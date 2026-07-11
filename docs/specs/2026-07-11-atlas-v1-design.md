@@ -54,7 +54,14 @@ per-command CLI-contract schema system, the provisional task-operation schema su
 **intentionally in V1** by operator directive; wherever an earlier draft implied otherwise the
 authoritative rule is: **in scope**, and every section herein is reconciled to agree.
 
-**Out of V1 (explicit non-goals):**
+**Out of V1 (explicit non-goals).** This enumerated list is the **single source of truth for
+V1 scope** and **supersedes any shorthand** (including a PR description's "everything except
+the MCP server and cloud hub"): V1 excludes the MCP server and cloud hub **and also** the
+network/adapter, reranking, scheduling, multi-worker/daemon, autonomous-destructive,
+local-inference, and task-workflow-behavior items below. Where the PR description and this
+section appear to disagree, **this section governs** and the PR description MUST be read as the
+shorthand it is; the correctness machinery (broker, audit ledger, ledger backup, purge,
+sandboxes, per-command schema contracts) remains fully **in** scope per *In V1* above.
 - MCP server (deferred to V2)
 - Cloud hub (deferred to V2)
 - Slack / email / web-capture / GitHub adapters — V1 sources are **local files only**
@@ -146,7 +153,12 @@ local file ─▶ Capture + Normalize ─▶ Immutable source note (sources/)
    - **`failed`/`cancelled` never leave a half-integrated canonical ref** — the broker is
      atomic, so a failure during integration means the CAS did not apply and the run is
      `failed@integrating` with canonical unchanged.
-   - Every `failed`/`cancelled` run emits exactly one audit event (see *Audit SSOT*).
+   - Every `failed`/`cancelled` run appends its terminal event (`run.failed` /
+     `run.cancelled`) **exactly once** to the append-only `refs/audit/runs` event stream,
+     following whatever lifecycle events (`run.started`, `run.planned`, …) it had already
+     emitted. A run's audit footprint is therefore the **one-or-more-event stream** whose
+     cardinality is owned solely by *Audit SSOT* — **each terminal event type exactly once
+     per run**, never "one event per run". This section defers to that owner.
    Retry/resume eligibility: only jobs (queue layer) retry, per the jobs contract; a terminal
    `failed` **workflow run** does not silently retry — it surfaces in `brain doctor`.
 
@@ -175,13 +187,13 @@ workspace** (what `pnpm-workspace.yaml` actually declares) and the **logical mod
 **A. Physical V1 workspace (normative — this is what ships).** V1 declares a small set of
 workspace **packages** and keeps everything else as **internal modules** (directories inside
 `apps/cli/src/`), because only components with a demonstrated isolation/reuse boundary
-(persistence and provider adapters) earn a package API in V1:
+(persistence, provider adapters, and the **cross-process contract**) earn a package API in V1:
 
 ```
 atlas/
   apps/cli/            ← the single CLI application; hosts all internal modules below
     src/
-      domain/          types, stable IDs, Zod schemas, ChangePlan operations   (internal module)
+      domain/          CLI-only orchestration types + re-export of `contracts`   (internal module)
       config/          typed config load + startup validation                  (internal module)
       vault/           read/write Markdown, frontmatter, wikilinks             (internal module)
       markdown/        parse + section/AST-level patch generator               (internal module)
@@ -190,23 +202,36 @@ atlas/
       policies/        note-type mutation policy + risk tiers                  (internal module)
       validation/      deterministic checks (+ optional semantic proposals)    (internal module)
   packages/
+    contracts/         stable IDs, ChangePlan + run-manifest Zod schemas, canonical
+                       serialization — the leaf cross-process contract (package — no deps)
     sources/           normalize md/txt/pdf/html in a sandboxed worker   (package — isolation need)
-    sqlite-store/      registry, links, jobs, runs, plans; migrations    (package — persistence)
+    sqlite-store/      registry, links, runs, plans; DB connection + migration runner
+                       (package — persistence; does NOT own the jobs tables)
     lancedb-index/     chunk + embed + hybrid (fts + vector) search      (package — persistence)
     models/            provider-neutral generateText/generateObject/embed (package — adapter)
     git/               branch / worktree / commit / broker client        (package — process seam)
-    jobs/              SQLite-backed queue (retries, backoff, idempotency) (package — persistence)
+    jobs/              SQLite-backed queue — SOLE owner of jobs/job_attempts schema,
+                       repository, txns (retries, backoff, idempotency)  (package — persistence)
     broker/            privilege-separated integration broker (separate OS identity)  (package)
     testing/           fixture-vault helpers                             (package)
   fixtures/  migrations/  prompts/  schemas/  docs/
   AGENTS.md  brain.config.example.yaml  package.json  pnpm-workspace.yaml  tsconfig.base.json
 ```
 
-**B. Logical module map.** `domain`, `policies`, `validation`, `workflows`, `vault`, and
+**B. Logical module map.** `policies`, `validation`, `workflows`, `vault`, and
 `markdown` are first-class *logical* boundaries with the same ownership discipline as
 packages, but they live as internal modules of `apps/cli` in V1. They are **promoted to
 workspace packages only** when independent reuse/versioning/ownership becomes concrete —
-avoiding premature package-API overhead with no V1 consumer. Phase deliverables (below) use
+avoiding premature package-API overhead with no V1 consumer.
+
+**The cross-process contract is NOT CLI-internal.** Because the `sqlite-store`, `git`, and **separate-identity `broker`** packages
+must all independently produce and verify the **same** stable IDs, `ChangePlan` / run-manifest
+schemas, and **canonical serialization** — the broker re-verifies a plan+manifest the CLI
+produced, in a different process under a different OS identity — that contract subset lives in
+the **leaf `contracts` package** (zero dependencies), consumed by both the CLI (`domain`
+re-exports it) and the broker. Only CLI-only orchestration types stay in the internal `domain`
+module. This guarantees byte-identical canonicalization on both sides of the process seam; the
+broker never imports `apps/cli`. Phase deliverables (below) use
 the word **"package"** only for the tree-A packages and **"internal module"** for tree-B
 boundaries, consistently.
 
@@ -216,7 +241,15 @@ agent-facing code never imports the broker's privileged internals (it calls acro
 process seam).
 
 **Jobs in V1.** The `jobs` queue runs **synchronously in the CLI** (no daemon). It persists
-job status, attempt count, idempotency key, and retry eligibility. V1 ships a **persistent single-runner queue**: atomic state transitions, attempt counts,
+job status, attempt count, idempotency key, and retry eligibility. **Single owner of job
+persistence.** The **`jobs` package is the sole owner** of the
+`jobs` and `job_attempts` tables — their DDL migrations, repository, transactions, and
+dependency invariants. `sqlite-store` owns the shared **DB connection + migration runner** and
+the *other* operational/projection tables; it exposes the connection/migration harness that
+`jobs` registers its own migrations into, and it is a **one-way consumer** of the `jobs`
+repository API (e.g. to read a job snapshot for a run) — it never issues DDL or writes against
+the jobs tables directly. There is exactly one owner of the job schema, repository, and
+transaction boundary. V1 ships a **persistent single-runner queue**: atomic state transitions, attempt counts,
 retry timing/backoff, idempotency keys, transactional recording of side-effect ids (so a
 resumed attempt continues rather than repeats — the on-demand path cannot double-commit), and
 startup recovery of interrupted jobs. Full lease epochs / fencing tokens / heartbeats /
@@ -352,8 +385,17 @@ Each table has a canonical Markdown manifest form that `brain db rebuild` folds 
 active-rendition pointer is derivable from the manifests, so it too rebuilds deterministically).
 
 ### Claims & provenance
-Claims carry evidence (`sourceId` + optional `locator` + `quoteHash`) and a status
-(`active` / `disputed` / `superseded`). An LLM-generated synthesis must never become an
+Claims carry evidence pinned to a **stable `renditionId`** (+ optional `locator` +
+`quoteHash`) and a status (`active` / `disputed` / `superseded`). **Evidence never persists
+the mutable `sourceId` alias:** `sourceId` is a CLI-input convenience only — it resolves
+through `content_blobs.active_rendition_id`, which a later extractor/normalizer upgrade
+re-points, so persisting it would silently change an evidence payload's meaning after a
+rendition upgrade. Therefore **`AttachEvidence` accepts either an explicit `renditionId` or a
+`sourceId`, resolves the `sourceId` to its concrete active `renditionId` at the command
+boundary, and persists only the pinned `renditionId` components** (the `source_renditions`
+composite key). The stored evidence row is thus immutable in meaning; a rendition bump does
+not silently re-point it — it flows through the explicit staleness/re-verification protocol
+below, which re-pins evidence to a new `renditionId` only via a validated ChangePlan. An LLM-generated synthesis must never become an
 unmarked source. **Canonical schema (V1):** each claim has a stable `claimId`, an `owningNoteId`, `text`, and a
 `status` (V1 exercises only `active`), serialized canonically into its owning note's Markdown
 (a `claims:` block) so it is deterministically rebuildable into the `claims`/`claim_evidence`
@@ -372,7 +414,12 @@ bump produces a new rendition with a changed `normalizedContentHash` and re-poin
    `claim_evidence` whose `renditionId` belongs to the superseded `contentId`.
 2. A single **re-verification job** is enqueued per affected owning-note (batched per note so
    one note's evidence is patched in one workflow run, avoiding partial multi-note drift). The
-   job's idempotency key = (`contentId`, new `renditionId`).
+   job's idempotency key = (`contentId`, new `renditionId`, **`owningNoteId`**) — the
+   `owningNoteId` component is **required** so that the per-`(workflow, key)` uniqueness
+   constraint admits **one job per affected owning-note**, not just the first note touched by a
+   rendition bump. (A rendition upgrade affecting N notes therefore enqueues N distinct jobs,
+   each idempotent on retry, and none suppresses another; no affected note is left with stale
+   evidence because its job collided with a sibling note's key.)
 3. The job runs a **deterministic re-anchoring** of each affected evidence to the new
    rendition's locator namespace: it re-locates the recorded `quoteHash` in the new normalized
    text. Outcomes are transactional per owning note, applied as one validated ChangePlan
@@ -418,7 +465,7 @@ identity resolution on `note_identity_keys(normalized_key)`, notes-needing-index
 (`active_generation`,`contentHash`), and audit lookup by `run_id` — verified with query-plan
 assertions at representative and maximum vault sizes.
 
-**Two migration ledgers, never conflated (finding: migration history):**
+**Two migration ledgers, never conflated:**
 - **`db_schema_migrations`** — the operational ledger of applied **SQLite DDL** migrations
   (id, applied_at, checksum). It is an **operational ledger table**, NOT a vault projection —
   `brain db rebuild` **never** touches it, because rebuilding a projection must not forget
@@ -467,7 +514,7 @@ It is authoritative; this section states the binding rules the dictionary MUST s
   backup/restore** (see *Ledger backup subsystem* and *Audit SSOT*). The git audit ref is a
   **best-effort partial** cross-check only, never the ledger's DR system of record.
 
-**Three DR guarantees, stated separately (finding: rebuildability):**
+**Three DR guarantees, stated separately:**
 1. **Projection rebuild** — `brain db rebuild` + `brain index rebuild` reconstruct SQLite
    vault-projection tables and all of LanceDB, deterministically, from Markdown alone. This is
    complete and lossless for projections.
@@ -487,7 +534,7 @@ Retention/backup is a config concern (`sqlite.ledger_retention` default keep-for
 `sqlite.ledger_backup.*`). This is what keeps runs inspectable and external transmissions
 audited across a projection rebuild.
 
-**Raw-payload retention — one policy, applied everywhere (finding: conflicting policies).**
+**Raw-payload retention — one policy, applied everywhere.**
 Raw prompts, model responses, quotes, and retrieved content are **NOT persisted anywhere by
 default** — the audit event, the ledger, logs, and the git ref all carry only the allowlisted
 metadata schema (identifiers, hashes, classifications, destinations, metrics). Therefore, by
@@ -504,8 +551,22 @@ is delivered by a concrete V1 subsystem, not just a config key:
 - **Snapshot method:** SQLite Online Backup API (consistent, no reader/writer stall) → a single
   AEAD-encrypted backup file.
 - **Trigger policy (V1, no scheduler):** a backup is taken (a) automatically after **every run
-  that writes ledger rows** (post-commit, best-effort, failure logged loud but non-fatal), and
-  (b) on demand via **`brain db backup`**. This gives an effective **RPO of one run**.
+  that writes ledger rows** (post-commit) and (b) on demand via **`brain db backup`**. This
+  gives an effective **RPO of one run**.
+- **Backup failure fails CLOSED.** The post-run
+  backup is the ledger's sole authoritative DR path, so its failure MUST NOT be silently
+  best-effort. A durable **backup watermark** records the highest ledger sequence covered by a
+  verified backup (`backup_watermark_seq`, its own ledger-adjacent row). After a ledger-writing
+  run the broker attempts the backup with **bounded durable retries + backoff**; on success it
+  advances the watermark to the run's ledger sequence. If the backup cannot be verified,
+  `brain doctor` and the `--json` health surface report a **degraded** state, and the system
+  **blocks further ledger-writing runs** (mutating workflows, `approve`, `rollback`, `purge`,
+  `db restore`) with a stable **`backup-unhealthy`** error (exit `2`) **until a verified backup
+  covers the latest ledger sequence** (watermark caught up) — read-only commands stay
+  available. An operator may proceed only via an explicit, audited **privileged override**
+  (`brain db backup --force-unblock`, under the separation-of-duties boundary) that records the
+  accepted-RPO-gap in the audit stream; there is no path in which repeated backup failures
+  silently accumulate unrecoverable ledger rows.
 - **Destination / key handling:** configurable local path (default beside the DB, mode 0600);
   AEAD key in the OS keychain / hardware-backed store (never in the vault or env), with defined
   rotation/revocation — same key custody rules as quarantine.
@@ -610,7 +671,7 @@ activation; all cleanup commands are transactional and auditable.
   persisting a normalized request hash + terminal result): `ingest`, `enrich`, `reconcile`,
   `maintain`, `source add`, `source trust promote`, `source trust revoke`, `jobs run`,
   `jobs retry`, `jobs cancel`, `git approve`, `git refresh`, `rollback`, `db backup`,
-  `db restore`. Intrinsically idempotent (converge on repeat, no key needed): `git reject`,
+  `db restore`, `purge`. Intrinsically idempotent (converge on repeat, no key needed): `git reject`,
   `git cleanup`, `git verify`, `index repair`, `index rebuild`, `db migrate`, `db rebuild` —
   each a no-op or deterministic convergence when already in the target state.
   - **`git refresh` is key-accepting** because it *creates* a new agent commit + manifest +
@@ -639,11 +700,20 @@ activation; all cleanup commands are transactional and auditable.
 - Patches are section/AST-level (not whole-file rewrites), preserve unknown frontmatter and
   formatting, fail safely on stale context, produce human-readable diff summaries.
 - **Risk tiers** gate git behavior:
-  - **Tier 0** read-only (search/answer/inspect) — no git mutation
+  - **Tier 0** read-only (search/answer/inspect) — **no mutation of the canonical branch or
+    the vault working tree.** The one stated exception is that an *executed* Tier-0 command
+    causes the broker to append a single terminal `run.readonly` event to the broker-owned,
+    append-only `refs/audit/runs` audit ref (see *Audit SSOT* / *Tier-0 audit exception*
+    below). That audit-ref append is **not** a canonical or vault mutation and does not create
+    a canonical commit; it is the explicit, enumerated exception to "no git mutation," and it
+    is performed only by the broker, never by an agent or read path directly.
   - **Tier 1** safe writes (add source, append log, inbox item) — auto-commit.
     *Projection-only* operations (index rebuild/repair, db rebuild) mutate no Markdown, so
-    they create **no git commit** — they are operationally audited in the ledger only, not
-    git-tier-gated
+    they create **no canonical git commit** and are not git-tier-gated. Like Tier-0 they are
+    the enumerated audit exception: an executed projection-only command causes the broker to
+    append exactly one terminal `run.projection` event to the append-only `refs/audit/runs`
+    ref (never a canonical commit or working-tree change) in addition to the ledger record —
+    see *Tier-0 / preview audit exception*
   - **Tier 2** structured updates (update project/person, enrich concept, add sourced
     claims) — auto-commit when confidence + validation thresholds pass
   - **Tier 3** high-risk (merge, delete, archive, resolve contradiction, rewrite
@@ -680,7 +750,27 @@ names it as an in-V1 capability. It is a **cross-check**, not a second DR system
 the ledger + encrypted backup remain the ledger's authoritative DR path; the git ref folds
 back only **best-effort**.
 
-**Event-stream model (finding: one event vs a stream).** A run is **not** one mutable event —
+**Tier-0 / preview audit exception.**
+Advancing the append-only `refs/audit/runs` ref is defined to be **neither a canonical-branch
+mutation nor a vault-working-tree mutation** — it is a broker-owned write to a dedicated audit
+ref that never touches the canonical branch, note files, or working tree, and never creates a
+canonical commit. This is the single, explicitly enumerated exception to the Tier-0 "no git
+mutation" guarantee and to the "no commit" guarantee: an **executed** Tier-0 read-only command
+(`query`/`inspect`/`status`) and an executed projection-only command emit exactly one terminal
+`run.readonly` / `run.projection` event to the audit ref, and nothing else in git changes.
+**Previews (`--dry-run` / the default non-mutating mode of `ingest`/`enrich`/`reconcile`/
+`maintain`) are pure computations and emit NO audit-ref event at all** — they have no run to
+record — so the preview "no side effects, no commit" contract holds literally. The
+git-rebuild requirements consume these `run.readonly`/`run.projection` events for cross-check
+only; they reconstruct no canonical content, consistent with the audit ref being a
+non-canonical cross-check rather than vault state.
+
+**Event-stream model.** This section is the **sole
+normative owner of audit-event cardinality**; every other section (the state-machine
+invariant, the observability matrix, acceptance) defers to it and MUST NOT assert a
+different count. The governing rule is **each terminal event type exactly once per run**,
+preceded by the lifecycle events that run passed through — **never** "exactly one event per
+run". A run is **not** one mutable event —
 `refs/audit/runs` is an **append-only stream of one-or-more lifecycle events per run**,
 correlated by `runId` and ordered by a per-ref monotonic `seq`. Defined event types:
 `run.started`, `run.planned`, `run.integrated` (carries the integration commit hash — appended
@@ -746,8 +836,7 @@ attestation is never conflated with Tier-3 approval authorization.
   commit, the intended revert commit, and a replay-protection nonce, verified by the broker
   immediately before the revert — an agent workflow can never invoke it.
 
-  **Operation-specific rollback semantics + dependency checks (finding: unsound generic
-  revert).** Before reverting, `rollback` computes the **downstream reference set** of the
+  **Operation-specific rollback semantics + dependency checks.** Before reverting, `rollback` computes the **downstream reference set** of the
   run's changed entities and branches on operation class:
   - **Immutable source capture** (a run that only captured a source): a plain revert would
     delete a source the design keeps forever and could dangle provenance. Instead, rollback
@@ -762,13 +851,14 @@ attestation is never conflated with Tier-3 approval authorization.
     dependents atomically in the same revert commit series, or (b) roll back the dependents
     first. Rollback never leaves the vault with dangling references.
   - **Self-contained mutation** (no downstream refs): a direct validated revert commit.
-  Every rollback path ends with mandatory projection reconciliation and one audit event; these
+  Every rollback path ends with mandatory projection reconciliation and its single
+  `run.rolled_back` terminal audit event (per the *Audit SSOT* event-stream contract); these
   outcomes are enumerated in the rollback contract + tests.
 - `cleanup` — prunes worktrees/branches for terminal (approved/rejected) runs.
 - Every outcome (approve/reject/rollback) triggers mandatory SQLite/LanceDB reconciliation.
 
 **Authorization boundary (separation of duties) — enforced by a privilege-separated
-integration broker (finding: agent FS access can bypass approval).** The separation-of-duties
+integration broker.** The separation-of-duties
 guarantee is **not** merely CLI behavior plus an unavailable signing key. It is enforced by an
 OS-level privilege boundary so that **no filesystem access available to an agent or parser
 process can advance a protected ref**, even with direct git plumbing:
@@ -800,8 +890,24 @@ process can advance a protected ref**, even with direct git plumbing:
   rewrite of a valid audit suffix is detectable** even after SQLite loss, because the anchor's
   event count exceeds what a truncated ref carries. Agents cannot write the anchor.
 
-Approval itself requires either explicit **interactive user-presence confirmation** or a
-**separately held signing key** the agent process cannot read; **`--yes` alone can never
+**What "user presence" actually proves.** A plain stdin/PTY confirmation is **not** a proof of human presence — an agent
+that can launch the CLI can synthesize stdin or allocate a PTY and answer the prompt.
+Therefore a typed "yes" / `--yes` is treated as a **cosmetic prompt bypass only and NEVER as
+authorization**. Privileged operations (`approve`, `refresh`-integration, `rollback`, `purge`,
+`db restore`, trust `promote`/`revoke`) are authorized by **exactly one of two broker-verifiable
+mechanisms, and nothing else**:
+1. **An OS-mediated presence assertion bound to the exact broker challenge** — a
+   Secure-Enclave / TPM / platform-authenticator (Touch ID / WebAuthn-class / hardware
+   security key) signature, or an OS keychain unlock gated by such an authenticator, produced
+   over the broker's `signingPayload` (op + targetCommit + canonicalBaseCommit + nonce). The
+   assertion is minted by the OS on hardware the agent cannot drive programmatically and is
+   verified by the broker against the concrete challenge; a synthesized stdin/PTY cannot
+   produce it. This is the "interactive" path.
+2. **The non-interactive external signing flow** (`--export-challenge` → sign with a
+   separately held key the agent process cannot read → `--authorization`), below.
+There is **no path in which a bare terminal confirmation authorizes a privileged op.** Approval
+itself therefore requires either the **OS-mediated presence assertion** or a **separately held
+signing key** the agent process cannot read; **`--yes` alone can never
 authorize Tier-3 integration or any privileged op** — it only bypasses cosmetic confirmation
 prompts. Key provisioning, storage (OS keychain / hardware-backed, never in the vault or in env
 visible to the agent), rotation, revocation, signer identity, signature algorithm (Ed25519),
@@ -827,8 +933,9 @@ JSON schemas (in `cli-contract/`):
    `{ challenge, signature, signerId }`. The execute step **re-derives the challenge from
    current state and rejects any drift** (canonical moved, nonce expired/replayed, target
    commit differs, signer not permitted) with stable error codes before the broker acts.
-The interactive path (`--yes` + user-presence) and the non-interactive path (`--authorization`)
-are the only two ways to authorize; there is no third. Signer selection, expiry, verification
+The interactive path (**OS-mediated presence assertion bound to the broker challenge** — not a
+bare `--yes`, which only bypasses cosmetic prompts) and the non-interactive path
+(`--authorization`) are the only two ways to authorize; there is no third. Signer selection, expiry, verification
 error catalog, and JSON schemas are normative in the broker/git contract.
 
 Commands: `brain git status/review/refresh/approve/reject/rollback/cleanup/verify`
@@ -850,6 +957,12 @@ versioned in the index). Every call records provider, model, prompt-template id+
 temperature, token counts, latency, cost estimate, retries, validation errors. Routing is
 policy-driven so a `confidential` note-type class can later pin to a local/allowlisted
 provider without touching call sites.
+**Credential + network custody:** the `models` adapter's outbound calls execute **inside the
+privilege-separated egress broker** (see *Egress guard*), which is the sole holder of the
+provider credential and the sole process with outbound network. The agent-facing `models`
+API is a typed IPC client to that broker; no provider key is ever loaded into an agent,
+parser, or workflow process. The egress broker lands with the first provider call (**Phase
+2**, non-mutating extraction/classification) and is exercised for embeddings from **Phase 3**.
 
 ## CLI (V1 surface)
 ```
@@ -866,6 +979,7 @@ brain index status|verify|repair|rebuild
 brain db status|verify|migrate|rebuild|backup|restore
 brain jobs list|run|retry|cancel
 brain git status|review|refresh|approve|reject|rollback|cleanup|verify
+brain purge <selector> [--dry-run | --apply] (--yes | --authorization <file> | --export-challenge)
 ```
 Human + JSON + quiet + verbose modes; stable exit codes
 (`0` ok · `1` validation · `2` config/vault · `3` secret-scan · `4` internal · `5` user/usage ·
@@ -936,6 +1050,18 @@ guaranteeing no drift and no missing command). It is not an external API framewo
 no V1 network/MCP consumer — so it stays a **docs+test generation contract**, not a runtime
 API surface; the *Scope* list names it in-V1 and this section agrees. This document is the
 overview.
+
+**Single canonical command registry (normative — finding: duplicated CLI inventories drift).**
+Command **membership** has exactly one owner: a machine-readable registry
+(`docs/specs/cli-contract/commands.json`) enumerating every command + subcommand (including the
+safety-critical `db backup`, `db restore`, `db verify --backup`, and `purge`) with its schema
+reference, phase, idempotency class, and privilege tier. The prose **CLI (V1 surface)**
+overview, the per-command `<command>.schema.json` set, the idempotency classification, and the
+**exhaustive per-command acceptance inventory** are all **generated from / validated against
+this one registry** — a CI check fails if any hand-written inventory in this spec omits or adds
+a command the registry does not list. No inventory in this document is authoritative on its own;
+the registry is. This closes the class of defect where a command present in one list (e.g.
+`db backup`/`db restore` in the CLI surface) is missing from another (the acceptance inventory).
 **Target selection** for target-sensitive commands: `git review/approve/reject/rollback`
 take a `<runId>`; `note show/related/history` take a note `id` or slug. **Jobs bulk-selection
 (normative — finding: unresolved `--all`):**
@@ -965,8 +1091,7 @@ the need.
 [<same shape>] (multiple validation failures), "retryable": bool, "retryAfterMs"?: number,
 "runId"?: string, "jobId"?: string }`; `details.*` are optional and typed as shown, multiple
 failures are carried in `errors[]`, and `runId`/`jobId` are included whenever the failing
-command operates on one. **Provider retry timing is preserved end-to-end (finding: lost at the
-CLI boundary):** when a failure originates from a provider `rate_limit`/`quota` error carrying
+command operates on one. **Provider retry timing is preserved end-to-end:** when a failure originates from a provider `rate_limit`/`quota` error carrying
 `retryAfter`, the workflow normalizes it into **`retryAfterMs`** (integer milliseconds) on this
 envelope and on the corresponding `jobs`/workflow result, so rate-limit consumers can honor
 provider-directed timing programmatically. `retryAfterMs` is present iff the provider supplied
@@ -984,7 +1109,7 @@ exists it is keyboard-operable and bypassable (`--yes` / `--no-pager`), and the 
 information is available via `--json`. Errors always name the affected argument/config
 key/file + source location in text.
 
-**Reduced-motion & screen-reader behavior (finding: TTY progress).** Animation/spinners/
+**Reduced-motion & screen-reader behavior.** Animation/spinners/
 in-place cursor updates are permitted **only** on an interactive TTY **and** when not
 suppressed. A **`--plain`** flag (and honoring `--no-color`, `NO_COLOR`, and a
 reduced-motion/`TERM=dumb` signal) **disables all animation, spinners, cursor movement, and
@@ -994,7 +1119,7 @@ so a direct-terminal screen-reader user receives announced, non-overwritten stat
 every long-running command (loading, progress, completion, failure). Contract tests exercise
 long-running commands in `--plain` mode and assert append-only, non-duplicated announcements.
 
-**Terminal-safe rendering (finding: control-sequence injection).** Human-mode commands display
+**Terminal-safe rendering.** Human-mode commands display
 attacker-influenced text (normalized sources, model answers, note content, diffs, paths,
 errors). **All** human-mode output routes through a single **terminal-safe renderer** that
 strips or visibly escapes ANSI/CSI, OSC (incl. OSC 8 hyperlinks and OSC 52 clipboard), C0/C1
@@ -1016,8 +1141,7 @@ lives in the OS keychain / hardware-backed store — never in the vault, env, or
 model/parser processes — with defined rotation/revocation, encrypted-or-minimized filenames,
 bounded retention, crash-safe purge, and `brain doctor` quarantine-security checks), the egress guard below, path-traversal + symlink protection, attachment
 size/type limits, audit of external transmissions, and a `models.routing.confidential` config
-hook (local/allowlist) reserved for V2. **Sensitivity is a first-class canonical field, split into declared vs effective (finding:
-persisted and derived sensitivity share one truth):** each note/source carries a canonical
+hook (local/allowlist) reserved for V2. **Sensitivity is a first-class canonical field, split into declared vs effective:** each note/source carries a canonical
 **`declaredSensitivity`** from a fixed taxonomy (`public | internal | confidential |
 restricted`) plus optional `data_categories` — this is the **only** authored/persisted
 classification input, written in frontmatter. The **`effectiveSensitivity`** is a **computed
@@ -1034,12 +1158,33 @@ loggability, retention) consume **`effectiveSensitivity`**; legacy-note classifi
 bootstrap sets `declaredSensitivity` only. These rules are normative in the security contract. Secrets live in env/OS keychain, never in the vault or
 SQLite.
 
-**Egress guard (non-bypassable).** Every `generateText`, `generateObject`, and `embed`
-request routes through a single egress guard that scans the *exact serialized payload* —
-covering ingest, query text, retrieval context, generated prompts, and embedding chunks, not
-just ingestion. Detected secrets block or redact the call; failures fail closed and
-quarantine; only sanitized metadata (hashes/classifications/destinations, never raw payloads)
-is audited. Query, enrichment, indexing, rebuild, and retry paths are all in scope.
+**Egress guard (non-bypassable — enforced by a privilege-separated egress broker, finding:
+agent-held credentials bypass the guard).** A guard that is merely a shared provider-library
+function is **not** sufficient: if the agent process can hold the Gemini credential and open
+sockets, a compromised agent or a malicious transitive dependency can transmit vault content
+directly, skipping the scanner and the audit entirely. V1 therefore enforces egress the same
+way it enforces canonical writes — with an **OS-level privilege boundary**:
+- **Agent/parser/workflow processes have NO outbound network capability and NO provider
+  credential.** The Gemini API key (and any future provider credential) lives **only** in the
+  **egress broker's** process, under a separate OS identity, in the OS keychain / hardware-backed
+  store — never readable by, inherited by, or present in the environment of an agent, parser,
+  or workflow process. On the supported hosts the agent processes run with **outbound network
+  denied** (Linux: network-isolated netns / seccomp; macOS: Seatbelt profile denying network),
+  so a direct provider call from agent code fails at the OS layer, not merely by convention.
+- **All `generateText` / `generateObject` / `embed` calls are IPC requests to the egress
+  broker.** The broker is the **sole holder of credentials and the sole process permitted
+  outbound network**. On every request it scans the *exact serialized payload* — ingest, query
+  text, retrieval context, generated prompts, and embedding chunks — **inside the broker,
+  where the caller cannot skip it**, before any byte leaves the host.
+- **The IPC channel is itself independently scanned and audited:** each request/response is
+  secret-scanned and written to the operational ledger + audit stream with sanitized metadata
+  only (hashes/classifications/destinations, never raw payloads) by the broker, so an agent
+  cannot both bypass the scan and suppress the audit record.
+Detected secrets block or redact the call; failures fail closed and quarantine. Query,
+enrichment, indexing, rebuild, and retry paths are all in scope. This egress broker is the same
+privilege-separation pattern as the integration broker (*Authorization boundary*) applied to
+the outbound-network seam; the two may share the broker OS identity but are distinct
+capabilities (egress-network vs protected-ref-write).
 
 **Generated-artifact persistence guard (non-bypassable — finding: model output can bypass
 no-secrets-at-rest).** Schema + provenance validation do not stop a model from emitting
@@ -1066,8 +1211,27 @@ launders it. **Promotion is an explicit human-authorized operation**, exposed as
 bound to a specific `sourceId` + `rawContentHash`; only a user-presence /
 signing-key-authorized caller (same boundary as `git approve` — never an agent workflow) may
 promote or revoke. Each promotion/revocation writes an immutable audit record; revocation
-re-taints dependent claims/syntheses and re-opens any pending or auto-committed-at-Tier-2
-plans that relied on the now-untrusted content. Adversarial indirect-prompt-injection cases
+re-taints dependent claims/syntheses and re-opens the plans that relied on the now-untrusted
+content.
+
+**Revocation "re-open" is a defined workflow transition, not an illegal reverse edge.** The normative state machine has **no**
+edge out of a terminal `integrated`/`finalized` state, and revocation does **not** invent one.
+Instead revocation branches on the affected run's state:
+- **Pre-integration run** (`planned`..`review-pending`, not yet integrated): revocation marks
+  it `failed@<checkpoint>` with reason `trust-revoked` (a legal terminal transition that
+  already exists) and discards its agent branch via the normal cleanup path — the run never
+  integrates untrusted-derived content.
+- **Already-`integrated`/`finalized` run** (e.g. a Tier-2 auto-commit that relied on the
+  now-untrusted source): the terminal run is **left intact and immutable**; revocation instead
+  **spawns a new Tier-3 remediation run** (its own `runId`, plan, branch, review artifacts,
+  and audit event) that references the revoked source + the affected run and proposes the
+  correcting change (rollback of the affected commit and/or a re-verified re-synthesis). That
+  remediation run is **review-required** and integrates only through `git approve` / the
+  broker like any other Tier-3 run; if it rolls back an integrated commit it uses the standard
+  `rollback` path with its dependency checks. Revocation therefore produces a **forward
+  remediation run**, never an undefined backward transition on the original run. This is the
+  sole defined mechanism; the affected content is re-taint-gated (cannot auto-commit) until the
+  remediation run resolves. Adversarial indirect-prompt-injection cases
 are part of the test plan.
 
 **At-rest & data-minimization.** The accepted local-host threat model and its deployment
@@ -1090,7 +1254,50 @@ SQLite, LanceDB, logs, backups), documents when git-history rewrite is required,
 projections afterward, and records that Google's provider-side retention/deletion terms apply
 to already-transmitted content.
 
-**Audit-ref reconciliation for erasure (finding: erasure vs the never-rewritten audit ref).**
+**`brain purge` command contract (normative — finding: purge has no public CLI contract).**
+- **Authorization tier:** privileged **Tier-3-equivalent, broker-authorized**. It is invocable
+  **only** through the same separation-of-duties boundary as `approve`/`rollback`/`db restore`:
+  an **OS-mediated presence assertion** or the non-interactive `--export-challenge` →
+  sign → `--authorization` flow, each bound to (op=`purge`, selector digest, canonical commit,
+  replay nonce). **No agent workflow may invoke it**; `--yes` alone never authorizes it.
+- **Selector:** a required `<selector>` naming the content to erase — one of `--note <id>`,
+  `--source <contentId>`, or `--data-category <label>` (from the `data_categories` taxonomy).
+  Selectors are resolved to a concrete, printed **erasure inventory** before any authorization
+  challenge is minted, so the signer authorizes an exact set, not an abstraction.
+- **Flags:** `--dry-run` (default-safe **preview** — computes and prints the full inventory +
+  the storage classes each item touches + whether git-history rewrite is required, with **no
+  mutation and no audit-ref event**); `--apply` performs the erasure; the two are mutually
+  exclusive (both ⇒ exit `5`). Authorization flags as above. `--dry-run` and `--apply` follow
+  the same uniform preview/apply contract as the workflow commands.
+- **Storage classes touched (complete):** canonical Markdown + **git history** (rewrite when
+  required, per the documented protocol), worktrees, the SQLite **projection and ledger**,
+  LanceDB, diagnostics/logs, quarantine store, **every encrypted ledger backup** containing the
+  redacted rows, and the **`refs/audit/runs` audit ref** (via the *Audit-ref reconciliation for
+  erasure* protocol below — opaque-ID unlink or signed tombstone + external checkpoint).
+- **Concurrency:** acquires the exclusive **`vault-maintenance`** lock (see *Administrative-command
+  concurrency*) so it cannot race workflows, `db` maintenance, or index rebuilds.
+- **Idempotency:** **key-accepting** (`--idempotency-key`); operation identity =
+  (selector digest, resolved-inventory digest, canonical base commit). A retried purge with the
+  same identity is a **no-op reporting the prior outcome** rather than a second erasure; a purge
+  whose inventory is already fully absent converges to success. Interrupted purge is
+  **resumable** from a persisted per-storage-class progress checkpoint (never restarting a
+  completed class).
+- **Audit behavior:** each purge run emits its lifecycle + terminal events on `refs/audit/runs`
+  per the *Audit SSOT* event-stream contract, and writes an immutable ledger erasure record
+  (selector digest, inventory digest, per-class outcome, git-rewrite performed, backups
+  re-minimized/expired) — carrying **allowlisted metadata only**, never the erased content.
+- **Effects / post-conditions:** rebuilds SQLite projections + LanceDB afterward; **post-purge
+  verification asserts no prohibited copy — including no re-linkable audit identifier —
+  remains across every storage class**; records that Google's provider-side retention/deletion
+  terms apply to already-transmitted content.
+- **Exit codes:** `0` success; `5` usage (missing selector, mutually exclusive flags); `2`
+  config/vault/lock (`locked:vault-maintenance`); the broker authorization/drift codes on a
+  failed/expired/replayed challenge; `4` internal.
+- **JSON schema:** governed by `docs/specs/cli-contract/purge.schema.json`, from which its
+  Markdown reference, contract-test fixtures, and acceptance cases are generated (same
+  per-command schema system as every other command).
+
+**Audit-ref reconciliation for erasure.**
 The audit ref is normally append-only, but erasure of personal/classified data can require
 removing linkable identifiers it retains. The two requirements are reconciled by an explicit
 protocol, not left to chance:
@@ -1126,8 +1333,7 @@ allow_auto_delete=false).
 Each phase is its own PR, green before the next. Fixture vault throughout; real vault only
 at Phase 5.
 
-0. **Normative contracts — phase-gated, not one big-bang gate (finding: all-command gate
-   defeats incremental delivery).** To honor "phased milestones, not big-bang," contracts are
+0. **Normative contracts — phase-gated, not one big-bang gate.** To honor "phased milestones, not big-bang," contracts are
    approved **per phase**, not all before any code:
    - **Before Phase 1 (up-front gate):** the **cross-cutting safety invariants** and Phase-1
      contracts only — `recovery-state-machine.md`, the `sqlite-data-dictionary.md`, the
@@ -1144,9 +1350,20 @@ at Phase 5.
    interfaces are frozen, so this is not a second design project ahead of all coding. All
    `cli-contract/*` schemas are complete before their command's implementation; none blocks an
    unrelated earlier phase.
-1. **Skeleton** — pnpm monorepo scaffold + `domain` + `config` + `vault` read/write +
-   `sqlite-store` registry + migrations + `brain inspect` / `doctor` / `db rebuild` against
-   a hand-built fixture vault.
+1. **Skeleton** — pnpm monorepo scaffold + the shared **`contracts`** leaf package (stable IDs,
+   ChangePlan / run-manifest schemas, canonical serialization — see *Repo layout*) + `config` +
+   `vault` read/write + `sqlite-store` registry + migrations + `brain inspect` / `doctor` /
+   `db rebuild` against a hand-built fixture vault. **Because Phase 1 also delivers the encrypted
+   ledger backup subsystem and the privileged `db restore` (with release-blocking restore +
+   corruption tests as Phase-1 exit criteria), Phase 1 additionally delivers the *minimal
+   privilege-separation seam* those depend on:** the **`git`** package (repo/ref plumbing) and
+   the separate-identity **`broker`** package sufficient to authorize and execute `db restore`
+   and `db backup` under the separation-of-duties boundary (challenge/response +
+   OS-presence/`--authorization`, protected-ref/credential custody, audit-event append). The
+   broker's full canonical-integration surface (`approve`/`refresh`/`rollback`) is wired in
+   Phase 4, but its authorization core and the protected-ref/audit-ref ownership exist from
+   Phase 1, so no phase depends on a broker capability delivered later than the phase needs it.
+   `brain db backup` / `db restore` / `db verify --backup` ship here.
 2. **Ingest loop** — `sources` normalize (md/txt/pdf/html) in a **sandboxed parser worker**
    (dedicated low-privilege identity, **allowlisted empty environment** — no inherited
    provider credentials/keychain/file descriptors, no network, isolated filesystem namespace
@@ -1170,8 +1387,7 @@ at Phase 5.
    startup recovery of interrupted jobs — with the single-runner queue tests as its exit
    criteria.
 
-   **Phase 2 model activity is restricted to satisfy hard invariant 3 (findings: Phase 2 vs
-   retrieval-before-synthesis).** Because retrieval does not exist until Phase 3, hard invariant
+   **Phase 2 model activity is restricted to satisfy hard invariant 3.** Because retrieval does not exist until Phase 3, hard invariant
    3 forbids **creating even a `ChangePlan`** for a synthesis mutation here. Therefore in Phase
    2 the Gemini adapter is used **only for non-mutating extraction/classification** (e.g.
    proposing note `type`, extracting candidate metadata for *preview display*) — it **MUST NOT
@@ -1188,7 +1404,14 @@ at Phase 5.
    + context packing; `brain query`; `brain index` ops + staleness detection.
 4. **Workflows** — `enrich`, `reconcile` (aliases/duplicates), `maintain`
    (orphans/broken-links/stale → proposals, never silent destructive), `validate`; risk
-   tiers + review gate wired through `git`.
+   tiers + review gate wired through `git`. **Also delivers the human-authorized erasure
+   workflow `brain purge`** (broker-authorized, `vault-maintenance`-locked, all-storage-class
+   inventory + audit-ref reconciliation + post-purge verification, per its command contract in
+   *Erasure workflow*) — every storage class it touches (git history, projection + ledger,
+   LanceDB, logs, quarantine, backups, audit ref) exists by this phase; its privileged-E2E
+   erasure test is a Phase-4 exit criterion. Purge is then **exercised against the copied
+   real-vault sandbox in Phase 5** (uniquely-identifiable classified content in every class),
+   not first introduced there.
 5. **Graduate to real vault** — first a **fail-closed, full-vault secret + sensitive-data
    scan** of the copied `main-vault` sandbox (before any db rebuild, indexing, migration, or
    model call); findings block graduation and route to the reviewed-remediation /
@@ -1246,8 +1469,11 @@ per-format size limits + the stable error-code set.
 promotion refused; promotion bound to `sourceId`+`rawContentHash` (a hash change after
 authorization invalidates it); promotion replay rejected; multi-hop transitive taint
 propagation; mixed trusted/untrusted evidence keeps a note untrusted; no laundering via
-summary; revocation during a pending run and after a Tier-2 auto-commit re-taints and reopens
-affected plans; assert audit records, risk escalation, and refusal of unauthorized mutations.
+summary; revocation during a pending run marks it `failed@<checkpoint>` (`trust-revoked`) while
+revocation after a Tier-2 auto-commit leaves the terminal run intact and **spawns a new
+Tier-3 remediation run** (its own `runId` + review artifacts + audit event, integrating only
+via `git approve`/`rollback`); assert audit records, risk escalation, and refusal of
+unauthorized mutations.
 
 **Gemini adapter tests.** Deterministic doubles/recorded responses by default + opt-in
 real-service contract tests; cover malformed/truncated output, schema violations, timeouts,
@@ -1267,9 +1493,11 @@ retained), locator-namespace stability, rendition dedup, canonical-Markdown rebu
 three provenance entities, raw-byte immutability, marking dependent evidence `stale` after
 `normalizedContentHash` changes, and **capture-event idempotency independent of blob dedup**
 (retried same-path ingest adds no capture; new path adds one). **Evidence re-verification
-end-to-end (finding: no complete workflow):** after a rendition bump, assert the deterministic
+end-to-end:** after a rendition bump, assert the deterministic
 affected-evidence enumeration, the per-owning-note re-verification job (idempotent by
-`(contentId, newRenditionId)`), and the three outcomes — **exact re-match → `valid` re-pinned**,
+`(contentId, newRenditionId, owningNoteId)` — **asserting a rendition bump spanning multiple
+owning notes enqueues one non-colliding job per note, so no note is left stale**), and the
+three outcomes — **exact re-match → `valid` re-pinned**,
 **ambiguous/moved → `pending` escalated to Tier-3 (never auto-committed)**, **not-found →
 `failed`** — plus the gating assertion that `stale`/`pending`/`failed` evidence cannot support
 Tier-2 auto-commit or trusted synthesis grounding, and that all verification-state changes flow
@@ -1292,7 +1520,13 @@ assertions.
 
 **Queue (single-runner V1).** Idempotency-key collisions, retry exhaustion → terminal state,
 startup recovery of interrupted/abandoned attempts, cancellation of queued-vs-running, and
-`jobs run/retry/cancel` CLI behavior, under controlled clocks + crash injection. The
+`jobs run/retry/cancel` CLI behavior, under controlled clocks + crash injection. **Cross-process
+single-runner exclusion:** a required test
+**starts two `jobs run` processes concurrently** against the same queue and asserts **one
+process acquires the single-runner process lock and drains the jobs, the other fails fast with
+the stable `locked:<scope>` lock error (exit `2`) and claims nothing, and every job executes
+exactly once** (no duplicate claim, no duplicate side effect) — proving a broken process lock
+cannot pass the suite silently. The
 multi-worker matrix (duplicate delivery, concurrent claimers, expired leases, worker-death
 races) is **deferred** with the leasing/daemon milestone.
 
@@ -1313,15 +1547,18 @@ retention (`logs.*`), captured worker logs, and defined crash-before-checkpoint 
 `doctor` check and an e2e self-debugging test for a failed run assert diagnostics survive and
 are recoverable.
 
-**Observability assertions — table-driven run-outcome matrix (finding: omitted run classes).**
+**Observability assertions — table-driven run-outcome matrix.**
 A single table-driven suite enumerates **every run class and terminal state**: mutating
 (Tier-1/2 auto-commit, Tier-3 review-pending → approved / rejected / rolled-back),
 **read-only/Tier-0**, **projection-only**, **failed@<checkpoint>**, and **cancelled@<checkpoint>**.
 For **each** case it asserts: `model_calls`/`retrieval_runs`/change plans/validation results/git
 metadata/RunReport are complete and correlated by run id and sanitized (secrets/PII redacted);
-**exactly one correctly correlated, signed, sanitized audit event** (plus any required
-superseding `run.integrated`/`run.rejected`/`run.rolled_back` event) is written on
-`refs/audit/runs`; and after **SQLite loss** the `--from-git` rebuild reproduces the expected
+the run's **audit footprint on `refs/audit/runs` matches the *Audit SSOT* event-stream
+cardinality** — i.e. the lifecycle events the run passed through (`run.started`, `run.planned`,
+…) plus **each applicable terminal event type exactly once** (`run.integrated` /
+`run.rejected` / `run.rolled_back` / `run.failed` / `run.cancelled`, or the `run.readonly` /
+`run.projection` terminal) — each correctly correlated, signed, and sanitized (the suite never
+asserts "one event per run"); and after **SQLite loss** the `--from-git` rebuild reproduces the expected
 per-class events (or explicit gaps) deterministically. The git-rebuild test explicitly requires
 read-only, projection-only, failed, and cancelled events so no run class can silently gap.
 
@@ -1340,7 +1577,7 @@ between plans or between commits; commit mutation after signing; `--yes` alone a
 Tier-3 integration; **`approve` on a stale base returns `refresh-required` and never
 rebases/creates a new commit**; stale-base races; and a canonical-branch move / TOCTOU change
 immediately before merge — each refused by the broker's re-verification. **Non-interactive
-authorization (finding: challenge/response):** `--export-challenge` → sign → `--authorization`
+authorization:** `--export-challenge` → sign → `--authorization`
 round trip for `approve`/`rollback`/`purge`/`db restore`/trust ops, asserting the execute step
 **rejects any drift** from the exported challenge (canonical moved, nonce expired/replayed,
 target commit changed, wrong signer) and that `rollback`'s challenge carries the deterministically
@@ -1358,7 +1595,13 @@ commit, or unintended cross-note conflict occurs.
 restore` → assert every ledger-only row, including data the git ref never carried, is
 recovered); AEAD encryption + file-mode (0600) assertions; **wrong / revoked key** rejection;
 **truncated / corrupt backup** rejection; **interrupted-restore atomicity** (all-or-nothing);
-**schema-version compatibility** gate; and post-restore projection rebuild consistency. This is
+**schema-version compatibility** gate; and post-restore projection rebuild consistency. **Plus
+the fail-closed backup contract:** inject a failing/unverifiable post-run backup and assert the
+**watermark does not advance**, the health surface goes **degraded**, **further ledger-writing
+runs are blocked** with the stable `backup-unhealthy` (exit `2`) while read-only commands still
+work, a subsequent successful+verified backup **unblocks** by advancing the watermark to the
+latest ledger sequence, and the audited `--force-unblock` privileged override records the
+accepted RPO gap. This is
 a **required, release-blocking** suite because this backup is the ledger's authoritative DR
 path.
 
@@ -1435,11 +1678,15 @@ install.
   argument/config-key/file + source location, remediation — never color/symbol alone, same
   association in JSON).
 - **Per-command acceptance cases.** The acceptance-case inventory is **generated from the
-  canonical CLI command list** so it covers **every** command and subcommand with no gaps —
+  single canonical command registry** (see *CLI contract* — the machine-readable registry that
+  owns command membership and generates the CLI overview, the per-command schema inventory, and
+  these acceptance cases from one source, so no list can drift or omit a safety-critical
+  command). It covers **every** command and subcommand with no gaps —
   including `inspect`, `doctor`, `status`, `source add/list/show/trust (show/promote/revoke)`,
   `note show/related/history`, `jobs list`, `index status`, `db status`, `git status/refresh`
   alongside `ingest`, `query`, `enrich`, `reconcile`, `maintain`, `validate`,
-  `jobs run/retry/cancel`, `index verify/repair/rebuild`, `db verify/migrate/rebuild`,
+  `jobs run/retry/cancel`, `index verify/repair/rebuild`,
+  `db verify/migrate/rebuild`, **`db backup`, `db restore`, `db verify --backup`**, **`purge`**,
   `git review/approve/reject/rollback/cleanup/verify`. Each gets at least one **success,
   zero-state, invalid-input, and representative-failure** case specifying fixture/setup,
   invocation, expected stdout or JSON schema, exit code, Markdown/SQLite/LanceDB/git effects,
