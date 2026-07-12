@@ -117,10 +117,12 @@ Key architectural decisions (wing-vetted in rounds 2–5, restated here as bindi
   classifications, destinations, metrics) — raw payloads only in the opt-in AEAD store
   (`sqlite.raw_payload_store`, default **off**).
 - Module discipline: `contracts` is a **zero-dependency leaf** consumed by CLI (`domain` re-export),
-  `sqlite-store`, `git`, and `broker`; the broker **never imports `apps/cli`**; **`jobs` is the sole
-  owner** of `jobs`/`job_attempts` DDL + repository + transactions; `policies`, `validation`,
-  `workflows`, `vault`, `markdown`, `retrieval`, `config`, `domain` are **internal modules** of
-  `apps/cli` (never workspace packages in V1).
+  `sqlite-store`, `git`, and `broker`; **`scan` is a second leaf** (engine + guards, consumes only
+  `contracts`) consumed by `sources` + the `broker` egress side + the CLI, so no workspace package
+  imports `apps/cli`; the broker **never imports `apps/cli`**; **`jobs` is the sole owner** of
+  `jobs`/`job_attempts` DDL + repository + transactions; `policies`, `validation`, `workflows`,
+  `vault`, `markdown`, `retrieval`, `config`, `domain` are **internal modules** of `apps/cli` (never
+  workspace packages in V1). No workspace package imports `apps/cli` (`contracts.no-app-import.test`).
 - Vault safety: **fixture vaults only until Phase 5**; Phase 5 operates on a **copy** of
   `main-vault`, agent-branch-only, never `main`.
 - Process: **each phase is its own PR (plus the retained PR-A where defined), green before the
@@ -288,8 +290,11 @@ contracts that gate Phase 1.
      ref-dirs owned `atlas-broker:atlas-git`, dirs `0750`, files `0640` — group-**readable** so
      agents read canonical to branch from it, broker-only writes — fixes R3-F2; `refs/agent/*` owned
      by the agent user, group `atlas-git`, dirs `0770`); the per-key ACL matrix (approval **verify**
-     key broker-readable; audit-attestation key agent-readable by design; backup AEAD key
-     broker-only; quarantine AEAD key trusted-CLI-only, parser/model-denied; `atlas.gemini.key`
+     key broker-readable; audit-attestation key agent-readable by design; **backup AEAD key
+     trusted-CLI-readable** (the CLI process that writes the ledger encrypts/decrypts its own backup —
+     consistent with D13's CLI-written ledger; the broker gates restore **authorization** via the
+     `db.restore` challenge, but the crypto runs CLI-side, so no broker backup-IPC primitive is
+     needed); quarantine AEAD key trusted-CLI-only, parser/model-denied; `atlas.gemini.key`
      **egress-broker-only**); WORM anchor format (signed head hash + monotonic event count) at D8's
      path; the challenge/response JSON schemas (`AuthorizationChallenge`, `AuthorizationResponse`,
      drift-rejection error catalog); Ed25519 envelope + canonicalization; nonce store + expiry;
@@ -743,18 +748,23 @@ egress broker and is provably restricted to non-mutating extraction/classificati
    - Acceptance: with **only** PR-A merged, `db rebuild` on `source-heavy` reproduces provenance
      projections from manifests alone.
 
-2. **Task 2.2 — Secret-scan engine + guards + quarantine store**
+2. **Task 2.2 — `@atlas/scan` leaf package: engine + guards (+ CLI quarantine orchestration)**
    - What: the scan engine (representative secret formats + entropy heuristics; deterministic,
      versioned ruleset), **`PrePersistenceGuard`** (raw bytes + normalized output; consumed by
      normalize/capture as a required dependency) and **`GeneratedArtifactGuard`** (exact serialized
      form of model responses + derived artifacts incl. future patches/diffs/commit messages — the
-     same engine, second enforcement point; exists from the first model call), and the quarantine
-     store: AEAD (key per ACL matrix, trusted-CLI identity), mode-0700 dir **outside the repo**,
-     minimized filenames, bounded retention, crash-safe purge (temp-then-rename; no plaintext ever
-     on disk), `doctor` quarantine-security checks.
-   - Files: `apps/cli/src/scan/{engine,rules,pre-persistence,generated-artifact}.ts`,
-     `apps/cli/src/quarantine/store.ts`, `apps/cli/test/scan/*.test.ts`.
-   - Interfaces — **Consumes:** 1.2, 1.8 (diag). **Produces:**
+     same engine, second enforcement point; exists from the first model call). **The engine + guards
+     live in a NEW leaf workspace package `@atlas/scan`** (structural inputs only, consumes just
+     `@atlas/contracts`) so the workspace packages that need it — `@atlas/sources` (2.3/2.4) and the
+     `@atlas/broker` egress side (2.8) — import it **without** an `apps/cli` back-edge (same
+     no-app-import invariant as D14). Only the **quarantine store orchestration** stays CLI-side:
+     AEAD (key per ACL matrix, trusted-CLI identity), mode-0700 dir **outside the repo**, minimized
+     filenames, bounded retention, crash-safe purge (temp-then-rename; no plaintext ever on disk),
+     `doctor` quarantine-security checks.
+   - Files: `packages/scan/src/{engine,rules,pre-persistence,generated-artifact}.ts`,
+     `apps/cli/src/quarantine/store.ts`, `packages/scan/test/*.test.ts`.
+   - Interfaces — **Consumes:** `@atlas/contracts` (structural types only — no config/diag import in
+     the leaf; the CLI injects config + a diag sink at call time). **Produces:**
      `scanBytes(input: {bytes: Uint8Array, context: ScanContext}): ScanVerdict`
      (`ScanVerdict = {clean: true} | {clean: false, findings: SecretFinding[]}`) ·
      `PrePersistenceGuard.assertClean(a: {bytes: Uint8Array, origin: string}): Promise<void>`
