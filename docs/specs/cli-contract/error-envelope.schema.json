@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/error-envelope.schema.json",
+  "title": "Atlas CLI — JSON error envelope",
+  "description": "The single discriminated error object every `brain` command emits on stdout in `--json` mode when it fails (design §CLI, plan §2.5). Discriminated on `code` — a stable, command-specific string enumerated per command in the sibling `<command>.schema.json` files. Each `code` maps to exactly one plan §2.5 process exit category (0 ok · 1 validation · 2 config/vault/lock · 3 secret-scan · 4 internal · 5 user/usage · 6 action-required). `details` carries code-specific structured remediation data (an open object keyed under the common `field`/`path`/`location`) so a consumer never has to parse `message`/`hint`. Batch commands (`jobs run|retry|cancel` with `--all`/multiple targets) use the separate batch-result object, not this envelope — that is the sole exception and is encoded in the jobs command schemas.",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["code", "message", "hint", "retryable"],
+  "properties": {
+    "code": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Stable, command-specific discriminator. Enumerated (with its exit category) in the emitting command's `x-atlas-contract.errorCodes`. Composite lock codes take the form `locked:<scope>`; authorization-drift codes take the form `authz.<reason>` (catalog in security-broker-contract.md)."
+    },
+    "message": {
+      "type": "string",
+      "description": "Human-readable, terminal-safe summary. Never the sole carrier of machine-actionable data — that lives in `details`."
+    },
+    "hint": {
+      "type": "string",
+      "description": "Actionable next step for a human operator. May be empty when no remediation applies."
+    },
+    "details": { "$ref": "#/$defs/details" },
+    "errors": {
+      "type": "array",
+      "description": "Present when a single invocation produced multiple failures (e.g. many validation errors). Each item is a nested envelope of the same shape.",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/nestedError" }
+    },
+    "retryable": {
+      "type": "boolean",
+      "description": "The boolean gate: MAY the caller retry the identical invocation? Independent of `retryAfterMs` (which only carries provider-directed timing when present)."
+    },
+    "retryAfterMs": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Provider-directed retry delay in integer milliseconds. Present iff the underlying provider supplied timing (a normalized `rate_limit`/`quota` `retryAfter`); absence does not imply non-retryable — consult `retryable`."
+    },
+    "runId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Included whenever the failing command operates on a specific run."
+    },
+    "jobId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Included whenever the failing command operates on a specific job."
+    }
+  },
+  "$defs": {
+    "location": {
+      "type": "object",
+      "description": "Source location for the failure, when it maps to a concrete file.",
+      "unevaluatedProperties": false,
+      "required": ["file"],
+      "properties": {
+        "file": { "type": "string", "minLength": 1 },
+        "line": { "type": "integer", "minimum": 1 },
+        "span": {
+          "type": "array",
+          "description": "Inclusive [startLine, endLine] (or [startOffset, endOffset]) pair.",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "details": {
+      "type": "object",
+      "description": "Code-specific typed remediation data. The common keys `field`/`path`/`location` are defined here; any additional keys are the code-specific structured fields documented per error code (e.g. `dependents[]` for `has-dependents`, lock-holder pid/scope/start-time for `locked:<scope>`, `backupWatermarkSeq`/`latestLedgerSeq` for `backup-unhealthy`).",
+      "properties": {
+        "field": { "type": "string", "description": "The offending argument/config key." },
+        "path": { "type": "string", "description": "The offending filesystem/vault/config path." },
+        "location": { "$ref": "#/$defs/location" }
+      }
+    },
+    "nestedError": {
+      "type": "object",
+      "description": "A single failure inside `errors[]`. Same shape as the top-level envelope, minus its own recursive `errors[]`.",
+      "unevaluatedProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1 },
+        "message": { "type": "string" },
+        "hint": { "type": "string" },
+        "details": { "$ref": "#/$defs/details" },
+        "retryable": { "type": "boolean" },
+        "retryAfterMs": { "type": "integer", "minimum": 0 },
+        "runId": { "type": "string", "minLength": 1 },
+        "jobId": { "type": "string", "minLength": 1 }
+      }
+    }
+  },
+  "examples": [
+    {
+      "code": "usage",
+      "message": "`--dry-run` and `--apply` are mutually exclusive.",
+      "hint": "Pass at most one of --dry-run / --apply.",
+      "retryable": false
+    },
+    {
+      "code": "config-invalid",
+      "message": "Invalid configuration: sqlite.ledger_backup.keep must be a positive integer.",
+      "hint": "Fix the offending key in brain.config.yaml.",
+      "details": {
+        "field": "sqlite.ledger_backup.keep",
+        "location": { "file": "brain.config.yaml", "line": 12 }
+      },
+      "retryable": false
+    },
+    {
+      "code": "locked:vault-maintenance",
+      "message": "The vault-maintenance lock is held by another process.",
+      "hint": "Wait for the holder to finish, or run `brain doctor --reclaim-locks` if its pid is dead.",
+      "details": {
+        "scope": "vault-maintenance",
+        "holderPid": 44122,
+        "startedAt": "2026-07-12T09:31:04.512Z"
+      },
+      "retryable": true
+    },
+    {
+      "code": "backup-unhealthy",
+      "message": "Ledger-writing runs are blocked: the latest verified backup does not cover the current ledger sequence.",
+      "hint": "Run `brain db backup`, or `brain db backup --force-unblock` to accept the RPO gap (audited).",
+      "details": {
+        "backupWatermarkSeq": 811,
+        "latestLedgerSeq": 907
+      },
+      "retryable": true
+    },
+    {
+      "code": "validation",
+      "message": "2 notes failed frontmatter validation.",
+      "hint": "Fix the reported notes and re-run.",
+      "errors": [
+        {
+          "code": "validation",
+          "message": "Missing required frontmatter key `id`.",
+          "details": { "location": { "file": "notes/orphan.md", "line": 1 } }
+        },
+        {
+          "code": "validation",
+          "message": "Duplicate note id `person-alice`.",
+          "details": { "field": "id", "location": { "file": "notes/alice-2.md", "line": 2 } }
+        }
+      ],
+      "retryable": false
+    },
+    {
+      "code": "authz.presence_unverified",
+      "message": "The privileged operation requires an OS presence assertion bound to the broker challenge.",
+      "hint": "Re-run with an interactive presence assertion, or use --export-challenge → sign → --authorization.",
+      "runId": "01J9Z8Q7M2N3P4R5S6T7V8W9XA",
+      "retryable": false
+    }
+  ]
+}

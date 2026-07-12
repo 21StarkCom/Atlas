@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/inspect.schema.json",
+  "title": "brain inspect — --json success output",
+  "description": "Read-only, non-persisting vault overview. Enumerates parsed notes, per-type counts, and any structural issues (broken links, duplicate ids, frontmatter problems) as data — it never throws on a malformed vault, it reports it. Stays available even when the ledger backup watermark is unhealthy (pure diagnostic).",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["command", "vault", "noteCount", "byType", "issues", "ok"],
+  "properties": {
+    "command": { "const": "inspect" },
+    "vault": { "type": "string", "minLength": 1, "description": "Absolute path of the inspected vault." },
+    "noteCount": { "type": "integer", "minimum": 0 },
+    "byType": {
+      "type": "object",
+      "description": "Note count keyed by frontmatter `type`.",
+      "additionalProperties": { "type": "integer", "minimum": 0 }
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["severity", "code", "message"],
+        "properties": {
+          "severity": { "enum": ["info", "warning", "error"] },
+          "code": { "type": "string", "minLength": 1 },
+          "message": { "type": "string" },
+          "location": {
+            "type": "object",
+            "unevaluatedProperties": false,
+            "required": ["file"],
+            "properties": {
+              "file": { "type": "string" },
+              "line": { "type": "integer", "minimum": 1 }
+            }
+          }
+        }
+      }
+    },
+    "ok": { "type": "boolean", "description": "True when no `error`-severity issue was found." }
+  },
+  "examples": [
+    { "command": "inspect", "vault": "/vault", "noteCount": 3, "byType": { "person": 1, "concept": 2 }, "issues": [], "ok": true },
+    {
+      "command": "inspect",
+      "vault": "/vault",
+      "noteCount": 2,
+      "byType": { "person": 2 },
+      "issues": [
+        { "severity": "error", "code": "duplicate-id", "message": "Duplicate note id `person-alice`.", "location": { "file": "notes/alice-2.md", "line": 2 } }
+      ],
+      "ok": false
+    }
+  ],
+  "x-atlas-contract": {
+    "command": "inspect",
+    "phase": 1,
+    "privilege": "shared",
+    "idempotency": "none",
+    "executionClass": "pure",
+    "summary": "Read-only vault overview: note inventory + structural issues.",
+    "args": [],
+    "flags": [],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "sideEffects": [],
+    "prohibitedEffects": [
+      "no ledger row written (pure diagnostic, available in backup-unhealthy blocked mode)",
+      "no git ref advanced",
+      "no vault or projection write"
+    ],
+    "locks": [{ "scope": "shared", "mode": "shared" }],
+    "exitCodes": [0, 2, 4, 5],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "unknown flag/argument or malformed invocation" },
+      { "code": "config-invalid", "exit": 2, "when": "brain.config.yaml fails schema validation" },
+      { "code": "vault-error", "exit": 2, "when": "the configured vault path is missing or unreadable" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}

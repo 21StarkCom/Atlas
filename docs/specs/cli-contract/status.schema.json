@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/status.schema.json",
+  "title": "brain status — --json success output",
+  "description": "Read-only summary of the system's live state (design D12): open runs by state, queued/failed job counts, quarantine count, backup watermark health, and audit head + anchor check. Tier-0 read; an executed run emits exactly one `run.readonly` git-ref event. Stays available in the backup-unhealthy blocked mode only in its non-persisting form — the audited variant (which writes a ledger row) is blocked; the pure summary is not.",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["command", "openRuns", "jobs", "quarantineCount", "backup", "audit"],
+  "properties": {
+    "command": { "const": "status" },
+    "openRuns": {
+      "type": "object",
+      "description": "Count of non-terminal runs keyed by workflow state (§2.5 state set).",
+      "additionalProperties": { "type": "integer", "minimum": 0 }
+    },
+    "jobs": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "required": ["queued", "failed"],
+      "properties": {
+        "queued": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "quarantineCount": { "type": "integer", "minimum": 0 },
+    "backup": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "required": ["watermarkSeq", "coveredSeq", "healthy"],
+      "properties": {
+        "watermarkSeq": { "type": "integer", "minimum": 0 },
+        "coveredSeq": { "type": "integer", "minimum": 0 },
+        "healthy": { "type": "boolean" }
+      }
+    },
+    "audit": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "required": ["headSeq", "head", "anchorOk"],
+      "properties": {
+        "headSeq": { "type": "integer", "minimum": 0 },
+        "head": { "type": "string", "description": "The refs/audit/runs head commit, or empty when no events exist." },
+        "anchorOk": { "type": "boolean", "description": "True when the head + event count reconcile with the WORM anchor." }
+      }
+    }
+  },
+  "examples": [
+    {
+      "command": "status",
+      "openRuns": {},
+      "jobs": { "queued": 0, "failed": 0 },
+      "quarantineCount": 0,
+      "backup": { "watermarkSeq": 907, "coveredSeq": 907, "healthy": true },
+      "audit": { "headSeq": 907, "head": "a1b2c3d4", "anchorOk": true }
+    },
+    {
+      "command": "status",
+      "openRuns": { "review-pending": 1 },
+      "jobs": { "queued": 3, "failed": 1 },
+      "quarantineCount": 2,
+      "backup": { "watermarkSeq": 811, "coveredSeq": 907, "healthy": false },
+      "audit": { "headSeq": 907, "head": "a1b2c3d4", "anchorOk": true }
+    }
+  ],
+  "x-atlas-contract": {
+    "command": "status",
+    "phase": 1,
+    "privilege": "shared",
+    "idempotency": "none",
+    "executionClass": "audited-read",
+    "summary": "Live-state summary: open runs, jobs, quarantine, backup + audit health.",
+    "args": [],
+    "flags": [],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "sideEffects": [
+      "an executed run emits exactly one run.readonly git-ref audit event (Tier-0 read)"
+    ],
+    "prohibitedEffects": [
+      "no vault, projection, or ledger-mutation write",
+      "no git branch/worktree/canonical change",
+      "no more than one terminal run.readonly event per run"
+    ],
+    "locks": [{ "scope": "shared", "mode": "shared" }],
+    "exitCodes": [0, 2, 4, 5],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "unknown flag/argument or malformed invocation" },
+      { "code": "config-invalid", "exit": 2, "when": "brain.config.yaml fails schema validation" },
+      { "code": "vault-error", "exit": 2, "when": "the configured vault/repo is missing or unreadable" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure while gathering state" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}

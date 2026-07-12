@@ -4,7 +4,7 @@
  * Asserts registry <-> fixture <-> schema-presence consistency and generator
  * determinism. Part of the Phase-0 bootstrap; never reverted.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
@@ -94,11 +94,14 @@ describe("fixture-mutation test (the load-bearing guarantee)", () => {
   });
 
   it("an implemented:true row without its schema file fails the schema-presence check", () => {
+    // Some Phase-1 schema files now exist (#14); pick a row whose schema file is
+    // still absent (a later-phase command) so flipping it to implemented must fail.
+    const idx = registry.commands.findIndex((c) => !existsSync(join(root, c.schemaRef)));
+    expect(idx).toBeGreaterThanOrEqual(0);
     const mutated: Registry = {
       version: registry.version,
-      commands: registry.commands.map((c, i) => (i === 0 ? { ...c, implemented: true } : c)),
+      commands: registry.commands.map((c, i) => (i === idx ? { ...c, implemented: true } : c)),
     };
-    // Phase 0 ships no schema files, so flipping any row to implemented must fail.
     expect(checkImplementedSchemas(root, mutated).length).toBeGreaterThan(0);
   });
 });

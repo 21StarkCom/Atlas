@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/db-status.schema.json",
+  "title": "brain db status — --json success output",
+  "description": "Read-only SQLite store status: applied migration head, per-table row counts, and backup watermark health. Pure diagnostic — writes no ledger row and stays available in the backup-unhealthy blocked mode.",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["command", "schema", "tables", "backup"],
+  "properties": {
+    "command": { "const": "db status" },
+    "schema": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "required": ["head", "applied"],
+      "properties": {
+        "head": { "type": "string", "description": "The highest applied migration id, or empty on a fresh DB." },
+        "applied": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "tables": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["name", "rowCount"],
+        "properties": {
+          "name": { "type": "string" },
+          "rowCount": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "backup": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "required": ["watermarkSeq", "coveredSeq", "healthy"],
+      "properties": {
+        "watermarkSeq": { "type": "integer", "minimum": 0 },
+        "coveredSeq": { "type": "integer", "minimum": 0 },
+        "healthy": { "type": "boolean" }
+      }
+    }
+  },
+  "examples": [
+    {
+      "command": "db status",
+      "schema": { "head": "0001_core", "applied": ["0001_core"] },
+      "tables": [ { "name": "notes", "rowCount": 3 }, { "name": "audit_events", "rowCount": 12 } ],
+      "backup": { "watermarkSeq": 12, "coveredSeq": 12, "healthy": true }
+    }
+  ],
+  "x-atlas-contract": {
+    "command": "db status",
+    "phase": 1,
+    "privilege": "shared",
+    "idempotency": "none",
+    "executionClass": "pure",
+    "summary": "SQLite store status: migration head, table row counts, backup health.",
+    "args": [],
+    "flags": [],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "sideEffects": [],
+    "prohibitedEffects": ["no ledger row written", "no DDL/DML mutation", "no git ref advanced"],
+    "locks": [{ "scope": "shared", "mode": "shared" }],
+    "exitCodes": [0, 2, 4, 5],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "unknown flag/argument or malformed invocation" },
+      { "code": "config-invalid", "exit": 2, "when": "brain.config.yaml fails schema validation" },
+      { "code": "db-unavailable", "exit": 2, "when": "the SQLite store file is missing or unopenable" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}
