@@ -1,0 +1,15 @@
+packages:
+  - apps/*
+  - packages/*
+  - tools
+
+allowBuilds:
+  esbuild: true
+
+# Single source of dependency versions across the monorepo (referenced as `catalog:`).
+catalog:
+  "@types/node": ^24.0.0
+  ajv: ^8.17.1
+  typescript: ^5.8.3
+  vitest: ^3.2.4
+  zod: ^3.25.76

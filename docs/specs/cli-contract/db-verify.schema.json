@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/db-verify.schema.json",
+  "title": "brain db verify [--backup <backupRef>] — --json success output",
+  "description": "Read-only integrity verification. Without --backup: runs the store invariant queries from sqlite-data-dictionary.md §invariants (identity-key uniqueness, no dangling FK, active-generation consistency, etc.). With --backup: additionally validates a backup bundle per ledger-backup-contract.md §8 — decryptability, content hash, schema compatibility, and (when a non-local destination is configured) failure-domain reachability. Writes no ledger row (non-persisting; available in the blocked mode). Exit 0 on success, 1 on any invariant or backup-integrity failure.",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["command", "ok", "invariants"],
+  "properties": {
+    "command": { "const": "db verify" },
+    "ok": { "type": "boolean", "description": "True when every invariant (and, if requested, the backup) verified." },
+    "invariants": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["name", "ok"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "ok": { "type": "boolean" },
+          "detail": { "type": "string" }
+        }
+      }
+    },
+    "backup": {
+      "type": "object",
+      "description": "Present only when --backup was passed.",
+      "unevaluatedProperties": false,
+      "required": ["backupRef", "decryptable", "contentHashOk", "schemaCompatible"],
+      "properties": {
+        "backupRef": { "type": "string", "minLength": 1 },
+        "decryptable": { "type": "boolean" },
+        "contentHashOk": { "type": "boolean" },
+        "schemaCompatible": { "type": "boolean" },
+        "failureDomainOk": { "type": "boolean", "description": "Present only when a non-local destination is configured." }
+      }
+    }
+  },
+  "examples": [
+    {
+      "command": "db verify",
+      "ok": true,
+      "invariants": [
+        { "name": "note-identity-key-unique", "ok": true },
+        { "name": "no-dangling-evidence-fk", "ok": true },
+        { "name": "active-generation-consistent", "ok": true }
+      ]
+    },
+    {
+      "command": "db verify",
+      "ok": true,
+      "invariants": [ { "name": "note-identity-key-unique", "ok": true } ],
+      "backup": { "backupRef": "backup-000907", "decryptable": true, "contentHashOk": true, "schemaCompatible": true }
+    }
+  ],
+  "x-atlas-contract": {
+    "command": "db verify",
+    "phase": 1,
+    "privilege": "shared",
+    "idempotency": "none",
+    "executionClass": "pure",
+    "summary": "Verify store invariants; with --backup also verify a backup bundle.",
+    "args": [],
+    "flags": [
+      { "flag": "--backup <backupRef>", "type": "string", "default": null, "description": "Verify the named backup bundle (decryptability, content hash, schema compatibility, failure-domain) instead of / in addition to store invariants." }
+    ],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "sideEffects": [],
+    "prohibitedEffects": [
+      "no ledger row written (available in the backup-unhealthy blocked mode)",
+      "no mutation of the store or any backup bundle",
+      "no git ref advanced"
+    ],
+    "locks": [{ "scope": "shared", "mode": "shared" }],
+    "exitCodes": [0, 1, 2, 4, 5],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "unknown flag/argument or malformed invocation" },
+      { "code": "config-invalid", "exit": 2, "when": "brain.config.yaml fails schema validation" },
+      { "code": "db-unavailable", "exit": 2, "when": "the SQLite store file is missing or unopenable" },
+      { "code": "verify-failed", "exit": 1, "when": "one or more store invariants did not hold" },
+      { "code": "backup-not-found", "exit": 1, "when": "--backup names a backup ref that does not exist" },
+      { "code": "backup-corrupt", "exit": 1, "when": "the backup fails decryptability or content-hash verification" },
+      { "code": "backup-schema-incompatible", "exit": 1, "when": "the backup's stamped schema version is incompatible with the current binary" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure during verification" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}

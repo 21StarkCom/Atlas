@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/db-migrate.schema.json",
+  "title": "brain db migrate — --json success output",
+  "description": "Apply pending, checksum-guarded SQLite migrations (DDL) in id order. Intrinsically idempotent: an already-applied migration is a checksum-verified no-op, and the runner never drops tables on downgrade. Acquires the exclusive vault-maintenance lock. This is the sole writer of vault_schema_migrations / db_schema_migrations and must run to completion before any db rebuild.",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["command", "head", "applied", "alreadyApplied"],
+  "properties": {
+    "command": { "const": "db migrate" },
+    "head": { "type": "string", "description": "The highest applied migration id after this run." },
+    "applied": {
+      "type": "array",
+      "description": "Migrations applied by THIS invocation.",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["id", "checksum"],
+        "properties": { "id": { "type": "string" }, "checksum": { "type": "string" } }
+      }
+    },
+    "alreadyApplied": {
+      "type": "array",
+      "description": "Migration ids that were already applied (checksum-verified no-op).",
+      "items": { "type": "string" }
+    }
+  },
+  "examples": [
+    { "command": "db migrate", "head": "0001_core", "applied": [ { "id": "0001_core", "checksum": "sha256:abc" } ], "alreadyApplied": [] },
+    { "command": "db migrate", "head": "0001_core", "applied": [], "alreadyApplied": ["0001_core"] }
+  ],
+  "x-atlas-contract": {
+    "command": "db migrate",
+    "phase": 1,
+    "privilege": "shared",
+    "idempotency": "intrinsic",
+    "executionClass": "projection-write",
+    "summary": "Apply checksum-guarded SQLite migrations (DDL); idempotent, never drops tables.",
+    "args": [],
+    "flags": [],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "sideEffects": [
+      "applies pending migration DDL inside a transaction",
+      "records applied migrations in db_schema_migrations"
+    ],
+    "prohibitedEffects": [
+      "never drops a table on downgrade",
+      "never re-runs an already-applied migration (checksum-guarded)",
+      "no git ref advanced",
+      "does not run projection rebuild (that is db rebuild)"
+    ],
+    "locks": [{ "scope": "vault-maintenance", "mode": "exclusive" }],
+    "exitCodes": [0, 1, 2, 4, 5],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "unknown flag/argument or malformed invocation" },
+      { "code": "config-invalid", "exit": 2, "when": "brain.config.yaml fails schema validation" },
+      { "code": "db-unavailable", "exit": 2, "when": "the SQLite store file is missing or unopenable" },
+      { "code": "locked:vault-maintenance", "exit": 2, "when": "the exclusive vault-maintenance lock is held by a live process" },
+      { "code": "migration-checksum-mismatch", "exit": 1, "when": "an applied migration's recorded checksum does not match its definition" },
+      { "code": "migration-failed", "exit": 4, "when": "a migration statement failed to execute (transaction rolled back)" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}

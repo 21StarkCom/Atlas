@@ -1,0 +1,87 @@
+Atlas V1 — CLI surface inventory (prose contract)
+=================================================
+
+This is the human-readable inventory of the `brain` command surface. It is a
+CONTRACT: `contract-lint` parses every command line below and asserts a bijection
+with the registry rows in `commands.json` — a command here without a registry row
+(or a registry row without a line here) fails the lint.
+
+Parse rule: a command line is one that BEGINS with a backtick; the command name
+is the text inside that first pair of backticks. Every other line — this prose,
+headings, and comments (lines starting with a hash) — is ignored, even if it
+contains backticked words. The text after the em dash is descriptive only.
+
+# Health & diagnostics (Phase 1)
+`inspect` — read-only structural summary of the vault + store.
+`doctor` — environment/permission/lock/backup health checks; `--reclaim-locks` for dead-pid locks.
+`status` — read-only run/job/quarantine/backup/audit summary (Tier-0; emits run.readonly).
+
+# Database / ledger (Phase 1)
+`db status` — projection + ledger + migration status.
+`db verify` — invariant checks over the store (with `--backup` to verify a backup file).
+`db migrate` — apply pending DDL migrations (idempotent, checksum-guarded).
+`db rebuild` — transactional rebuild of the vault-projection tables from Markdown.
+`db backup` — take an encrypted ledger backup (advances the watermark; `--force-unblock` recovery).
+`db restore` — privileged, destructive restore of ledger tables from a backup.
+
+# Ingest & sources (Phase 2)
+`ingest` — capture + extraction/classification preview by default; `--apply` performs it.
+`source add` — deterministic Tier-1 source capture; applies immediately.
+`source list` — paginated list of captured sources.
+`source show` — show one source capture + renditions.
+`source trust show` — show a source's trust state.
+
+# Jobs queue (Phase 2)
+`jobs list` — paginated list of queue jobs.
+`jobs run` — claim and drain queued jobs synchronously (single-runner lock).
+`jobs retry` — re-queue failed jobs.
+`jobs cancel` — cancel pending/claimed/running jobs.
+
+# Notes (Phase 2)
+`note show` — show a note by id or slug.
+`note related` — paginated related-notes traversal.
+`note history` — paginated note change history.
+
+# Git workflow — read/maintenance (Phase 2)
+`git status` — paginated open-run status.
+`git cleanup` — prune abandoned agent branches/worktrees (convergent).
+
+# Retrieval (Phase 3)
+`query` — grounded question answering with citations.
+`index status` — index generation + staleness summary.
+`index verify` — verify index consistency.
+`index repair` — convergent index repair.
+`index rebuild` — full deterministic index rebuild from Markdown.
+
+# Workflows — mutation loop (Phase 4)
+`enrich` — enrich a note; preview by default, `--apply` mutates per risk tier.
+`reconcile` — alias/duplicate resolution; preview by default, `--apply` mutates.
+`maintain` — orphans/broken-links/stale maintenance; preview by default, `--apply` mutates.
+`validate` — deterministic vault validation checks.
+
+# Git workflow — review gate & privileged integration (Phase 4)
+`git review` — show a review-pending run's diff.
+`git refresh` — privileged: rebase + regenerate a superseded run (new commit + manifest).
+`git approve` — privileged: integrate an exact reviewed commit.
+`git reject` — reject a review-pending run (convergent).
+`git rollback` — privileged: roll back an integrated run.
+`git verify` — convergent manifest↔index reconciliation repair.
+
+# Evidence & claims (Phase 4)
+`evidence review` — review flagged evidence/claims.
+`evidence resolve` — resolve a flagged evidence issue (convergent).
+`evidence retry` — retry evidence re-verification (convergent).
+
+# Trust (Phase 4)
+`source trust promote` — privileged: promote a source's trust level.
+`source trust revoke` — privileged: revoke a source's trust.
+
+# Erasure (Phase 4)
+`purge` — privileged, broker-authorized selector-based erasure across all storage classes.
+
+# Graduation & quarantine (Phase 5)
+`graduation scan` — fail-closed full-vault (+ history) secret scan on the disposable copy.
+`graduation audit` — read-only bootstrap audit of legacy notes by quarantine category.
+`graduation migrate` — privileged: deterministic, review-gated bootstrap migration.
+`quarantine inspect` — privileged: inspect quarantined items.
+`quarantine resolve` — privileged: resolve a quarantined item.

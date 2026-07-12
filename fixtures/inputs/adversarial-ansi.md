@@ -1,0 +1,18 @@
+---
+title: Adversarial ANSI / control-byte Input
+---
+
+# Adversarial ANSI / Control-Byte Input
+
+Real control bytes for scanner + terminal-safe renderer fixtures. Do not
+"clean up" this file by hand â€” the bytes below are the fixture.
+
+CSI SGR color: [31mRED[0m and [1;32mBOLD-GREEN[0m normal.
+CSI cursor move + erase: [2K[10Doverwrite-attempt.
+OSC-8 hyperlink: ]8;;https://evil.example.com\click-here]8;;\ end.
+OSC-52 clipboard write: ]52;c;ZXZpbC1jbGlwYm9hcmQ= end.
+C0 controls: bell[] backspace[] vertical-tab[] formfeed[].
+C1 control (0x9b CSI): ›31mC1-CSI›0m end.
+CR overwrite: SAFE-TEXTHACKED end.
+Bidi override (RLO ... PDF): â€®drowssapâ€¬ end.
+Preserved whitespace: tab[	] and newline follow.

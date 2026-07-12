@@ -1,0 +1,19 @@
+{
+  "name": "@atlas/cli-contract-tools",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Retained CLI-contract harness: registry generator + contract-lint (never reverted).",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "gen": "node gen-cli-contract.ts --write",
+    "check": "node gen-cli-contract.ts --check"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "ajv": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

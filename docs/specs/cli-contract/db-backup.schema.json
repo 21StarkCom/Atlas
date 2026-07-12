@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/db-backup.schema.json",
+  "title": "brain db backup [--force-unblock] — --json success output",
+  "description": "Produce a verified encrypted ledger backup bundle per ledger-backup-contract.md (SQLite Online Backup snapshot → single AEAD file, temp-then-rename, content-hash + schema stamp, retention prune keep-N + keep-forever-latest). On success advances backup_watermark.seq. With --force-unblock: an audited privileged override that clears the backup-unhealthy blocking set by recording an accepted RPO gap (emits a db.force_unblock ledger audit row, D6) even without a fresh verified backup. Key-accepting idempotency: a repeat with the same effective coverage is a no-op returning the prior backupRef.",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["command", "backupRef", "seq", "coveredSeq", "healthy"],
+  "properties": {
+    "command": { "const": "db backup" },
+    "backupRef": { "type": "string", "minLength": 1, "description": "Stable identifier of the produced (or, when forced without a new cut, the latest) backup bundle." },
+    "seq": { "type": "integer", "minimum": 0, "description": "Highest audit seq this bundle durably covers." },
+    "coveredSeq": { "type": "integer", "minimum": 0, "description": "backup_watermark.seq after this operation." },
+    "healthy": { "type": "boolean", "description": "Watermark health after the operation (true once coveredSeq == latest committed ledger seq)." },
+    "forcedUnblock": {
+      "type": "object",
+      "description": "Present only when --force-unblock cleared the blocking set without a fresh verified backup.",
+      "unevaluatedProperties": false,
+      "required": ["fromSeq", "toSeq"],
+      "properties": {
+        "fromSeq": { "type": "integer", "minimum": 0, "description": "Watermark seq before the override (start of the accepted RPO gap)." },
+        "toSeq": { "type": "integer", "minimum": 0, "description": "Latest ledger seq at override time (end of the accepted RPO gap)." }
+      }
+    },
+    "prunedRefs": { "type": "array", "items": { "type": "string" }, "description": "Backup refs removed by retention (keep-N); the keep-forever-latest is never pruned." }
+  },
+  "examples": [
+    { "command": "db backup", "backupRef": "backup-000912", "seq": 912, "coveredSeq": 912, "healthy": true },
+    { "command": "db backup", "backupRef": "backup-000912", "seq": 912, "coveredSeq": 940, "healthy": false, "forcedUnblock": { "fromSeq": 912, "toSeq": 940 } }
+  ],
+  "x-atlas-contract": {
+    "command": "db backup",
+    "phase": 1,
+    "privilege": "shared",
+    "idempotency": "key-accepting",
+    "executionClass": "ledger-writing",
+    "summary": "Produce a verified encrypted ledger backup; --force-unblock audibly clears the blocked state.",
+    "args": [],
+    "flags": [
+      { "flag": "--force-unblock", "type": "boolean", "default": false, "description": "Privileged-in-effect audited override: clear the backup-unhealthy blocking set by recording an accepted RPO gap without a fresh verified backup. Emits a db.force_unblock ledger audit row (D6)." }
+    ],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "sideEffects": [
+      "writes a new AEAD backup bundle (temp-then-rename)",
+      "advances backup_watermark on verified success",
+      "prunes backups per retention keep-N (keep-forever-latest retained)",
+      "with --force-unblock: writes a db.force_unblock ledger audit row"
+    ],
+    "prohibitedEffects": [
+      "no vault mutation",
+      "no canonical/audit/trust git ref advanced by this command's own action (the backup is an out-of-band ledger snapshot)"
+    ],
+    "locks": [{ "scope": "ledger-maintenance", "mode": "exclusive" }],
+    "exitCodes": [0, 1, 2, 4, 5],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "unknown flag/argument or malformed invocation" },
+      { "code": "config-invalid", "exit": 2, "when": "brain.config.yaml fails schema validation" },
+      { "code": "db-unavailable", "exit": 2, "when": "the SQLite store file is missing or unopenable" },
+      { "code": "locked:ledger-maintenance", "exit": 2, "when": "another ledger-maintenance holder is active" },
+      { "code": "backup-failed", "exit": 1, "when": "the snapshot could not be written or verified" },
+      { "code": "key-unavailable", "exit": 2, "when": "the backup AEAD key is not readable by the trusted-CLI identity" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure during backup" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}

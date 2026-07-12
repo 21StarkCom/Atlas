@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/doctor.schema.json",
+  "title": "brain doctor — --json success output",
+  "description": "Read-only host/vault health diagnostic (pure — no ledger row; available even when the backup watermark is unhealthy). Runs the Phase-1 check inventory (x-atlas-contract.checkInventory): modes/permissions, lock liveness (+ --reclaim-locks for dead-pid locks), backup watermark health, and the audit-head anchor check. `--reclaim-locks` is the one narrow mutation: it removes lock records whose owning pid is provably dead. Aggregate exit is 0 when all checks pass, 6 when any check reports an operator action is required.",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["command", "status", "checks"],
+  "properties": {
+    "command": { "const": "doctor" },
+    "status": { "enum": ["healthy", "degraded", "action-required"] },
+    "checks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["id", "title", "status"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "title": { "type": "string", "minLength": 1 },
+          "status": { "enum": ["ok", "warning", "degraded", "action-required"] },
+          "detail": { "type": "string" }
+        }
+      }
+    },
+    "reclaimedLocks": {
+      "type": "array",
+      "description": "Present only when `--reclaim-locks` was passed: the dead-pid lock records reclaimed.",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["scope", "holderPid"],
+        "properties": {
+          "scope": { "type": "string" },
+          "holderPid": { "type": "integer" }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "command": "doctor",
+      "status": "healthy",
+      "checks": [
+        { "id": "modes-permissions", "title": "Filesystem modes & permissions", "status": "ok" },
+        { "id": "lock-liveness", "title": "Lock liveness", "status": "ok" },
+        { "id": "backup-watermark", "title": "Backup watermark health", "status": "ok" },
+        { "id": "audit-anchor", "title": "Audit-head anchor check", "status": "ok" }
+      ]
+    },
+    {
+      "command": "doctor",
+      "status": "action-required",
+      "checks": [
+        { "id": "modes-permissions", "title": "Filesystem modes & permissions", "status": "ok" },
+        { "id": "lock-liveness", "title": "Lock liveness", "status": "action-required", "detail": "vault-maintenance held by dead pid 44122 — run --reclaim-locks" },
+        { "id": "backup-watermark", "title": "Backup watermark health", "status": "degraded", "detail": "watermark seq 811 < latest ledger seq 907" },
+        { "id": "audit-anchor", "title": "Audit-head anchor check", "status": "ok" }
+      ]
+    }
+  ],
+  "x-atlas-contract": {
+    "command": "doctor",
+    "phase": 1,
+    "privilege": "shared",
+    "idempotency": "none",
+    "executionClass": "pure",
+    "summary": "Host/vault health checks; --reclaim-locks reclaims dead-pid locks.",
+    "args": [],
+    "flags": [
+      { "flag": "--reclaim-locks", "type": "boolean", "default": false, "description": "Reclaim lock records whose owning pid is provably dead. The only mutation this command performs." }
+    ],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "sideEffects": [
+      "with --reclaim-locks: removes lock records held by a dead pid (no ledger row; lock-file maintenance only)"
+    ],
+    "prohibitedEffects": [
+      "no ledger row written",
+      "no git ref advanced",
+      "no vault, projection, or backup write",
+      "without --reclaim-locks: no mutation at all"
+    ],
+    "locks": [{ "scope": "shared", "mode": "shared" }],
+    "exitCodes": [0, 2, 4, 5, 6],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "unknown flag/argument or malformed invocation" },
+      { "code": "config-invalid", "exit": 2, "when": "brain.config.yaml fails schema validation" },
+      { "code": "vault-error", "exit": 2, "when": "the configured vault/repo is missing or unreadable" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure while running a check" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json",
+    "checkInventory": [
+      {
+        "id": "modes-permissions",
+        "title": "Filesystem modes & permissions",
+        "description": "Verify the protected-ref permission layout and key ACLs match the security/broker contract (ref dirs 0750 / files 0640 owned atlas-broker:atlas-git; refs/agent 0770 agent-owned; WORM anchor 0600). Reports action-required on any drift.",
+        "phase": 1
+      },
+      {
+        "id": "lock-liveness",
+        "title": "Lock liveness",
+        "description": "Inspect every named lock scope (vault-maintenance ⊐ ledger-maintenance ⊐ jobs-runner ⊐ canonical-integration) for a live holder. A lock whose owning pid is dead is reported action-required and is reclaimable via --reclaim-locks.",
+        "phase": 1,
+        "remediationFlag": "--reclaim-locks"
+      },
+      {
+        "id": "backup-watermark",
+        "title": "Backup watermark health",
+        "description": "Compare backup_watermark.seq against the latest ledger seq. degraded/action-required when the watermark lags (the backup-unhealthy blocking state); healthy when fully covered.",
+        "phase": 1
+      },
+      {
+        "id": "audit-anchor",
+        "title": "Audit-head anchor check",
+        "description": "Verify the refs/audit/runs head and monotonic event count against the external WORM anchor (D8). action-required on count regression or head mismatch (anti-truncation).",
+        "phase": 1
+      }
+    ]
+  }
+}
