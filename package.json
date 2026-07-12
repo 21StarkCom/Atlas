@@ -1,0 +1,23 @@
+{
+  "name": "atlas",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Atlas — the LLM-native second-brain wiki engine (pnpm/TypeScript monorepo).",
+  "author": "Aryeh Stark <aryeh@21stark.com>",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=24",
+    "pnpm": ">=11"
+  },
+  "packageManager": "pnpm@11.12.0",
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "contract:check": "node tools/gen-cli-contract.ts --check",
+    "contract:write": "node tools/gen-cli-contract.ts --write"
+  },
+  "devDependencies": {
+    "typescript": "catalog:"
+  }
+}
