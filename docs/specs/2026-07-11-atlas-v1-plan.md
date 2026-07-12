@@ -78,8 +78,9 @@ Key architectural decisions (wing-vetted in rounds 2–5, restated here as bindi
   nightly live suite (repo Actions secret, injected only into the egress-broker test fixture).
 - **Gemini access:** one API key for `gemini-3.5-flash` + `gemini-embedding-001`; custody per the
   egress-broker key ACL (Task 1.0) — never in agent/parser env.
-- **Parallel with Phase 1:** Phase-2 contract authoring (Task 2.0) and fixture-vault authoring
-  (Task 0.6) have no code dependency on Phase 1 and may proceed concurrently once Phase 0 merges.
+- **Parallel with Phase 1:** only **prose drafting** of Phase-2 contracts (Task 2.0) and fixture-vault
+  authoring (Task 0.6) may proceed concurrently once Phase 0 merges; Task 2.0's **code + tests consume
+  Task 1.1's ChangePlan envelope, so its implementation/merge is gated on Task 1.1** (fixes premature parallel).
 
 ---
 
@@ -118,8 +119,10 @@ Key architectural decisions (wing-vetted in rounds 2–5, restated here as bindi
   owner** of `jobs`/`job_attempts` DDL + repository + transactions; `policies`, `validation`,
   `workflows`, `vault`, `markdown`, `retrieval`, `config`, `domain` are **internal modules** of
   `apps/cli` (never workspace packages in V1). Shared DTOs (`VaultSnapshot`) and the executable
-  scanner/guard abstractions live in dependency-safe **leaf packages** (`contracts` + a dedicated
-  `@atlas/scanner`) consumed by both `apps/cli` and the packages, so no CLI→package→CLI cycle exists;
+  scanner/guard abstractions **and the risk/sensitivity/mutation-policy evaluators** live in
+  dependency-safe **leaf packages** (`contracts` + a dedicated `@atlas/scanner` + a dedicated
+  `@atlas/policy`, each delivered before its first package/broker consumer) consumed by both
+  `apps/cli` and the packages, so no CLI→package→CLI cycle exists;
   an import-graph test covers **every** workspace package, not only broker→sqlite-store (fixes
   cross-workspace cycle).
 - Vault safety: **fixture vaults only until Phase 5**; Phase 5 operates on a **copy** of
@@ -131,7 +134,7 @@ Key architectural decisions (wing-vetted in rounds 2–5, restated here as bindi
 
 | # | Decision | Value (binding for V1) |
 |---|---|---|
-| D1 | CI two-UID mechanism | CI runners execute `sudo provisioning/ci/setup.sh` which creates `atlas-broker` + `atlas-egress` users, `atlas-git` group, and installs a sudoers drop-in (`/etc/sudoers.d/atlas-ci`) allowing the runner user to `sudo -u atlas-broker` / `sudo -u atlas-egress` **only** the two launcher scripts. Agent-side tests run as the unprivileged runner user. Same script family works on macOS (`sysadminctl -addUser`) and Linux (`useradd -r`). |
+| D1 | CI two-UID mechanism | CI runners execute `sudo provisioning/ci/setup.sh` which creates `atlas-broker` + `atlas-egress` + `atlas-trusted-cli` (crypto-service) users, `atlas-git` + the two per-socket groups, and installs a sudoers drop-in (`/etc/sudoers.d/atlas-ci`) allowing the runner user to `sudo -u atlas-broker` / `sudo -u atlas-egress` **only** the two launcher scripts. Agent-side tests run as the unprivileged runner user. Same script family works on macOS (`sysadminctl -addUser`) and Linux (`useradd -r`). |
 | D2 | `effectiveSensitivity` representation | **Computed on read, never persisted** in V1 (the spec's default). No projection column; recompute cost is acceptable at V1 vault sizes; revisit only if the Phase-5 scale gate fails. |
 | D3 | `sourceId` acceptance & serialization | Commands taking a source handle accept either a serialized `renditionId` `sha256:<rawContentHash>:<canonicalMediaType>:<extractorVersion>:<normalizerVersion>` or a serialized `contentId` `sha256:<rawContentHash>:<canonicalMediaType>` (resolved via `content_blobs.active_rendition_id`). Colon-delimited, lowercase hex. Parsing lives in `packages/contracts/src/ids.ts` only. |
 | D4 | Initial `chunker_version` | **`1`** (config `indexing.chunker_version`, seeded in `brain.config.example.yaml`). |
@@ -179,8 +182,12 @@ Every ledger-writing run funnels through `finalizeLedgerWrite` with this exact o
    are dispatched to the broker by a **single ordered dispatcher, strictly ascending by `seq`**, and
    recovery processes pending intents in `seq` order, so writer N cannot leave writer N+1 stalled at
    the broker as non-monotonic (fixes append-ordering / f358814172cc).
-2. **Git append + ref advance (broker):** send the signed event to `broker.appendAuditEvent`; the
-   broker verifies monotonic `seq` against the ref head, appends, returns `{seq, head}`. When the run
+2. **Git append + ref advance (broker):** send the **unsigned canonical event + the committed `audit_intents` proof** (the authenticated
+   mutation-envelope + `seq` from step 1) to `broker.appendAuditEvent`; the broker validates the
+   proof against its own ref view (never importing sqlite-store), **signs the event with the
+   broker-only audit signing key**, verifies monotonic `seq` against the ref head, appends, returns
+   `{signed, seq, head}` — so agents never hold the signing key yet the append is still constructible
+   (fixes missing signing path). When the run
    also advances a protected ref (capture integration, synthesis integration), the **same idempotent
    broker operation atomically appends the audit event and advances the ref** (keyed `(runId, seq)`),
    so audit and canonical integration never diverge; recovery covers every combination of audit
@@ -223,8 +230,11 @@ contracts that gate Phase 1.
      policy for critical dependency findings** (fixes absent supply-chain controls); the provisioning
      step is added by Task 1.0), root `package.json` scripts. The **retained harness**: the full command registry with
      one row per command/subcommand — name, `schemaRef`, `phase`, idempotency class
-     (`key-accepting`/`intrinsic`), privilege tier — seeded for **every** command in §7's inventory
-     including the Phase-5 `graduation`/`quarantine` groups; the CLI-surface fixture (the prose
+     (`key-accepting`/`intrinsic`), privilege tier — the `privilege` classification **references the single `PrivilegedOpDescriptor`
+     registry (Task 0.3), from which the broker op union, challenge mapping, and contract tables are
+     generated; a test proves every privileged command has exactly one challenge definition (fixes dual
+     privilege registries)** — seeded for **every** command in §7's inventory
+     including **`broker enroll`** (Task 1.0) and the Phase-5 `graduation`/`quarantine` groups; the CLI-surface fixture (the prose
      inventory `contract-lint` parses — fixes R4-F6); the generator that emits per-command Markdown
      refs + contract-test fixtures + the acceptance-case inventory from the schemas; and
      `contract-lint` asserting registry ↔ fixture ↔ schema-presence-for-implemented-phase consistency.
@@ -255,7 +265,11 @@ contracts that gate Phase 1.
    - Acceptance: every state + terminal appears; no state lacks a recovery action.
 
 2. **Task 0.2 — `sqlite-data-dictionary.md` + versioned index contract**
-   - What: complete per-table DDL for **all** tables in §2.7 (every column, SQL type, PK/FK,
+   - What: this task lands in **two passes** — a draft table **inventory** that may begin immediately,
+     then **final DDL/FK/`ON DELETE` authored only after Task 0.4's `retention-matrix.md` lands**
+     (retention drives the FKs, so migration creation in Task 1.4 is gated on the finalized dictionary —
+     fixes backward retention dependency); migration SQL is **generated from a single executable schema
+     module**, never hand-copied. Complete per-table DDL for **all** tables in §2.7 (every column, SQL type, PK/FK,
      nullability, UNIQUE, CHECKs, ON DELETE per the retention matrix, upsert conflict targets), the
      composite-identifier rule (component scalar columns, never packed strings — `source_renditions`
      PK = (`raw_content_hash`,`canonical_media_type`,`extractor_version`,`normalizer_version`);
@@ -271,7 +285,8 @@ contracts that gate Phase 1.
    - Interfaces — **Consumes:** §2.7, **Task 0.4's `retention-matrix.md` (authored before this task's
      ON DELETE / DDL is finalized so retention drives the FKs, not the reverse — fixes ordering)**.
      **Produces:** the DDL source of truth consumed by Tasks 1.4,
-     2.1, 2.7, 4.1 (each migration copies its tables' DDL verbatim from here).
+     2.1, 2.7, 4.1 (each migration's SQL is **generated from this single executable schema module**,
+     never hand-copied, and structurally diffed against it as the migration lands — fixes manual DDL copy).
    - Test: named later as `db.migrate-ownership.test` (Task 1.4) — the dictionary itself is gated by
      `contract-lint`'s table-inventory check against §2.7.
    - Acceptance: every §2.7 table present; every FK names its ON DELETE; every upsert names its
@@ -290,15 +305,25 @@ contracts that gate Phase 1.
      validating a broker-observed op or a durable authenticated ledger intent — agents cannot mint
      audit history; any retained agent assertion is signed with a distinct untrusted-producer key and
      kept separate from broker-attested records (fixes forged-audit)**; backup AEAD key
-     broker-only; quarantine AEAD key trusted-CLI-only, parser/model-denied; `atlas.gemini.key`
+     **held by a single dedicated trusted-CLI/crypto-service identity (not the broker — the broker does not perform backup encryption; `keys.acl.json` and its equivalence check are generated from this same decision, fixing the custody contradiction)**; quarantine AEAD key that same trusted-CLI identity, parser/model-denied; `atlas.gemini.key`
      **egress-broker-only**); WORM anchor format (signed head hash + monotonic event count) at D8's
-     path, additionally **mirrored to independently-administered append-only / object-lock (or
-     TPM-backed monotonic) storage** — the local file is a cache only, so a compromised broker cannot
-     silently rewrite both ref and anchor and pass the anti-truncation check (fixes mutable-anchor); the challenge/response JSON schemas (`AuthorizationChallenge`, `AuthorizationResponse`,
+     path, additionally **mirrored to a concrete independently-administered append-only backend chosen before
+     Phase 1 — a TPM-backed monotonic counter where a TPM exists, else an append-only log owned by a
+     separate administrative OS identity/partition the broker cannot rewrite (append+read only) —
+     provisioned in Task 1.0; where no supported backend exists on a host the broker refuses to start
+     rather than silently trusting the local cache** — the local file is a cache only, so a compromised
+     broker cannot silently rewrite both ref and anchor and pass the anti-truncation check (fixes
+     mutable/unprovisioned anchor); the challenge/response JSON schemas (`AuthorizationChallenge`, `AuthorizationResponse`,
      drift-rejection error catalog); Ed25519 envelope + canonicalization; nonce store + expiry;
      signer registry; key rotation/revocation procedure; audit-event payload schema (**opaque salted
      IDs** for note/source identifiers + the ledger mapping table, so ordinary erasure needs no
-     ref rewrite); the D6 event-mapping decision; the signed-tombstone audit-ref replacement
+     ref rewrite); the D6 event-mapping decision; the **`SignedScanAttestation` schema** (raw + normalized content
+     hashes, scanner + ruleset version, trusted-scanner signer id + Ed25519 signature) with its signer
+     identity + key custody, so `integrateSourceCapture`'s clean-scan requirement has a defined
+     producer; the **single machine-readable `PrivilegedOpDescriptor` registry** from which the broker
+     op union, challenge mapping, CLI privilege classification, and contract tables are all generated
+     (one authority for privileged-op membership — fixes dual privilege registries); the
+     signed-tombstone audit-ref replacement
      protocol for erasure.
    - Files: `docs/specs/security-broker-contract.md`.
    - Interfaces — **Consumes:** D1, D6, D8, D9, D10. **Produces:** the contract consumed by Tasks
@@ -398,9 +423,11 @@ backup/restore round-trips destructively.
 
 0. **Task 1.0 — Host + CI provisioning (both runtime identities)**
    - What: idempotent provisioning scripts creating users **`atlas-broker`** and **`atlas-egress`**,
-     group **`atlas-git`** (agent user + both brokers are members); protected-ref permission layout
+     group **`atlas-git`** for canonical-repo readers (agent user + `atlas-broker` **only** — `atlas-egress` deliberately excluded so the sole outbound-network identity has no canonical/object access per D10; a separation test reads refs/commits/blobs as `atlas-egress` and asserts EACCES — fixes egress canonical access), plus the two per-socket groups from D10 (`atlas-broker-sock`/`atlas-egress-sock`) created here, with CLI/tests executed through a launcher that calls `initgroups`/fresh-login so the running process picks up new membership in-job (fixes socket-group provisioning); protected-ref permission layout
      per Task 0.3 (dirs `0750`, ref files `0640`, `refs/agent/` agent-owned `0770`); WORM anchor
-     file at D8's path (broker-owned `0600`, parent `0700`); key provisioning per the ACL matrix
+     file at D8's path (broker-owned `0600`, parent `0700`) **plus the independent append-only / TPM
+     anchor backend from Task 0.3 provisioned with its own separate administrative identity (broker
+     holds append+read only)**; key provisioning per the ACL matrix
      (D9); the **`atlas-test-approver`** approval keypair is created **only inside an isolated CI/test
      broker with an ephemeral trust store** — its private key is **never** installed by dev or
      production provisioning and is excluded from production artifacts (real authorization requires a
@@ -408,18 +435,25 @@ backup/restore round-trips destructively.
      bypassable in dev/prod (fixes test-signer bypass); agent
      **outbound-network denial** (macOS: Seatbelt profile `provisioning/profiles/agent.sb` applied
      by the agent launcher; Linux: network-isolated netns via `provisioning/linux/netns.sh` +
-     seccomp allowlist) while `atlas-egress` retains network; launchers
+     seccomp allowlist) while `atlas-egress` retains network — and **every non-egress identity (the agent session, `atlas-broker`, trusted-cli) runs inside a persistent deny-by-default network namespace / host-firewall policy enforced outside application control, so an arbitrary `node`/`curl` process cannot transmit even without the CLI launcher** (fixes egress bypass outside the launcher); launchers
      `provisioning/bin/broker-launcher.sh` + `provisioning/bin/egress-launcher.sh` (drop to the
      respective identity, exec the built broker binaries) **installed as root-owned, non-writable,
      symlink-rejecting files in a system dir** (the agent cannot replace a sudo-approved launcher;
      provisioning validates ownership+mode and pins the exact command+args before the sudoers drop-in
-     — fixes launcher-takeover / cd86c776e680); a **daemon lifecycle**
-     (`provisioning/bin/{start,stop,readiness}-brokers.sh`: start both daemons under their identities,
-     authenticated readiness wait, restart-after-build, teardown stop) and an idempotent
+     — fixes launcher-takeover / cd86c776e680); **provisioning proper only provisions identities/sockets/keys/launchers**; **daemon lifecycle is
+     delivered with its daemon — integration-broker (`atlas-broker`) start/readiness with Task 1.6,
+     egress (`atlas-egress`) start/readiness with Task 2.8** (`provisioning/bin/{start,stop,readiness}-brokers.sh`
+     gain each daemon as it is built: authenticated readiness wait, restart-after-build, teardown stop),
+     so Phase-1 starts only `atlas-broker` and never awaits an unbuilt egress binary (fixes
+     egress-daemon-before-phase-2) and an idempotent
      **`brain broker enroll --vault <dir>`** op (validate repo, set traversable group perms +
      protected-ref ownership, bind the broker to the vault) so verification blocks have a bound socket
      before the first audited command (fixes missing broker lifecycle / 0418eed1f6c2); a
-     **trusted-CLI identity + launcher** holding the backup/quarantine AEAD keys, exposed only through
+     **trusted-CLI/crypto-service identity + launcher — provisioned with a complete OS identity + sudo
+     lifecycle like the brokers (D1 adds its UID)** — as the **single owner** of the backup + quarantine
+     AEAD keys (Task 0.3's ACL and `keys.acl.json` generation are aligned to this owner, so the
+     equivalence check passes and the first post-ledger backup succeeds — fixes backup-key custody
+     contradiction), exposed only through
      narrowly-scoped crypto RPCs that never return key material, so agent-side sqlite-store/quarantine
      code completes without reading either key (fixes backup/quarantine key runtime / 64bed648e7b0,
      e671e263a41b); a **mandatory CLI launcher** that enters the Seatbelt profile / netns before
@@ -448,7 +482,10 @@ backup/restore round-trips destructively.
      **envelope** schema (target, rationale, sourceIds, retrievedEvidence, confidence,
      `proposedRisk`, reversibility, `idempotencyKey?` — per-operation payload schemas are Phase 2's
      gate, **not** promised here — fixes R2-F1/R3-F1), run-manifest schema, audit-event +
-     authorization schemas mirroring Task 0.3, provider-error union type (taxonomy only; adapter is
+     authorization schemas mirroring Task 0.3, the shared note/link DTOs **`VaultSnapshot`/`ParsedNote`**
+     and the **`SignedScanAttestation`** schema (living here so `sqlite-store`, `git`, and both brokers
+     consume them with no CLI import — fixes VaultSnapshot/attestation boundary), provider-error union
+     type (taxonomy only; adapter is
      Phase 2), zero runtime dependencies (Zod only).
    - Files: `packages/contracts/src/{ids,canonical,changeplan-envelope,run-manifest,audit,authorization,provider-errors}.ts`,
      `packages/contracts/src/index.ts`, `packages/contracts/test/*.test.ts`.
@@ -461,6 +498,7 @@ backup/restore round-trips destructively.
      `RunManifestSchema: z.ZodType<RunManifest>` ·
      `AuditEventSchema: z.ZodType<AuditEvent>` · `SignedAuditEvent = {event: AuditEvent, signature: Uint8Array, signerId: string}` ·
      `AuthorizationChallengeSchema` / `AuthorizationResponseSchema` ·
+     `VaultSnapshotSchema` / `ParsedNoteSchema` (shared DTOs) · `SignedScanAttestationSchema` ·
      `ProviderError` (discriminated union of `validation|authentication|quota|rate_limit|timeout|transport|cancelled|partial_batch|model_incompatible`, each `{retryable: boolean, retryAfter?: number}`).
    - Test: `contracts.canonical.test` (byte-identical serialization across key orders + Unicode
      forms); `contracts.authorization.test` (Task 0.3's JSON examples validate).
@@ -493,7 +531,7 @@ backup/restore round-trips destructively.
      `apps/cli/src/markdown/{parse,sections}.ts`, `apps/cli/test/vault.test.ts`.
    - Interfaces — **Consumes:** 1.1, 1.2. **Produces:**
      `readVault(cfg: AtlasConfig): Promise<VaultSnapshot>` ·
-     `VaultSnapshot = {notes: ParsedNote[], errors: VaultError[]}` ·
+     `VaultSnapshot`/`ParsedNote` **imported from `@atlas/contracts` (1.1), not redefined here** — `VaultSnapshot = {notes: ParsedNote[], errors: VaultError[]}` ·
      `ParsedNote = {id: string, path: string, type: NoteType, schemaVersion: number, aliases: string[], sources: string[], declaredSensitivity: Sensitivity, links: WikiLink[], sections: SectionTree, contentHash: string, raw: string}` ·
      `normalizeIdentityKey(s: string): string` · `writeNoteFile(path: string, content: string): Promise<void>`.
    - Test: `vault.identity.test` — mixed Hebrew/English alias normalization is rune-safe and
@@ -520,9 +558,10 @@ backup/restore round-trips destructively.
      `registerPostRestoreRebuild(step: (ctx: RebuildCtx) => Promise<void>): void` ·
      `Migration = {id: string, checksum: string, up(db: Database): void}`.
    - Test: `db.migrate-ownership.test` (**phase-aware**) — in Phase 1 it validates bootstrap +
-     `0001_core` only and statically checks the later migrations' ownership declarations against §2.7;
-     each later migration extends it, with the full every-§2.7-table assertion enabled only once
-     `0004_claims` exists (fresh DB diff vs dictionary); `db.rebuild.test` — rebuild after note edits converges;
+     `0001_core` and runs a **structural-schema-equivalence check of the applied `0001_core` against the
+     generated dictionary DDL immediately** (each later migration extends the check as it lands — an
+     applied schema is never left unverified against the dictionary; fixes deferred DDL comparison), and
+     statically checks later migrations' ownership declarations against §2.7; `db.rebuild.test` — rebuild after note edits converges;
      ledger rows survive rebuild untouched; query-plan assertions use the contract's indexes.
    - Acceptance: `db migrate` idempotent; rebuild transactional (crash mid-rebuild leaves old
      projection readable — asserted with a failpoint).
@@ -549,7 +588,7 @@ backup/restore round-trips destructively.
      with: challenge mint/verify (nonce store, expiry, drift rejection per Task 0.3), Ed25519
      verification, protected-ref CAS advance with ancestry + signature + audit-event re-verification **plus independent
      risk/diff verification** (the broker re-derives `effectiveRisk` + mutation-policy from the exact
-     commit diff via a shared broker-consumable policy package, never trusting the manifest's claimed
+     commit diff via the **`@atlas/policy` leaf package (delivered before this task, imported identically by CLI, broker, and egress — the single risk authority)**, never trusting the manifest's claimed
      tier, and requires privileged authorization whenever it cannot itself prove auto-integration
      eligibility — fixes client-supplied-risk),
      **`integrateSourceCapture`** (the narrowly scoped Tier-1 capture integration Phase 2 consumes —
@@ -557,7 +596,7 @@ backup/restore round-trips destructively.
      scanner-produced signed clean-scan attestation bound to every blob hash + normalized artifact and
      rejects unattested objects** (so a direct `integrateSourceCapture` call cannot fast-forward
      unscanned secret-bearing bytes without `PrePersistenceGuard` — fixes scanner bypass), and
-     fast-forwards canonical under CAS — fixes R1-F2), audit-ref append (monotonic seq check, signed events only),
+     fast-forwards canonical under CAS — fixes R1-F2), audit-ref append (accepts an **unsigned** canonical event + a broker-verifiable durable-intent proof, validates the proof, **signs it with the broker-only audit key**, monotonic seq check — so agents drive an append without holding the signing key; fixes signing-path gap),
      WORM-anchor update on every append, and the client library. **No `@atlas/sqlite-store` import**
      (§2.8 direction; enforced by test). Includes `tools/test-signer.ts` (signs a challenge with the
      provisioned `atlas-test-approver` key) so every privileged flow is executable in tests/CI.
@@ -566,10 +605,11 @@ backup/restore round-trips destructively.
      `packages/broker/test/*.test.ts`.
    - Interfaces — **Consumes:** 0.3, 1.0 (identities/keys), 1.1, 1.5. **Produces:**
      `BrokerClient.connect(socketPath: string): Promise<BrokerClient>` ·
-     `BrokerClient.appendAuditEvent(e: SignedAuditEvent): Promise<{seq: number, head: string}>` ·
+     `BrokerClient.appendAuditEvent(e: {event: AuditEvent, intentProof: DurableIntentProof}): Promise<{signed: SignedAuditEvent, seq: number, head: string}>` (broker validates the durable-intent proof, signs internally with the broker-only key, appends) ·
      `BrokerClient.advanceProtectedRef(r: RefAdvanceRequest): Promise<RefAdvanceResult>` where
      `RefAdvanceRequest = {ref: ProtectedRef, expectedOld: string, newCommit: string, manifest: RunManifest, authorization?: AuthorizationResponse, auditEvent: SignedAuditEvent}` ·
-     `BrokerClient.integrateSourceCapture(r: {captureCommit: string, expectedBase: string, manifest: RunManifest, auditEvent: SignedAuditEvent}): Promise<RefAdvanceResult>` ·
+     `BrokerClient.integrateSourceCapture(r: {captureCommit: string, expectedBase: string, manifest: RunManifest, auditEvent: AuditEvent, intentProof: DurableIntentProof, scanAttestation: SignedScanAttestation}): Promise<RefAdvanceResult>` (the `scanAttestation` — produced by Task 2.2's guard, bound to every blob + normalized hash — is the artifact the broker requires; missing/forged/stale/hash-mismatched ⇒ rejected; fixes attestation producer+transport) ·
+     `BrokerClient.ingestObjects(req: {commit: string, pack: Uint8Array}): Promise<void>` (idempotent; `git index-pack --strict` + fsck + reachability + size caps + quarantine transfer agent-clone objects into the broker's bare repo **before** any ref op, so the broker can resolve/diff the commit — fixes agent→broker object transfer) ·
      `BrokerClient.mintChallenge(op: PrivilegedOpDescriptor): Promise<AuthorizationChallenge>` ·
      `BrokerClient.execAuthorized(op: PrivilegedOpDescriptor, auth: AuthorizationResponse): Promise<PrivilegedOpResult>` ·
      `tools/test-signer.ts` CLI: `node tools/test-signer.ts --key atlas-test-approver < challenge.json > authorization.json`.
@@ -594,7 +634,11 @@ backup/restore round-trips destructively.
      `seq` the surviving ref holds beyond the restored ledger, and **seed the allocator floor above
      both the restored ledger and the authenticated broker head** — so a restore of an older backup
      (ref at M, ledger at N<M) cannot strand allocation with rejected `run.projection` appends (fixes
-     restore-desync / 1030cfb3b850); only then run the post-restore hook registry (projection rebuild
+     restore-desync / 1030cfb3b850); then **take + verify a new backup covering the reconciled sequence and
+     advance the authenticated watermark before any event-emitting hook runs** (a failpoint sits between
+     reconciliation and this backup; it resumes as part of the persisted restore state machine), so
+     reconciling an older backup never leaves the fail-closed gate seeing uncovered ledger writes (fixes
+     restore-watermark-before-hooks); only then run the post-restore hook registry (projection rebuild
      now; index rebuild added Phase 3) as a **persisted multi-stage operation** with projections/index
      marked `rebuilding`/unhealthy and each hook idempotent + resumable, so a hook failure after the
      ledger commit leaves a resumable state rather than a silently half-applied restore (fixes
@@ -688,8 +732,7 @@ pnpm -r build && pnpm -r test                              # all Phase-0/1 suite
 ATLAS_PROVISIONED=1 pnpm --filter @atlas/broker --filter @atlas/sqlite-store test
 V=$(mktemp -d)/vault && cp -R fixtures/small-valid/. "$V" && git -C "$V" init -q && git -C "$V" add -A \
   && git -C "$V" -c user.name='Aryeh Stark' -c user.email='aryeh@21stark.com' commit -qm seed
-sudo provisioning/dev/setup.sh && provisioning/bin/start-brokers.sh   # provision + start/await both daemons (Task 1.0)
-node apps/cli/dist/index.js broker enroll --vault "$V"                # idempotent per-vault broker enrollment
+scripts/verify-bootstrap.sh "$V"   # provision (isolated test-broker + ephemeral atlas-test-approver), start/await atlas-broker ONLY (egress lands Phase 2), broker enroll — all via the brain launcher
 node apps/cli/dist/index.js --vault "$V" db migrate        # exit 0, idempotent on rerun
 node apps/cli/dist/index.js --vault "$V" db rebuild        # exit 0; emits one run.projection
 node apps/cli/dist/index.js --vault "$V" inspect --json    # exit 0; validates inspect.schema.json
@@ -769,13 +812,16 @@ egress broker and is provably restricted to non-mutating extraction/classificati
 2. **Task 2.2 — Secret-scan engine + guards + quarantine store**
    - What: the scan engine (representative secret formats + entropy heuristics; deterministic,
      versioned ruleset), **`PrePersistenceGuard`** (raw bytes + normalized output; consumed by
-     normalize/capture as a required dependency) and **`GeneratedArtifactGuard`** (exact serialized
+     normalize/capture as a required dependency), each clean check emitting a **`SignedScanAttestation`** (0.3 schema; bound to raw + normalized content hashes + scanner/ruleset version, trusted-scanner-signed) persisted in the capture manifest and handed to `integrateSourceCapture` — fixes missing attestation producer, and **`GeneratedArtifactGuard`** (exact serialized
      form of model responses + derived artifacts incl. future patches/diffs/commit messages — the
      same engine, second enforcement point; exists from the first model call), and the quarantine
      store: AEAD (key per ACL matrix, trusted-CLI identity), mode-0700 dir **outside the repo**,
      minimized filenames, bounded retention, crash-safe purge (temp-then-rename; no plaintext ever
      on disk), `doctor` quarantine-security checks.
-   - Files: `apps/cli/src/scan/{engine,rules,pre-persistence,generated-artifact}.ts`,
+   - Files: `packages/scanner/src/{engine,rules,verdict}.ts` (the authoritative **`@atlas/scanner`
+     leaf** — imported by both CLI guards and both broker daemons, so no broker→CLI dependency and one
+     ruleset version everywhere; pinned+attested ruleset hash; import-graph + cross-process corpus
+     equivalence test — fixes scanner leaf), `apps/cli/src/scan/{pre-persistence,generated-artifact}.ts`,
      `apps/cli/src/quarantine/store.ts`, `apps/cli/test/scan/*.test.ts`.
    - Interfaces — **Consumes:** 1.2, 1.8 (diag). **Produces:**
      `scanBytes(input: {bytes: Uint8Array, context: ScanContext}): ScanVerdict`
@@ -910,7 +956,7 @@ egress broker and is provably restricted to non-mutating extraction/classificati
      (request/response hashes, destination, model, tokens, latency, cost, retries). `@atlas/models`
      = typed IPC client (`generateText`/`generateObject<T>`/`embed`, versioned request/result types,
      `AbortSignal`, adapter-owned retry, taxonomy mapping incl. `retryAfter` propagation). The
-     Gemini adapter lives **inside** the egress broker; on startup the egress broker probes the provider to resolve the configured model id (`gemini-3.5-flash`) + embedding model before accepting any request, failing loud if unknown (fixes invalid-model). Structured-output requests cross IPC as a registered `schemaId`+version (never a live Zod object); the egress broker holds an allowlisted JSON-Schema registry and validates the result independently on both sides (fixes non-serializable-Zod). It authenticates the socket peer UID (SO_PEERCRED/getpeereid) and enforces purpose/model/destination/effective-sensitivity policy in-process — not only the CLI-side gate (fixes client-only egress restrictions) — binds each request to a broker-issued operation token, and durably records an outbound intent **before** transmission + a sanitized completion receipt **after**, so a crash on either side reconciles idempotently (fixes unordered transmission/audit). Plus **`policies.operationGate`** — the
+     Gemini adapter lives **inside** the egress broker; on startup the egress broker probes the provider to resolve the configured model id (`gemini-3.5-flash`) + embedding model before accepting any request, failing loud if unknown (fixes invalid-model). Structured-output requests cross IPC as a registered `schemaId`+version (never a live Zod object); the egress broker holds an allowlisted JSON-Schema registry and validates the result independently on both sides (fixes non-serializable-Zod). It authenticates the socket peer UID (SO_PEERCRED/getpeereid) and enforces purpose/model/destination/effective-sensitivity policy in-process — computing `effectiveSensitivity` itself via the shared **`@atlas/policy` leaf** over authenticated provenance inputs, never trusting a client-supplied classification, and not only the CLI-side gate (fixes client-only egress restrictions + egress sensitivity ownership) — binds each request to a broker-issued operation token, and durably records an outbound intent in a **broker-owned crash-safe encrypted journal (stable transmission id, request hash, intent/receipt state, retention) before** transmission + a sanitized completion receipt **after**; **startup reconciliation enumerates every sent-or-indeterminate intent and imports it through `finalizeLedgerWrite` via an authenticated CLI pull/ack RPC before accepting new transmissions**, with failpoints before send / after send / after receipt / before CLI ack, so a CLI crash after a successful send cannot lose the mandatory transmission ledger/audit row or double-transmit (fixes egress journal storage + unordered transmission/audit). Plus **`policies.operationGate`** — the
      narrow Phase-2 policy subset (fixes R1-F3): capture/projection ops allowed, synthesis ops
      rejected fail-closed, reserved task ops rejected always. This CLI-side gate is **defence-in-depth
      only** — the authoritative purpose/model/destination/sensitivity enforcement, peer authentication,
@@ -977,7 +1023,8 @@ egress broker and is provably restricted to non-mutating extraction/classificati
 ```bash
 pnpm -r build && pnpm -r test
 ATLAS_PROVISIONED=1 pnpm --filter @atlas/sources --filter @atlas/jobs --filter @atlas/broker test
-V=$(mktemp -d)/vault && cp -R fixtures/small-valid "$V" && git -C "$V" init -q && git -C "$V" add -A && git -C "$V" -c user.name='Aryeh Stark' -c user.email='aryeh@21stark.com' commit -qm seed
+V=$(mktemp -d)/vault && cp -R fixtures/small-valid "$V" && git -C "$V" init -q -b main && git -C "$V" add -A && git -C "$V" -c user.name='Aryeh Stark' -c user.email='aryeh@21stark.com' commit -qm seed
+scripts/verify-bootstrap.sh "$V"   # provision + start/await atlas-broker AND atlas-egress (Phase 2), broker enroll; commands via the brain launcher
 node apps/cli/dist/index.js --vault "$V" db migrate
 node apps/cli/dist/index.js --vault "$V" ingest fixtures/inputs/sample.md        # preview; exit 0; no sinks written
 node apps/cli/dist/index.js --vault "$V" ingest fixtures/inputs/sample.md --apply --json | jq -e .runId
@@ -1022,7 +1069,7 @@ answers with packed context; index maintenance commands exist.
 1. **Task 3.1 — `@atlas/lancedb-index`: schema + chunker + generations**
    - What: LanceDB table schema (`SearchChunk`: chunk text, noteId, section path, `contentHash`,
      `chunkerVersion`, `embeddingModel`, `embeddingDimensions`, `generationId`, embedding vector),
-     the deterministic section chunker (v1 per D4) with **token-aware subdivision keeping every chunk safely below `gemini-embedding-001`'s 2048-input-token limit** (preserving section + locator metadata; boundary tests at/below/above 2048 tokens — fixes oversized-chunk rejection), sourced from a **version→implementation registry that rejects configured `indexing.chunker_version` values lacking an implementation** (the generation's `chunkerVersion` derives from the selected implementation, never the raw config label — fixes mislabeling), immutable generation ids
+     the deterministic section chunker (v1 per D4) with **token-aware subdivision keeping every chunk safely below the embedding model's input-token capacity read from a versioned model-capability registry owned by the egress/model layer (or the validated startup model probe) — never a hardcoded literal; the effective capability + version fold into generation identity so a model change re-chunks** (preserving section + locator metadata; boundary tests at/below/above the resolved capacity — fixes hardcoded/oversized-chunk), sourced from a **version→implementation registry that rejects configured `indexing.chunker_version` values lacking an implementation** (the generation's `chunkerVersion` derives from the selected implementation, never the raw config label — fixes mislabeling), immutable generation ids
      (`noteId`,`contentHash`,`chunkerVersion`,`embeddingModel`,`embeddingDimensions`).
    - Files: `packages/lancedb-index/src/{schema,chunker,generation}.ts`,
      `packages/lancedb-index/test/chunker.test.ts`.
@@ -1120,7 +1167,9 @@ answers with packed context; index maintenance commands exist.
 ### Verification (run from repo root)
 ```bash
 pnpm -r build && pnpm -r test
-V=$(mktemp -d)/vault && cp -R fixtures/source-heavy "$V" && git -C "$V" init -q && git -C "$V" add -A && git -C "$V" commit -qm seed
+V=$(mktemp -d)/vault && cp -R fixtures/source-heavy "$V" && git -C "$V" init -q -b main && git -C "$V" add -A \
+  && git -C "$V" -c user.name='Aryeh Stark' -c user.email='aryeh@21stark.com' commit -qm seed
+scripts/verify-bootstrap.sh "$V"   # provision + start/await brokers, broker enroll; all commands via the brain launcher
 node apps/cli/dist/index.js --vault "$V" db migrate && node apps/cli/dist/index.js --vault "$V" db rebuild
 ATLAS_LIVE_GEMINI=1 node apps/cli/dist/index.js --vault "$V" index rebuild        # exit 0; run.projection appended
 ATLAS_LIVE_GEMINI=1 node apps/cli/dist/index.js --vault "$V" query "what sources discuss meridian" --json | jq -e '.items | length > 0'
@@ -1192,7 +1241,11 @@ evidence with re-verification; `purge`. Lands as **PR-A (Task 4.1, retained)** t
    - Acceptance: whole-file rewrites impossible by construction (API takes ops, not content).
 
 3. **Task 4.3 — `policies`: effective risk + effective sensitivity (single producers)**
-   - What: extend the 2.8 gate module (same owner): `effectiveRisk` derived deterministically from
+   - What: the authoritative `effectiveRisk`/`effectiveSensitivity`/mutation-policy evaluators live in
+     the **`@atlas/policy` zero-CLI-dependency leaf package** (delivered before Task 1.6 so broker +
+     egress import the *same* implementation — thresholds are binding constants in that package, config
+     constrained to them; fixes risk/sensitivity single-source); this task wires the leaf into the CLI
+     gate + config: `effectiveRisk` derived deterministically from
      operation type × target note type × scope × config (the model's `proposedRisk` never gates);
      `effectiveSensitivity` computed-on-read (D2) as most-restrictive over declared + input chain;
      per-type mutation policy table (immutability of sources/decisions, append-only rules);
@@ -1230,7 +1283,10 @@ evidence with re-verification; `purge`. Lands as **PR-A (Task 4.1, retained)** t
      via egress, **retrieval-first enforced in orchestration**: the plan stage takes a
      `RetrievalResult` handle it must present) → validate (4.4) → patch (4.2) → worktree apply →
      agent commit (manifest per 1.5) → tier branch: Tier-1/2 CAS auto-integrate via
-     `advanceProtectedRef` with rebase-regenerate-revalidate on CAS miss; Tier-3 stop at
+     `advanceProtectedRef` with rebase-regenerate-revalidate on CAS miss, **then a mandatory
+     post-integration indexing checkpoint — synchronously run / enqueue the Phase-3 fenced index
+     pipeline (3.2/3.5) and verify CAS generation activation for every changed note before checkpointing
+     `reindexed`→`finalized` (fixes missing reindex before finalize)**; Tier-3 stop at
      `review-pending` (exit `6`, success-shaped `review_pending` + runId). `git refresh`
      implementation (new commit + manifest, supersession record, back to review-pending,
      key-accepting identity per the spec). The `GeneratedArtifactGuard` wraps every persisted
@@ -1251,8 +1307,11 @@ evidence with re-verification; `purge`. Lands as **PR-A (Task 4.1, retained)** t
      inspection); `concurrent-integration.test` — canonical moved between validation and commit ⇒
      CAS fails, regenerate+revalidate, no lost update/duplicate commit; Tier-3 apply ⇒ durable
      plan/branch/worktree/commit + exit `6`.
-   - Acceptance: preview mode provably side-effect-free across all sinks (same all-sink assertion
-     harness as 2.6).
+   - Acceptance: preview mode writes **zero vault/worktree/git/ChangePlan/patch/index effects**, while
+     for a model-reaching preview the **mandatory observability sinks (transmission ledger rows + audit
+     event + backup per §2.8) are present** — the harness asserts the two sink classes separately
+     (workflow-artifact sinks empty; observability sinks as required), so the egress-audit contract and
+     preview-safety do not contradict (fixes preview vs egress-audit).
 
 6. **Task 4.6 — Claims & evidence operations**
    - What: `CreateClaim`/`AttachEvidence`/`UpdateEvidenceVerification` op execution: canonical
@@ -1303,7 +1362,8 @@ evidence with re-verification; `purge`. Lands as **PR-A (Task 4.1, retained)** t
 
 9. **Task 4.9 — Full `git` surface: `review|approve|reject|rollback|verify`**
    - What: `review` (diff + manifest, read-only), `approve` (challenge-bound; FF-only CAS of the
-     exact signed commit; stale base ⇒ stable `refresh-required` exit `6`; idempotent re-approve),
+     exact signed commit; **the same post-integration indexing checkpoint as 4.5 runs before
+     `reindexed`→`finalized`**; stale base ⇒ stable `refresh-required` exit `6`; idempotent re-approve),
      `reject` (terminal + cleanup), `rollback` (privileged; deterministic revert-commit derivation
      in the challenge; **operation-class semantics**: capture-only run ⇒ tombstone/deactivate
      rendition+capture, retain blob; downstream dependents ⇒ `has-dependents` refusal listing them,
@@ -1380,9 +1440,11 @@ evidence with re-verification; `purge`. Lands as **PR-A (Task 4.1, retained)** t
 ### Verification (run from repo root)
 ```bash
 pnpm -r build && pnpm -r test
-V=$(mktemp -d)/vault && cp -R fixtures/source-heavy "$V" && git -C "$V" init -q && git -C "$V" add -A && git -C "$V" commit -qm seed
+V=$(mktemp -d)/vault && cp -R fixtures/source-heavy "$V" && git -C "$V" init -q -b main && git -C "$V" add -A \
+  && git -C "$V" -c user.name='Aryeh Stark' -c user.email='aryeh@21stark.com' commit -qm seed
+scripts/verify-bootstrap.sh "$V"   # provision + start/await brokers, broker enroll; all commands via the brain launcher
 node apps/cli/dist/index.js --vault "$V" db migrate && node apps/cli/dist/index.js --vault "$V" db rebuild
-node apps/cli/dist/index.js --vault "$V" enrich project-meridian                 # preview; exit 0 or 6; no sinks written
+node apps/cli/dist/index.js --vault "$V" enrich project-meridian                 # preview; exit 0 or 6; no workflow/vault sinks written (observability sinks per §2.8 allowed)
 set +e
 OUT=$(ATLAS_LIVE_GEMINI=1 node apps/cli/dist/index.js --vault "$V" enrich project-meridian --apply --json)
 RC=$?
@@ -1459,7 +1521,10 @@ bootstrap migration; agent-branch-only operation verified; eval + scale gates me
      **signed persisted scan-state gate binding repo identity, HEAD, index + working-tree digests,
      history boundary, submodule/LFS state, scanner version, ruleset hash, and config hash** —
      recomputed and compared immediately before every downstream graduation command, failing closed on
-     any difference so a post-scan change cannot ride a stale gate — fixes unbound scan gate).
+     any difference so a post-scan change cannot ride a stale gate; **each committed migration checkpoint
+     (Task 5.3) produces an authenticated successor gate binding the prior gate + approved migration plan
+     + completed-checkpoint set + new digests, so an interrupted-then-resumed migration is recognized
+     rather than failing closed** — fixes unbound scan gate + gate-blocks-resume).
 
 2. **Task 5.2 — `graduation audit` (read-only bootstrap audit)**
    - What: inventory legacy notes missing `id`/`type`/`schema_version`, ambiguous aliases,
@@ -1480,7 +1545,10 @@ bootstrap migration; agent-branch-only operation verified; eval + scale gates me
      artifacts, rollback via per-note checkpoints (`graduation migrate --rollback`);
      `quarantine inspect|resolve` operator commands;
      graduation criteria enforcement (zero unresolved quarantines; projections rebuild clean).
-     Runs under `vault-maintenance` lock, Tier-3 review-gated (broker-authorized apply).
+     Consumes a persisted **graduation-copy initialization gate** — after the clean scan the copy is
+     broker-enrolled, `db migrate`'d, initial `db rebuild`'t, and backup-health established (fixes
+     uninitialized graduation copy) — in addition to the 5.1 scan gate. Runs under `vault-maintenance`
+     lock, Tier-3 review-gated (broker-authorized apply).
    - Files: `apps/cli/src/commands/{graduation-migrate,quarantine}.ts`,
      `apps/cli/src/graduation/{migrate,quarantine}.ts`, `apps/cli/test/e2e/bootstrap-migration.e2e.test.ts`.
    - Interfaces — **Consumes:** 5.0 contract, 5.2, 4.5 (review gate), 1.6. **Produces:**
@@ -1518,6 +1586,7 @@ bootstrap migration; agent-branch-only operation verified; eval + scale gates me
 pnpm -r build && pnpm -r test
 MAIN_VAULT="$HOME/Code/Vaults/main-vault"; LIVE_HEAD=$(git -C "$MAIN_VAULT" rev-parse HEAD)
 node apps/cli/dist/index.js graduation scan --source "$MAIN_VAULT" --copy .scratch/atlas-graduation-copy   # exit 0 (or 3 with findings)
+scripts/verify-bootstrap.sh .scratch/atlas-graduation-copy   # init gate: broker enroll + db migrate + db rebuild + backup-health on the copy
 node apps/cli/dist/index.js --vault .scratch/atlas-graduation-copy graduation audit --json | jq -e '.unresolved == 0 or .categories'
 node apps/cli/dist/index.js --vault .scratch/atlas-graduation-copy graduation migrate            # preview
 node apps/cli/dist/index.js --vault .scratch/atlas-graduation-copy graduation migrate --apply --export-challenge > /tmp/ch.json
@@ -1611,6 +1680,8 @@ test "$(git -C "$MAIN_VAULT" rev-parse HEAD)" = "$LIVE_HEAD"                    
   suites; offline suite on every change; live-Gemini opt-in + nightly (`ATLAS_LIVE_GEMINI=1`);
   flaky tests quarantined (vitest retry-tagged, tracked, never silently retried in the safety gate). Destructive provisioning setup/teardown **validation runs in a dedicated serial CI job / disposable VM**; the main matrix provisions once before all dependent suites, forbids test-owned teardown, and tears down only after the whole job completes (fixes teardown-race).
 
+**Verification bootstrap (used by every phase + rollback block; fixes missing bootstrap / launcher bypass / unavailable test signer).** A single idempotent `scripts/verify-bootstrap.sh <vault>` provisions the **isolated disposable test-broker + ephemeral `atlas-test-approver` trust store** (never installed by dev/prod provisioning), starts + awaits **only the daemons built by that phase** (`atlas-broker` from Phase 1; `atlas-egress` added Phase 2), runs `brain broker enroll` for the vault, and runs every subsequent command **through the mandatory `brain` launcher** so isolation markers + network denial hold (direct `node apps/cli` is a tested-negative path); a CI post-step/trap guarantees teardown. For the Phase-5 real-vault copy, privileged applies use the **real external/hardware-backed signer procedure**, not the test signer.
+
 Aggregate offline gate (CI, every change — working directory **repo root**; fixes R5-F2):
 ```bash
 pnpm -r build && pnpm -r test
@@ -1657,7 +1728,7 @@ revert). Shared rules:
 | `source trust show` | 2.9 | `quarantine inspect\|resolve` | 5.3 |
 | `source trust promote\|revoke` | 4.8 | `note show\|related\|history` | 2.9 |
 
-**Normative capabilities → owner task:** provisioning/separation 1.0 · contracts seam 1.1/2.0 ·
+**Normative capabilities → owner task:** provisioning/separation + `broker enroll` command 1.0 · contracts seam 1.1/2.0 ·
 config 1.2 · identity namespace 1.3 (validation 4.4) · migrations + rebuild 1.4 (§2.7) · git
 plumbing 1.5 · broker auth core + anchor 1.6 · ledger DR + fail-closed watermark + §2.8 1.7 ·
 renderer/a11y/`--plain` + JSON envelope + locks + diagnostics 1.8 · Tier-0/projection audit 1.9 ·
