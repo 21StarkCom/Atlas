@@ -10,10 +10,14 @@ import { describe, expect, it } from "vitest";
 import {
   checkFixtureConsistency,
   checkImplementedSchemas,
+  checkStateTableCompleteness,
   findRepoRoot,
   loadFixtureNames,
   loadRegistry,
+  loadStateTable,
+  normativeStateSet,
   parseFixture,
+  parseStateTable,
   renderOverview,
   validateRegistry,
   type Registry,
@@ -22,6 +26,7 @@ import {
 const root = findRepoRoot();
 const registry = loadRegistry(root);
 const fixtureNames = loadFixtureNames(root);
+const stateTable = loadStateTable(root);
 
 describe("registry integrity", () => {
   it("has rows and a version", () => {
@@ -94,6 +99,101 @@ describe("fixture parser", () => {
       "`baz`",
     ].join("\n");
     expect(parseFixture(text)).toEqual(["foo bar", "baz"]);
+  });
+});
+
+describe("recovery-state-machine stateTable", () => {
+  it("the fenced `json stateTable` block parses to an object with states", () => {
+    expect(stateTable.version).toBeGreaterThanOrEqual(1);
+    expect(Array.isArray(stateTable.states)).toBe(true);
+    expect(stateTable.states.length).toBeGreaterThan(0);
+  });
+
+  it("covers every state in the §2.5 normative set, and no state lacks a recovery action", () => {
+    expect(checkStateTableCompleteness(stateTable)).toEqual([]);
+  });
+
+  it("every normative §2.5 state is present as a stateTable row", () => {
+    const present = new Set(stateTable.states.map((s) => s.state));
+    for (const state of normativeStateSet()) {
+      expect(present.has(state), `missing state "${state}"`).toBe(true);
+    }
+  });
+
+  it("covers both failed@ and cancelled@ checkpoint-suffixed terminals", () => {
+    const present = new Set(stateTable.states.map((s) => s.state));
+    for (const cp of ["planned", "patched", "worktree-applied", "agent-committed", "review-pending"]) {
+      expect(present.has(`failed@${cp}`), `missing failed@${cp}`).toBe(true);
+      expect(present.has(`cancelled@${cp}`), `missing cancelled@${cp}`).toBe(true);
+    }
+  });
+});
+
+describe("stateTable completeness gate (the load-bearing guarantee)", () => {
+  it("dropping a §2.5 state from the table fails the completeness check", () => {
+    const dropped = normativeStateSet()[0]!;
+    const mutated = { ...stateTable, states: stateTable.states.filter((s) => s.state !== dropped) };
+    const errors = checkStateTableCompleteness(mutated);
+    expect(errors.some((e) => e.includes(dropped) && e.includes("missing"))).toBe(true);
+  });
+
+  it("a state with an empty recoveryAction fails the completeness check", () => {
+    const mutated = {
+      ...stateTable,
+      states: stateTable.states.map((s, i) => (i === 0 ? { ...s, recoveryAction: "" } : s)),
+    };
+    const errors = checkStateTableCompleteness(mutated);
+    expect(errors.some((e) => e.includes("lacks a recoveryAction"))).toBe(true);
+  });
+
+  it("a malformed / absent stateTable block throws on parse", () => {
+    expect(() => parseStateTable("# no fenced block here")).toThrow(/stateTable/);
+    expect(() => parseStateTable("```json stateTable\n{ not json }\n```")).toThrow();
+  });
+
+  it("an unknown/typo'd state (outside the §2.5 set) fails the completeness check", () => {
+    const mutated = {
+      ...stateTable,
+      states: [
+        ...stateTable.states,
+        { state: "integratedd", kind: "checkpoint" as const, recoveryAction: "x" },
+      ],
+    };
+    const errors = checkStateTableCompleteness(mutated);
+    expect(errors.some((e) => e.includes("integratedd") && e.includes("§2.5 persisted-state set"))).toBe(true);
+  });
+
+  it("a row missing its kind fails the completeness check", () => {
+    const mutated = {
+      ...stateTable,
+      states: stateTable.states.map((s, i) => {
+        if (i !== 0) return s;
+        const { kind: _drop, ...rest } = s;
+        return rest as typeof s;
+      }),
+    };
+    const errors = checkStateTableCompleteness(mutated);
+    expect(errors.some((e) => e.includes("invalid kind"))).toBe(true);
+  });
+
+  it("a checkpoint misclassified as terminal (or vice versa) fails the completeness check", () => {
+    const idx = stateTable.states.findIndex((s) => s.kind === "checkpoint");
+    const mutated = {
+      ...stateTable,
+      states: stateTable.states.map((s, i) => (i === idx ? { ...s, kind: "terminal" as const } : s)),
+    };
+    const errors = checkStateTableCompleteness(mutated);
+    expect(errors.some((e) => e.includes("must be") && e.includes("checkpoint"))).toBe(true);
+  });
+
+  it("a failed@ terminal misclassified as checkpoint fails the completeness check", () => {
+    const idx = stateTable.states.findIndex((s) => s.state === "failed@planned");
+    const mutated = {
+      ...stateTable,
+      states: stateTable.states.map((s, i) => (i === idx ? { ...s, kind: "checkpoint" as const } : s)),
+    };
+    const errors = checkStateTableCompleteness(mutated);
+    expect(errors.some((e) => e.includes("failed@planned") && e.includes('must be "terminal"'))).toBe(true);
   });
 });
 

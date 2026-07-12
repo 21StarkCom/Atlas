@@ -37,11 +37,103 @@ export interface Registry {
   commands: CommandRow[];
 }
 
+/**
+ * The normative workflow state set, verbatim from the plan's §2.5 Global
+ * Constraints. This is the single source of truth the recovery-state-machine
+ * contract's `stateTable` is checked for completeness against — it must not be
+ * silently widened (that would mask a missing state in the contract).
+ *
+ *   planned → patched → worktree-applied → agent-committed → [review-pending] →
+ *   integrated → reindexed → finalized;
+ *   terminals rejected, rolled-back, failed, cancelled
+ *   (recorded failed@<checkpoint> / cancelled@<checkpoint>).
+ */
+export const RECOVERY_CHECKPOINTS = [
+  "planned",
+  "patched",
+  "worktree-applied",
+  "agent-committed",
+  "review-pending",
+  "integrated",
+  "reindexed",
+] as const;
+export type RecoveryCheckpoint = (typeof RECOVERY_CHECKPOINTS)[number];
+
+/** Terminal state classes (§2.5). `failed`/`cancelled` are also recorded suffixed. */
+export const RECOVERY_TERMINALS = ["finalized", "rejected", "rolled-back", "failed", "cancelled"] as const;
+export type RecoveryTerminal = (typeof RECOVERY_TERMINALS)[number];
+
+/**
+ * The checkpoints from which a run can terminate as failed/cancelled. Per the
+ * contract, once `integrated` the mutation is durable and recovery is
+ * forward-only (or an explicit `rolled-back`) — so no `failed@`/`cancelled@`
+ * forms exist for `integrated`/`reindexed`.
+ */
+export const FAILABLE_CHECKPOINTS = [
+  "planned",
+  "patched",
+  "worktree-applied",
+  "agent-committed",
+  "review-pending",
+] as const;
+export type FailableCheckpoint = (typeof FAILABLE_CHECKPOINTS)[number];
+
+/**
+ * The full §2.5 state set the `stateTable` must cover: every progression
+ * checkpoint, every terminal class, and every `failed@`/`cancelled@` suffixed
+ * terminal for the failable checkpoints.
+ */
+export function normativeStateSet(): string[] {
+  const states = new Set<string>([...RECOVERY_CHECKPOINTS, ...RECOVERY_TERMINALS]);
+  for (const cp of FAILABLE_CHECKPOINTS) {
+    states.add(`failed@${cp}`);
+    states.add(`cancelled@${cp}`);
+  }
+  return [...states].sort();
+}
+
+/** The two legal `kind` classifications for a `stateTable` row. */
+export const STATE_KINDS = ["checkpoint", "terminal"] as const;
+export type StateKind = (typeof STATE_KINDS)[number];
+
+/**
+ * The `kind` a §2.5 state MUST carry in the `stateTable`. Only the progression
+ * checkpoints (`RECOVERY_CHECKPOINTS`) are `checkpoint`s; every terminal class,
+ * every `failed@`/`cancelled@` suffixed terminal, and `finalized` are
+ * `terminal`s. Because Task 4.11 generates a failpoint per row, a row whose
+ * `kind` is missing or misclassified would emit an invalid failpoint — so the
+ * lint pins the classification, it is not free-form.
+ */
+export function expectedStateKind(state: string): StateKind | undefined {
+  if ((RECOVERY_CHECKPOINTS as readonly string[]).includes(state)) return "checkpoint";
+  if ((RECOVERY_TERMINALS as readonly string[]).includes(state)) return "terminal";
+  if (/^(failed|cancelled)@/.test(state)) {
+    const cp = state.slice(state.indexOf("@") + 1);
+    return (FAILABLE_CHECKPOINTS as readonly string[]).includes(cp) ? "terminal" : undefined;
+  }
+  return undefined;
+}
+
+/** One row of the recovery `stateTable`; only the fields the lint enforces are typed. */
+export interface StateTableEntry {
+  state: string;
+  kind: "checkpoint" | "terminal";
+  recoveryAction: string;
+  [key: string]: unknown;
+}
+
+export interface StateTable {
+  version: number;
+  states: StateTableEntry[];
+  [key: string]: unknown;
+}
+
 /** Relative (repo-root-anchored) paths for the contract files. */
 export const REGISTRY_PATH = "docs/specs/cli-contract/commands.json";
 export const FIXTURE_PATH = "docs/specs/cli-contract/cli-surface.fixture.txt";
 export const OVERVIEW_PATH = "docs/specs/cli-contract/commands-overview.md";
 export const CLI_CONTRACT_DIR = "docs/specs/cli-contract";
+export const RECOVERY_STATE_MACHINE_PATH = "docs/specs/recovery-state-machine.md";
 
 /** Walk up from a starting directory until the repo root (pnpm-workspace.yaml) is found. */
 export function findRepoRoot(startDir?: string): string {
@@ -182,6 +274,90 @@ export function lintAll(root: string, reg: Registry, fixtureNames: string[]): st
     ...checkFixtureConsistency(reg, fixtureNames),
     ...checkImplementedSchemas(root, reg),
   ];
+}
+
+/**
+ * Extract the single fenced `stateTable` JSON block from the
+ * recovery-state-machine contract. The block's opening fence info string is
+ * exactly ```` ```json stateTable ```` — the same marker the Task 4.11
+ * failpoint generator scans for. Throws if the block is absent, duplicated, or
+ * malformed JSON.
+ */
+export function extractStateTableJson(markdown: string): string {
+  const fence = /```json\s+stateTable\s*\n([\s\S]*?)\n```/g;
+  const matches: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = fence.exec(markdown)) !== null) matches.push(m[1]!);
+  if (matches.length === 0) {
+    throw new Error(`no fenced \`\`\`json stateTable block found in ${RECOVERY_STATE_MACHINE_PATH}`);
+  }
+  if (matches.length > 1) {
+    throw new Error(`expected exactly one \`\`\`json stateTable block, found ${matches.length}`);
+  }
+  return matches[0]!;
+}
+
+/** Parse the `stateTable` block into its typed shape. Throws on malformed JSON or shape. */
+export function parseStateTable(markdown: string): StateTable {
+  const parsed = JSON.parse(extractStateTableJson(markdown)) as StateTable;
+  if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.states)) {
+    throw new Error(`${RECOVERY_STATE_MACHINE_PATH}: stateTable must be an object with a "states" array`);
+  }
+  return parsed;
+}
+
+/** Load + parse the recovery `stateTable` from disk. */
+export function loadStateTable(root: string): StateTable {
+  return parseStateTable(readFileSync(join(root, RECOVERY_STATE_MACHINE_PATH), "utf8"));
+}
+
+/**
+ * Assert the recovery `stateTable` covers every state in the normative §2.5 set
+ * and that no state lacks a recovery action. Returns human-readable errors
+ * (empty = complete).
+ */
+export function checkStateTableCompleteness(table: StateTable): string[] {
+  const errors: string[] = [];
+  const present = new Set<string>();
+
+  const expectedKind = new Map(normativeStateSet().map((s) => [s, expectedStateKind(s)!] as const));
+
+  for (const [i, row] of table.states.entries()) {
+    const where = `states[${i}] (${row?.state ?? "?"})`;
+    if (!row || typeof row.state !== "string" || row.state.trim() === "") {
+      errors.push(`${where}: missing/empty "state"`);
+      continue;
+    }
+    if (present.has(row.state)) errors.push(`${where}: duplicate state "${row.state}"`);
+    present.add(row.state);
+
+    // Reject any row outside the §2.5 persisted-state set. Task 4.11 generates a
+    // failpoint per row, so a typo'd or unsupported state would silently produce
+    // an invalid failpoint — it must fail the lint, not pass through.
+    const wantKind = expectedKind.get(row.state);
+    if (wantKind === undefined) {
+      errors.push(`${where}: state "${row.state}" is not in the §2.5 persisted-state set`);
+    }
+
+    // Validate the checkpoint/terminal classification. `kind` must be present,
+    // one of STATE_KINDS, and match the state's normative classification.
+    if (!(STATE_KINDS as readonly string[]).includes(row.kind)) {
+      errors.push(`${where}: invalid kind ${JSON.stringify(row.kind)} (expected "checkpoint" or "terminal")`);
+    } else if (wantKind !== undefined && row.kind !== wantKind) {
+      errors.push(`${where}: state "${row.state}" is classified "${row.kind}" but must be "${wantKind}"`);
+    }
+
+    if (typeof row.recoveryAction !== "string" || row.recoveryAction.trim() === "") {
+      errors.push(`state "${row.state}" lacks a recoveryAction`);
+    }
+  }
+
+  for (const state of normativeStateSet()) {
+    if (!present.has(state)) {
+      errors.push(`§2.5 state "${state}" is missing from the stateTable`);
+    }
+  }
+  return errors;
 }
 
 /** Deterministically render the derived Markdown overview from the registry. */
