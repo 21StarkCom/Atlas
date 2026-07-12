@@ -135,6 +135,11 @@ export const OVERVIEW_PATH = "docs/specs/cli-contract/commands-overview.md";
 export const CLI_CONTRACT_DIR = "docs/specs/cli-contract";
 export const RECOVERY_STATE_MACHINE_PATH = "docs/specs/recovery-state-machine.md";
 export const DATA_DICTIONARY_PATH = "docs/specs/sqlite-data-dictionary.md";
+export const SECURITY_BROKER_CONTRACT_PATH = "docs/specs/security-broker-contract.md";
+
+/** The plan §2.5 exit-code set. Every drift-rejection error code maps to one of these. */
+export const EXIT_CODES = [0, 1, 2, 3, 4, 5, 6] as const;
+export type ExitCode = (typeof EXIT_CODES)[number];
 
 /**
  * Migration ownership — transcribed verbatim from the plan's §2.7 (the single
@@ -383,6 +388,7 @@ export function lintAll(root: string, reg: Registry, fixtureNames: string[]): st
     ...checkFixtureConsistency(reg, fixtureNames),
     ...checkImplementedSchemas(root, reg),
     ...checkTableInventory(loadDataDictionaryTables(root)),
+    ...checkAuthzContractCompleteness(loadAuthzContract(root), reg),
   ];
 }
 
@@ -468,6 +474,178 @@ export function checkStateTableCompleteness(table: StateTable): string[] {
     }
   }
   return errors;
+}
+
+/**
+ * The set of commands the registry classifies `privileged` — the SSOT the
+ * security/broker contract's `authzContract` block is checked for coverage
+ * against. Returned sorted so callers can compare set membership deterministically.
+ */
+export function privilegedCommandSet(reg: Registry): string[] {
+  return reg.commands.filter((c) => c.privilege === "privileged").map((c) => c.name).sort();
+}
+
+/** One stable drift-rejection error code + its plan §2.5 exit code. */
+export interface AuthzErrorCode {
+  code: string;
+  exitCode: number;
+  [key: string]: unknown;
+}
+
+/** One privileged-op authorization mapping (challenge fields → verification → drift codes). */
+export interface AuthzOp {
+  op: string;
+  /** The `commands.json` command name this op authorizes. */
+  command: string;
+  /** A privileged *variant* of a (possibly shared) command, e.g. `db backup --force-unblock`. */
+  variant?: boolean;
+  mechanism: string;
+  challengeFields: string[];
+  verificationSteps: string[];
+  driftCodes: string[];
+  [key: string]: unknown;
+}
+
+export interface AuthzContract {
+  version: number;
+  errorCatalog: AuthzErrorCode[];
+  privilegedOps: AuthzOp[];
+  [key: string]: unknown;
+}
+
+/**
+ * Extract the single fenced `authzContract` JSON block from the security/broker
+ * contract. The opening fence info string is exactly ```` ```json authzContract ````.
+ * Throws if the block is absent, duplicated, or malformed JSON.
+ */
+export function extractAuthzContractJson(markdown: string): string {
+  const fence = /```json\s+authzContract\s*\n([\s\S]*?)\n```/g;
+  const matches: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = fence.exec(markdown)) !== null) matches.push(m[1]!);
+  if (matches.length === 0) {
+    throw new Error(`no fenced \`\`\`json authzContract block found in ${SECURITY_BROKER_CONTRACT_PATH}`);
+  }
+  if (matches.length > 1) {
+    throw new Error(`expected exactly one \`\`\`json authzContract block, found ${matches.length}`);
+  }
+  return matches[0]!;
+}
+
+/** Parse the `authzContract` block into its typed shape. Throws on malformed JSON or shape. */
+export function parseAuthzContract(markdown: string): AuthzContract {
+  const parsed = JSON.parse(extractAuthzContractJson(markdown)) as AuthzContract;
+  if (
+    !parsed ||
+    typeof parsed !== "object" ||
+    !Array.isArray(parsed.errorCatalog) ||
+    !Array.isArray(parsed.privilegedOps)
+  ) {
+    throw new Error(
+      `${SECURITY_BROKER_CONTRACT_PATH}: authzContract must be an object with "errorCatalog" and "privilegedOps" arrays`,
+    );
+  }
+  return parsed;
+}
+
+/** Load + parse the `authzContract` block from disk. */
+export function loadAuthzContract(root: string): AuthzContract {
+  return parseAuthzContract(readFileSync(join(root, SECURITY_BROKER_CONTRACT_PATH), "utf8"));
+}
+
+/**
+ * Assert the security/broker contract authorizes **exactly** the registry's
+ * privileged command set (bijection over non-variant ops), that every op names
+ * challenge fields + verification steps + drift codes, and that every drift code
+ * is a member of the declared error catalog. This is the load-bearing gate for
+ * acceptance criterion 1 ("every privileged op maps to challenge fields +
+ * verification steps + stable error codes"), mirroring the registry↔fixture,
+ * stateTable, and table-inventory gates. Returns human-readable errors (empty = OK).
+ */
+export function checkAuthzContractCompleteness(contract: AuthzContract, reg: Registry): string[] {
+  const errors: string[] = [];
+
+  // 1. Error catalog: unique codes, each mapped to a valid §2.5 exit code.
+  const codes = new Set<string>();
+  for (const [i, e] of contract.errorCatalog.entries()) {
+    const where = `errorCatalog[${i}] (${e?.code ?? "?"})`;
+    if (!e || typeof e.code !== "string" || e.code.trim() === "") {
+      errors.push(`${where}: missing/empty "code"`);
+      continue;
+    }
+    if (codes.has(e.code)) errors.push(`${where}: duplicate code "${e.code}"`);
+    codes.add(e.code);
+    if (typeof e.exitCode !== "number" || !(EXIT_CODES as readonly number[]).includes(e.exitCode)) {
+      errors.push(`${where}: exitCode ${JSON.stringify(e.exitCode)} not in the §2.5 set 0..6`);
+    }
+  }
+
+  // 2. Privileged-op coverage: bijection with the registry's privileged set for
+  //    non-variant ops; variants must reference a real (any-privilege) command.
+  const privileged = new Set(privilegedCommandSet(reg));
+  const allCommands = new Set(reg.commands.map((c) => c.name));
+  const coveredPrivileged = new Set<string>();
+
+  for (const [i, op] of contract.privilegedOps.entries()) {
+    const where = `privilegedOps[${i}] (${op?.op ?? "?"})`;
+    if (!op || typeof op.op !== "string" || op.op.trim() === "") {
+      errors.push(`${where}: missing/empty "op"`);
+      continue;
+    }
+    if (typeof op.command !== "string" || op.command.trim() === "") {
+      errors.push(`${where}: missing/empty "command"`);
+    } else if (!allCommands.has(op.command)) {
+      errors.push(`${where}: command "${op.command}" is not a command in ${REGISTRY_PATH}`);
+    } else if (op.variant === true) {
+      // A privileged variant of a (possibly shared) command — allowed, not part
+      // of the registry-privileged bijection, but must reference a real command.
+    } else if (!privileged.has(op.command)) {
+      errors.push(
+        `${where}: command "${op.command}" is not classified privileged in ${REGISTRY_PATH} ` +
+          `(set "variant": true if it is a privileged variant of a shared command)`,
+      );
+    } else {
+      if (coveredPrivileged.has(op.command)) errors.push(`${where}: duplicate op for command "${op.command}"`);
+      coveredPrivileged.add(op.command);
+    }
+
+    for (const field of ["challengeFields", "verificationSteps", "driftCodes"] as const) {
+      const v = op[field];
+      if (!Array.isArray(v) || v.length === 0) {
+        errors.push(`${where}: "${field}" must be a non-empty array`);
+      }
+    }
+    if (typeof op.mechanism !== "string" || op.mechanism.trim() === "") {
+      errors.push(`${where}: missing/empty "mechanism"`);
+    }
+    if (Array.isArray(op.driftCodes)) {
+      for (const c of op.driftCodes) {
+        if (!codes.has(c)) errors.push(`${where}: driftCode "${c}" is not in the errorCatalog`);
+      }
+    }
+  }
+
+  for (const cmd of privileged) {
+    if (!coveredPrivileged.has(cmd)) {
+      errors.push(
+        `privileged command "${cmd}" (${REGISTRY_PATH}) has no authz mapping in ${SECURITY_BROKER_CONTRACT_PATH}`,
+      );
+    }
+  }
+  return errors;
+}
+
+/**
+ * Extract every fenced ```` ```json ```` block from a Markdown document (any info
+ * string beginning `json`). Used to assert the contract's JSON examples are all
+ * well-formed — a structural precondition for the Task 1.1 Zod-mirror validation.
+ */
+export function extractJsonBlocks(markdown: string): string[] {
+  const fence = /```json\b[^\n]*\n([\s\S]*?)```/g;
+  const blocks: string[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = fence.exec(markdown)) !== null) blocks.push(m[1]!);
+  return blocks;
 }
 
 /** Deterministically render the derived Markdown overview from the registry. */

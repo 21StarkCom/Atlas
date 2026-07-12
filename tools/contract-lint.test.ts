@@ -9,23 +9,30 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import {
+  checkAuthzContractCompleteness,
   checkFixtureConsistency,
   checkImplementedSchemas,
   checkStateTableCompleteness,
   checkTableInventory,
   DATA_DICTIONARY_PATH,
+  extractJsonBlocks,
   findRepoRoot,
+  loadAuthzContract,
   loadDataDictionaryTables,
   loadFixtureNames,
   loadRegistry,
   loadStateTable,
   normativeStateSet,
+  parseAuthzContract,
   parseDataDictionaryTables,
   parseFixture,
   parseStateTable,
+  privilegedCommandSet,
   renderOverview,
+  SECURITY_BROKER_CONTRACT_PATH,
   sqlite27Tables,
   validateRegistry,
+  type AuthzContract,
   type Registry,
 } from "./cli-contract.ts";
 
@@ -34,6 +41,7 @@ const registry = loadRegistry(root);
 const fixtureNames = loadFixtureNames(root);
 const stateTable = loadStateTable(root);
 const dictionaryTables = loadDataDictionaryTables(root);
+const authzContract = loadAuthzContract(root);
 
 describe("registry integrity", () => {
   it("has rows and a version", () => {
@@ -232,6 +240,129 @@ describe("table-inventory gate (the load-bearing guarantee)", () => {
     const mutated = [...dictionaryTables, dictionaryTables[0]!];
     const errors = checkTableInventory(mutated);
     expect(errors.some((e) => e.includes(dictionaryTables[0]!) && e.includes("more than once"))).toBe(true);
+  });
+});
+
+describe("security/broker contract authzContract", () => {
+  it("the fenced `json authzContract` block parses to an object with ops + catalog", () => {
+    expect(authzContract.version).toBeGreaterThanOrEqual(1);
+    expect(Array.isArray(authzContract.privilegedOps)).toBe(true);
+    expect(authzContract.privilegedOps.length).toBeGreaterThan(0);
+    expect(Array.isArray(authzContract.errorCatalog)).toBe(true);
+    expect(authzContract.errorCatalog.length).toBeGreaterThan(0);
+  });
+
+  it("covers exactly the registry-privileged set, every op fully mapped, every driftCode cataloged", () => {
+    expect(checkAuthzContractCompleteness(authzContract, registry)).toEqual([]);
+  });
+
+  it("every commands.json privileged command has a non-variant authz op", () => {
+    const nonVariant = new Set(
+      authzContract.privilegedOps.filter((o) => o.variant !== true).map((o) => o.command),
+    );
+    for (const cmd of privilegedCommandSet(registry)) {
+      expect(nonVariant.has(cmd), `missing authz mapping for privileged command "${cmd}"`).toBe(true);
+    }
+  });
+
+  it("every op names a mechanism and non-empty challenge/verification/drift arrays", () => {
+    for (const op of authzContract.privilegedOps) {
+      expect(op.mechanism, `op "${op.op}" mechanism`).toBeTruthy();
+      expect(op.challengeFields.length, `op "${op.op}" challengeFields`).toBeGreaterThan(0);
+      expect(op.verificationSteps.length, `op "${op.op}" verificationSteps`).toBeGreaterThan(0);
+      expect(op.driftCodes.length, `op "${op.op}" driftCodes`).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("authzContract completeness gate (the load-bearing guarantee)", () => {
+  it("dropping the authz op for a privileged command fails the completeness check", () => {
+    const dropped = privilegedCommandSet(registry)[0]!;
+    const mutated: AuthzContract = {
+      ...authzContract,
+      privilegedOps: authzContract.privilegedOps.filter((o) => o.command !== dropped),
+    };
+    const errors = checkAuthzContractCompleteness(mutated, registry);
+    expect(errors.some((e) => e.includes(dropped) && e.includes("no authz mapping"))).toBe(true);
+  });
+
+  it("authorizing a non-privileged command (without variant:true) fails the check", () => {
+    const shared = registry.commands.find((c) => c.privilege === "shared")!.name;
+    const mutated: AuthzContract = {
+      ...authzContract,
+      privilegedOps: [
+        ...authzContract.privilegedOps,
+        {
+          op: shared,
+          command: shared,
+          mechanism: "broker-signature",
+          challengeFields: ["op"],
+          verificationSteps: ["x"],
+          driftCodes: ["authz.ok"],
+        },
+      ],
+    };
+    const errors = checkAuthzContractCompleteness(mutated, registry);
+    expect(errors.some((e) => e.includes(shared) && e.includes("not classified privileged"))).toBe(true);
+  });
+
+  it("a driftCode outside the errorCatalog fails the check", () => {
+    const mutated: AuthzContract = {
+      ...authzContract,
+      privilegedOps: authzContract.privilegedOps.map((o, i) =>
+        i === 0 ? { ...o, driftCodes: [...o.driftCodes, "authz.not_a_real_code"] } : o,
+      ),
+    };
+    const errors = checkAuthzContractCompleteness(mutated, registry);
+    expect(errors.some((e) => e.includes("authz.not_a_real_code") && e.includes("not in the errorCatalog"))).toBe(true);
+  });
+
+  it("an op missing its verificationSteps fails the check", () => {
+    const mutated: AuthzContract = {
+      ...authzContract,
+      privilegedOps: authzContract.privilegedOps.map((o, i) =>
+        i === 0 ? { ...o, verificationSteps: [] } : o,
+      ),
+    };
+    const errors = checkAuthzContractCompleteness(mutated, registry);
+    expect(errors.some((e) => e.includes("verificationSteps") && e.includes("non-empty array"))).toBe(true);
+  });
+
+  it("an errorCatalog exitCode outside the §2.5 set fails the check", () => {
+    const mutated: AuthzContract = {
+      ...authzContract,
+      errorCatalog: authzContract.errorCatalog.map((e, i) => (i === 0 ? { ...e, exitCode: 7 } : e)),
+    };
+    const errors = checkAuthzContractCompleteness(mutated, registry);
+    expect(errors.some((e) => e.includes("exitCode") && e.includes("0..6"))).toBe(true);
+  });
+
+  it("a malformed / absent authzContract block throws on parse", () => {
+    expect(() => parseAuthzContract("# no fenced block here")).toThrow(/authzContract/);
+    expect(() => parseAuthzContract("```json authzContract\n{ not json }\n```")).toThrow();
+  });
+});
+
+describe("security/broker contract JSON examples are well-formed", () => {
+  const raw = readFileSync(join(root, SECURITY_BROKER_CONTRACT_PATH), "utf8");
+
+  it("every fenced ```json block parses (structural precondition for the Task 1.1 Zod mirrors)", () => {
+    const blocks = extractJsonBlocks(raw);
+    expect(blocks.length).toBeGreaterThan(0);
+    for (const block of blocks) {
+      expect(() => JSON.parse(block), block.slice(0, 60)).not.toThrow();
+    }
+  });
+
+  it("contains no NUL (or other C0 control) bytes — stays a text file, byte-stable to sign over", () => {
+    expect(raw.includes("\x00")).toBe(false);
+    // Only tab / newline are permitted C0 controls in the Markdown source; a raw
+    // separator byte embedded in the opaque-ID formula would break text-safety
+    // and canonicalization (it must be written as an explicit \x00 escape).
+    // eslint-disable-next-line no-control-regex
+    const badControl = /[\x01-\x08\x0B\x0C\x0E-\x1F]/.exec(raw);
+    expect(badControl, badControl ? `control char U+${badControl[0].codePointAt(0)!.toString(16)}` : "")
+      .toBeNull();
   });
 });
 
