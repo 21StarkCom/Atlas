@@ -184,7 +184,7 @@ local file ─▶ Capture + Normalize ─▶ Immutable source note (sources/)
    The full per-state transition table (required artifacts, atomic write, legal next states
    including `failed`/`cancelled` entry conditions, idempotency check, retained artifacts,
    worktree cleanup, audit emission, and recovery action for **every** checkpoint) is a
-   normative contract (`docs/specs/recovery-state-machine.md`) landing before Phase 2.
+   normative contract (`docs/specs/recovery-state-machine.md`) landing before Phase 1.
    Ambiguous states fail fast, surface in `brain doctor`, and have a documented operator
    repair flow rather than an automatic guess.
 
@@ -1696,8 +1696,7 @@ at Phase 5.
 0. **Normative contracts — phase-gated, not one big-bang gate.** To honor "phased milestones, not big-bang," contracts are
    approved **per phase**, not all before any code:
    - **Before Phase 1 (up-front gate):** the **cross-cutting safety invariants** and Phase-1
-     contracts only — `recovery-state-machine.md` (the Phase-1-required scope; this supersedes the
-     earlier "before Phase 2" mention, reconciled here to Phase 1), `sqlite-data-dictionary.md`,
+     contracts only — `recovery-state-machine.md`, `sqlite-data-dictionary.md`,
      **`config-schema.md`**, **`vault-format.md`** (required by the first Phase-1 `db rebuild`),
      **`state-inventory.md`** (required by Phase-1 backup/restore), the `sqlite.ledger_backup`
      subsystem contract, the security/authorization+broker contract, `retention-matrix.md`, and
