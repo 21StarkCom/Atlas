@@ -66,13 +66,13 @@ Key architectural decisions (wing-vetted in rounds 2–5, restated here as bindi
 
 ## 2. Prerequisites
 
-- **Hosts:** macOS (Apple-silicon, pinned supported majors — 15 and 26) and Linux — the two supported V1 targets. Local dev
+- **Hosts:** macOS (Apple-silicon, current major) and Linux — the two supported V1 targets. Local dev
   needs `sudo` once for provisioning (Task 1.0). Node ≥ 24 (built-in `--experimental-strip-types` not
   used — we compile with `tsc`), pnpm ≥ 10, git ≥ 2.44, SQLite ≥ 3.45 (bundled via `better-sqlite3`).
 - **Test runner:** vitest (workspace mode). Live-Gemini tests opt-in via `ATLAS_LIVE_GEMINI=1`;
   provisioning-dependent suites gate on `ATLAS_PROVISIONED=1` and **skip with an explicit reason**
   otherwise (CI always provisions, so CI never skips them — a skip on CI fails the job).
-- **CI:** GitHub Actions, matrix `ubuntu-latest` + `macos-15` **+ `macos-26` (arm64)** — each supported macOS major is an explicit compatibility lane with its own pinned Seatbelt/provisioning profile (no moving "current major"). Both runners have passwordless sudo;
+- **CI:** GitHub Actions, matrix `ubuntu-latest` + `macos-15`. Both runners have passwordless sudo;
   the workflow runs `sudo provisioning/ci/setup.sh` before the test step (see Task 1.0 for the
   two-UID mechanism). No cloud resources; the only secret is `ATLAS_GEMINI_KEY` for the opt-in
   nightly live suite (repo Actions secret, injected only into the egress-broker test fixture).
@@ -80,11 +80,6 @@ Key architectural decisions (wing-vetted in rounds 2–5, restated here as bindi
   egress-broker key ACL (Task 1.0) — never in agent/parser env.
 - **Parallel with Phase 1:** Phase-2 contract authoring (Task 2.0) and fixture-vault authoring
   (Task 0.6) have no code dependency on Phase 1 and may proceed concurrently once Phase 0 merges.
-- **Verification hygiene (all phases):** every fixture-vault Verification block copies the fixture
-  into a fresh temp dir, `git init`s it with **repo-local** identity `Aryeh Stark
-  <aryeh@21stark.com>` (never relying on global git config), and passes a temp `--config` with all
-  derived paths under that temp dir; the committed `fixtures/` tree and this implementation repo stay
-  byte-unchanged (a git ceiling / vault-root assertion prevents discovery of the enclosing repo). **All Verification blocks run through the checked-in helper `tools/verify-env.sh`, which materializes the temp `--config` (all derived paths under the temp dir) and exports `$CFG`, sets the repo-local git identity `Aryeh Stark <aryeh@21stark.com>` (`git -c user.name=… -c user.email=…`, never global config), and defines a `brain()` wrapper that invokes the installed CLI through `provisioning/bin/agent-launcher.sh --config "$CFG"` — so every command below runs with config + repo-local git identity + agent isolation and never bypasses them (read each `node apps/cli/dist/index.js …` as `brain …`).**
 
 ---
 
@@ -113,15 +108,14 @@ Key architectural decisions (wing-vetted in rounds 2–5, restated here as bindi
   default; `--apply` mutates; `--dry-run`+`--apply` together ⇒ exit `5`. Previews emit **no**
   audit-ref event. **`--yes` never authorizes** a privileged op.
 - Privileged ops (`approve`, `refresh`-integration, `rollback`, `purge`, `db restore`, trust
-  `promote`/`revoke`): authorized **only** by an OS-mediated presence assertion bound to the broker
-  challenge **or** the non-interactive `--export-challenge` → sign → `--authorization` flow.
+  `promote`/`revoke`, **`quarantine inspect`/`quarantine resolve`**, **`graduation migrate --apply`**):
+  authorized **only** by an OS-mediated presence assertion bound to the broker challenge **or** the
+  non-interactive `--export-challenge` → sign → `--authorization` flow. **Privilege class has one
+  owner** — the `commands.json` `privilege` field (D-registry); `policies`/broker read it, never
+  re-classify.
 - Audit/ledger rows and audit-ref events carry **allowlisted metadata only** (identifiers, hashes,
   classifications, destinations, metrics) — raw payloads only in the opt-in AEAD store
-  (`sqlite.raw_payload_store`, default **off**) — its ciphertext envelope uses a **dedicated
-  raw-payload AEAD key** (listed in the canonical ACL, trusted-CLI-only) with encrypt/decrypt exposed
-  only as `atlas-trusted-cli` RPCs (`sealRawPayload`/`openRawPayload`), a defined rotation/re-key
-  procedure, and backup/restore/purge/unauthorized-read tests gating the option before it may be
-  enabled.
+  (`sqlite.raw_payload_store`, default **off**).
 - Module discipline: `contracts` is a **zero-dependency leaf** consumed by CLI (`domain` re-export),
   `sqlite-store`, `git`, and `broker`; the broker **never imports `apps/cli`**; **`jobs` is the sole
   owner** of `jobs`/`job_attempts` DDL + repository + transactions; `policies`, `validation`,
@@ -143,30 +137,49 @@ Key architectural decisions (wing-vetted in rounds 2–5, restated here as bindi
 | D5 | Jobs single-runner lock | New named scope **`jobs-runner`** (exclusive), defined in `jobs-contract.md`, registered in the lock manager, error `locked:jobs-runner`; ordered between `ledger-maintenance` and `canonical-integration` (a draining job may acquire `canonical-integration` per job). |
 | D6 | Audit mapping for privileged ledger ops | `db backup` / `db restore` / `--force-unblock` write **ledger** audit rows (`audit_events` table, ledger-internal event kinds `db.backup`/`db.restore`/`db.force_unblock`) and **no `run.*` git-ref event of their own** — the git-ref stream covers the run classes of the observability matrix; the post-restore projection rebuild emits its own `run.projection` like any executed projection-only command. Canonized in the security/broker contract (Task 0.3). |
 | D7 | Embedding dimensions | **768** (`indexing.dimensions: 768` in the example config; `gemini-embedding-001` `output_dimensionality=768`). Config-owned; changing it opens a new index generation by construction. |
-| D8 | WORM anchor default path | `git.audit_anchor_path` default **`/var/lib/atlas/audit-anchor`** (Linux) / **`/usr/local/var/atlas/audit-anchor`** (macOS) — broker-owned `0600`, parent `0700`, **outside** the vault and repo — but treated only as a **local
-   cache**: the authoritative monotonic checkpoint lives in storage the broker identity cannot
-   rewrite (an append-only external transparency/monotonic service or separately-administered
-   immutable object store), so a compromised broker rewriting the local file **and** ref is still
-   detected against an **independent external checkpoint**. **V1 pins one concrete backend: an append-only file on an isolated host reached via a destination-pinned, append-only transport owned by a distinct `atlas-anchor-admin` identity (config `git.audit_anchor_external.*`: endpoint, credential path, append/verify protocol). Task 1.0 provisions the sink + credential; Task 1.6 makes every audit append contingent on a durable external append acknowledgment (offline ⇒ fail-closed, append blocked), verifies the local cache against the external checkpoint on startup, and CI uses a fixture sink under `provisioning/ci/anchor-sink/`; the anti-truncation test rewrites both the local file and the ref while the external checkpoint stands** (fixes R3-F3, and the external-backend gap). |
+| D8 | WORM anchor default path | `git.audit_anchor_path` default **`/var/lib/atlas/audit-anchor`** (Linux) / **`/usr/local/var/atlas/audit-anchor`** (macOS) — broker-owned `0600`, parent `0700`, **outside** the vault and repo (fixes R3-F3). |
 | D9 | Key custody mechanism per OS | macOS: Keychain items readable per-identity via separate login keychains for `atlas-broker`/`atlas-egress` (created by provisioning). Linux: root-provisioned files under `/etc/atlas/keys/<identity>/` (dir `0700` owned by that identity). Uniform accessor in each privileged process; the ACL matrix in Task 1.0 is the contract. |
-| D10 | Broker IPC | Unix domain sockets: `broker.socket_path` default `/var/run/atlas/broker.sock`, `egress.socket_path` default `/var/run/atlas/egress.sock` (macOS: `/usr/local/var/run/atlas/*.sock`); socket files use **separate groups** (`atlas-broker-clients` / `atlas-egress-clients`, never the shared `atlas-git`), files `0660`, and every RPC enforces a **peer-credential (`SO_PEERCRED`/`getpeereid`) caller check** against an explicit per-RPC caller matrix, so neither broker can invoke the other's service (tested: each broker is rejected by the other's socket). Framed JSON messages validated by `contracts` schemas on both sides. |
+| D10 | Broker IPC | Unix domain sockets: `broker.socket_path` default `/var/run/atlas/broker.sock`, `egress.socket_path` default `/var/run/atlas/egress.sock` (macOS: `/usr/local/var/run/atlas/*.sock`); socket file `0660` `atlas-broker:atlas-git` / `atlas-egress:atlas-git`. Framed JSON messages validated by `contracts` schemas on both sides. |
 | D11 | `source add` vs `ingest` | `source add <path>` = deterministic Tier-1 capture, applies immediately (key-accepting, no preview mode). `ingest <path>` = capture **preview + extraction/classification preview** by default; `--apply` performs the capture (Phase 2) and, from Phase 4, the synthesis follow-on. Both funnel through the same `captureSource`. |
 | D12 | `brain status` semantics | Read-only summary: open runs (by state), queued/failed jobs, quarantine count, backup watermark health, audit head + anchor check. Tier-0; executed run emits `run.readonly`. |
+
+## 2.6.1 Review-hardening decisions (D13–D20 — resolved from the `stark-review-plan` pass, 2026-07-12)
+
+The plan-review lead/wing loop surfaced ~14 genuine defects (and ~9 phantom findings that its own
+fixer introduced — a "trusted-CLI daemon" / "trusted-ledger capability issuer" / "durable outbox"
+cascade that misread the `trusted-CLI-only` **ACL label** as a service; those are explicitly
+**rejected**, see the review record). The genuine ones are resolved here as binding decisions.
+
+| # | Decision | Value (binding for V1) |
+|---|---|---|
+| D13 | **Privilege boundary scope (the load-bearing clarification).** | The OS privilege boundary protects exactly **(a) the protected git refs** (canonical, `refs/audit/runs`, trust ledger — broker-only writes), **(b) the WORM anchor**, and **(c) the provider credential + outbound network** (egress-only). The **SQLite ledger DB is NOT broker-owned** — the unprivileged CLI opens `better-sqlite3` directly and writes ledger + projection rows in-process. Tamper-evidence for the ledger comes from the **broker-signed `refs/audit/runs` cross-check + external WORM anchor**, not from gating SQLite writes. There is **no store service / trusted-CLI daemon**; `finalizeLedgerWrite` runs its `write` closure in the CLI process and only *calls* `broker.appendAuditEvent` for the git-ref side. |
+| D14 | **Shared DTOs live in `@atlas/contracts`.** | `VaultSnapshot`, `ParsedNote`, `SectionTree`, `WikiLink`, `NormalizedRendition`, and the indexing input DTOs move into `@atlas/contracts` (structural types, zero runtime dep). Workspace packages (`sqlite-store`, `lancedb-index`) consume them from `contracts`, **never from `apps/cli`** — killing the package→app build cycle. `apps/cli` modules adapt their internals into these DTOs. Enforced by `contracts.no-app-import.test` (import-graph assertion). |
+| D15 | **Scan-before-persist is enforced inside the sandbox worker.** | The parser worker runs the secret scanner **inside the sandbox** and emits an **attested clean stream through a pipe / sealed memory-backed fd** — it never writes normalized bytes to a shared `outputDir` before scanning. `runInSandbox` returns a readable stream + attestation, not a directory path. No normalized byte touches any temp/parser sink unscanned. |
+| D16 | **Launcher + service-binary integrity.** | Broker/egress binaries and their launchers are **installed hash-verified into root-owned, non-agent-writable dirs** (`/usr/local/lib/atlas/bin/` on macOS, `/opt/atlas/bin/` on Linux; `0755` root:wheel) by `provisioning/*/setup.sh` from a built+hashed release artifact — **not** run from the agent-writable repo `dist/`. Launchers are root-owned with fixed exec paths + args. A compromised agent cannot swap the privileged binary. `provisioning.integrity.test` asserts the installed hash + non-writability. |
+| D17 | **Agent network denial is enforced at the UID, not the launcher.** | The agent runs as a **dedicated non-login UID** that is **always** inside the network-denied context (Linux: the agent UID's processes are confined to a no-egress netns via a service-managed cgroup/namespace it cannot leave; macOS: a per-UID `pf` anchor denying outbound + the Seatbelt profile). Denial does **not** depend on the agent choosing the launcher — a direct `node`/`curl` from the agent UID still has no route. Only `atlas-egress` has outbound. `egress.bypass.test` runs a direct (non-launcher) outbound attempt from the agent UID and asserts failure. |
+| D18 | **`atlas-egress` has no vault access.** | `atlas-egress` is **removed from `atlas-git`** and from every vault/object-store ACL. It can reach only its own socket, its credential, and the request bytes explicitly handed to it over IPC. The internet-facing identity therefore cannot read vault objects. Broker repo-read uses a separate narrow group (`atlas-broker` only). Covered by `provisioning.separation.test` (egress read of any vault path → EACCES). |
+| D19 | **Egress calls are run-bound + budgeted.** | Every `@atlas/models` IPC request carries a **short-lived capability bound to (runId, approved operation, model, max-bytes, max-tokens, cost-ceiling, allowed `effectiveSensitivity` class)**, minted CLI-side per run. The egress broker enforces the capability + a per-run cost/byte budget in addition to the payload scan, and rejects export of a payload whose `effectiveSensitivity` exceeds the run's allowed class. Prevents a compromised agent from unbounded export/spend even through the sanctioned RPC. |
+| D20 | **Test signer is fixture-only; graduation uses the production authorizer.** | `tools/test-signer.ts` + `atlas-test-approver` are usable **only** in explicit **test mode** (`ATLAS_TEST_MODE=1`, set only by CI fixture runs); the broker **hard-rejects** that signer otherwise. **Phase-5 real-copy graduation uses the production OS-presence / hardware-backed authorizer**, documented as a runbook, not the test signer. The plan's Phase-0–4 fixture verifications keep using the test signer under test mode; **Phase-5's real-copy verification does not** (see the corrected Phase-5 block). `broker.rejects-test-signer-in-prod.test` asserts it. |
+
+**Also resolved inline (smaller findings):** privilege classification has a **single owner** — the
+`commands.json` registry `privilege` field; `policies`/broker **read** it, never re-classify
+(D-registry SSOT, Task 0.0/2.8). `quarantine inspect|resolve` are **privileged ops** (added to the
+§2.5 list + Task 5.3). Graduation thresholds + RRF defaults/bounds are **config/contract-owned**,
+never hardcoded (Tasks 3.0/5.0). The WORM anchor (D8) is a **local broker-owned append-only file
+outside the repo** — the accepted local-first V1 threat model; a remote isolated-host anchor is V2
+(stated, not silently assumed). Tier-0 read runs **write ledger rows but do not each force a full
+backup** — the watermark coalesces backups so cheap reads can't amplify into storage DoS
+(Task 1.7/1.9). Verification blocks pass `--config`/`--vault` explicitly (no phantom shell wrapper).
 
 ## 2.7 Migration ownership (single authoritative table — fixes R2-F3, R3-F5)
 
 Exactly one migration creates each table; the runner treats an applied migration as a checksum-guarded
-no-op and **never drops tables on downgrade**. The runner applies migrations by **sparse id** (any
-registered id not yet in `db_schema_migrations` is applied exactly once, even if a higher id was
-applied earlier — it is **not** a max-version monotonic runner), so out-of-order landing (`0003`
-before `0002`) is a supported, tested contract (`db.sparse-migration.test`: apply 0001+0003, then
-register 0002 → 0002 applied once). Every migration — including `0002_jobs` — lands in a **retained**
-migration PR ahead of its feature PR so a feature revert never orphans applied DDL.
+no-op and **never drops tables on downgrade**.
 
 | Migration | Owner package | Phase / PR | Tables |
 |---|---|---|---|
-| `0001_core` | `sqlite-store` | 1 | `notes`, `note_identity_keys`, `note_links`, `vault_schema_migrations`, `agent_runs`, `model_calls`, `retrieval_runs`, `retrieval_results`, `change_plans`, `patches`, `patch_operations`, `validation_results`, `git_operations`, `audit_events`, `audit_intents`, `audit_id_map` (salted-audit-id ↔ real-id mapping that purge deletes for unlinkability; key custody + uniqueness + deletion semantics + backup handling + verification queries owned here), `backup_watermark`, `raw_payloads` |
-| `0002_jobs` | `jobs` (registered into sqlite-store's runner) | 2 **PR-A (retained)** | `jobs`, `job_attempts` |
+| `0001_core` | `sqlite-store` | 1 | `notes`, `note_identity_keys`, `note_links`, `vault_schema_migrations`, `agent_runs`, `model_calls`, `retrieval_runs`, `retrieval_results`, `change_plans`, `patches`, `patch_operations`, `validation_results`, `git_operations`, `audit_events`, `audit_intents`, `backup_watermark`, `raw_payloads` |
+| `0002_jobs` | `jobs` (registered into sqlite-store's runner) | 2 PR-B | `jobs`, `job_attempts` |
 | `0003_provenance` | `sqlite-store` | 2 **PR-A (retained)** | `content_blobs`, `source_captures`, `source_renditions`, `note_sources` |
 | `0004_claims` | `sqlite-store` | 4 **PR-A (retained)** | `claims`, `claim_evidence` |
 | (runner bootstrap) | `sqlite-store` | 1 | `db_schema_migrations` (created by the runner itself, not a migration) |
@@ -180,17 +193,12 @@ once `0004` lands) inside one transaction; it never touches ledger tables or `db
 
 Every ledger-writing run funnels through `finalizeLedgerWrite` with this exact ordering:
 
-1. **Intent txn (SQLite):** acquire the cross-process **`audit-append`** lock (serializes the
-   allocate→append interval so a later-allocated writer cannot reach the broker before an
-   earlier-allocated one — fixes the reversed-arrival broker rejection/deadlock); open a
-   transaction; allocate the audit `seq` monotonically and persist a **complete durable outbox
-   record** in `audit_intents` (`runId`, `seq`, the **full canonical signed event**
-   (event + signature + signerId), a **deterministic serialization of every ledger mutation** the
-   write callback will perform, and state `pending`); commit. The outbox — not a bare hash — is what
-   a fresh process replays, so recovery needs no retained in-memory callback.
-2. **Git append (broker):** send the persisted signed event to `broker.appendAuditEvent` while still
-   holding the `audit-append` lock; the broker verifies monotonic `seq` against the ref head,
-   appends, returns `{seq, head}`; release the lock (later writers wait/retry).
+1. **Intent txn (SQLite):** open a transaction; allocate the audit `seq` monotonically
+   (`audit_intents` row: `runId`, `seq`, canonical event payload hash, state `pending`); commit.
+   Seq allocation inside this txn is the serialization point — concurrent writers cannot collide
+   (adopts R4 non-blocking suggestion).
+2. **Git append (broker):** send the signed event to `broker.appendAuditEvent`; the broker verifies
+   monotonic `seq` against the ref head, appends, returns `{seq, head}`.
 3. **Ledger commit (SQLite):** one transaction writes the run's ledger rows + the `audit_events` row
    and flips the intent to `done`.
 4. **Backup + watermark:** post-commit encrypted backup with bounded durable retries; on verified
@@ -199,12 +207,10 @@ Every ledger-writing run funnels through `finalizeLedgerWrite` with this exact o
 
 **Crash recovery (both directions), run by `reconcileInterruptedRuns` on startup:** a `pending`
 intent **with** a matching git event (same `runId`+`seq` on the ref) → complete step 3 idempotently;
-a `pending` intent **without** a git event → re-drive step 2 from the persisted signed event in the
-outbox (the broker append is idempotent on `(runId, seq)`), then step 3 from the persisted
-ledger-mutation record; a `done` intent with no backup coverage → re-attempt step 4. Idempotency key
-end-to-end is `(runId, seq)`. `audit.cross-store-ordering.test` restarts in a genuinely fresh process (no retained callbacks) and
-injects a crash between every pair of steps in both directions, replaying only from the durable
-outbox, and asserts convergence with no duplicate or lost event.
+a `pending` intent **without** a git event → re-drive step 2 (the broker append is idempotent on
+`(runId, seq)`); a `done` intent with no backup coverage → re-attempt step 4. Idempotency key
+end-to-end is `(runId, seq)`. `audit.cross-store-ordering.test` injects a crash between every pair of
+steps in both directions and asserts convergence with no duplicate or lost event.
 
 ---
 
@@ -219,17 +225,11 @@ contracts that gate Phase 1.
 ### Tasks
 
 0. **Task 0.0 — Repo scaffold + retained CLI-contract harness**
-   - What: pnpm workspace skeleton (all package dirs from the **authoritative workspace inventory enumerated in
-     this task's Files/Produces below** — mirroring the spec's tree-A layout but self-contained here
-     so the task is executable without external context — with placeholder
+   - What: pnpm workspace skeleton (all package dirs from the spec's tree-A layout with placeholder
      `package.json` + `src/index.ts` exporting nothing), `tsconfig.base.json` (strict, ESM, NodeNext),
-     vitest workspace config, `.github/workflows/ci.yml` (matrix ubuntu-latest + macos-15 **+ macos-26 (arm64)**, each macOS major a pinned compatibility lane with its own Seatbelt/provisioning profile, and a supported-host matrix test asserting every declared target has a non-skipping job; steps: checkout →
-     **setup-node@v4 pinning Node 24 → Corepack-pinned pnpm 10 → assert `node --version` /
-     `pnpm --version`** → pnpm install → `pnpm -r build` → `pnpm -r test`; the provisioning step is
-     added by Task 1.0), root `package.json` scripts, a committed **`pnpm-lock.yaml`** with CI using
-     `pnpm install --frozen-lockfile`, an explicit lifecycle-script allowlist
-     (`pnpm.onlyBuiltDependencies`), git deps pinned to immutable commits, and a dependency
-     vulnerability + provenance gate in the release CI. The **retained harness**: the full command registry with
+     vitest workspace config, `.github/workflows/ci.yml` (matrix ubuntu-latest + macos-15; steps:
+     checkout → pnpm install → `pnpm -r build` → `pnpm -r test`; the provisioning step is added by
+     Task 1.0), root `package.json` scripts. The **retained harness**: the full command registry with
      one row per command/subcommand — name, `schemaRef`, `phase`, idempotency class
      (`key-accepting`/`intrinsic`), privilege tier — seeded for **every** command in §7's inventory
      including the Phase-5 `graduation`/`quarantine` groups; the CLI-surface fixture (the prose
@@ -239,7 +239,7 @@ contracts that gate Phase 1.
    - Files: `pnpm-workspace.yaml`, `tsconfig.base.json`, `vitest.workspace.ts`,
      `.github/workflows/ci.yml`, `docs/specs/cli-contract/commands.json`,
      `docs/specs/cli-contract/cli-surface.fixture.txt`, `tools/gen-cli-contract.ts`,
-     `tools/contract-lint.test.ts`, `package.json`, `AGENTS.md`, plus the **authoritative workspace inventory** — a placeholder `package.json` + `src/index.ts` for every package/app: `packages/{contracts,scan,sqlite-store,git,broker,jobs,sources,models,lancedb-index,testing}` and `apps/cli` (a test asserts this inventory equals `pnpm-workspace.yaml`).
+     `tools/contract-lint.test.ts`, `package.json`, `AGENTS.md`.
    - Interfaces — **Consumes:** —. **Produces:** `commands.json` row shape
      `{name: string, schemaRef: string, phase: 0|1|2|3|4|5, idempotency: "key-accepting"|"intrinsic"|"none", privilege: "shared"|"privileged", implemented: boolean}`;
      `gen-cli-contract.ts` CLI (`--check` mode used by lint; `--write` regenerates derived files).
@@ -263,7 +263,6 @@ contracts that gate Phase 1.
    - Acceptance: every state + terminal appears; no state lacks a recovery action.
 
 2. **Task 0.2 — `sqlite-data-dictionary.md` + versioned index contract**
-   - **Execution order:** although numbered 0.2, this task **runs after** Task 0.4's `retention-matrix.md` (its retention/deletion rows are a hard predecessor; the `contract-lint` dependency graph — not the numeric label — enforces the ordering, so top-down execution honors it).
    - What: complete per-table DDL for **all** tables in §2.7 (every column, SQL type, PK/FK,
      nullability, UNIQUE, CHECKs, ON DELETE per the retention matrix, upsert conflict targets), the
      composite-identifier rule (component scalar columns, never packed strings — `source_renditions`
@@ -277,11 +276,8 @@ contracts that gate Phase 1.
      `status`, `note_identity_keys(normalized_key)`, needs-index scans
      (`active_generation`,`contentHash`), audit lookup by `run_id`) with query-plan assertions.
    - Files: `docs/specs/sqlite-data-dictionary.md`.
-   - Interfaces — **Consumes:** §2.7 **+ the retention/deletion-policy portion of
-     `retention-matrix.md` (Task 0.4, split to land before this task so ON DELETE is not frozen ahead
-     of its contract; Task 0.2 acceptance gates on an automated comparison against it)**. **Produces:**
-     the DDL source of truth consumed by Tasks 1.4, 2.1, 2.7, 4.1 (each migration copies its tables'
-     DDL verbatim from here).
+   - Interfaces — **Consumes:** §2.7. **Produces:** the DDL source of truth consumed by Tasks 1.4,
+     2.1, 2.7, 4.1 (each migration copies its tables' DDL verbatim from here).
    - Test: named later as `db.migrate-ownership.test` (Task 1.4) — the dictionary itself is gated by
      `contract-lint`'s table-inventory check against §2.7.
    - Acceptance: every §2.7 table present; every FK names its ON DELETE; every upsert names its
@@ -301,7 +297,7 @@ contracts that gate Phase 1.
      IDs** for note/source identifiers + the ledger mapping table, so ordinary erasure needs no
      ref rewrite); the D6 event-mapping decision; the signed-tombstone audit-ref replacement
      protocol for erasure.
-   - Files: `docs/specs/security-broker-contract.md`, `docs/specs/security-broker-contract.acl.json` (the canonical machine-readable ACL authority; the doc's key table, `@atlas/contracts`' ACL export, `provisioning/keys.acl.json`, and the separation-test cases are all generated from it — no independently-editable Markdown authority).
+   - Files: `docs/specs/security-broker-contract.md`.
    - Interfaces — **Consumes:** D1, D6, D8, D9, D10. **Produces:** the contract consumed by Tasks
      1.0, 1.6, 1.7, 4.9, 4.10.
    - Test: schemas in this doc are mirrored as Zod in Task 1.1; `contracts.authorization.test`
@@ -320,8 +316,8 @@ contracts that gate Phase 1.
      trigger, soft-vs-hard delete + tombstones, ON DELETE, purge ordering, config key + bounds
      (V1 defaults verbatim from the spec).
    - Files: `docs/specs/ledger-backup-contract.md`, `docs/specs/retention-matrix.md`.
-   - Interfaces — **Consumes:** D6, D9. **Produces:** contracts consumed by Tasks 1.7, 4.10; the retention/deletion-policy rows land
-     **before** Task 0.2 so the dictionary's ON DELETE column derives from (not precedes) the matrix.
+   - Interfaces — **Consumes:** D6, D9. **Produces:** contracts consumed by Tasks 1.7, 4.10 and the
+     dictionary's ON DELETE column (Task 0.2 cross-references the matrix).
    - Test: `ledger.dr-roundtrip.test` + `ledger.fail-closed-watermark.test` (Task 1.7) implement
      this contract's acceptance section verbatim.
    - Acceptance: every storage/entity class of the spec's retention list has a row; the fail-closed
@@ -394,83 +390,56 @@ backup/restore round-trips destructively.
 ### Tasks
 
 0. **Task 1.0 — Host + CI provisioning (both runtime identities)**
-   - What: idempotent provisioning scripts creating users **`atlas-broker`**, **`atlas-egress`**, and the
-     **`atlas-trusted-cli`** identity that runs a **trusted-CLI daemon** (`provisioning/bin/trusted-cli-launcher.sh`
-     drops to the identity and execs it; unix socket `trusted-cli.socket_path` default
-     `/var/run/atlas/trusted-cli.sock` (macOS `/usr/local/var/run/atlas/trusted-cli.sock`), file
-     `0660`, group `atlas-trusted-cli-clients`, per-RPC `SO_PEERCRED`/`getpeereid` caller matrix per
-     D10, install/start/stop + socket-cleanup + readiness lifecycle) — the **sole** holder of the
-     quarantine + raw-payload AEAD keys and the **only** executor, via narrow
-     broker-authorization-capability-gated RPCs (`restoreBackup`/`purgeErase`/`sealQuarantine`/`openQuarantine`/`sealRawPayload`/`openRawPayload`),
-     of destructive ledger/purge/restore/quarantine ops, with the vault + protected SQLite paths
-     **not** agent-writable so a direct library import or raw SQLite/socket call cannot bypass
-     authorization (tested: agent library + raw-socket calls rejected as unauthorized callers), group **`atlas-git`**
-     (agent user + all three identities are members) — but destructive restore/purge run **only**
-     behind the trusted-cli service boundary, so importing a library or opening SQLite directly
-     cannot bypass authorization; protected-ref permission layout
-     per Task 0.3 (dirs `0750`, ref files `0640`, `refs/agent/` agent-owned `0770`); WORM anchor file at the **resolved `git.audit_anchor_path` config value** (defaulting to D8's path;
-     provisioning validates + owns whatever path config resolves, so a non-default configured path is
-     created broker-owned `0600`, parent `0700`, never left unprovisioned); key provisioning per the ACL matrix
-     (D9) including the **`atlas-test-approver`** approval keypair provisioned **only** in
-     explicitly-marked ephemeral CI/dev environments (never on a graduation/production host), with its signer ID **hard-rejected by the broker outside test mode**; the **production authorizer is a first-class deliverable of this task** — a macOS/Linux OS-presence provider **or** hardware-backed external signer with enrollment → signer-registry binding → attestation verification → rotation → revocation → recovery → decommissioning — which Phase 5 graduation uses on real hosts, the test signer confined to separate fixture-only CI tests and never able to authorize a production/graduation op; **deny-by-default outbound-network applied independently to the agent, broker, trusted-cli, and parser identities** (macOS: per-identity Seatbelt profiles incl. `provisioning/profiles/agent.sb` applied by each launcher; Linux: network-isolated netns via `provisioning/linux/netns.sh` + seccomp allowlist) — **only `atlas-egress` gets general provider network** (with a single narrowly destination-pinned, append-only exception for the broker to reach the D8 external audit checkpoint) — the D8 external audit-checkpoint sink and its `atlas-anchor-admin`-owned append-only credential (config `git.audit_anchor_external.*`) are provisioned by this task (CI uses the fixture sink under `provisioning/ci/anchor-sink/`); `provisioning.separation.test` asserts outbound TCP fails for the broker and trusted-cli too, not only the agent; **the agent launcher `provisioning/bin/agent-launcher.sh` is
-     the mandatory entrypoint for every agent-side CLI/test process (CI and dev invoke the installed
-     `brain` only through it), and startup asserts the process is inside its profile/netns before any
-     work** so a compromised CLI cannot escape isolation; launchers
-     `provisioning/bin/broker-launcher.sh` + `provisioning/bin/egress-launcher.sh` (drop to the
-     respective identity, exec the built broker binaries); CI setup (`provisioning/ci/setup.sh`, D1)
-     + dev setup/teardown (`provisioning/dev/{setup,teardown}.sh`). Fixes R2-F2, R4-F2.
+   - What: idempotent provisioning scripts creating a **dedicated non-login agent UID** plus users
+     **`atlas-broker`** and **`atlas-egress`**, group **`atlas-git`** (**members: agent UID +
+     `atlas-broker` only — NOT `atlas-egress`**, D18); protected-ref permission layout per Task 0.3
+     (dirs `0750`, ref files `0640`, `refs/agent/` agent-owned `0770`); WORM anchor file at D8's path
+     (broker-owned `0600`, parent `0700` — a **local append-only file outside the repo**, the
+     accepted local-first V1 threat model; remote isolated-host anchor is V2); key provisioning per
+     the ACL matrix (D9) including the **`atlas-test-approver`** approval keypair usable **only under
+     `ATLAS_TEST_MODE=1`** (D20). **Service-binary integrity (D16):** `setup.sh` builds + hashes the
+     broker/egress release artifact and installs it hash-verified into a **root-owned, non-agent-
+     writable** dir (`/usr/local/lib/atlas/bin` on macOS, `/opt/atlas/bin` on Linux, `0755`
+     root:wheel) — the privileged binaries are **never** run from the agent-writable repo `dist/`;
+     launchers are root-owned with fixed exec paths. **Agent network denial at the UID (D17):** the
+     agent UID's processes are **always** confined to a no-egress context (Linux: service-managed
+     netns/cgroup the UID cannot leave; macOS: per-UID `pf` anchor denying outbound + the Seatbelt
+     profile) — denial does **not** depend on the agent invoking a launcher; only `atlas-egress` has
+     outbound. CI setup (`provisioning/ci/setup.sh`, D1) + dev setup/teardown
+     (`provisioning/dev/{setup,teardown}.sh`). Fixes R2-F2, R4-F2 + review D16/D17/D18/D20.
    - Files: `provisioning/dev/setup.sh`, `provisioning/dev/teardown.sh`, `provisioning/ci/setup.sh`,
      `provisioning/bin/broker-launcher.sh`, `provisioning/bin/egress-launcher.sh`,
-     `provisioning/bin/trusted-cli-launcher.sh`, `provisioning/bin/agent-launcher.sh`,
-     `provisioning/profiles/agent.sb`, `provisioning/linux/netns.sh`,
-     `provisioning/keys.acl.json` (**generated** from the single canonical machine-readable ACL authored in **Phase 0 Task 0.3** (`docs/specs/security-broker-contract.acl.json`); the `@atlas/contracts` ACL export (Task 1.1) is itself a generated consumer, not an authority,
-     which the Task 0.3 table is also generated from — not an independent authority; provisioning and
-     the separation test both derive from it, so a 0.3 revocation propagates and cannot leave a stale
-     JSON), `.github/workflows/ci.yml` (add
+     `provisioning/profiles/agent.sb`, `provisioning/linux/{netns.sh,agent-cgroup.sh}`,
+     `provisioning/macos/agent-pf.conf`, `provisioning/install-artifact.sh` (hash-verified install),
+     `provisioning/keys.acl.json` (machine-readable ACL matrix), `.github/workflows/ci.yml` (add
      `sudo provisioning/ci/setup.sh` + `ATLAS_PROVISIONED=1`).
    - Interfaces — **Consumes:** Task 0.3 contract. **Produces:** the provisioned-host contract every
      broker/egress test consumes; `keys.acl.json` rows
-     `{key: string, path: {darwin: string, linux: string}, readableBy: Identity[], identity: "atlas-broker"|"atlas-egress"|"agent"|"trusted-cli"}`.
-   - Test: `provisioning.separation.test` — key assertions: agent read of each broker-only key path
-     fails EACCES; `atlas-egress` cannot read the approval/backup keys; `atlas-broker` cannot read
-     `atlas.gemini.key`; agent `git update-ref` on a protected ref fails EACCES while agent **read**
-     of canonical succeeds; agent outbound TCP fails **when the installed `brain` is invoked exactly as users do (through the
-     mandatory launcher), with the process profile/netns asserted first**; egress outbound TCP
-     succeeds; teardown removes **every artifact in a shared machine-readable inventory** — all three users +
-     group + anchor + Linux key dirs + macOS keychains + the sudoers drop-in (re-parsed after
-     deletion) + sockets + netns + profiles + signer-registry entries, terminating privileged
-     processes — asserted by re-running the test expecting absent artifacts; `provisioning.
-     production-negative.test` asserts the `atlas-test-approver` key + signer are absent and the
-     broker refuses the test signer id outside test mode.
-   - Acceptance: setup → test → teardown is idempotent twice in a row on both OS; CI matrix runs it; a non-default
-     configured anchor path is provisioned with correct ownership/modes and the broker appends to it.
-
-1. **Task 1.05 — `@atlas/scan` engine leaf (moved ahead of what was Task 2.2)**
-   - What: the dependency-leaf `@atlas/scan` package — the deterministic, versioned secret-scan
-     engine (`scanBytes` + ruleset) and its broker-facing rescan/attestation API **only** (no
-     CLI-side guards, quarantine store, or enforcement — those stay in Task 2.2, which builds on
-     this leaf). Delivered in Phase 1 so Task 1.6's `integrateSourceCapture` broker-side rescan has
-     a real engine to import; `@atlas/scan` is a leaf with no back-edge into `apps/cli`.
-   - Files: `packages/scan/src/{engine,rules}.ts`, `packages/scan/package.json`,
-     `packages/scan/test/scan-engine.test.ts`.
-   - Interfaces — **Consumes:** 1.2 (config/diag). **Produces:**
-     `scanBytes(input: {bytes: Uint8Array, context: ScanContext}): ScanVerdict` · a broker-facing
-     `rescanGitTree(objects, rulesetVersion): ScanAttestation` consumed by Task 1.6.
-   - Test: `scan.engine.test` — representative secret formats detected; clean fixtures pass;
-     determinism across runs; import-graph test asserts leaf status (no `apps/cli` back-edge).
-   - Acceptance: `pnpm --filter @atlas/scan test` green on both OS from an empty checkout.
+     `{key: string, path: {darwin: string, linux: string}, readableBy: Identity[], identity: "atlas-broker"|"atlas-egress"|"agent"}`.
+   - Test: `provisioning.separation.test` — agent read of each broker-only key path fails EACCES;
+     `atlas-egress` cannot read the approval/backup keys **nor any vault/object-store path** (D18);
+     `atlas-broker` cannot read `atlas.gemini.key`; agent `git update-ref` on a protected ref fails
+     EACCES while agent **read** of canonical succeeds; **a direct (non-launcher) outbound TCP from
+     the agent UID fails** (D17); egress outbound TCP succeeds; teardown removes agent UID + both
+     users + group + anchor. `provisioning.integrity.test` — the installed privileged binary matches
+     the recorded hash and is not agent-writable (D16); replacing the repo `dist/` binary does not
+     change what the launcher executes.
+   - Acceptance: setup → test → teardown is idempotent twice in a row on both OS; CI matrix runs it.
 
 1. **Task 1.1 — `@atlas/contracts` (leaf package)**
    - What: stable ID mint/parse (D3 serialization), canonical serialization, the ChangePlan
      **envelope** schema (target, rationale, sourceIds, retrievedEvidence, confidence,
      `proposedRisk`, reversibility, `idempotencyKey?` — per-operation payload schemas are Phase 2's
-     gate, **not** promised here — fixes R2-F1/R3-F1), run-manifest schema, audit-event + authorization schemas **generated from Task 0.3's normative JSON Schemas** (single
-     machine-readable authority; the Zod validators are emitted, never hand-mirrored) with an
-     equivalence/property test over accepted **and rejected** input spaces, provider-error union type (taxonomy only; adapter is
-     Phase 2), zero runtime dependencies (Zod only).
-   - Files: `packages/contracts/src/{ids,canonical,changeplan-envelope,run-manifest,audit,authorization,provider-errors}.ts`,
+     gate, **not** promised here — fixes R2-F1/R3-F1), run-manifest schema, audit-event +
+     authorization schemas mirroring Task 0.3, provider-error union type (taxonomy only; adapter is
+     Phase 2), **and the shared cross-boundary DTOs (D14)** — `VaultSnapshot`, `ParsedNote`,
+     `SectionTree`, `WikiLink`, `NormalizedRendition`, `Chunk` — as structural types so workspace
+     packages consume them **from `contracts`, never from `apps/cli`** (breaks the package→app build
+     cycle). Zero runtime dependencies (Zod only).
+   - Files: `packages/contracts/src/{ids,canonical,changeplan-envelope,run-manifest,audit,authorization,provider-errors,dtos}.ts`,
      `packages/contracts/src/index.ts`, `packages/contracts/test/*.test.ts`.
-   - Interfaces — **Consumes:** Task 0.3 doc + its `security-broker-contract.acl.json` (the `@atlas/contracts` ACL export is generated from that Phase-0 authority, never hand-authored). **Produces:**
+   - Interfaces — **Consumes:** Task 0.3 doc. **Produces:** the DTO types above (consumed by
+     `sqlite-store`, `lancedb-index`, `vault`, `sources`), plus:
      `newRunId(): string` (ULID) · `parseSourceHandle(s: string): ContentId | RenditionId` ·
      `serializeRenditionId(r: RenditionId): string` ·
      `canonicalSerialize(v: unknown): Uint8Array` (sorted keys, NFC, no NaN/Infinity) ·
@@ -481,24 +450,23 @@ backup/restore round-trips destructively.
      `AuthorizationChallengeSchema` / `AuthorizationResponseSchema` ·
      `ProviderError` (discriminated union of `validation|authentication|quota|rate_limit|timeout|transport|cancelled|partial_batch|model_incompatible`, each `{retryable: boolean, retryAfter?: number}`).
    - Test: `contracts.canonical.test` (byte-identical serialization across key orders + Unicode
-     forms); `contracts.authorization.test` (Task 0.3's JSON examples validate) + a schema-equivalence/property
-     check that the generated Zod accepts exactly the JSON-Schema-valid space (not only the examples).
-   - Acceptance: package has zero deps besides `zod`; `pnpm --filter @atlas/contracts test` green.
+     forms); `contracts.authorization.test` (Task 0.3's JSON examples validate);
+     `contracts.no-app-import.test` (D14 — the package's import graph contains no `apps/cli`
+     specifier; run repo-wide so no workspace package ever imports the app).
+   - Acceptance: package has zero deps besides `zod`; no workspace package imports `apps/cli`
+     (grep-guard); `pnpm --filter @atlas/contracts test` green.
 
 2. **Task 1.2 — `config` internal module**
    - What: typed load + startup validation of `brain.config.yaml` (sections per spec:
      `vault`, `sqlite` (incl. `ledger_backup.*`, `ledger_retention`, `raw_payload_store`),
-     `lancedb`, `indexing` (chunker_version=1, embedding model, `dimensions: 768`, `rrf_weights.*` with per-layer defaults + bounds per the Task-3.0 retrieval contract — runtime search and eval read only these resolved values), `git`
+     `lancedb`, `indexing` (chunker_version=1, embedding model, `dimensions: 768`), `git`
      (worktrees_path, auto_commit_risk_levels, `audit_anchor_path`), `models`, `policies`, `logs`,
      `broker` (socket paths)); env-var overrides `ATLAS_<SECTION>_<KEY>`; ships the example config.
    - Files: `apps/cli/src/config/{schema,load}.ts`, `brain.config.example.yaml`,
      `apps/cli/test/config.test.ts`.
    - Interfaces — **Consumes:** Task 1.1 (`canonicalSerialize` for config hash). **Produces:**
-     `loadConfig(cwd: string, env: NodeJS.ProcessEnv, opts?: {configPath?: string}): AtlasConfig`
-     (resolves an explicit `--config` path or `brain.config.yaml`; throws `ConfigError` with
-     file/key/location → exit `2`); `AtlasConfig` typed per section. Every phase Verification block
-     generates a temp config from the example with all paths rooted in the temp dir and passes it via
-     `--config`; missing config is tested as a deliberate fail-fast error.
+     `loadConfig(cwd: string, env: NodeJS.ProcessEnv): AtlasConfig` (throws `ConfigError` with
+     file/key/location → exit `2`); `AtlasConfig` typed per section.
    - Test: `config.test` — invalid enum/missing path fail with the offending key named; env
      override wins; example config validates.
    - Acceptance: every config key referenced anywhere in this plan exists in the schema + example.
@@ -513,10 +481,14 @@ backup/restore round-trips destructively.
      selectors) that both reader and future patcher share.
    - Files: `apps/cli/src/vault/{reader,writer,frontmatter,identity}.ts`,
      `apps/cli/src/markdown/{parse,sections}.ts`, `apps/cli/test/vault.test.ts`.
-   - Interfaces — **Consumes:** 1.1, 1.2. **Produces:**
-     `readVault(cfg: AtlasConfig): Promise<VaultSnapshot>` ·
-     `VaultSnapshot = {notes: ParsedNote[], errors: VaultError[]}` ·
-     `ParsedNote = {id: string, path: string, type: NoteType, schemaVersion: number, aliases: string[], sources: string[], declaredSensitivity: Sensitivity, links: WikiLink[], sections: SectionTree, contentHash: string, raw: string}` ·
+   - Interfaces — **Consumes:** 1.1 (the `VaultSnapshot`/`ParsedNote`/`SectionTree`/`WikiLink` DTO
+     *types* now live in `@atlas/contracts`, D14 — this module produces **values** of them, it does
+     not own the types), 1.2. **Produces:**
+     `readVault(cfg: AtlasConfig): Promise<VaultSnapshot>` (shapes: `VaultSnapshot =
+     {notes: ParsedNote[], errors: VaultError[]}`; `ParsedNote = {id: string, path: string,
+     type: NoteType, schemaVersion: number, aliases: string[], sources: string[],
+     declaredSensitivity: Sensitivity, links: WikiLink[], sections: SectionTree, contentHash: string,
+     raw: string}` — **all defined in `@atlas/contracts`**) ·
      `normalizeIdentityKey(s: string): string` · `writeNoteFile(path: string, content: string): Promise<void>`.
    - Test: `vault.identity.test` — mixed Hebrew/English alias normalization is rune-safe and
      deterministic; duplicate-id fixture surfaces both offenders.
@@ -529,12 +501,12 @@ backup/restore round-trips destructively.
      for projection + ledger tables, projection rebuild (transactional replace of the Phase-1
      projection set from a `VaultSnapshot`), the post-restore rebuild **hook registry** (fixes
      R1-F1: restore triggers whatever rebuild steps are registered; Phase 3 registers the index
-     step), invariant queries (`db verify`), the composite indexes + query-plan assertions from the index contract, and the **shared lock
-     manager** (`withLock` + named scopes) so restore (1.7) can acquire exclusive locks before the
-     CLI layer (1.8) wires command-level scope usage.
+     step), invariant queries (`db verify`), and the composite indexes + query-plan assertions from
+     the index contract.
    - Files: `packages/sqlite-store/src/{connection,migrate,rebuild,verify,repos/*.ts}.ts`,
      `packages/sqlite-store/migrations/0001_core.ts`, `packages/sqlite-store/test/*.test.ts`.
-   - Interfaces — **Consumes:** 0.2 dictionary, 1.1, 1.3 (`VaultSnapshot`). **Produces:**
+   - Interfaces — **Consumes:** 0.2 dictionary, 1.1 (`VaultSnapshot` DTO **from `@atlas/contracts`**,
+     not from `apps/cli` — D14; sqlite-store never imports the app). **Produces:**
      `openStore(cfg: SqliteConfig): Store` ·
      `Store.migrate(): MigrationReport` · `Store.registerMigration(m: Migration): void` (jobs
      registers `0002` here) ·
@@ -570,27 +542,17 @@ backup/restore round-trips destructively.
      with: challenge mint/verify (nonce store, expiry, drift rejection per Task 0.3), Ed25519
      verification, protected-ref CAS advance with ancestry + signature + audit-event re-verification,
      **`integrateSourceCapture`** (the narrowly scoped Tier-1 capture integration Phase 2 consumes —
-     **independently re-scans the exact git objects being integrated** (broker-side, engine from
-     `@atlas/scan` — **whose dependency-leaf scan engine + broker-facing API are delivered in Phase 1 as new Task 1.05, moved ahead of this task from what was Task 2.2; Task 2.2 later adds the guards + quarantine store + CLI-side enforcement on that same leaf**), rejects symlinks + malformed manifests, verifies the commit touches only
-     `sources/**` + manifest paths, requires a non-forgeable scanner attestation bound to the commit
-     tree hash + ruleset version, and fast-forwards canonical under CAS — so a crafted RPC that skips
-     `captureSource` cannot land unscanned bytes; fixes R1-F2), audit-ref append — the agent **cannot mint unrestricted events**: `appendAuditEvent` requires a
-     one-time capability bound to the exact `(intentHash, runId, seq, eventType, expectedHead)`
-     issued by a **peer-authenticated trusted ledger service** (co-located with the `atlas-trusted-cli` boundary; its capability-signing key is agent-inaccessible) that reads the committed SQLite intent; the broker re-verifies the capability (canonical intent hash + expected head) before appending, so an agent that persisted **no** SQLite intent cannot obtain one and even a compromised agent holding the (by-design agent-readable) audit-attestation key can neither fabricate a terminal event nor consume
-     a sequence without a matching SQLite intent (monotonic seq check, signed events only),
-     WORM-anchor update on every append **made contingent on a durable external append acknowledgment from the D8 checkpoint sink (offline ⇒ fail-closed, append blocked), with the local cache verified against the external checkpoint on startup**, and the client library; plus **daemon lifecycle** — the `atlas-broker` launcher `provisioning/bin/broker-launcher.sh` (the `egress-launcher.sh` start/readiness lands in Task 2.8, not here)
-     install/start/stop hooks, socket cleanup, a readiness probe (`BrokerClient.connect` waits for
-     socket + handshake), PID ownership, and startup-failure logging, invoked by
-     `provisioning/{dev,ci}/setup.sh` and every Verification flow needing IPC. **No
-     `@atlas/sqlite-store` import**
+     verifies the capture commit touches only `sources/**` + manifest paths and fast-forwards
+     canonical under CAS — fixes R1-F2), audit-ref append (monotonic seq check, signed events only),
+     WORM-anchor update on every append, and the client library. **No `@atlas/sqlite-store` import**
      (§2.8 direction; enforced by test). Includes `tools/test-signer.ts` (signs a challenge with the
      provisioned `atlas-test-approver` key) so every privileged flow is executable in tests/CI.
    - Files: `packages/broker/src/{server,client,authorize,refs,audit-append,anchor}.ts`,
      `packages/broker/bin/atlas-broker.ts`, `tools/test-signer.ts`,
      `packages/broker/test/*.test.ts`.
    - Interfaces — **Consumes:** 0.3, 1.0 (identities/keys), 1.1, 1.5. **Produces:**
-     `BrokerClient.connect(socketPath: string, vault: VaultAttachment): Promise<BrokerClient>` (an authenticated per-vault registration binds the daemon to one repository via an inherited directory descriptor + a signed vault capability carried in every ref RPC; the broker resolves objects/refs only through it, and the git object/ref store is group-traversable by `atlas-git` so the broker UID can read it — the `0700` in `doctor` applies to the agent's private state dirs, not the git store the broker must reach) ·
-     `BrokerClient.appendAuditEvent(e: SignedAuditEvent, cap: AuditAppendCapability): Promise<{seq: number, head: string}>` (the `cap` is the one-time capability minted by the peer-authenticated trusted ledger service and bound to `(intentHash, runId, seq, eventType, expectedHead)`; the broker re-verifies it before appending, so no committed SQLite intent ⇒ no capability ⇒ no append) ·
+     `BrokerClient.connect(socketPath: string): Promise<BrokerClient>` ·
+     `BrokerClient.appendAuditEvent(e: SignedAuditEvent): Promise<{seq: number, head: string}>` ·
      `BrokerClient.advanceProtectedRef(r: RefAdvanceRequest): Promise<RefAdvanceResult>` where
      `RefAdvanceRequest = {ref: ProtectedRef, expectedOld: string, newCommit: string, manifest: RunManifest, authorization?: AuthorizationResponse, auditEvent: SignedAuditEvent}` ·
      `BrokerClient.integrateSourceCapture(r: {captureCommit: string, expectedBase: string, manifest: RunManifest, auditEvent: SignedAuditEvent}): Promise<RefAdvanceResult>` ·
@@ -599,10 +561,9 @@ backup/restore round-trips destructively.
      `tools/test-signer.ts` CLI: `node tools/test-signer.ts --key atlas-test-approver < challenge.json > authorization.json`.
    - Test: `broker.no-ledger-dep.test` (import graph contains no sqlite-store);
      `approval-boundary.adversarial.test` (Phase-1 subset): agent direct `update-ref` on protected
-     refs → EACCES; forged/replayed/expired signature → typed refusal; append with non-monotonic seq → refusal; direct fabricated append / sequence-consumption without a
-     matching intent-bound capability → refusal; `anchor.anti-truncation.test`: truncate the audit ref, broker startup + verify detect count
-     regression vs anchor; `capture.broker-rescan.test`: a crafted secret-bearing capture commit
-     submitted directly to `integrateSourceCapture` (bypassing the CLI) is refused.
+     refs → EACCES; forged/replayed/expired signature → typed refusal; append with non-monotonic
+     seq → refusal; `anchor.anti-truncation.test`: truncate the audit ref, broker startup + verify
+     detect count regression vs anchor.
    - Acceptance: broker runs under `broker-launcher.sh` on both OS; all adversarial cases refused
      with the contract's stable error codes.
 
@@ -610,21 +571,12 @@ backup/restore round-trips destructively.
    - What: `finalizeLedgerWrite` implementing §2.8 exactly (intent txn + seq allocation → broker
      append → ledger commit → backup + watermark), `reconcileInterruptedRuns`, the AEAD backup
      writer (Online Backup API snapshot, temp-then-rename, content hash + schema stamp, retention
-     pruning) — the AEAD **encrypt/decrypt** step runs behind narrowly scoped `atlas-broker` RPCs
-     (`sealBackup`/`openBackup`) that accept/return backup streams without exposing the broker-only
-     backup key to the unprivileged CLI (fixes the inaccessible-key defect), watermark fail-closed gate (blocks the **mutating** ledger-writing command set with
-     `backup-unhealthy` exit `2` until covered, while the narrowly defined health-surface reads
-     (`status`/`inspect`) run in **degraded mode** — render health immediately and durably queue
-     their audit intent for later reconciliation rather than being blocked by the condition they
-     report; audited `db backup --force-unblock` override), and
+     pruning), watermark fail-closed gate (blocks the ledger-writing command set with
+     `backup-unhealthy` exit `2` until covered; audited `db backup --force-unblock` override), and
      the **privileged restore**: challenge/authorization via broker (`op: "db.restore"`, challenge
-     carries backupRef + content hash), exclusive `vault-maintenance`+`ledger-maintenance` locks (the lock manager + `withLock` are
-     delivered as a shared primitive in **Task 1.4 — moved ahead of 1.7** — with Task 1.8 adding
-     CLI-level scope wiring; fixes the ordering gap),
-     transactional ledger-table restore with a **restore-specific reconciliation against the broker's
-     current audit head**: verify the backup audit head is a prefix of the anchored ref, **advance
-     the seq allocator to the broker head** (never re-allocate an already-appended seq), explicitly
-     record/declare the post-backup RPO gap (lost N+1..M rows), append the `db.restore` event at head+1, **then** run the post-restore hooks as a **durable per-hook state machine**: the restore intent records each registered hook's completion, the restore/health gate stays **blocked until every hook finishes**, and `reconcileInterruptedRuns` resumes incomplete hooks idempotently on restart (a crash after the restore txn + audit append but before a hook completes still converges to rebuilt projections/index). Projection rebuild lands now; index rebuild is registered in Phase 3. D6 audit rows for backup/restore/force-unblock.
+     carries backupRef + content hash), exclusive `vault-maintenance`+`ledger-maintenance` locks,
+     transactional ledger-table restore, then the post-restore hook registry (projection rebuild
+     now; index rebuild added Phase 3). D6 audit rows for backup/restore/force-unblock.
    - Files: `packages/sqlite-store/src/ledger/{finalize,intents,reconcile}.ts`,
      `packages/sqlite-store/src/backup/{backup,restore,watermark}.ts`,
      `apps/cli/src/commands/db-backup.ts`, `apps/cli/src/commands/db-restore.ts`,
@@ -635,20 +587,17 @@ backup/restore round-trips destructively.
      `reconcileInterruptedRuns(store: Store, broker: BrokerClient): Promise<ReconcileReport>` ·
      `takeBackup(store: Store, cfg: LedgerBackupConfig): Promise<{backupRef: string, seq: number}>` ·
      `verifyBackup(cfg: LedgerBackupConfig, backupRef: string): Promise<void>` ·
-     `restoreBackup(store: Store, backupRef: string): Promise<void>` (executed **only** inside the `atlas-trusted-cli` daemon via its capability-gated `restoreBackup` RPC — the unprivileged CLI cannot call it directly, and the vault/ledger paths it rewrites are not agent-writable) · `watermarkHealth(store: Store): {seq: number, coveredSeq: number, healthy: boolean}`.
+     `restoreBackup(store: Store, backupRef: string): Promise<void>` (invoked only by the
+     authorized CLI path) · `watermarkHealth(store: Store): {seq: number, coveredSeq: number, healthy: boolean}`.
    - Test: `ledger.dr-roundtrip.test` — backup → wipe DB → authorized restore (via
-     `tools/test-signer.ts`) → every ledger row recovered byte-equal; `restore.atomicity.test` — crash mid-restore leaves the prior DB intact, and a concurrent rebuild/
-     integration/second-restore is excluded by the locks; `restore.non-latest-continuity.test` —
-     restoring a non-latest backup after several later ledger-writing runs, then running a new ledger
-     write, succeeds with no non-monotonic broker rejection (seq allocator advanced to head, RPO gap
-     recorded); `ledger.fail-closed-watermark.test` — injected
+     `tools/test-signer.ts`) → every ledger row recovered byte-equal; `restore.atomicity.test` —
+     crash mid-restore leaves the prior DB intact; `ledger.fail-closed-watermark.test` — injected
      backup failure blocks a subsequent ledger-writing run with `backup-unhealthy`, read-only
      commands still work, verified backup unblocks, `--force-unblock` records the audited RPO gap;
      `audit.cross-store-ordering.test` per §2.8; wrong/revoked key + truncated/corrupt backup
      rejection.
    - Acceptance: the Phase-1 exit criteria — destructive restore + corruption tests — are green in
-     CI on both OS, exercised as the **actual unprivileged CLI identity** (backup key never
-     CLI-readable; encrypt/decrypt only via the broker RPCs).
+     CI on both OS.
 
 8. **Task 1.8 — CLI foundation: entrypoint, renderer, envelope, locks, diagnostics**
    - What: the `brain` entrypoint (command routing from the registry, `--json|--quiet|--verbose`,
@@ -656,19 +605,19 @@ backup/restore round-trips destructively.
      escapes ANSI/CSI/OSC-8/OSC-52/C0-C1/CR-overwrite; isolates bidi controls; preserves
      newline/tab), `--plain` + `NO_COLOR`/`--no-color`/`TERM=dumb`/non-TTY degradation with
      append-only progress lines, the JSON error envelope emitter (0.5 schema), the **lock manager**
-     (the **single shared lock manager delivered in Task 1.4 — `@atlas/sqlite-store`'s `withLock` — re-exported here as the sole authority + backing ownership record, never a second implementation; a multi-process test spans restore, jobs, integration, and audit-append contending through the one API; named scopes + §2.5 global order incl. `jobs-runner` and `audit-append`; owner pid + start time;
+     (named scopes + §2.5 global order incl. `jobs-runner`; owner pid + start time;
      `locked:<scope>` exit `2`; `doctor --reclaim-locks` for dead-pid locks), and **diagnostics
      logging** (structured JSONL to `logs.dir`, rotation + retention per `logs.*`, run/job-id
      correlation, redaction boundary — never raw prompts/quotes/secrets). Fixes R1-F13's missing
      owners.
    - Files: `apps/cli/src/{main,router}.ts`, `apps/cli/src/render/{safe,plain,progress}.ts`,
-     `apps/cli/src/errors/envelope.ts`, `apps/cli/src/locks/reexport.ts` (thin re-export of `@atlas/sqlite-store`'s single lock manager — no second implementation),
+     `apps/cli/src/errors/envelope.ts`, `apps/cli/src/locks/manager.ts`,
      `apps/cli/src/diag/logger.ts`, `apps/cli/test/{renderer,locks,envelope}.test.ts`.
    - Interfaces — **Consumes:** 0.5 schemas, 1.2. **Produces:**
      `runCli(argv: string[], env: NodeJS.ProcessEnv): Promise<number>` ·
      `render(text: string, opts: RenderOpts): string` (the ONLY human-output path) ·
      `withLock<T>(scope: LockScope, fn: () => Promise<T>): Promise<T>` where
-     `LockScope = "vault-maintenance"|"ledger-maintenance"|"audit-append"|"jobs-runner"|"canonical-integration"` (the `audit-append` scope §2.8 Step 1 requires is a first-class member of the single shared registry — ordered between `ledger-maintenance` and `jobs-runner` — with reversed-arrival + stale-lock tests) ·
+     `LockScope = "vault-maintenance"|"ledger-maintenance"|"jobs-runner"|"canonical-integration"` ·
      `emitError(e: CliError): never` · `diag(runId: string | null): Logger` where
      `Logger = {info(msg: string, ctx?: object): void; warn(msg: string, ctx?: object): void; error(msg: string, ctx?: object): void; child(ctx: object): Logger}`
      (full method signatures, fixes R2-F6).
@@ -683,13 +632,15 @@ backup/restore round-trips destructively.
    - What: `inspect` (vault + projection summary), `doctor` (Phase-1 check inventory per 0.5:
      file/dir modes 0700/0600 across vault/SQLite/worktrees/temp, encrypted-volume marker where
      detectable, lock liveness + `--reclaim-locks`, backup watermark health, audit-head anchor
-     check, provisioning presence), `status` per D12. Executed `inspect`/`status` append one terminal
-     **`run.readonly`** event via §2.8; but under a `backup-unhealthy` gate these health-surface
-     reads run in **degraded mode** — they render the watermark/health immediately and **durably
-     queue their audit intent** (reconciled when backup recovers) rather than being rejected by the
-     very condition they must report (fixes the read-survival contradiction); executed `db rebuild` (from 1.4) appends **`run.projection`** — wired
-     here so the Phase-1 projection-only command is audited from day one. Previews/`doctor` emit no
-     run events (doctor is a health surface, not a run — per the spec's closed Tier-0 enumeration).
+     check, provisioning presence), `status` per D12. Executed `inspect`/`status` append one
+     terminal **`run.readonly`** event via §2.8 (fixes R2-F4); executed `db rebuild` (from 1.4)
+     appends **`run.projection`** — wired here so the Phase-1 projection-only command is audited from
+     day one. **Read-run backup coalescing (review-inline):** a readonly run writes its ledger row +
+     audit event but does **not** each force a full encrypted backup — the watermark **coalesces**
+     (a backup covers up to the latest ledger seq, debounced), so cheap high-frequency reads cannot
+     amplify into unbounded backup/storage growth (bounds the read-DoS finding). Previews/`doctor`
+     emit no run events (doctor is a health surface, not a run — per the spec's closed Tier-0
+     enumeration).
    - Files: `apps/cli/src/commands/{inspect,doctor,status}.ts`, `apps/cli/src/audit/readonly.ts`,
      `apps/cli/test/e2e/phase1.e2e.test.ts`.
    - Interfaces — **Consumes:** 1.3, 1.4, 1.6, 1.7 (`finalizeLedgerWrite`), 1.8. **Produces:**
@@ -711,13 +662,11 @@ backup/restore round-trips destructively.
 - **macOS Seatbelt deprecation churn:** the sandbox/network profiles are pinned per macOS major and
   capability-probed at startup (`doctor` fails loud), per the sandbox contract.
 
-### Verification (run from repo root; requires `sudo provisioning/dev/setup.sh` once, which starts the **broker daemon** and waits for its socket readiness; Phase-1 provisioning creates the `atlas-egress` **identity + keys only** — the egress daemon's install/start/readiness is deferred to Phase 2 Task 2.8, so no egress process is started or probed here)
+### Verification (run from repo root; requires `sudo provisioning/dev/setup.sh` once)
 ```bash
 pnpm -r build && pnpm -r test                              # all Phase-0/1 suites green
 ATLAS_PROVISIONED=1 pnpm --filter @atlas/broker --filter @atlas/sqlite-store test
-V=$(mktemp -d)/vault && cp -R fixtures/small-valid "$V" && git -C "$V" init -q && git -C "$V" add -A \
-  && git -C "$V" -c user.name='Aryeh Stark' -c user.email='aryeh@21stark.com' commit -qm seed   # isolated vault, not the committed fixture
-CFG="$V.config.yaml"; tools/verify-env.sh --emit-config "$V" > "$CFG"   # real temp --config, all derived paths under "$V"; every command below is run via brain() (agent-launcher + --config "$CFG")
+V=fixtures/small-valid
 node apps/cli/dist/index.js --vault "$V" db migrate        # exit 0, idempotent on rerun
 node apps/cli/dist/index.js --vault "$V" db rebuild        # exit 0; emits one run.projection
 node apps/cli/dist/index.js --vault "$V" inspect --json    # exit 0; validates inspect.schema.json
@@ -731,7 +680,7 @@ node apps/cli/dist/index.js --vault "$V" db restore "$REF" --authorization /tmp/
 
 ### Rollback
 - Precondition: Phase-1 PR merged; Phase 2 not started.
-- Procedure (single branch): first **stop + uninstall the Phase-1 privileged broker daemon** the revert orphans — `provisioning/bin/broker-launcher.sh stop` (terminate the process, remove its socket + service registration), keeping users/keys/anchor intact — then `git revert <phase1-PR-merge-sha>` on a branch → revert PR → merge, and re-run `provisioning.separation.test` to assert no Phase-1 daemon or socket remains.
+- Procedure (single branch): `git revert <phase1-PR-merge-sha>` on a branch → revert PR → merge.
   Host provisioning is **not** torn down by a code revert (it is stateful host config;
   `provisioning/dev/teardown.sh` is run only when decommissioning a host).
 - Schema compatibility: `0001_core` DDL already applied to local DBs remains readable; the migration
@@ -745,7 +694,7 @@ node apps/cli/dist/index.js --vault "$V" db restore "$REF" --authorization /tmp/
 **Goal:** `brain ingest`/`source add` capture local files (md/txt/pdf/html) as immutable,
 provenanced source notes through the broker; jobs queue runs; the Gemini adapter exists behind the
 egress broker and is provably restricted to non-mutating extraction/classification.
-**Dependencies:** Phase 1. Lands as **two PRs**: PR-A (retained) = Task 2.1 (`0003_provenance`) **+ Task 2.1b (`0002_jobs` DDL + runner registration + checksum test, no feature code)**; then PR-B (all else).
+**Dependencies:** Phase 1. Lands as **two PRs**: PR-A (Task 2.1, retained) then PR-B (all else).
 **Estimated effort:** L
 
 ### Tasks
@@ -794,21 +743,6 @@ egress broker and is provably restricted to non-mutating extraction/classificati
    - Acceptance: with **only** PR-A merged, `db rebuild` on `source-heavy` reproduces provenance
      projections from manifests alone.
 
-1. **Task 2.1b — PR-A (retained): `0002_jobs` migration + runner registration (no feature code)**
-   - What: the `0002_jobs` DDL (`jobs`, `job_attempts` verbatim from the dictionary) authored in
-     `@atlas/jobs` and registered into sqlite-store's runner via `registerMigration`, plus its
-     checksum test — **no** repository, runner, or CLI feature code (all deferred to Task 2.7/PR-B).
-     Lands in retained PR-A so a PR-B revert never orphans applied jobs DDL (fixes the retained-vs-
-     feature split for `0002_jobs`).
-   - Files: `packages/jobs/migrations/0002_jobs.ts`, `packages/jobs/src/register.ts`,
-     `packages/jobs/test/migration-checksum.test.ts`.
-   - Interfaces — **Consumes:** 0.2 dictionary, 1.4 (`registerMigration`). **Produces:**
-     `registerJobsMigration(store: Store): void`.
-   - Test: `jobs.migration-checksum.test` — `0002_jobs` applies once by sparse id, checksum-guarded
-     no-op on re-apply.
-   - Acceptance: with only PR-A merged, `db migrate` creates `jobs`/`job_attempts`; a PR-B revert
-     leaves them intact and owned.
-
 2. **Task 2.2 — Secret-scan engine + guards + quarantine store**
    - What: the scan engine (representative secret formats + entropy heuristics; deterministic,
      versioned ruleset), **`PrePersistenceGuard`** (raw bytes + normalized output; consumed by
@@ -818,11 +752,8 @@ egress broker and is provably restricted to non-mutating extraction/classificati
      store: AEAD (key per ACL matrix, trusted-CLI identity), mode-0700 dir **outside the repo**,
      minimized filenames, bounded retention, crash-safe purge (temp-then-rename; no plaintext ever
      on disk), `doctor` quarantine-security checks.
-   - Files: `packages/scan/src/{engine,rules,pre-persistence,generated-artifact}.ts` +
-     `packages/scan/package.json` (a **dependency-leaf `@atlas/scan` package** consumed by `apps/cli`,
-     `@atlas/sources`, and `@atlas/broker` — eliminates the CLI→package→CLI runtime cycle and the
-     module-boundary violation), `apps/cli/src/quarantine/store.ts` (quarantine orchestration stays
-     app-internal), `packages/scan/test/*.test.ts`, `apps/cli/test/scan/*.test.ts`.
+   - Files: `apps/cli/src/scan/{engine,rules,pre-persistence,generated-artifact}.ts`,
+     `apps/cli/src/quarantine/store.ts`, `apps/cli/test/scan/*.test.ts`.
    - Interfaces — **Consumes:** 1.2, 1.8 (diag). **Produces:**
      `scanBytes(input: {bytes: Uint8Array, context: ScanContext}): ScanVerdict`
      (`ScanVerdict = {clean: true} | {clean: false, findings: SecretFinding[]}`) ·
@@ -835,26 +766,32 @@ egress broker and is provably restricted to non-mutating extraction/classificati
      mid-quarantine leaves no plaintext; `scan.engine.test` — representative formats detected,
      clean fixtures pass.
    - Acceptance: guard refusal quarantines + aborts with exit `3`; nothing persists to any sink.
-     Import-graph tests assert `@atlas/scan` is a leaf consumed by CLI, sources, and broker with no
-     back-edge into `apps/cli`, so all three enforcement points share one scanner without duplication.
 
-3. **Task 2.3 — `@atlas/sources`: sandboxed parser worker**
+3. **Task 2.3 — `@atlas/sources`: sandboxed parser worker (scans inside the sandbox — D15)**
    - What: the sandbox launcher per `sandbox-contract.md` — dedicated low-privilege spawn,
      **allowlisted empty environment**, no network, isolated FS namespace (read-only input handle +
-     disposable output dir), isolated temp, CPU/memory/time/output caps, syscall restrictions,
+     a **disposable, worker-private** temp), CPU/memory/time/output caps, syscall restrictions,
      MIME-signature validation before parse, scripts/external resources disabled; startup capability
-     probes that fail fast (wired into `doctor`). Both backends (macOS Seatbelt, Linux
+     probes that fail fast (wired into `doctor`). **Scan-before-persist (D15):** the worker runs the
+     secret scanner (engine injected from Task 2.2) **inside the sandbox** over its normalized output
+     and emits an **attested clean byte stream through a pipe / sealed memory-backed fd** — it
+     **never** writes normalized bytes to a shared `outputDir` the trusted process later reads, so no
+     normalized byte reaches any temp/parser sink unscanned. `runInSandbox` returns a readable stream
+     + a scan attestation, not a directory path. Both backends (macOS Seatbelt, Linux
      userns+seccomp+netns+rlimits).
    - Files: `packages/sources/src/sandbox/{launcher,darwin,linux,probes}.ts`,
-     `packages/sources/src/worker/main.ts`, `packages/sources/test/sandbox-containment.test.ts`.
-   - Interfaces — **Consumes:** 0.3 (identities), 2.0 sandbox contract. **Produces:**
+     `packages/sources/src/worker/main.ts`, `packages/sources/test/{sandbox-containment,scan-before-persist}.test.ts`.
+   - Interfaces — **Consumes:** 0.3 (identities), 2.0 sandbox contract, 2.2 scan engine (injected into
+     the worker). **Produces:**
      `runInSandbox(req: {inputPath: string, format: SourceFormat, limits: SandboxLimits}): Promise<WorkerResult>`
-     (`WorkerResult = {ok: true, outputDir: string} | {ok: false, rejection: NormalizationRejection}`) ·
+     (`WorkerResult = {ok: true, stream: ReadableStream<Uint8Array>, attestation: ScanAttestation} | {ok: false, rejection: NormalizationRejection}`) ·
      `probeSandbox(): Promise<SandboxCapabilityReport>` (consumed by `doctor`).
    - Test: `sandbox.containment.test` (adversarial): probe parsers assert network, env, keychain,
      inherited FDs, out-of-scope paths, subprocess spawn, forbidden syscalls all fail; caps enforce
-     incl. cleanup after forced termination.
-   - Acceptance: containment suite green on both OS in CI.
+     incl. cleanup after forced termination. `scan-before-persist.test` (D15) — a secret-bearing
+     source yields **no** file on any temp/parser/worktree sink before the reject; a filesystem probe
+     during the run finds no unscanned normalized bytes.
+   - Acceptance: containment + scan-before-persist suites green on both OS in CI.
 
 4. **Task 2.4 — Normalization per contract (consumes the guard)**
    - What: md/txt/pdf/html normalizers running in the worker, driven by `normalization-contract.md`:
@@ -921,19 +858,21 @@ egress broker and is provably restricted to non-mutating extraction/classificati
      matrix (same bytes new path ⇒ capture not blob; changed bytes ⇒ new blob; extractor upgrade ⇒
      new rendition + re-pointed active; retried same-path ingest ⇒ no new capture) — **provenance
      behavior only; dependent-evidence staleness asserted in Phase 4** (fixes R4-F4);
-     `ingest.e2e.test` — preview creates **no canonical/vault/worktree/git mutation** (any
-     model-call/transmission-audit rows an extraction preview writes are the enumerated observability
-     writes, not vault state, per the single preview-side-effect contract), `--apply` commits via
+     `ingest.e2e.test` — preview creates nothing (asserted against all sinks), `--apply` commits via
      broker CAS, canonical advanced exactly one commit.
    - Acceptance: capture idempotency proven under retry + crash injection at each checkpoint.
 
 7. **Task 2.7 — PR-B: `@atlas/jobs` + `jobs` CLI**
-   - What: the `0002_jobs` DDL + runner registration ship in retained **PR-A as Task 2.1b** (sole ownership retained; the runner applies it by sparse id per §2.7) so a PR-B revert never orphans applied jobs DDL; this PR-B task adds only the repository + transactions (state enum, attempts, `lease_epoch` reserved-written,
-     `next_run_at` backoff, idempotency keys unique per (workflow, key), side-effect-id recording),
-     synchronous single-runner (`jobs-runner` lock, bounded attempts, backoff), startup dead-runner
-     recovery (reset to `pending` under the lock), `jobs list|run|retry|cancel` per D5 + the
-     registry (bulk selection semantics, per-job result array + aggregate exit).
-   - Files: `packages/jobs/src/{repo,runner,recovery}.ts`,   # `0002_jobs.ts` migration + registration ship in retained PR-A (Task 2.1b)
+   - What: `0002_jobs` migration (authored here; **the CLI composition root (`apps/cli/src/main.ts`)
+     imports `@atlas/jobs` and calls `registerJobsMigration(store)` before `store.migrate()`** so
+     `db migrate` discovers `0002` — sole ownership, no undiscoverable migration), repository +
+     transactions (state enum, attempts, `lease_epoch` reserved-written, `next_run_at` backoff,
+     idempotency keys unique per (workflow, key), side-effect-id recording), synchronous single-runner
+     (`jobs-runner` lock, bounded attempts, backoff), startup dead-runner recovery (reset to
+     `pending` under the lock), `jobs list|run|retry|cancel` per D5 + the registry (bulk selection
+     semantics, per-job result array + aggregate exit).
+   - Files: `packages/jobs/migrations/0002_jobs.ts`, `packages/jobs/src/{repo,runner,recovery,register}.ts`,
+     `apps/cli/src/main.ts` (add the `registerJobsMigration` call at the composition root),
      `apps/cli/src/commands/jobs.ts`, `packages/jobs/test/*.test.ts`.
    - Interfaces — **Consumes:** 2.0 jobs-contract, 1.4 (`registerMigration`), 1.8 (`withLock`).
      **Produces:**
@@ -950,43 +889,40 @@ egress broker and is provably restricted to non-mutating extraction/classificati
 8. **Task 2.8 — Egress broker + `@atlas/models` (Gemini, extraction-only) + operation gate**
    - What: the egress-broker daemon (runs as `atlas-egress` via its launcher; unix socket per D10):
      sole credential holder, sole outbound-network process; scans the **exact serialized payload**
-     in-broker on every request/response (engine from 2.2), writes sanitized-metadata ledger rows + audit events for every transmission via a **durable
-     broker-owned egress outbox** — a journal at `egress.outbox_path` (default
-     `/var/lib/atlas/egress-outbox` (Linux) / `/usr/local/var/atlas/egress-outbox` (macOS)),
-     `atlas-egress`-owned dir `0700`, append-only records `{requestId, idempotencyKey, state,
-     sanitized-metadata}` written with fsync + temp-then-rename atomicity, retention pruned only
-     after CLI acknowledgment, **included in the egress-broker backup set**, and normative in
-     `provider-interface.md` (Task 2.0): the broker persists a request **receipt (end-to-end
-     request/idempotency id)** before any network transmission and persists the terminal outcome
-     **before replying**; the CLI-side
-     `finalizeLedgerWrite` correlation (request/response hashes, destination, model, tokens, latency,
-     cost, retries) then **acknowledges** the receipt, and `reconcileInterruptedRuns` on restart
-     records any unacknowledged receipt — so a crash between transmission and finalization can never
-     lose or silently re-bill a transmission. **Each transmission is a ledger-internal `model_calls`/receipt write, not a `run.*` git-ref event** — the single terminal git-ref event per run (§2.5 cardinality) is emitted once by the run's cross-store finalization after the run completes, so a run performing N transmissions (e.g. `query`'s embedding + generation) still yields exactly one terminal event. `@atlas/models`
-     = typed IPC client (`generateText`/`generateObject<T>`/`embed`, versioned request/result types,
-     `AbortSignal`, adapter-owned retry, taxonomy mapping incl. `retryAfter` propagation). The
-     Gemini adapter lives **inside** the egress broker. Plus **`policies.operationGate`** — the
-     narrow Phase-2 policy subset (fixes R1-F3): capture/projection ops allowed, synthesis ops
-     rejected fail-closed, reserved task ops rejected always.
-   - Files: `packages/models/src/{client,types}.ts`,
-     `packages/broker/src/egress/{server,gemini,scan}.ts`, `packages/broker/bin/atlas-egress.ts`,
+     in-broker on every request/response (engine from 2.2). **Every call carries a run-bound
+     capability (D19)** minted CLI-side per run — `{runId, operation, model, maxBytes, maxTokens,
+     costCeiling, allowedSensitivity}` — and the broker enforces the capability + a **per-run
+     cost/byte budget** and refuses a payload whose `effectiveSensitivity` exceeds
+     `allowedSensitivity`, in addition to the scan (bounds a compromised agent's export/spend through
+     the sanctioned RPC). **Audit cardinality (D6):** each transmission writes a **`model_calls`
+     ledger row** (request/response hashes, destination, model, tokens, latency, cost, retries) — a
+     run has many; it does **NOT** emit a `run.*` terminal audit-ref event per call (those stay
+     one-terminal-per-run, owned by the run's workflow). `@atlas/models` = typed IPC client
+     (`generateText`/`generateObject<T>`/`embed`, versioned request/result types, `AbortSignal`,
+     adapter-owned retry, taxonomy mapping incl. `retryAfter` propagation). The Gemini adapter lives
+     **inside** the egress broker. Plus **`policies.operationGate`** — the narrow Phase-2 policy
+     subset (fixes R1-F3): capture/projection ops allowed, synthesis ops rejected fail-closed,
+     reserved task ops rejected always.
+   - Files: `packages/models/src/{client,types,capability}.ts`,
+     `packages/broker/src/egress/{server,gemini,scan,budget}.ts`, `packages/broker/bin/atlas-egress.ts`,
      `apps/cli/src/policies/operation-gate.ts`, `packages/models/test/*.test.ts`.
    - Interfaces — **Consumes:** 2.0 provider contract, 2.2 engine, 1.0 (identity/keys), 1.1
-     (`ProviderError`). **Produces:**
-     `generateText(req: GenerateTextRequest, signal?: AbortSignal): Promise<GenerateTextResult>` ·
-     `generateObject<T>(req: {schemaId: SchemaRef, prompt: PromptRef, input: string}, signal?: AbortSignal): Promise<T>` (the IPC carries a **registered schema id / serializable JSON Schema**, never a Zod instance — the client keeps the `z.ZodType<T>` locally for result validation, since Zod objects are not JSON-serializable across the framed-JSON seam) ·
-     `embed(req: {texts: string[], dimensions: number}, signal?: AbortSignal): Promise<EmbedResult>`
+     (`ProviderError`), 4.3 (`effectiveSensitivity` — forward ref; Phase-2 uses the declared value
+     until 4.3 lands). **Produces:**
+     `mintEgressCapability(run: RunContext, limits: EgressLimits): EgressCapability` (CLI-side) ·
+     `generateText(req: GenerateTextRequest, cap: EgressCapability, signal?: AbortSignal): Promise<GenerateTextResult>` ·
+     `generateObject<T>(req: {schema: z.ZodType<T>, prompt: PromptRef, input: string}, cap: EgressCapability, signal?: AbortSignal): Promise<T>` ·
+     `embed(req: {texts: string[], dimensions: number}, cap: EgressCapability, signal?: AbortSignal): Promise<EmbedResult>`
      (batch semantics: `partial_batch` names succeeded indices, never persisted as complete) ·
-     `lookupReceipt(idempotencyKey: string): Promise<EgressReceipt | null>` · `ackReceipt(requestId: string): Promise<void>` · `listUnacknowledgedReceipts(): Promise<EgressReceipt[]>` (a registered egress reconciliation handler consumed by `reconcileInterruptedRuns` (1.7) at CLI startup replays cached terminal results **without retransmission** and acknowledges them — no double-transmit, no permanently-incomplete model-call ledger) ·
      `assertOperationAllowed(op: ChangePlanOperation, phase: 2 | 4): void` (throws typed
      `OperationForbiddenError`; Phase-4 extends the same owner with tier gating — single source).
-   - Test: `egress.bypass.test` — agent-context direct fetch fails at OS layer (network denial);
-     a secret planted in a prompt is blocked in-broker, quarantined, audited; adapter suite per the
-     spec (doubles by default; malformed/truncated output, schema violations, timeouts, rate-limit
-     `retryAfter → retryAfterMs`, cancellation before/during/mid-batch, auth failures: stable `authentication`, `retryable: false`,
-     zero retries, sanitized diagnostics); crash/socket-loss failpoints at the network/IPC/
-     finalization boundaries prove request-succeeds/ledger-fails and intent-succeeds/request-fails
-     both reconcile via the outbox (idempotent, no double-transmit).
+   - Test: `egress.bypass.test` — a direct (non-launcher) outbound from the agent UID fails at the OS
+     layer (D17); a secret planted in a prompt is blocked in-broker, quarantined, `model_calls` row
+     written; `egress.capability-budget.test` (D19) — a call exceeding the run's byte/cost ceiling or
+     exporting above `allowedSensitivity` is refused; adapter suite per the spec (doubles by default;
+     malformed/truncated output, schema violations, timeouts, rate-limit `retryAfter → retryAfterMs`,
+     cancellation before/during/mid-batch, auth failures: stable `authentication`, `retryable: false`,
+     zero retries, sanitized diagnostics).
    - Acceptance: `ATLAS_LIVE_GEMINI=1` smoke passes nightly; no provider key readable outside
      `atlas-egress` (re-asserted by `provisioning.separation.test`).
 
@@ -1031,13 +967,13 @@ egress broker and is provably restricted to non-mutating extraction/classificati
 ```bash
 pnpm -r build && pnpm -r test
 ATLAS_PROVISIONED=1 pnpm --filter @atlas/sources --filter @atlas/jobs --filter @atlas/broker test
-V=$(mktemp -d)/vault && cp -R fixtures/small-valid "$V" && git -C "$V" init -q && git -C "$V" add -A && git -C "$V" -c user.name='Aryeh Stark' -c user.email='aryeh@21stark.com' commit -qm seed
+V=$(mktemp -d)/vault && cp -R fixtures/small-valid "$V" && git -C "$V" init -q && git -C "$V" add -A && git -C "$V" commit -qm seed
 node apps/cli/dist/index.js --vault "$V" db migrate
 node apps/cli/dist/index.js --vault "$V" ingest fixtures/inputs/sample.md        # preview; exit 0; no sinks written
 node apps/cli/dist/index.js --vault "$V" ingest fixtures/inputs/sample.md --apply --json | jq -e .runId
 node apps/cli/dist/index.js --vault "$V" source list --json | jq -e '.total >= 1'
 node apps/cli/dist/index.js --vault "$V" jobs list --json                        # exit 0
-pnpm --filter ./apps/cli test -- --testNamePattern "phase2.non-integration"      # release gate green
+pnpm --filter ./apps/cli test -- --grep "phase2.non-integration"                 # release gate green
 ```
 
 ### Rollback
@@ -1065,7 +1001,7 @@ answers with packed context; index maintenance commands exist.
 0. **Task 3.0 — Phase-3 contracts gate**
    - What: retrieval/index contract doc (chunking rules: semantic sections, heading hierarchy,
      title+aliases in chunk text; generation identity; reconciliation steps; staleness detection;
-     RRF weights + layer precedence: exact id → slug → unique alias → fts/vector fusion — **the contract defines only the default values + bounds of explicit `indexing.rrf_weights.*` config keys (added to the typed config + example in Task 1.2); runtime search and the eval tooling both read only those resolved config values, never hardcoded literals**, so Phase-5 tuning on the copy cannot fork retrieval behavior) +
+     RRF weights + layer precedence: exact id → slug → unique alias → fts/vector fusion) +
      `cli-contract/*` for `query`, `index status|verify|repair|rebuild`.
    - Files: `docs/specs/retrieval-index-contract.md`,
      `docs/specs/cli-contract/{query,index-status,index-verify,index-repair,index-rebuild}.schema.json`.
@@ -1174,7 +1110,7 @@ answers with packed context; index maintenance commands exist.
 ### Verification (run from repo root)
 ```bash
 pnpm -r build && pnpm -r test
-V=$(mktemp -d)/vault && cp -R fixtures/source-heavy "$V" && git -C "$V" init -q && git -C "$V" add -A && git -C "$V" -c user.name='Aryeh Stark' -c user.email='aryeh@21stark.com' commit -qm seed
+V=$(mktemp -d)/vault && cp -R fixtures/source-heavy "$V" && git -C "$V" init -q && git -C "$V" add -A && git -C "$V" commit -qm seed
 node apps/cli/dist/index.js --vault "$V" db migrate && node apps/cli/dist/index.js --vault "$V" db rebuild
 ATLAS_LIVE_GEMINI=1 node apps/cli/dist/index.js --vault "$V" index rebuild        # exit 0; run.projection appended
 ATLAS_LIVE_GEMINI=1 node apps/cli/dist/index.js --vault "$V" query "what sources discuss meridian" --json | jq -e '.items | length > 0'
@@ -1203,21 +1139,14 @@ evidence with re-verification; `purge`. Lands as **PR-A (Task 4.1, retained)** t
 ### Tasks
 
 0. **Task 4.0 — Phase-4 contracts gate**
-   - What: `acceptance-thresholds.md` **§workflow** (Tier-2 thresholds sourced from a **single
-     machine-readable policy module in `@atlas/contracts`** — the doc, config defaults, and
-     `effectiveRisk` all read the **same** constants; runtime config **cannot loosen** these binding
-     V1 safety limits (overrides validated against immutable bounds, rejected otherwise), so a value
-     beyond confidence 0.8 / 50 lines / 3 sections can never auto-integrate while a comparison test
-     stays green; doctor/verify check inventories consolidated; per-command failure exit codes), the
-     workflow/risk
-     contract (**the complete per-operation × note-type × scope policy/risk matrix lives in one machine-readable module in `@atlas/contracts`; the Markdown table here and the Task-4.3 test cases are generated from it, and `effectiveRisk`/`mutationPolicyFor` consume it directly — no hand-copied mapping**; tier definitions; CAS/refresh
+   - What: `acceptance-thresholds.md` **§workflow** (Tier-2 thresholds verbatim from §2.5; doctor/
+     verify check inventories consolidated; per-command failure exit codes), the workflow/risk
+     contract (per-type mutation policy table → `policies` inputs; tier definitions; CAS/refresh
      semantics), and `cli-contract/*` for `enrich`, `reconcile`, `maintain`, `validate`,
      `git review|refresh|approve|reject|rollback|verify`, `purge`,
-     `source trust promote|revoke`; plus a **revision of `db-rebuild.schema.json`** for the new
-     `--from-git` flag (flag compatibility, report/gap output shape, exit codes, generated acceptance
-     fixtures) so the retained harness validates the flag Task 4.11 adds.
+     `source trust promote|revoke`.
    - Files: `docs/specs/acceptance-thresholds.md` (§workflow), `docs/specs/workflow-risk-contract.md`,
-     `docs/specs/cli-contract/{enrich,reconcile,maintain,validate,git-review,git-refresh,git-approve,git-reject,git-rollback,git-verify,purge,source-trust-promote,source-trust-revoke,db-rebuild}.schema.json` (the last a revision adding `--from-git`).
+     `docs/specs/cli-contract/{enrich,reconcile,maintain,validate,git-review,git-refresh,git-approve,git-reject,git-rollback,git-verify,purge,source-trust-promote,source-trust-revoke}.schema.json`.
    - Interfaces — **Consumes:** 0.1, 0.3. **Produces:** contracts consumed by 4.3–4.11.
    - Test: `contract-lint.test` schema-presence; threshold values asserted equal to §2.5 constants
      by a literal-comparison test (no drift between plan/spec/contract).
@@ -1253,9 +1182,8 @@ evidence with re-verification; `purge`. Lands as **PR-A (Task 4.1, retained)** t
    - What: extend the 2.8 gate module (same owner): `effectiveRisk` derived deterministically from
      operation type × target note type × scope × config (the model's `proposedRisk` never gates);
      `effectiveSensitivity` computed-on-read (D2) as most-restrictive over declared + input chain;
-     per-op×type×scope mutation policy + risk matrix **read directly from the single machine-readable module in `@atlas/contracts`** (no hand-copied mapping; the doc table + tests are generated from it), incl. immutability of sources/decisions + append-only rules;
-     Tier-2 threshold values read from the single machine-readable policy module (§2.5 constants;
-     runtime config cannot loosen them — overrides validated against immutable bounds).
+     per-type mutation policy table (immutability of sources/decisions, append-only rules);
+     Tier-2 thresholds consumed from `acceptance-thresholds.md` values via config.
    - Files: `apps/cli/src/policies/{risk,sensitivity,mutation-policy}.ts`,
      `apps/cli/test/policies.test.ts`.
    - Interfaces — **Consumes:** 4.0 contract, 2.0 ops, 1.3. **Produces:**
@@ -1264,8 +1192,7 @@ evidence with re-verification; `purge`. Lands as **PR-A (Task 4.1, retained)** t
      `mutationPolicyFor(type: NoteType): MutationPolicy`.
    - Test: `policies.test` — table-driven: every op×type cell yields the contract's tier; source
      mutation ⇒ policy violation; sensitivity chain (source→claim→note) takes the max; `proposedRisk`
-     is demonstrably ignored for gating; and the Tier-2 threshold values used by `effectiveRisk` are
-     asserted identical to the §2.5 policy-module constants (no config-loosening path).
+     is demonstrably ignored for gating.
    - Acceptance: exactly one call site computes risk (grep-guard test: no other module references
      `proposedRisk` for control flow).
 
@@ -1289,7 +1216,9 @@ evidence with re-verification; `purge`. Lands as **PR-A (Task 4.1, retained)** t
    - What: extend the 2.5 engine with synthesis stages: plan (LLM `generateObject<ChangePlan>`
      via egress, **retrieval-first enforced in orchestration**: the plan stage takes a
      `RetrievalResult` handle it must present) → validate (4.4) → patch (4.2) → worktree apply →
-     agent commit (manifest per 1.5) → tier branch: Tier-1/2 CAS auto-integrate via `advanceProtectedRef` with rebase-regenerate-revalidate on CAS miss **bounded by a small fixed limit (config `git.cas_max_retries`, default 3), after which the run terminates with a stable `refresh-required`/conflict result (exit `6`) — every attempt and its model cost recorded** so an actively-moving canonical cannot loop retrieval+model unboundedly; Tier-3 stop at `review-pending` (exit `6`, success-shaped `review_pending` + runId). **Auto-integrated Tier-1/2 runs do not stop at `integrated`: this task drives the full `integrated → reindexed → finalized` sequence**, consuming the Phase-3 indexing APIs (`reconcileIndex` + generation activation from 3.2/3.5) with durable checkpoints + crash recovery between integration, reindex, and finalize, so canonical never advances while retrieval is left on the old generation; an auto-integration E2E asserts the complete state sequence. `git refresh`
+     agent commit (manifest per 1.5) → tier branch: Tier-1/2 CAS auto-integrate via
+     `advanceProtectedRef` with rebase-regenerate-revalidate on CAS miss; Tier-3 stop at
+     `review-pending` (exit `6`, success-shaped `review_pending` + runId). `git refresh`
      implementation (new commit + manifest, supersession record, back to review-pending,
      key-accepting identity per the spec). The `GeneratedArtifactGuard` wraps every persisted
      artifact (plans, patches, diffs, worktree contents, manifests, commit messages).
@@ -1304,10 +1233,8 @@ evidence with re-verification; `purge`. Lands as **PR-A (Task 4.1, retained)** t
      inspection); `concurrent-integration.test` — canonical moved between validation and commit ⇒
      CAS fails, regenerate+revalidate, no lost update/duplicate commit; Tier-3 apply ⇒ durable
      plan/branch/worktree/commit + exit `6`.
-   - Acceptance: preview mode provably free of **canonical/vault/worktree/git** side effects across those sinks
-     (same assertion harness as 2.6); the enumerated model-call/transmission-audit writes a
-     model-backed preview performs are permitted by the single preview-side-effect contract and
-     asserted **distinct from vault state** (no `run.*` audit-ref event, no vault mutation).
+   - Acceptance: preview mode provably side-effect-free across all sinks (same all-sink assertion
+     harness as 2.6).
 
 6. **Task 4.6 — Claims & evidence operations**
    - What: `CreateClaim`/`AttachEvidence`/`UpdateEvidenceVerification` op execution: canonical
@@ -1341,22 +1268,19 @@ evidence with re-verification; `purge`. Lands as **PR-A (Task 4.1, retained)** t
 
 8. **Task 4.8 — Trust lifecycle + taint**
    - What: `source trust promote|revoke` (privileged; challenge/authorization; bound to
-     `sourceId`+`rawContentHash`; trust ledger ref advanced by broker **through `finalizeLedgerWrite` (§2.8) with a trust intent** —
-     ref advancement is idempotent by operation id, the intent defines which store is authoritative
-     at each checkpoint, and `reconcileInterruptedRuns` converges both crash directions
-     (ref-advanced/ledger-failed and ledger-first/ref-failed); immutable audit record),
+     `sourceId`+`rawContentHash`; trust ledger ref advanced by broker; immutable audit record),
      transitive taint (claim/context/synthesis derived from untrusted stays untrusted; mixed
      evidence ⇒ untrusted; no laundering), Tier-2 block for untrusted-derived mutations, revocation
      semantics: pre-integration run ⇒ `failed@<checkpoint>` reason `trust-revoked`; integrated run ⇒
      spawn Tier-3 **remediation run** referencing source + affected run.
    - Files: `apps/cli/src/trust/{state,taint,revoke}.ts`,
      `apps/cli/src/commands/source-trust.ts`, `apps/cli/test/trust-lifecycle.test.ts`.
-   - Interfaces — **Consumes:** 1.6 (challenge + ref advance), 1.7 (`finalizeLedgerWrite`), 4.5, 2.7. **Produces:**
+   - Interfaces — **Consumes:** 1.6 (challenge + ref advance), 4.5, 2.7. **Produces:**
      `trustStateFor(contentId: ContentId): TrustState` · `taintOf(inputs: EvidenceRef[]): "trusted"|"untrusted"` ·
      `spawnRemediationRun(revokedSource: ContentId, affectedRun: string): Promise<RunId>`.
    - Test: `trust.lifecycle.test` — the spec's full matrix: forged/agent promotion refused, hash
-     change invalidates authorization, replay rejected, multi-hop taint, revocation both branches, audit records present; crash between trust-ref CAS and ledger
-     finalization converges on restart in both directions.
+     change invalidates authorization, replay rejected, multi-hop taint, revocation both branches,
+     audit records present.
    - Acceptance: an untrusted-ingest-driven Tier-2 mutation is forced to review until promotion.
 
 9. **Task 4.9 — Full `git` surface: `review|approve|reject|rollback|verify`**
@@ -1387,20 +1311,14 @@ evidence with re-verification; `purge`. Lands as **PR-A (Task 4.1, retained)** t
       verification across **every** storage class incl. no re-linkable audit identifier);
       audit-ref reconciliation (ordinary erasure = ledger-mapping deletion renders opaque IDs
       unlinkable; legally-required removal = broker signed-tombstone replacement + external
-      checkpoint per 0.3); git-history rewrite protocol where required — via a **dedicated broker-authorized canonical
-      rewrite operation** (`broker.rewriteCanonicalHistory`, distinct from the FF-only advance) bound
-      to the complete erasure-inventory digest, old+new graph hashes, authorization nonce, and
-      external checkpoint, followed by post-rewrite reachability scans across every ref, reflog,
-      worktree, backup, and object store (a raw non-broker rewrite is never permitted); **retention/
-      compaction execution** — the scheduled-work owner (R1-F13): retention jobs that **only schedule
-      and invoke each storage module's own idempotent maintenance API** (`pruneBackups` (1.7),
-      `expireQuarantine` (2.2), `rotateLogs` (1.8), `compactRetiredGenerations` (3.2)) with the
-      resolved shared config — never reimplementing policy — enqueued via 2.7 and run by `jobs run`/
-      workflow drains, with tests proving scheduled and inline triggers produce identical results.
+      checkpoint per 0.3); git-history rewrite protocol where required; **retention/compaction
+      execution** — the scheduled-work owner (R1-F13): retention jobs enforcing
+      `retention-matrix.md` (LanceDB generation compaction post-activation, log rotation expiry,
+      backup pruning, quarantine expiry) enqueued via 2.7 and run by `jobs run`/workflow drains.
     - Files: `apps/cli/src/commands/purge.ts`, `apps/cli/src/purge/{inventory,erase,verify}.ts`,
       `packages/broker/src/ops/audit-tombstone.ts`, `apps/cli/src/retention/jobs.ts`,
       `apps/cli/test/e2e/purge.e2e.test.ts`.
-    - Interfaces — **Consumes:** 0.4 matrix, 1.2 (resolved shared config), 1.6, 1.7, 2.2 (quarantine), 3.5, 2.7. **Produces:**
+    - Interfaces — **Consumes:** 0.4 matrix, 1.6, 1.7, 2.2 (quarantine), 3.5, 2.7. **Produces:**
       `computeErasureInventory(sel: PurgeSelector): Promise<ErasureInventory>` ·
       `registerRetentionJobs(deps): void`.
     - Test: `purge.e2e.test` (privileged, fixture vault): seed uniquely-identifiable content in
@@ -1444,7 +1362,7 @@ evidence with re-verification; `purge`. Lands as **PR-A (Task 4.1, retained)** t
 ### Verification (run from repo root)
 ```bash
 pnpm -r build && pnpm -r test
-V=$(mktemp -d)/vault && cp -R fixtures/source-heavy "$V" && git -C "$V" init -q && git -C "$V" add -A && git -C "$V" -c user.name='Aryeh Stark' -c user.email='aryeh@21stark.com' commit -qm seed
+V=$(mktemp -d)/vault && cp -R fixtures/source-heavy "$V" && git -C "$V" init -q && git -C "$V" add -A && git -C "$V" commit -qm seed
 node apps/cli/dist/index.js --vault "$V" db migrate && node apps/cli/dist/index.js --vault "$V" db rebuild
 node apps/cli/dist/index.js --vault "$V" enrich project-meridian                 # preview; exit 0 or 6; no sinks written
 set +e
@@ -1460,7 +1378,7 @@ node apps/cli/dist/index.js --vault "$V" git approve "$RUN_ID" --authorization /
 node apps/cli/dist/index.js --vault "$V" git rollback "$RUN_ID" --export-challenge > /tmp/ch2.json
 node tools/test-signer.ts --key atlas-test-approver < /tmp/ch2.json > /tmp/auth2.json
 node apps/cli/dist/index.js --vault "$V" git rollback "$RUN_ID" --authorization /tmp/auth2.json # exit 0; revert + reconcile
-pnpm --filter ./apps/cli test -- --testNamePattern "crash-recovery.failpoints|observability"
+pnpm --filter ./apps/cli test -- --grep "crash-recovery.failpoints|observability"
 ```
 (The `set +e` wrapper captures the deliberate exit-6 without tripping `set -e` CI shells — fixes R3-F11.)
 
@@ -1492,7 +1410,9 @@ bootstrap migration; agent-branch-only operation verified; eval + scale gates me
      per-quarantine-category operator flows, executable migration fixtures);
      `acceptance-thresholds.md` **§retrieval + §scale** (recall@10 ≥ 0.85, MRR ≥ 0.7;
      representative + maximum vault profiles; latency/throughput/memory/disk/recovery thresholds);
-     `cli-contract/*` + registry `implemented` flips for `graduation scan|audit|migrate`, `quarantine inspect|resolve` (rows seeded in Task 0.0; spec's CLI-surface prose already regenerated from the registry by `gen-cli-contract.ts`, so no drift); **and adds `graduation.migrate` to the normative privileged-operation registry + regenerates the broker `AuthorizationChallenge`/`PrivilegedOpDescriptor` schemas** so the broker can mint/verify its challenge — graduation apply uses the **production authorizer** (Task 1.0), the test signer reserved for CI fixture runs only.
+     `cli-contract/*` + registry `implemented` flips for `graduation scan|audit|migrate`,
+     `quarantine inspect|resolve` (rows seeded in Task 0.0; spec's CLI-surface prose already
+     regenerated from the registry by `gen-cli-contract.ts`, so no drift).
    - Files: `docs/specs/bootstrap-migration.md`, `docs/specs/acceptance-thresholds.md` (§retrieval,
      §scale), `docs/specs/cli-contract/{graduation-scan,graduation-audit,graduation-migrate,quarantine-inspect,quarantine-resolve}.schema.json`.
    - Interfaces — **Consumes:** 0.0 registry. **Produces:** contracts consumed by 5.1–5.4.
@@ -1500,11 +1420,9 @@ bootstrap migration; agent-branch-only operation verified; eval + scale gates me
    - Acceptance: migration fixtures in the contract are executable (consumed by 5.3's suite).
 
 1. **Task 5.1 — `graduation scan` (fail-closed full-vault scan on the copy)**
-   - What: run a **read-only history scan on the source first**; only then create the disposable copy in a
-     **unique, encrypted, mode-0700, non-backed-up staging dir** (atomically renamed to
-     `.scratch/atlas-graduation-copy` only after clone verification), and re-scan working tree **and
-     git history** before any rebuild/index/migration/model call; a blocking scan **securely deletes
-     all copied objects + temp packs** (cleanup guaranteed on every failure path); findings block graduation
+   - What: create the disposable copy (`.scratch/atlas-graduation-copy`, full clone of `main-vault`
+     incl. history); run the full-vault secret + sensitive-data scan (2.2 engine) over working tree
+     **and git history** before any rebuild/index/migration/model call; findings block graduation
      and route to reviewed-remediation / encrypted-quarantine (accounting for history copies).
    - Files: `apps/cli/src/commands/graduation-scan.ts`, `apps/cli/src/graduation/copy.ts`,
      `apps/cli/test/e2e/graduation-scan.e2e.test.ts`.
@@ -1512,9 +1430,7 @@ bootstrap migration; agent-branch-only operation verified; eval + scale gates me
      `createGraduationCopy(src: string, dst: string): Promise<{head: string}>` ·
      `scanFullVault(dir: string, opts: {includeHistory: true}): Promise<VaultScanReport>`.
    - Test: `graduation-scan.e2e.test` — a seeded secret in an **old commit** (not the working tree)
-     is found and blocks with exit `3`; clean copy passes; a blocked scan leaves no copied objects behind
-     (staging dir removed); an interrupted run followed by retry is safe — `--replace` performs
-     destructive recreation, and a stale partial copy is never silently resumed.
+     is found and blocks with exit `3`; clean copy passes.
    - Acceptance: no downstream graduation step runs while findings are unresolved (enforced by a
      persisted scan-state gate the later commands check).
 
@@ -1535,17 +1451,24 @@ bootstrap migration; agent-branch-only operation verified; eval + scale gates me
      infer `type` by the contract's precedence, initialize `schema_version: 1`, preserve/rewrite
      links, quarantine identity conflicts; per-note checkpoints (idempotent, resumable), review
      artifacts, rollback via per-note checkpoints (`graduation migrate --rollback`);
-     `quarantine inspect|resolve` operator commands;
-     graduation criteria enforcement (zero unresolved quarantines; projections rebuild clean).
-     Runs under `vault-maintenance` lock, Tier-3 review-gated (broker-authorized apply).
+     `quarantine inspect|resolve` operator commands; graduation criteria enforcement (zero unresolved
+     quarantines; projections rebuild clean). Runs under `vault-maintenance` lock, Tier-3
+     review-gated (broker-authorized apply). **`quarantine inspect|resolve` are privileged ops**
+     (they decrypt detected-credential quarantine content): broker challenge-bound (purpose = reveal,
+     caller + vault-bound, expiry/replay-protected), least-privilege reveal (metadata by default,
+     full content only under an explicit authorized reveal), each write an audit record — registered
+     in `commands.json` with `privilege: "privileged"` (D-registry, §2.5).
    - Files: `apps/cli/src/commands/{graduation-migrate,quarantine}.ts`,
      `apps/cli/src/graduation/{migrate,quarantine}.ts`, `apps/cli/test/e2e/bootstrap-migration.e2e.test.ts`.
-   - Interfaces — **Consumes:** 5.0 contract, 5.2, 4.5 (review gate), 1.6. **Produces:**
+   - Interfaces — **Consumes:** 5.0 contract, 5.2, 4.5 (review gate), 1.6 (challenge/authorization).
+     **Produces:**
      `runBootstrapMigration(dir: string, mode: "preview"|"apply"): Promise<MigrationReport>` ·
-     `resolveQuarantine(category: QuarantineCategory, noteId: string, resolution: Resolution): Promise<void>`.
+     `resolveQuarantine(category: QuarantineCategory, noteId: string, resolution: Resolution, auth: AuthorizationResponse): Promise<void>`.
    - Test: `bootstrap.migration.test` — the contract's executable fixtures: interrupted + rerun
      idempotent; unsupported/future `schema_version` refused; unknown frontmatter + provenance
      preserved; rebuild-after-migration clean; rollback of a failed bootstrap via checkpoints.
+     `quarantine.authorization.test` — unauthorized/agent `quarantine inspect` refused; reveal is
+     challenge-bound + replay-protected.
    - Acceptance: graduation criteria queryable (`graduation audit` post-migrate reports zero
      unresolved).
 
@@ -1570,30 +1493,39 @@ bootstrap migration; agent-branch-only operation verified; eval + scale gates me
 - **Eval thresholds miss:** thresholds gate *graduation*, not earlier merges — iterate chunker/
   RRF weights (config-owned) on the copy without touching phase code.
 
-### Verification (run from repo root; operates ONLY on the copy)
+### Verification — two flows (D20: real-copy uses the PRODUCTION authorizer, not the test signer)
+
+**Flow A — fixture CI (test-mode, automated):** proves the mechanics with the test signer under
+explicit test mode; runs on a throwaway migration fixture, never the real-vault copy.
 ```bash
 pnpm -r build && pnpm -r test
-MAIN_VAULT="$HOME/Code/Vaults/main-vault"; BASELINE=$(mktemp -d)/main-vault-baseline
-git -C "$MAIN_VAULT" rev-parse HEAD > "$BASELINE.head"
-git -C "$MAIN_VAULT" status --porcelain --untracked-files=all > "$BASELINE.status"
-# deterministic content manifest — content-hash of working-tree BYTES (not index metadata) for every
-# tracked, modified, and untracked file outside .git, persisted OUTSIDE the vault
-git -C "$MAIN_VAULT" ls-files -z --cached --modified --others --exclude-standard \
-  | ( cd "$MAIN_VAULT" && xargs -0 -I{} sh -c 'printf "%s " "{}"; git hash-object "{}"' ) | sort > "$BASELINE.tree"
-# Do NOT chmod the live vault. Source read-only during graduation is enforced by cloning through a
-# read-only bind/snapshot in createGraduationCopy (which never mutates source modes) and a separate
-# identity — never by rewriting the owner's permissions (which this sequence must leave untouched).
-node apps/cli/dist/index.js graduation scan --source "$MAIN_VAULT" --copy .scratch/atlas-graduation-copy   # exit 0 (or 3 with findings)
-node apps/cli/dist/index.js --vault .scratch/atlas-graduation-copy graduation audit --json | jq -e '.unresolved == 0 or .categories'
-node apps/cli/dist/index.js --vault .scratch/atlas-graduation-copy graduation migrate            # preview
-node apps/cli/dist/index.js --vault .scratch/atlas-graduation-copy graduation migrate --apply --export-challenge > /tmp/ch.json
+export ATLAS_TEST_MODE=1                                                      # broker accepts atlas-test-approver ONLY here
+V=$(mktemp -d)/legacy && cp -R fixtures/schema-v1 "$V" && git -C "$V" init -q && git -C "$V" add -A && git -C "$V" commit -qm seed
+node apps/cli/dist/index.js --config "$CFG" --vault "$V" graduation audit --json | jq -e '.categories'
+node apps/cli/dist/index.js --config "$CFG" --vault "$V" graduation migrate --apply --export-challenge > /tmp/ch.json
 node tools/test-signer.ts --key atlas-test-approver < /tmp/ch.json > /tmp/auth.json
-node apps/cli/dist/index.js --vault .scratch/atlas-graduation-copy graduation migrate --apply --authorization /tmp/auth.json
-ATLAS_LIVE_GEMINI=1 node tools/retrieval-eval.ts --vault .scratch/atlas-graduation-copy          # thresholds met
-test "$(git -C "$MAIN_VAULT" rev-parse HEAD)" = "$(cat "$BASELINE.head")" \
-  && diff <(git -C "$MAIN_VAULT" status --porcelain --untracked-files=all) "$BASELINE.status" \
-  && diff <( git -C "$MAIN_VAULT" ls-files -z --cached --modified --others --exclude-standard | ( cd "$MAIN_VAULT" && xargs -0 -I{} sh -c 'printf "%s " "{}"; git hash-object "{}"' ) | sort ) "$BASELINE.tree"   # live vault byte-untouched incl. untracked/working-tree contents
+node apps/cli/dist/index.js --config "$CFG" --vault "$V" graduation migrate --apply --authorization /tmp/auth.json
 ```
+
+**Flow B — real-copy graduation (production authorizer; operator runbook, ONLY on the copy):** no
+`ATLAS_TEST_MODE`, so the broker hard-rejects the test signer; apply is authorized by the enrolled
+**OS-presence / hardware-backed** production authorizer.
+```bash
+pnpm -r build && pnpm -r test
+unset ATLAS_TEST_MODE
+MAIN_VAULT="$HOME/Code/Vaults/main-vault"; LIVE_HEAD=$(git -C "$MAIN_VAULT" rev-parse HEAD)
+node apps/cli/dist/index.js --config "$CFG" graduation scan --source "$MAIN_VAULT" --copy .scratch/atlas-graduation-copy   # exit 0 (or 3 with findings)
+node apps/cli/dist/index.js --config "$CFG" --vault .scratch/atlas-graduation-copy graduation audit --json | jq -e '.unresolved == 0 or .categories'
+node apps/cli/dist/index.js --config "$CFG" --vault .scratch/atlas-graduation-copy graduation migrate            # preview
+# apply: OS-presence interactive path (Touch ID / hardware key) — the test signer is REFUSED here:
+! node tools/test-signer.ts --key atlas-test-approver < /dev/null 2>/dev/null | \
+    node apps/cli/dist/index.js --config "$CFG" --vault .scratch/atlas-graduation-copy graduation migrate --apply --authorization /dev/stdin   # MUST fail
+node apps/cli/dist/index.js --config "$CFG" --vault .scratch/atlas-graduation-copy graduation migrate --apply   # prompts for the production presence assertion
+ATLAS_LIVE_GEMINI=1 node tools/retrieval-eval.ts --config "$CFG" --vault .scratch/atlas-graduation-copy          # thresholds met
+test "$(git -C "$MAIN_VAULT" rev-parse HEAD)" = "$LIVE_HEAD"                                     # live vault untouched
+```
+`graduation.e2e.test` asserts Flow B's negative (test signer refused outside test mode) via
+`broker.rejects-test-signer-in-prod.test` (D20).
 
 ### Rollback
 - Precondition: any Phase-5 failure at any step.
@@ -1605,7 +1537,7 @@ test "$(git -C "$MAIN_VAULT" rev-parse HEAD)" = "$(cat "$BASELINE.head")" \
   come out: `git revert <phase5-PR-merge-sha>` → revert PR → merge.
 - Schema compatibility: Phase 5 introduces **no SQLite DDL** (reuses `0001`–`0004`); nothing to
   downgrade.
-- Verify supported state: `git -C "$MAIN_VAULT" rev-parse HEAD` + porcelain status + tree hash equal the persisted `$BASELINE.*` files (not an in-memory var — survives a fresh shell after a crash);
+- Verify supported state: `git -C "$MAIN_VAULT" rev-parse HEAD` equals the recorded `$LIVE_HEAD`;
   `test ! -e .scratch/atlas-graduation-copy`; Phase-4 Verification block still passes on fixtures.
 
 ---
@@ -1665,7 +1597,10 @@ test "$(git -C "$MAIN_VAULT" rev-parse HEAD)" = "$(cat "$BASELINE.head")" \
   `egress.bypass` · `phase2.non-integration` · `jobs.single-runner-exclusion` ·
   `retrieval.order-invariant` · `index.generation-fencing` · `crash-recovery.failpoints` ·
   `observability.run-matrix` · `trust.lifecycle` · `rollback.dependency-checks` · `purge.e2e` ·
-  `terminal-renderer.safety` · `db.migrate-ownership`. Any regression here is release-blocking.
+  `terminal-renderer.safety` · `db.migrate-ownership` · **`provisioning.integrity`** (D16) ·
+  **`scan-before-persist`** (D15) · **`egress.capability-budget`** (D19) ·
+  **`broker.rejects-test-signer-in-prod`** (D20) · **`contracts.no-app-import`** (D14) ·
+  **`quarantine.authorization`**. Any regression here is release-blocking.
 - **Security negative:** fail-closed scan on every egress path; path-traversal/symlink-escape/
   symlink-race; disguised/oversized attachments; injection-shaped Markdown/frontmatter; indirect
   prompt injection; a provider response echoing a secret — always asserting **no persistence to any
