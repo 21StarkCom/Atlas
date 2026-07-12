@@ -1,590 +1,1694 @@
 # Atlas V1 — Implementation Plan
 
-**Source spec:** `docs/specs/2026-07-11-atlas-v1-design.md` (approved-pending-review)
-**Plan date:** 2026-07-12 · **Author:** generated for Aryeh Stark
-**Repo:** `21StarkCom/Atlas` · TypeScript strict, ESM, pnpm monorepo
+**Source spec:** `docs/specs/2026-07-11-atlas-v1-design.md` · **Date:** 2026-07-12 · **Author:** Aryeh Stark (hand-written)
+**Provenance:** replaces the unresolved 5-round `stark-spec-to-plan` lead/wing output. The wing-approved
+architectural resolutions from rounds 2–5 are adopted; every round-4/round-5 blocking finding is fixed
+in this document (see `2026-07-11-atlas-v1-design.s2p-review.md` for the round-by-round audit).
+
+**Altitude rule (how to read this plan).** The spec schedules ~14 normative contract documents
+(`docs/specs/*.md`, `cli-contract/*`). This plan makes each contract an explicit, ordered **task
+deliverable**, and later tasks **consume the contract file as the single source of truth** — the plan
+does not duplicate their enumerations (that would create a drifting second copy). A task is executable
+top-down because everything it consumes is produced by an earlier task of this plan, including the
+contract docs themselves.
 
 ---
 
 ## 1. Overview
 
-Atlas is built as a **safety-loop-first** system: the correctness machinery (privilege-separated
-brokers, signed audit ledger, typed ChangePlan → validate → section-patch → git-branch apply,
-persisted workflow state machine, encrypted ledger backup/restore) is not deferred — it is the
-load-bearing spine that every later capability hangs off. The implementation therefore front-loads
-the two hardest guarantees into the earliest phases: **Phase 1** stands up persistence *plus* the
-minimal privilege-separation seam (broker + git plumbing) so that the encrypted ledger
-backup/restore — the ledger's sole DR path — is real and tested from day one; **Phase 2** stands up
-the sandboxed parser and the egress broker, deliberately restricting model activity to non-mutating
-extraction so hard invariant 3 (retrieval-before-synthesis) holds *before* retrieval exists.
+Atlas V1 is built as a pnpm/TypeScript monorepo in six PR-gated phases, each ending in a working,
+verifiable increment: **Phase 0** lands the repo scaffold + the retained CLI-contract harness + the
+up-front normative contracts; **Phase 1** delivers the skeleton (contracts package, config, vault
+read, SQLite store + migrations, git plumbing, the privilege-separated broker's authorization core,
+the encrypted ledger backup/restore subsystem, and the `inspect`/`doctor`/`status`/`db *` CLI);
+**Phase 2** the ingest loop (sandboxed normalization, fail-closed secret scanning, immutable source
+capture through the broker, the jobs queue, the egress broker with the Gemini adapter restricted to
+non-mutating extraction); **Phase 3** retrieval (LanceDB chunk/embed/hybrid + RRF, `query`, index
+ops with generation fencing); **Phase 4** the full mutation workflows (ChangePlan pipeline, risk
+tiers, review gate, approve/refresh/rollback, trust, claims/evidence, purge); **Phase 5** graduation
+to a **copy** of the real vault (fail-closed scan → read-only audit → review-gated bootstrap
+migration → eval + scale gates).
 
-**Key architectural decisions (from spec, load-bearing for ordering):**
-- **`contracts` is a leaf package**, not a CLI-internal module, because the separate-identity broker
-  must byte-identically re-verify plans/manifests the CLI produced. This forces the shared schema +
-  canonical serialization to land in Phase 1.
-- **Two brokers, one privilege pattern:** the *integration broker* (protected-ref writes) and the
-  *egress broker* (outbound network + provider credential). Authorization core lands Phase 1;
-  canonical-integration surface (`approve`/`refresh`/`rollback`) lands Phase 4; egress lands Phase 2.
-- **Two classes of state:** vault projections (rebuildable from Markdown) vs the primary
-  operational/audit ledger (backed up, never rebuilt). Every DR and rebuild path defers to this split.
-- **Effective risk and effective sensitivity each have exactly one producer** (`policies`), consumed
-  everywhere; models only *advise*.
-- **Contracts are phase-gated**, not one big-bang design gate: cross-cutting safety invariants +
-  Phase-1 contracts up front; each later phase approves its own contracts before its code.
+Key architectural decisions (wing-vetted in rounds 2–5, restated here as binding):
 
-**Phases (6):** 0 = per-phase normative contracts (gates, not a phase of code); 1 = skeleton +
-persistence + ledger backup/restore + broker/git authorization seam; 2 = sandboxed ingest + jobs +
-egress broker (extraction-only); 3 = retrieval/index; 4 = mutating workflows + risk/review + purge;
-5 = graduate to real vault (scan → bootstrap migration → agent-branch runs).
+- **Acyclic broker↔ledger seam.** `@atlas/broker`'s git-side primitives (`appendAuditEvent`,
+  `advanceProtectedRef`, `integrateSourceCapture`) never import `@atlas/sqlite-store`.
+  `finalizeLedgerWrite` (sqlite-store) is the **sole cross-store orchestrator** and *calls* broker
+  primitives. Dependency direction is strictly ledger → broker; no cycle (fixes R4-F1).
+- **Two provisioned runtime identities from day one.** `atlas-broker` (integration: protected refs,
+  approval verification, WORM anchor) and `atlas-egress` (egress: provider credential + outbound
+  network) are distinct OS users, both created by Phase 1 Task 1.0 with a per-key ACL matrix and a
+  separation test (fixes R4-F2). The spec permits sharing one identity; this plan deliberately does
+  **not** (also resolves red-team finding rt1).
+- **Scanner before any persistence.** The secret-scan engine + `PrePersistenceGuard` land before
+  normalization and capture; `normalize` and `captureSource` take the guard as a **required**
+  constructor dependency, so no raw or normalized byte can persist or transmit unscanned (fixes R4-F3).
+- **Retained-vs-feature PR split for migrations.** Every phase that registers a SQLite migration
+  lands it in a separate **PR-A (retained)** ahead of the feature **PR-B**, so a feature revert never
+  orphans applied DDL or breaks `db rebuild` (fixes R4-F5; generalizes to Phase 4's claims migration).
+- **Retained CLI-contract harness.** `commands.json` (the full command registry, seeded Phase 0 with a
+  `phase` field per command), `cli-surface.fixture.txt`, and `tools/gen-cli-contract.ts` +
+  `contract-lint` live in Phase 0 Task 0.0 and survive every later revert (fixes R4-F6, R3-F8).
+- **Evidence/claims tests live with their schema.** Provenance tests in Phase 2 assert provenance
+  behavior only; dependent-evidence staleness assertions move to Phase 4 where `claims`/
+  `claim_evidence` exist (fixes R4-F4).
+
+| Phase | Goal | Effort |
+|---|---|---|
+| 0 | Scaffold + retained contract harness + up-front contracts | M |
+| 1 | Skeleton: store, broker auth core, ledger backup DR, base CLI | L |
+| 2 | Ingest loop: sandbox, scanner, capture, jobs, egress broker | L |
+| 3 | Retrieval: LanceDB, embeddings, hybrid search, `query`, index ops | M |
+| 4 | Workflows: ChangePlan pipeline, review gate, rollback, trust, purge | L |
+| 5 | Graduation: real-vault copy, bootstrap migration, eval + scale gates | M |
 
 ---
 
 ## 2. Prerequisites
 
-**Must exist before Phase 1 code:**
-- `21StarkCom/Atlas` repo created; commits authored `Aryeh Stark <aryeh@21stark.com>`; branch+PR flow.
-- Node LTS + pnpm; `tsconfig.base.json` strict/ESM baseline agreed.
-- OS keychain access on both supported hosts (macOS Apple-silicon current major; Linux) for AEAD keys,
-  approval-signing key, audit-attestation key, provider credential custody.
-- Ability to create a **separate OS identity/uid** for the broker (integration + egress) on dev + CI.
-- The **up-front Phase-0 gate contracts approved** (see Phase 0).
-
-**Can run in parallel with Phase 1:**
-- Authoring the Phase-2 contracts (jobs, sandbox, normalization, per-op ChangePlan schema, provider
-  interface) — they gate Phase 2, not Phase 1.
-- Building fixture vaults (`empty`, `small-valid`, `broken-links`, `duplicate-ids`,
-  `conflicting-claims`, `source-heavy`, one per `schema_version`).
-- CI harness scaffold (offline suite + opt-in nightly live-Gemini lane).
+- **Hosts:** macOS (Apple-silicon, current major) and Linux — the two supported V1 targets. Local dev
+  needs `sudo` once for provisioning (Task 1.0). Node ≥ 24 (built-in `--experimental-strip-types` not
+  used — we compile with `tsc`), pnpm ≥ 10, git ≥ 2.44, SQLite ≥ 3.45 (bundled via `better-sqlite3`).
+- **Test runner:** vitest (workspace mode). Live-Gemini tests opt-in via `ATLAS_LIVE_GEMINI=1`;
+  provisioning-dependent suites gate on `ATLAS_PROVISIONED=1` and **skip with an explicit reason**
+  otherwise (CI always provisions, so CI never skips them — a skip on CI fails the job).
+- **CI:** GitHub Actions, matrix `ubuntu-latest` + `macos-15`. Both runners have passwordless sudo;
+  the workflow runs `sudo provisioning/ci/setup.sh` before the test step (see Task 1.0 for the
+  two-UID mechanism). No cloud resources; the only secret is `ATLAS_GEMINI_KEY` for the opt-in
+  nightly live suite (repo Actions secret, injected only into the egress-broker test fixture).
+- **Gemini access:** one API key for `gemini-3-5-flash` + `gemini-embedding-001`; custody per the
+  egress-broker key ACL (Task 1.0) — never in agent/parser env.
+- **Parallel with Phase 1:** Phase-2 contract authoring (Task 2.0) and fixture-vault authoring
+  (Task 0.6) have no code dependency on Phase 1 and may proceed concurrently once Phase 0 merges.
 
 ---
 
-## 2.5 Global Constraints (verbatim values from spec)
+## 2.5 Global Constraints (verbatim from the spec — every task implicitly includes these)
 
-- **Language/build:** TypeScript strict, ESM, pnpm monorepo.
-- **Repo:** `21StarkCom/Atlas` (new, standalone); reuses nothing from the Go `2nd-brain` stack.
-- **Model provider:** Google Gemini — `gemini-3-5-flash` for generation/extraction/classification/
-  synthesis; `gemini-embedding-001` for embeddings; embedding **dimensions pinned + versioned in the index**.
-- **Supported V1 hosts:** macOS (Apple-silicon, current major) and Linux — **both native sandbox
-  backends in scope** (macOS `sandbox-exec`/Seatbelt; Linux user namespaces + seccomp-bpf +
-  network-isolated netns + rlimits).
-- **V1 sources:** local files only — Markdown, plain text, PDF, HTML. **OCR out of V1.**
-- **Fusion:** RRF only (no cross-encoder / LLM reranking).
-- **Jobs:** synchronous single-runner in-process; **no daemon**; `lease_epoch` reserved (written,
-  uncontended). No timed lease protocol — process lock only.
-- **Frontmatter `id` is immutable in V1** — no ID-migration operation; `ProposeRename` never touches `id`.
-- **Duplicate `id` = hard error.** Unresolved duplicate identity is quarantined.
-- **`schema_version`:** V1 implements exactly legacy-unversioned→v1 bootstrap + validation of
-  `schema_version: 1`; refuse unsupported/newer.
-- **Exit codes:** `0` ok · `1` validation · `2` config/vault/lock · `3` secret-scan · `4` internal ·
-  `5` user/usage · `6` action-required.
-- **Mutation default:** `ingest`/`enrich`/`reconcile`/`maintain` (and `purge`) default to **non-mutating
-  preview**; `--apply` mutates; `--dry-run`+`--apply` together ⇒ exit `5`.
-- **Effective risk producer:** `policies` package only; model `proposedRisk` never gates.
-- **Effective sensitivity producer:** `policies` package only; `declaredSensitivity ∈
-  {public|internal|confidential|restricted}` is the sole authored input; unlabeled ⇒ `internal`.
-- **Secret scanning is fail-closed and pre-persistence** (raw bytes + normalized output scanned before
-  any vault/SQLite/worktree/git write); quarantine under AEAD, key in OS keychain, mode-0700 dir.
-- **No agent/parser/workflow process holds provider credential or outbound network** — egress broker only.
-- **No agent/parser filesystem access can advance a protected ref** — integration broker only; agents
-  hold object-write + `refs/agent/*` only.
-- **Audit event cardinality owner = *Audit SSOT*:** each terminal event type exactly once per run,
-  preceded by its lifecycle events; **never "one event per run."**
-- **Tier-2 auto-commit default threshold:** model+validation confidence ≥ 0.8 **and** patch ≤ 50
-  changed lines across ≤ 3 sections of a single note (larger ⇒ Tier-3).
-- **Retrieval eval gate:** recall@10 ≥ 0.85 and MRR ≥ 0.7 for canonical-note discovery.
-- **Config file:** `brain.config.yaml`; keys `sqlite.ledger_retention` (default keep-forever),
-  `sqlite.ledger_backup.*`, `sqlite.raw_payload_store` (default off), `policies.allow_auto_merge=false`,
-  `policies.allow_auto_delete=false`, `policies.require_sources_for_synthesis`.
-- **Pagination:** `--limit` default 50 / max 500 + `--offset`, stable sort + unique tie-breaker,
-  best-effort under concurrency; opaque cursors deferred.
-- **Every human-mode output** routes through a single terminal-safe renderer; `--plain` disables all
-  animation; honor `NO_COLOR`/`--no-color`.
-- **CLI contract single source of truth:** `docs/specs/cli-contract/commands.json` registry owns command
-  membership; per-command `<command>.schema.json` is authoritative; Markdown + test fixtures +
-  acceptance inventory are generated from it.
-- **Task surface reserved:** `task` note type + `CreateTask`/`UpdateTaskState` schemas ship and validate,
-  but validation **rejects any ChangePlan containing a task operation** (fail-closed); no V1 workflow
-  exercises them.
+- Language/layout: **TypeScript (strict, ESM, pnpm monorepo)**; repo `21StarkCom/Atlas`.
+- Models: **`gemini-3-5-flash`** (generation/extraction/classification/synthesis),
+  **`gemini-embedding-001`** (embeddings, dimensions pinned + versioned in the index).
+- Exit codes: **`0` ok · `1` validation · `2` config/vault · `3` secret-scan · `4` internal ·
+  `5` user/usage · `6` action-required**.
+- Normative workflow state set: **`planned → patched → worktree-applied → agent-committed →
+  [review-pending] → integrated → reindexed → finalized`; terminals `rejected`, `rolled-back`,
+  `failed`, `cancelled`** (recorded `failed@<checkpoint>` / `cancelled@<checkpoint>`).
+- Audit event types (closed set): **`run.started`, `run.planned`, `run.integrated`, `run.rejected`,
+  `run.rolled_back`, `run.failed`, `run.cancelled`, `run.readonly`, `run.projection`** — cardinality:
+  **each terminal event type exactly once per run** (Audit SSOT owns this; no other assertion).
+- Lock scopes + global order: **`vault-maintenance ⊐ ledger-maintenance ⊐ jobs-runner ⊐
+  canonical-integration`**, plus concurrent `shared`; failure code **`locked:<scope>`** (exit `2`).
+  (`jobs-runner` is the plan-defined name for the spec's "single-runner process lock" — see §2.6.)
+- Tier-2 auto-commit thresholds: **confidence ≥ 0.8 AND patch ≤ 50 changed lines across ≤ 3 sections
+  of a single note** (larger ⇒ Tier-3). Retrieval eval: **recall@10 ≥ 0.85, MRR ≥ 0.7**.
+- Defaults: **`declaredSensitivity: internal`** for unlabeled content; ledger retention
+  **keep-forever** (`sqlite.ledger_retention`); collection pagination **`--limit` default 50 / max
+  500 + `--offset`**, best-effort under concurrency.
+- Mutation default: `ingest`/`enrich`/`reconcile`/`maintain` are **non-mutating previews** by
+  default; `--apply` mutates; `--dry-run`+`--apply` together ⇒ exit `5`. Previews emit **no**
+  audit-ref event. **`--yes` never authorizes** a privileged op.
+- Privileged ops (`approve`, `refresh`-integration, `rollback`, `purge`, `db restore`, trust
+  `promote`/`revoke`, **`quarantine inspect`/`quarantine resolve`**, **`graduation migrate --apply`**):
+  authorized **only** by an OS-mediated presence assertion bound to the broker challenge **or** the
+  non-interactive `--export-challenge` → sign → `--authorization` flow. **Privilege class has one
+  owner** — the `commands.json` `privilege` field (D-registry); `policies`/broker read it, never
+  re-classify.
+- Audit/ledger rows and audit-ref events carry **allowlisted metadata only** (identifiers, hashes,
+  classifications, destinations, metrics) — raw payloads only in the opt-in AEAD store
+  (`sqlite.raw_payload_store`, default **off**).
+- Module discipline: `contracts` is a **zero-dependency leaf** consumed by CLI (`domain` re-export),
+  `sqlite-store`, `git`, and `broker`; **`scan` is a second leaf** (engine + guards, consumes only
+  `contracts`) consumed by `sources` + the `broker` egress side + the CLI, so no workspace package
+  imports `apps/cli`; the broker **never imports `apps/cli`**; **`jobs` is the sole owner** of
+  `jobs`/`job_attempts` DDL + repository + transactions; `policies`, `validation`, `workflows`,
+  `vault`, `markdown`, `retrieval`, `config`, `domain` are **internal modules** of `apps/cli` (never
+  workspace packages in V1). No workspace package imports `apps/cli` (`contracts.no-app-import.test`).
+- Vault safety: **fixture vaults only until Phase 5**; Phase 5 operates on a **copy** of
+  `main-vault`, agent-branch-only, never `main`.
+- Process: **each phase is its own PR (plus the retained PR-A where defined), green before the
+  next**; commits authored `Aryeh Stark <aryeh@21stark.com>`.
+
+## 2.6 Plan-resolved decisions (ambiguities the spec left to the implementer — now fixed)
+
+| # | Decision | Value (binding for V1) |
+|---|---|---|
+| D1 | CI two-UID mechanism | CI runners execute `sudo provisioning/ci/setup.sh` which creates `atlas-broker` + `atlas-egress` users, `atlas-git` group, and installs a sudoers drop-in (`/etc/sudoers.d/atlas-ci`) allowing the runner user to `sudo -u atlas-broker` / `sudo -u atlas-egress` **only** the two launcher scripts. Agent-side tests run as the unprivileged runner user. Same script family works on macOS (`sysadminctl -addUser`) and Linux (`useradd -r`). |
+| D2 | `effectiveSensitivity` representation | **Computed on read, never persisted** in V1 (the spec's default). No projection column; recompute cost is acceptable at V1 vault sizes; revisit only if the Phase-5 scale gate fails. |
+| D3 | `sourceId` acceptance & serialization | Commands taking a source handle accept either a serialized `renditionId` `sha256:<rawContentHash>:<canonicalMediaType>:<extractorVersion>:<normalizerVersion>` or a serialized `contentId` `sha256:<rawContentHash>:<canonicalMediaType>` (resolved via `content_blobs.active_rendition_id`). Colon-delimited, lowercase hex. Parsing lives in `packages/contracts/src/ids.ts` only. |
+| D4 | Initial `chunker_version` | **`1`** (config `indexing.chunker_version`, seeded in `brain.config.example.yaml`). |
+| D5 | Jobs single-runner lock | New named scope **`jobs-runner`** (exclusive), defined in `jobs-contract.md`, registered in the lock manager, error `locked:jobs-runner`; ordered between `ledger-maintenance` and `canonical-integration` (a draining job may acquire `canonical-integration` per job). |
+| D6 | Audit mapping for privileged ledger ops | `db backup` / `db restore` / `--force-unblock` write **ledger** audit rows (`audit_events` table, ledger-internal event kinds `db.backup`/`db.restore`/`db.force_unblock`) and **no `run.*` git-ref event of their own** — the git-ref stream covers the run classes of the observability matrix; the post-restore projection rebuild emits its own `run.projection` like any executed projection-only command. Canonized in the security/broker contract (Task 0.3). |
+| D7 | Embedding dimensions | **768** (`indexing.dimensions: 768` in the example config; `gemini-embedding-001` `output_dimensionality=768`). Config-owned; changing it opens a new index generation by construction. |
+| D8 | WORM anchor default path | `git.audit_anchor_path` default **`/var/lib/atlas/audit-anchor`** (Linux) / **`/usr/local/var/atlas/audit-anchor`** (macOS) — broker-owned `0600`, parent `0700`, **outside** the vault and repo (fixes R3-F3). |
+| D9 | Key custody mechanism per OS | macOS: Keychain items readable per-identity via separate login keychains for `atlas-broker`/`atlas-egress` (created by provisioning). Linux: root-provisioned files under `/etc/atlas/keys/<identity>/` (dir `0700` owned by that identity). Uniform accessor in each privileged process; the ACL matrix in Task 1.0 is the contract. |
+| D10 | Broker IPC | Unix domain sockets: `broker.socket_path` default `/var/run/atlas/broker.sock`, `egress.socket_path` default `/var/run/atlas/egress.sock` (macOS: `/usr/local/var/run/atlas/*.sock`); socket file `0660` `atlas-broker:atlas-git` / `atlas-egress:atlas-git`. Framed JSON messages validated by `contracts` schemas on both sides. |
+| D11 | `source add` vs `ingest` | `source add <path>` = deterministic Tier-1 capture, applies immediately (key-accepting, no preview mode). `ingest <path>` = capture **preview + extraction/classification preview** by default; `--apply` performs the capture (Phase 2) and, from Phase 4, the synthesis follow-on. Both funnel through the same `captureSource`. |
+| D12 | `brain status` semantics | Read-only summary: open runs (by state), queued/failed jobs, quarantine count, backup watermark health, audit head + anchor check. Tier-0; executed run emits `run.readonly`. |
+
+## 2.6.1 Review-hardening decisions (D13–D20 — resolved from the `stark-review-plan` pass, 2026-07-12)
+
+The plan-review lead/wing loop surfaced ~14 genuine defects (and ~9 phantom findings that its own
+fixer introduced — a "trusted-CLI daemon" / "trusted-ledger capability issuer" / "durable outbox"
+cascade that misread the `trusted-CLI-only` **ACL label** as a service; those are explicitly
+**rejected**, see the review record). The genuine ones are resolved here as binding decisions.
+
+| # | Decision | Value (binding for V1) |
+|---|---|---|
+| D13 | **Privilege boundary scope (the load-bearing clarification).** | The OS privilege boundary protects exactly **(a) the protected git refs** (canonical, `refs/audit/runs`, trust ledger — broker-only writes), **(b) the WORM anchor**, and **(c) the provider credential + outbound network** (egress-only). The **SQLite ledger DB is NOT broker-owned** — the unprivileged CLI opens `better-sqlite3` directly and writes ledger + projection rows in-process. Tamper-evidence for the ledger comes from the **broker-signed `refs/audit/runs` cross-check + external WORM anchor**, not from gating SQLite writes. There is **no store service / trusted-CLI daemon**; `finalizeLedgerWrite` runs its `write` closure in the CLI process and only *calls* `broker.appendAuditEvent` for the git-ref side. |
+| D14 | **Shared DTOs live in `@atlas/contracts`.** | `VaultSnapshot`, `ParsedNote`, `SectionTree`, `WikiLink`, `NormalizedRendition`, and the indexing input DTOs move into `@atlas/contracts` (structural types, zero runtime dep). Workspace packages (`sqlite-store`, `lancedb-index`) consume them from `contracts`, **never from `apps/cli`** — killing the package→app build cycle. `apps/cli` modules adapt their internals into these DTOs. Enforced by `contracts.no-app-import.test` (import-graph assertion). |
+| D15 | **Scan-before-persist is enforced inside the sandbox worker.** | The parser worker runs the secret scanner **inside the sandbox** and emits an **attested clean stream through a pipe / sealed memory-backed fd** — it never writes normalized bytes to a shared `outputDir` before scanning. `runInSandbox` returns a readable stream + attestation, not a directory path. No normalized byte touches any temp/parser sink unscanned. |
+| D16 | **Launcher + service-binary integrity.** | Broker/egress binaries and their launchers are **installed hash-verified into root-owned, non-agent-writable dirs** (`/usr/local/lib/atlas/bin/` on macOS, `/opt/atlas/bin/` on Linux; `0755` root:wheel) by `provisioning/*/setup.sh` from a built+hashed release artifact — **not** run from the agent-writable repo `dist/`. Launchers are root-owned with fixed exec paths + args. A compromised agent cannot swap the privileged binary. `provisioning.integrity.test` asserts the installed hash + non-writability. |
+| D17 | **Agent network denial is enforced at the UID, not the launcher.** | The agent runs as a **dedicated non-login UID** that is **always** inside the network-denied context (Linux: the agent UID's processes are confined to a no-egress netns via a service-managed cgroup/namespace it cannot leave; macOS: a per-UID `pf` anchor denying outbound + the Seatbelt profile). Denial does **not** depend on the agent choosing the launcher — a direct `node`/`curl` from the agent UID still has no route. Only `atlas-egress` has outbound. `egress.bypass.test` runs a direct (non-launcher) outbound attempt from the agent UID and asserts failure. |
+| D18 | **`atlas-egress` has no vault access.** | `atlas-egress` is **removed from `atlas-git`** and from every vault/object-store ACL. It can reach only its own socket, its credential, and the request bytes explicitly handed to it over IPC. The internet-facing identity therefore cannot read vault objects. Broker repo-read uses a separate narrow group (`atlas-broker` only). Covered by `provisioning.separation.test` (egress read of any vault path → EACCES). |
+| D19 | **Egress calls are run-bound + budgeted.** | Every `@atlas/models` IPC request carries a **short-lived capability bound to (runId, approved operation, model, max-bytes, max-tokens, cost-ceiling, allowed `effectiveSensitivity` class)**, minted CLI-side per run. The egress broker enforces the capability + a per-run cost/byte budget in addition to the payload scan, and rejects export of a payload whose `effectiveSensitivity` exceeds the run's allowed class. Prevents a compromised agent from unbounded export/spend even through the sanctioned RPC. |
+| D20 | **Test signer is fixture-only; graduation uses the production authorizer.** | `tools/test-signer.ts` + `atlas-test-approver` are usable **only** in explicit **test mode** (`ATLAS_TEST_MODE=1`, set only by CI fixture runs); the broker **hard-rejects** that signer otherwise. **Phase-5 real-copy graduation uses the production OS-presence / hardware-backed authorizer**, documented as a runbook, not the test signer. The plan's Phase-0–4 fixture verifications keep using the test signer under test mode; **Phase-5's real-copy verification does not** (see the corrected Phase-5 block). `broker.rejects-test-signer-in-prod.test` asserts it. |
+
+**Also resolved inline (smaller findings):** privilege classification has a **single owner** — the
+`commands.json` registry `privilege` field; `policies`/broker **read** it, never re-classify
+(D-registry SSOT, Task 0.0/2.8). `quarantine inspect|resolve` are **privileged ops** (added to the
+§2.5 list + Task 5.3). Graduation thresholds + RRF defaults/bounds are **config/contract-owned**,
+never hardcoded (Tasks 3.0/5.0). The WORM anchor (D8) is a **local broker-owned append-only file
+outside the repo** — the accepted local-first V1 threat model; a remote isolated-host anchor is V2
+(stated, not silently assumed). Tier-0 read runs **write ledger rows but do not each force a full
+backup** — the watermark coalesces backups so cheap reads can't amplify into storage DoS
+(Task 1.7/1.9). Verification blocks pass `--config`/`--vault` explicitly (no phantom shell wrapper).
+
+## 2.7 Migration ownership (single authoritative table — fixes R2-F3, R3-F5)
+
+Exactly one migration creates each table; the runner treats an applied migration as a checksum-guarded
+no-op and **never drops tables on downgrade**.
+
+| Migration | Owner package | Phase / PR | Tables |
+|---|---|---|---|
+| `0001_core` | `sqlite-store` | 1 | `notes`, `note_identity_keys`, `note_links`, `vault_schema_migrations`, `agent_runs`, `model_calls`, `retrieval_runs`, `retrieval_results`, `change_plans`, `patches`, `patch_operations`, `validation_results`, `git_operations`, `audit_events`, `audit_intents`, `backup_watermark`, `raw_payloads` |
+| `0002_jobs` | `jobs` (registered into sqlite-store's runner) | 2 PR-B | `jobs`, `job_attempts` |
+| `0003_provenance` | `sqlite-store` | 2 **PR-A (retained)** | `content_blobs`, `source_captures`, `source_renditions`, `note_sources` |
+| `0004_claims` | `sqlite-store` | 4 **PR-A (retained)** | `claims`, `claim_evidence` |
+| (runner bootstrap) | `sqlite-store` | 1 | `db_schema_migrations` (created by the runner itself, not a migration) |
+
+`db rebuild` replaces **only** the vault-projection tables that exist at that point
+(`notes`, `note_identity_keys`, `note_links`, `vault_schema_migrations`; + the `0003` provenance
+tables via `foldProvenanceManifests` once PR-A lands; + `claims`/`claim_evidence` via the claims fold
+once `0004` lands) inside one transaction; it never touches ledger tables or `db_schema_migrations`.
+
+## 2.8 Cross-store audit write protocol (referenced by tasks as “§2.8” — fixes R3-F7)
+
+Every ledger-writing run funnels through `finalizeLedgerWrite` with this exact ordering:
+
+1. **Intent txn (SQLite):** open a transaction; allocate the audit `seq` monotonically
+   (`audit_intents` row: `runId`, `seq`, canonical event payload hash, state `pending`); commit.
+   Seq allocation inside this txn is the serialization point — concurrent writers cannot collide
+   (adopts R4 non-blocking suggestion).
+2. **Git append (broker):** send the signed event to `broker.appendAuditEvent`; the broker verifies
+   monotonic `seq` against the ref head, appends, returns `{seq, head}`.
+3. **Ledger commit (SQLite):** one transaction writes the run's ledger rows + the `audit_events` row
+   and flips the intent to `done`.
+4. **Backup + watermark:** post-commit encrypted backup with bounded durable retries; on verified
+   success advance `backup_watermark.seq`; on failure the health surface degrades and further
+   ledger-writing runs are blocked (`backup-unhealthy`, exit `2`) per the fail-closed contract.
+
+**Crash recovery (both directions), run by `reconcileInterruptedRuns` on startup:** a `pending`
+intent **with** a matching git event (same `runId`+`seq` on the ref) → complete step 3 idempotently;
+a `pending` intent **without** a git event → re-drive step 2 (the broker append is idempotent on
+`(runId, seq)`); a `done` intent with no backup coverage → re-attempt step 4. Idempotency key
+end-to-end is `(runId, seq)`. `audit.cross-store-ordering.test` injects a crash between every pair of
+steps in both directions and asserts convergence with no duplicate or lost event.
 
 ---
 
 ## 3. Phases
 
-### Phase 0: Normative contracts (per-phase gates)
-
-**Goal:** Land the versioned normative contracts that govern each phase, gated *before* the code they
-govern — not all before Phase 1.
-**Dependencies:** none (up-front subset); each later subset depends on the prior phase's learnings.
-**Estimated effort:** L (spread across the project)
-
-#### Tasks
-1. **Up-front safety-invariant + Phase-1 contracts**
-   - What: author + approve `docs/specs/recovery-state-machine.md` (full per-state transition table:
-     required artifacts, atomic write, legal next states incl. `failed@`/`cancelled@`, idempotency
-     check, retained artifacts, worktree cleanup, audit emission, recovery action per checkpoint);
-     `docs/specs/sqlite-data-dictionary.md` (complete DDL — component-scalar composite PKs/FKs, CHECK
-     enums, conflict targets, ON DELETE per retention matrix, invariant-validation queries);
-     `sqlite.ledger_backup` subsystem contract; security/authorization+broker contract (broker OS
-     boundary, protected refs, challenge/response JSON schemas, Ed25519, nonce replay, OS-presence);
-     `docs/specs/retention-matrix.md`; `docs/specs/cli-contract/commands.json` (registry seed) +
-     `cli-contract/*.schema.json` for Phase-1 commands (`inspect`, `doctor`, `status`, `db *`).
-   - Files: `docs/specs/*`, `docs/specs/cli-contract/*`.
-   - Interfaces — **Produces:** the normative state set `planned → patched → worktree-applied →
-     agent-committed → [review-pending] → integrated → reindexed → finalized` + terminals `rejected`,
-     `rolled-back`, `failed`, `cancelled`; the table names, PK/FK component columns, and audit event
-     types (`run.started/planned/integrated/rejected/rolled_back/failed/cancelled/readonly/projection`)
-     that every later task consumes. **Consumes:** the spec.
-   - Test: contract lint — a CI check parses `commands.json` and asserts every command in the prose CLI
-     surface is present with schema ref, phase, idempotency class, privilege tier.
-   - Acceptance: Phase-1 code cannot start until this subset is approved on the PR.
-2. **Phase-2 contracts** (gate Phase 2): `jobs-contract.md`, `sandbox-contract.md`,
-   `normalization-contract.md`, per-operation ChangePlan schema, provider-interface + error-taxonomy,
-   `cli-contract/*` for Phase-2 commands.
-   - Interfaces — **Produces:** jobs state enum + transitions + backoff + process-lock + dead-runner
-     recovery; sandbox guarantee set + per-host isolation primitive + startup capability checks;
-     normalization envelope + error-code set; discriminated ChangePlan payload schemas; provider error
-     union `{validation|authentication|quota|rate_limit|timeout|transport|cancelled|partial_batch|
-     model_incompatible}` each with `retryable`+`retryAfter`.
-3. **Phase-3 contracts:** retrieval/index contracts (generation fencing, chunk schema, staleness,
-   RRF) + Phase-3 `cli-contract/*`.
-4. **Phase-4 contracts:** workflow + risk contracts, `purge.schema.json`, trust-model contract,
-   rollback dependency-check contract, `acceptance-thresholds.md` **workflow subset**.
-5. **Phase-5 contracts:** `bootstrap-migration.md` + `acceptance-thresholds.md` retrieval-eval + scale
-   profiles.
-
-#### Risks
-- Over-freezing later interfaces before earlier slices validate assumptions: mitigated by the
-  per-phase gating rule itself.
-- Registry ↔ prose drift: mitigated by generating Markdown + fixtures from schema, CI-enforced.
-
-#### Verification
-- Each subset approved on its PR before the governed code merges; contract-lint CI green.
-
----
-
-### Phase 1: Skeleton + persistence + ledger DR + broker/git seam
-
-**Goal:** A working CLI over a fixture vault that can `inspect`/`doctor`/`db rebuild`, plus the
-encrypted ledger backup/restore under a real privilege-separated broker.
-**Dependencies:** Phase 0 up-front subset.
-**Estimated effort:** L
-
-#### Tasks
-1. **Monorepo scaffold + `contracts` leaf package**
-   - What: `pnpm-workspace.yaml` declaring tree-A packages; `tsconfig.base.json`; `apps/cli` shell.
-     Implement `packages/contracts`: stable ID types, `ChangePlan` + run-manifest Zod schemas,
-     **canonical serialization** (byte-identical on both process seam sides).
-   - Files: root config, `packages/contracts/src/*`.
-   - Interfaces — **Produces:** `canonicalize(value): Uint8Array`, `ChangePlanSchema`,
-     `RunManifestSchema`, `NoteId`/`ContentId`/`RenditionId`/`RunId` types (component-scalar form per
-     data dictionary). **Consumes:** Phase-0 schemas.
-   - Test: `contracts.canonical.test` — same logical object serialized in CLI vs broker context yields
-     identical bytes; round-trip stable.
-   - Acceptance: zero deps in `contracts`; broker + CLI both import it, neither imports the other's internals.
-2. **`config` module + startup validation**
-   - What: typed load of `brain.config.yaml`, env-override, fail-loud on invalid; expose config to CLI.
-   - Interfaces — **Produces:** `loadConfig(): Config` with `vault`, `sqlite`, `lancedb`, `indexing`,
-     `git`, `models`, `policies`, `logs` sections. **Consumes:** none.
-   - Test: `config.validate.test` — malformed config exits `2` with named key + file location.
-3. **`vault` module — Markdown read/write**
-   - What: read/write notes, frontmatter parse/serialize preserving unknown fields + formatting,
-     wikilink parse.
-   - Interfaces — **Produces:** `readNote(id|slug)`, `writeNoteSection(...)`, `parseFrontmatter`,
-     `serializeFrontmatter` (unknown-field-preserving). **Consumes:** `contracts` IDs.
-   - Test: `vault.roundtrip.test` — read→serialize preserves unknown frontmatter + body byte-for-byte.
-4. **`sqlite-store` — connection, migration runner, projection tables + `db rebuild`**
-   - What: DB connection (FKs on, WAL), the migration runner + `db_schema_migrations` ledger (checksum-
-     guarded), the projection tables + operational/audit ledger tables per data dictionary, versioned
-     index contract, `brain db migrate|rebuild|status|verify`. `db rebuild` replaces **only** projection
-     tables in one txn; never touches ledger tables. Exposes the migration harness that `jobs` registers into.
-   - Interfaces — **Produces:** `db()` connection, `registerMigrations(module)`, `rebuildProjections()`,
-     `verifyInvariants()` (runs dictionary invariant queries). **Consumes:** `contracts`, data dictionary.
-   - Test: `db.rebuild.test` — drop projection tables, `db rebuild` from fixture Markdown reproduces them
-     exactly; ledger tables untouched. `db.migrate-order.test` — migrate (DDL) completes before rebuild;
-     both crash-idempotent.
-   - Acceptance: `brain db rebuild` never mutates `db_schema_migrations` or any ledger table.
-5. **`git` package — repo/ref plumbing + protected-ref ownership model**
-   - What: branch/worktree/commit primitives; protected refs (canonical, `refs/audit/runs`, trust ledger)
-     owned by broker uid via filesystem ownership/mode; agent capability = object-write + `refs/agent/*`.
-   - Interfaces — **Produces:** `createAgentBranch`, `writeObject`, `readRef`; broker-only
-     `advanceProtectedRef` (guarded). **Consumes:** `contracts`.
-   - Test: `git.protected-ref.test` — agent-uid `update-ref`/raw ref-file write against canonical fails EACCES.
-6. **`broker` package — authorization core + audit-ref append (restore/backup surface)**
-   - What: separate-identity broker sufficient to authorize + execute `db restore`/`db backup`:
-     challenge/response (`--export-challenge` → OS-presence assertion **or** `--authorization`), Ed25519
-     verification, nonce replay-protection, protected-ref/audit-ref ownership, audit-event append,
-     credential/key custody. Full `approve`/`refresh`/`rollback` deferred to Phase 4.
-   - Interfaces — **Produces:** `mintChallenge(op, targets)`, `verifyAuthorization(challenge, sig, signerId)`,
-     `appendAuditEvent(signedEvent)`, `advanceProtectedRef(...)`. **Consumes:** `contracts` canonicalization,
-     Phase-0 broker contract.
-   - Test: `broker.authz.test` — `--yes` alone never authorizes; forged/replayed/expired signature rejected;
-     drift (canonical moved, wrong commit, wrong signer) rejected with stable codes.
-7. **Encrypted ledger backup/restore subsystem**
-   - What: SQLite Online Backup API → AEAD-encrypted file (key in OS keychain, mode 0600, write-temp-then-
-     rename); `backup_watermark_seq`; **fail-closed** post-run backup with bounded retries → `backup-unhealthy`
-     (exit `2`) blocking ledger-writing runs until watermark catches up; `--force-unblock` privileged override;
-     `brain db backup|restore`, `db verify --backup`; restore is privileged/destructive under broker, holds
-     `vault-maintenance` lock, restores ledger txn-atomically then triggers projection + index rebuild.
-   - Interfaces — **Produces:** `backupLedger()`, `restoreLedger(backupRef)`, `verifyBackup(ref)`,
-     `backupWatermark()`. **Consumes:** broker authorization, `sqlite-store` connection.
-   - Test: `ledger.dr-roundtrip.test` (**release-blocking**) — backup → wipe → restore recovers every
-     ledger-only row; wrong/revoked key rejected; truncated/corrupt rejected; interrupted restore atomic;
-     schema-version gate; fail-closed watermark blocks then unblocks; `--force-unblock` records RPO gap.
-8. **`brain inspect` / `doctor` / `status`**
-   - What: inspect vault + projections; `doctor` health incl. dir/file modes 0700/0600, worktree cleanup,
-     encrypted-volume marker, backup health, quarantine-security, `--reclaim-locks` step.
-   - Interfaces — **Consumes:** all above; `policies.effectiveSensitivity` producer (stub until Phase 4
-     computes it, but the reader uses the producer, never recomputes).
-   - Test: `doctor.health.test` — missing checkable prerequisite fails loud; JSON health surface reports degraded.
-
-#### Risks
-- **Broker OS-identity setup on CI:** mitigated by documenting the two-uid setup + capability startup
-  checks that fail fast; skill `replicate-infra-platform` not applicable (no GCP here).
-- **Canonical-serialization drift between seam sides:** mitigated by the `contracts` byte-identity test (Task 1).
-- **Backup fail-closed deadlocking dev:** mitigated by the audited `--force-unblock` override.
-
-#### Verification
-- `brain inspect|doctor|db rebuild|db backup|db restore|db verify --backup` all green on fixtures.
-- Release-blocking ledger DR round-trip + corruption tests pass (Phase-1 exit criteria).
-- Protected-ref EACCES + broker authz negative tests green.
-
----
-
-### Phase 2: Sandboxed ingest + jobs + egress broker (extraction-only)
-
-**Goal:** Deterministic immutable source capture through a sandboxed parser, a persistent single-runner
-job queue, and the egress broker — with model use restricted to non-mutating extraction.
-**Dependencies:** Phase 1; Phase-2 contracts approved.
-**Estimated effort:** L
-
-#### Tasks
-1. **`jobs` package — persistent single-runner queue (sole owner of `jobs`/`job_attempts`)**
-   - What: DDL migrations registered into `sqlite-store`'s runner; repository + txns; state enum
-     `pending→claimed→running→succeeded|failed|cancelled`; `attempt`/`max_attempts`, backoff/`next_run_at`,
-     `idempotency_key` unique per `(workflow,key)`, `lease_epoch` reserved; process-lock ownership;
-     dead-runner startup recovery (reset to `pending` under lock); transactional side-effect-id recording.
-     `brain jobs list|run|retry|cancel` with `<jobId>|--all` mutual exclusion + bulk contract.
-   - Interfaces — **Produces:** `enqueue(workflow, key, payload)`, `claimAndRun()`, `retry`, `cancel`,
-     job snapshot read API (one-way consumer for `sqlite-store`). **Consumes:** `sqlite-store` connection +
-     migration harness, jobs-contract.
-   - Test: `jobs.single-runner.test` (**release-blocking**) — two concurrent `jobs run` processes: one
-     acquires lock + drains, other fails fast `locked:<scope>` exit `2`, every job runs exactly once.
-     `jobs.recovery.test` — dead-runner job reset to pending. `jobs.idempotency.test` — key collision.
-2. **`sources` package — sandboxed normalization**
-   - What: normalize md/txt/pdf/html in a dedicated low-privilege worker (empty allowlisted env, no
-     network, isolated fs namespace exposing only read-only input + disposable output, isolated temp,
-     CPU/mem/time caps, syscall restrictions, MIME-signature validation, scripts/external-resources
-     disabled). Enforce `normalization-contract.md` envelope + typed rejections. Both native backends
-     (Seatbelt / userns+seccomp+netns+rlimits); `doctor` verifies sandbox availability at startup.
-   - Interfaces — **Produces:** `normalize(inputHandle): Rendition | TypedRejection` with error codes
-     (`unsupported-encoding`, `encrypted-source`, `no-extractable-text`, …). **Consumes:** sandbox +
-     normalization contracts.
-   - Test: `sandbox.containment.test` — network/env/keychain/fd/out-of-scope-path/subprocess/syscall all
-     fail; caps enforce + cleanup after forced kill. `normalization.conformance.test` — per-format fixtures
-     (malformed/encrypted/scanned/mixed-encoding/oversized/script-bearing); partial extraction ⇒ typed
-     rejection; deterministic byte-identical output.
-3. **Provenance model + capture commit**
-   - What: `content_blobs`/`source_captures`/`source_renditions` (+ `active_rendition_id`); copy raw bytes
-     into `sources/` immutable; capture idempotency keyed `(contentId, origin)`; canonical Markdown
-     manifest per entity foldable by `db rebuild`. Deterministic model-free source-capture commit → RunReport.
-   - Interfaces — **Produces:** `captureSource(path)` → `{contentId, captureId, renditionId}` separately;
-     `resolveSourceId(sourceId)` → active rendition. **Consumes:** `sources`, `vault`, `sqlite-store`.
-   - Test: `provenance.versioning.test` — same bytes/new path adds capture not blob; changed bytes ⇒ new
-     contentId; extractor upgrade ⇒ new rendition, old retained, active repointed, dependents `stale`.
-4. **Pre-persistence secret scanner + quarantine**
-   - What: fail-closed scan of raw bytes + normalized output before any write; quarantine outside repo,
-     mode-0700, AEAD (keychain key), minimized filenames, bounded retention, crash-safe purge.
-   - Interfaces — **Produces:** `scanOrQuarantine(bytes|text)` → pass | quarantined. **Consumes:** keychain
-     key custody (shared rules with backup key).
-   - Test: `quarantine.test` — ciphertext only (AEAD integrity), key inaccessible to parser/model, crash
-     mid-quarantine leaves no plaintext, rotation/revocation/expiry work.
-5. **`models` package + egress broker (extraction-only in Phase 2)**
-   - What: provider-neutral `generateText`/`generateObject<T>`/`embed` as typed IPC client to the egress
-     broker (sole credential holder + sole outbound network; agent processes network-denied at OS layer).
-     Broker scans exact serialized payload inside itself + audits sanitized metadata. Gemini adapter.
-     Records provider/model/template id+version/temp/tokens/latency/cost/retries/errors.
-   - Interfaces — **Produces:** `generateText`, `generateObject`, `embed`, provider-error union.
-     **Consumes:** provider-interface contract, egress broker.
-   - Test: `egress.bypass.test` — agent-side direct provider call fails at OS network layer; IPC payload
-     scanned + audited. `gemini.adapter.test` — malformed/timeout/rate-limit(`retryAfter`→`retryAfterMs`)/
-     auth(no retries)/cancellation(before/during/mid-batch)/partial-batch/dimension-mismatch; audit record
-     per outcome.
-6. **Phase-2 operation allowlist enforcement**
-   - What: allowlist = source-capture + projection-update ops only; synthesis ChangePlan **creation**
-     forbidden; model used only for non-mutating extraction/classification for preview display.
-   - Interfaces — **Consumes:** validation layer, `policies`.
-   - Test: `phase2.non-integration.test` (**release-blocking**) — model-derived ops at every proposed risk
-     level + injection-shaped input: canonical HEAD + Markdown never change; **no synthesis ChangePlan even
-     created**; no approval path integrates a model artifact; only deterministic capture commits.
-7. **`brain ingest <path>` (preview default / `--apply`) + `source add|list|show`**
-   - Interfaces — **Consumes:** all above; key-accepting `--idempotency-key` (intrinsic identifier =
-     content hash). **Produces:** ingest RunReport.
-   - Test: `ingest.preview.test` — bare invocation no side effects; `--apply` captures; `--dry-run`+`--apply`
-     ⇒ exit `5`.
-
-#### Risks
-- **Sandbox parity across macOS/Linux:** mitigated by platform-neutral guarantee set + per-host startup
-  capability checks that fail fast; execution-environment matrix in CI.
-- **Egress broker latency / IPC complexity:** accepted — it is the non-bypassable security seam.
-- **Invariant-3 violation via an accidental synthesis plan:** mitigated by the release-blocking
-  non-integration exit test + code-level allowlist.
-
-#### Verification
-- Ingest one source end-to-end; single-runner queue + containment + non-integration exit tests green.
-- `doctor` reports sandbox + egress health.
-
----
-
-### Phase 3: Retrieval + indexing
-
-**Goal:** Hybrid retrieval over the vault with generation-fenced, rebuildable LanceDB.
-**Dependencies:** Phase 2; Phase-3 contracts.
+## Phase 0: Scaffold + retained harness + up-front contracts
+**Goal:** a building repo whose contract harness survives every later revert, plus the normative
+contracts that gate Phase 1.
+**Dependencies:** none.
 **Estimated effort:** M
 
-#### Tasks
-1. **`lancedb-index` — chunk + embed + hybrid search**
-   - What: chunk by semantic section (preserve heading hierarchy, include title + aliases); embed via
-     egress broker (`gemini-embedding-001`, pinned dims); id/alias/fts/vector/hybrid search; `SearchChunk`
-     stores `contentHash`/`chunkerVersion`/`embeddingModel`/`embeddingDimensions`.
-   - Interfaces — **Produces:** `indexNote(noteId, generationId)`, `search(query, mode)`. **Consumes:**
-     `models.embed`, retrieval/index contract.
-   - Test: `index.staleness.test` — dim/chunker/model change opens new generation.
-2. **Generation fencing + SQLite↔LanceDB reconciliation**
-   - What: generation id = `(noteId, contentHash, chunkerVersion, embeddingModel, embeddingDimensions)`;
-     write chunks tagged; SQLite CAS activates iff `contentHash` matches; retrieval filters by active
-     generation; retire/marker steps independently retryable; crash-safe.
-   - Interfaces — **Produces:** `activateGeneration(id)` (SQLite CAS), `reconcileIndex(noteId)`.
-     **Consumes:** `sqlite-store`, `lancedb-index`.
-   - Test: `index.fencing.test` — stale worker CAS fails; half-written generation never queryable;
-     orphaned chunks inert + compacted. Failpoint tests per reconciliation step.
-3. **`retrieval` module — RRF fusion + context packing**
-   - Interfaces — **Produces:** `retrieve(query): ContextPack` (RRF only). **Consumes:** `lancedb-index`,
-     resolver precedence (id → slug → unique alias).
-   - Test: `retrieval.rrf.test` — deterministic fusion; ambiguous alias ⇒ error not silent pick.
-4. **`brain query` + `brain index status|verify|repair|rebuild`**
-   - What: `index rebuild`/`repair`/`db rebuild` are projection-only (no canonical commit; broker appends
-     one `run.projection` event); `query` is Tier-0 (broker appends one `run.readonly` event).
-   - Interfaces — **Consumes:** `retrieval`, broker audit append. **Produces:** query answer + provenance.
-   - Test: `index.rebuild.test` — LanceDB fully rebuilt from Markdown. `tier0.audit.test` — executed query
-     appends exactly one `run.readonly`; preview/dry-run appends none.
+### Tasks
 
-#### Risks
-- **Cross-store consistency without distributed txn:** mitigated by SQLite-as-sole-activation-authority
-  + generation fencing (spec design).
-- **Retrieval quality unknown until eval:** eval fixtures land Phase 5; here assert mechanics only.
+0. **Task 0.0 — Repo scaffold + retained CLI-contract harness**
+   - What: pnpm workspace skeleton (all package dirs from the spec's tree-A layout with placeholder
+     `package.json` + `src/index.ts` exporting nothing), `tsconfig.base.json` (strict, ESM, NodeNext),
+     vitest workspace config, `.github/workflows/ci.yml` (matrix ubuntu-latest + macos-15; steps:
+     checkout → pnpm install → `pnpm -r build` → `pnpm -r test`; the provisioning step is added by
+     Task 1.0), root `package.json` scripts. The **retained harness**: the full command registry with
+     one row per command/subcommand — name, `schemaRef`, `phase`, idempotency class
+     (`key-accepting`/`intrinsic`), privilege tier — seeded for **every** command in §7's inventory
+     including the Phase-5 `graduation`/`quarantine` groups; the CLI-surface fixture (the prose
+     inventory `contract-lint` parses — fixes R4-F6); the generator that emits per-command Markdown
+     refs + contract-test fixtures + the acceptance-case inventory from the schemas; and
+     `contract-lint` asserting registry ↔ fixture ↔ schema-presence-for-implemented-phase consistency.
+   - Files: `pnpm-workspace.yaml`, `tsconfig.base.json`, `vitest.workspace.ts`,
+     `.github/workflows/ci.yml`, `docs/specs/cli-contract/commands.json`,
+     `docs/specs/cli-contract/cli-surface.fixture.txt`, `tools/gen-cli-contract.ts`,
+     `tools/contract-lint.test.ts`, `package.json`, `AGENTS.md`.
+   - Interfaces — **Consumes:** —. **Produces:** `commands.json` row shape
+     `{name: string, schemaRef: string, phase: 0|1|2|3|4|5, idempotency: "key-accepting"|"intrinsic"|"none", privilege: "shared"|"privileged", implemented: boolean}`;
+     `gen-cli-contract.ts` CLI (`--check` mode used by lint; `--write` regenerates derived files).
+   - Test: `contract-lint.test` — key assertions: every fixture line has a registry row and vice
+     versa; every row with `implemented: true` has an existing `schemaRef` file; the generator is
+     deterministic (`--check` clean after `--write`).
+   - Acceptance: `pnpm -r build && pnpm -r test` green on both OS from an empty checkout; lint fails
+     if a command is added to the fixture without a registry row (proven by a fixture-mutation test).
 
-#### Verification
-- `brain query` returns grounded answers; index verify/repair/rebuild converge; fencing failpoints green.
+1. **Task 0.1 — `recovery-state-machine.md` (normative contract)**
+   - What: the full per-state transition table for the workflow state machine — for **every**
+     checkpoint of the normative state set (§2.5): required artifacts + hashes, the single atomic
+     write, legal next states incl. `failed`/`cancelled` entry conditions, idempotency check,
+     retained artifacts, worktree cleanup, audit emission, recovery action. Failpoint tests
+     (Task 4.11) are **generated from this table**.
+   - Files: `docs/specs/recovery-state-machine.md`.
+   - Interfaces — **Consumes:** —. **Produces:** the transition table consumed by Tasks 2.5, 4.5,
+     4.11 (machine-readable appendix: a fenced JSON block `stateTable` the failpoint generator parses).
+   - Test: `contract-lint.test` extension asserting the `stateTable` JSON parses and covers every
+     state in §2.5's set (checked by `tools/contract-lint.test.ts` — table-completeness assertion).
+   - Acceptance: every state + terminal appears; no state lacks a recovery action.
+
+2. **Task 0.2 — `sqlite-data-dictionary.md` + versioned index contract**
+   - What: complete per-table DDL for **all** tables in §2.7 (every column, SQL type, PK/FK,
+     nullability, UNIQUE, CHECKs, ON DELETE per the retention matrix, upsert conflict targets), the
+     composite-identifier rule (component scalar columns, never packed strings — `source_renditions`
+     PK = (`raw_content_hash`,`canonical_media_type`,`extractor_version`,`normalizer_version`);
+     dependent tables carry the same components as composite FKs, so **`content_blobs`'s active
+     rendition is the component column set `active_extractor_version` + `active_normalizer_version`**
+     (nullable pair, FK with the blob's own PK components to `source_renditions`) — fixes R3-F6);
+     `claim_evidence.evidence_id` non-null hash with sentinel encoding; the invariant-validation
+     queries `brain db verify` runs; and the **versioned index contract** (composite indexes for job
+     eligibility (`state`,`next_run_at`), `note_links` bidirectional traversal, run lookup by
+     `status`, `note_identity_keys(normalized_key)`, needs-index scans
+     (`active_generation`,`contentHash`), audit lookup by `run_id`) with query-plan assertions.
+   - Files: `docs/specs/sqlite-data-dictionary.md`.
+   - Interfaces — **Consumes:** §2.7. **Produces:** the DDL source of truth consumed by Tasks 1.4,
+     2.1, 2.7, 4.1 (each migration copies its tables' DDL verbatim from here).
+   - Test: named later as `db.migrate-ownership.test` (Task 1.4) — the dictionary itself is gated by
+     `contract-lint`'s table-inventory check against §2.7.
+   - Acceptance: every §2.7 table present; every FK names its ON DELETE; every upsert names its
+     conflict target.
+
+3. **Task 0.3 — Security / authorization / broker contract**
+   - What: one normative doc fixing: protected-ref set + filesystem permission model (refs +
+     ref-dirs owned `atlas-broker:atlas-git`, dirs `0750`, files `0640` — group-**readable** so
+     agents read canonical to branch from it, broker-only writes — fixes R3-F2; `refs/agent/*` owned
+     by the agent user, group `atlas-git`, dirs `0770`); the per-key ACL matrix (approval **verify**
+     key broker-readable; audit-attestation key agent-readable by design; **backup AEAD key
+     trusted-CLI-readable** (the CLI process that writes the ledger encrypts/decrypts its own backup —
+     consistent with D13's CLI-written ledger; the broker gates restore **authorization** via the
+     `db.restore` challenge, but the crypto runs CLI-side, so no broker backup-IPC primitive is
+     needed); quarantine AEAD key trusted-CLI-only, parser/model-denied; `atlas.gemini.key`
+     **egress-broker-only**); WORM anchor format (signed head hash + monotonic event count) at D8's
+     path; the challenge/response JSON schemas (`AuthorizationChallenge`, `AuthorizationResponse`,
+     drift-rejection error catalog); Ed25519 envelope + canonicalization; nonce store + expiry;
+     signer registry; key rotation/revocation procedure; audit-event payload schema (**opaque salted
+     IDs** for note/source identifiers + the ledger mapping table, so ordinary erasure needs no
+     ref rewrite); the D6 event-mapping decision; the signed-tombstone audit-ref replacement
+     protocol for erasure.
+   - Files: `docs/specs/security-broker-contract.md`.
+   - Interfaces — **Consumes:** D1, D6, D8, D9, D10. **Produces:** the contract consumed by Tasks
+     1.0, 1.6, 1.7, 4.9, 4.10.
+   - Test: schemas in this doc are mirrored as Zod in Task 1.1; `contracts.authorization.test`
+     (Task 1.1) asserts the JSON examples in this doc validate against those schemas.
+   - Acceptance: every privileged op maps to challenge fields + verification steps + stable error
+     codes; every key names its readable identities.
+
+4. **Task 0.4 — Ledger-backup subsystem contract + `retention-matrix.md`**
+   - What: (a) the backup contract — SQLite Online Backup API snapshot → single AEAD file,
+     write-temp-then-rename atomicity, trigger policy (post-ledger-writing-run + `db backup`),
+     fail-closed watermark semantics + `backup-unhealthy` blocking set + audited `--force-unblock`,
+     key custody per D9, retention `sqlite.ledger_backup.keep` (default keep-N=10 + keep-forever
+     latest), integrity stamp (content hash + schema version), restore protocol (privileged;
+     verify → exclusive locks → transactional ledger-table restore → post-restore rebuild hooks);
+     (b) `retention-matrix.md` — per entity class: system of record, minimum retention, compaction
+     trigger, soft-vs-hard delete + tombstones, ON DELETE, purge ordering, config key + bounds
+     (V1 defaults verbatim from the spec).
+   - Files: `docs/specs/ledger-backup-contract.md`, `docs/specs/retention-matrix.md`.
+   - Interfaces — **Consumes:** D6, D9. **Produces:** contracts consumed by Tasks 1.7, 4.10 and the
+     dictionary's ON DELETE column (Task 0.2 cross-references the matrix).
+   - Test: `ledger.dr-roundtrip.test` + `ledger.fail-closed-watermark.test` (Task 1.7) implement
+     this contract's acceptance section verbatim.
+   - Acceptance: every storage/entity class of the spec's retention list has a row; the fail-closed
+     state machine (healthy → degraded → blocked → unblocked) is fully enumerated.
+
+5. **Task 0.5 — Phase-1 `cli-contract/*` schemas + JSON error envelope**
+   - What: per-command JSON Schemas for the Phase-1 commands — `inspect`, `doctor`, `status`,
+     `db status|verify|migrate|rebuild|backup|restore` (incl. `db verify --backup`) — each capturing
+     args, flags + defaults + constraints, side effects, prohibited effects, exit codes, stable
+     per-command error codes, `--json` output shape; plus the shared **JSON error envelope** schema
+     (discriminated `{code, message, hint, details{field?,path?,location?}, errors[]?, retryable,
+     retryAfterMs?, runId?, jobId?}`) and the doctor check inventory for Phase 1 (modes/permissions,
+     lock liveness + `--reclaim-locks`, backup watermark health, audit-head anchor check).
+     Registry rows for these commands flip `implemented: false → true` per delivering task.
+   - Files: `docs/specs/cli-contract/error-envelope.schema.json`,
+     `docs/specs/cli-contract/{inspect,doctor,status,db-status,db-verify,db-migrate,db-rebuild,db-backup,db-restore}.schema.json`.
+   - Interfaces — **Consumes:** Task 0.0 registry. **Produces:** schemas consumed by Tasks 1.8, 1.9
+     (runtime validation of `--json` output in contract tests is generated by `gen-cli-contract.ts`).
+   - Test: `contract-lint.test` (schema-presence) + generated per-command fixture stubs compile.
+   - Acceptance: every Phase-1 registry row has a schema; envelope schema validates the doc's examples.
+
+6. **Task 0.6 — Fixture vaults + `@atlas/testing` scaffold**
+   - What: the fixture-vault set (`empty`, `small-valid`, `broken-links`, `duplicate-ids`,
+     `conflicting-claims`, `source-heavy`, `schema-v1`) as committed directories, plus
+     `@atlas/testing` helpers to copy a fixture into a temp dir with a fresh git repo (agents never
+     test against a shared fixture in place).
+   - Files: `fixtures/{empty,small-valid,broken-links,duplicate-ids,conflicting-claims,source-heavy,schema-v1}/**`,
+     `fixtures/inputs/{sample.md,sample.txt,sample.pdf,sample.html,secret-bearing.md,adversarial-ansi.md}`
+     (loose ingest-input files, incl. the scanner + renderer adversarial fixtures),
+     `packages/testing/src/fixture.ts`, `packages/testing/package.json`.
+   - Interfaces — **Consumes:** —. **Produces:**
+     `withFixtureVault(name: FixtureName, fn: (ctx: {vaultDir: string, git: SimpleGitHandle}) => Promise<void>): Promise<void>`;
+     `FixtureName = "empty"|"small-valid"|"broken-links"|"duplicate-ids"|"conflicting-claims"|"source-heavy"|"schema-v1"`.
+   - Test: `testing.fixture.test` — copying `small-valid` yields a clean git repo with the fixture
+     tree; mutations do not leak back into `fixtures/`.
+   - Acceptance: all seven fixtures load; `duplicate-ids` really contains a duplicate `id` pair.
+
+### Risks
+- **Registry over-freezing:** seeding all commands in Phase 0 could ossify names. Mitigation: the
+  registry is data; renames are one-row diffs gated by `contract-lint`, and schemas land per phase.
+- **Contract docs drifting from code:** mitigated by generated fixtures (0.0) and by Zod mirrors
+  asserting the docs' own examples (0.3/0.5 pattern).
+
+### Verification (run from repo root)
+```bash
+pnpm install
+pnpm -r build && pnpm -r test          # scaffold + harness + fixture tests green (both OS in CI)
+node tools/gen-cli-contract.ts --check # deterministic; exits 0
+```
+
+### Rollback
+- Precondition: Phase-0 PR merged; any later contract revision.
+- Procedure: `git revert <phase0-followup-sha>` of the offending contract commit **only** — Task 0.0
+  (scaffold + harness) is never reverted (it is the retained bootstrap every later rollback's
+  verification depends on — fixes R3-F8).
+- Schema compatibility: no SQLite DDL exists in Phase 0; nothing to downgrade.
+- Verify supported state: `pnpm -r build && pnpm -r test` and
+  `node tools/gen-cli-contract.ts --check` still exit 0 (the seed registry + fixture lint clean even
+  with all contract docs reverted: ∅ == ∅).
 
 ---
 
-### Phase 4: Mutating workflows + risk/review + purge
-
-**Goal:** The full synthesis loop — enrich/reconcile/maintain/validate — gated by risk tiers, the review
-lifecycle through the integration broker, and the human-authorized erasure workflow.
-**Dependencies:** Phase 3; Phase-4 contracts + workflow acceptance thresholds.
+## Phase 1: Skeleton — store, broker authorization core, ledger DR, base CLI
+**Goal:** a provisioned host can `inspect`/`doctor`/`status` a fixture vault; SQLite store with
+migrations + projection rebuild; the broker owns protected refs + audit append; the encrypted ledger
+backup/restore round-trips destructively.
+**Dependencies:** Phase 0.
 **Estimated effort:** L
 
-#### Tasks
-1. **`policies` — effective risk + effective sensitivity (sole producers) + per-type mutation policy + taint**
-   - What: derive+persist `effectiveRisk` from op type + note type + scope + config (Tier 0–4); derive
-     `effectiveSensitivity` (most-restrictive over declared + inputs, computed on read or as rebuildable
-     projection); per-type mutation policy table; transitive taint (untrusted evidence ⇒ untrusted claim/
-     note; no laundering).
-   - Interfaces — **Produces:** `effectiveRisk(op, target)`, `effectiveSensitivity(entity)`,
-     `mutationPolicy(type)`, `isTainted(entity)`. **Consumes:** `contracts`, security contract.
-   - Test: `policies.risk.test` — Tier-2 gate = confidence ≥ 0.8 **and** ≤ 50 lines / ≤ 3 sections;
-     model `proposedRisk` never gates. `taint.transitive.test` — multi-hop; mixed evidence keeps untrusted.
-2. **`validation` — deterministic checks + per-op schema validation + task fail-closed guard**
-   - What: schema + path-policy + provenance validation; reject dangling refs + duplicate evidence;
-     **reject any ChangePlan containing a task operation**; Markdown accessibility checks (one top-level
-     heading, no skipped levels, descriptive links, list structure, alt-text) run in `validate`.
-   - Interfaces — **Produces:** `validatePlan(plan)` → typed results. **Consumes:** per-op ChangePlan schema.
-   - Test: `validation.task-guard.test` — task op ⇒ rejected. `validate.a11y.test` — degrading change blocked.
-3. **`markdown` — section/AST patch generator**
-   - What: section-level patches (never whole-file), preserve unknown frontmatter/formatting, fail on stale
-     context (expected content hash precondition), human-readable diffs.
-   - Interfaces — **Produces:** `generatePatch(note, op)` → patch + diff summary. **Consumes:** `vault`.
-   - Test: `patch.stale-context.test` — stale hash ⇒ safe failure, no write.
-4. **`workflows` — orchestrator + persisted state machine + concurrent-integration CAS**
-   - What: deterministic orchestrator running the normative state machine with durable per-checkpoint
-     atomic writes (plan/patch/worktree/commit hashes); enforce retrieval-before-synthesis in code;
-     startup reconciler; Tier-1/2 auto-commit under CAS (rebase+regenerate+re-retrieve+re-validate on
-     stale base); Tier-3 halts at `review-pending`.
-   - Interfaces — **Produces:** `runWorkflow(cmd, target)` advancing checkpoints. **Consumes:** `policies`,
-     `validation`, `markdown`, `retrieval`, `git`, `jobs`, recovery-state-machine contract.
-   - Test: `ordering.retrieval-before-synthesis.test` (**CI safety gate**) — inject retrieval failure/empty:
-     no plan/patch/worktree/commit for synthesis; capture exempt. `crash-recovery.failpoints.test`
-     (**generated from transition table**) — crash before/after every git effect + checkpoint incl.
-     integration-hash; convergence, no double-commit/half-integrated ref.
-5. **Integration broker full surface — `git status/review/approve/reject/refresh/rollback/cleanup/verify`**
-   - What: extend Phase-1 broker: `approve` = fast-forward CAS of exact signed commit only (stale ⇒
-     `refresh-required` exit `6`, never rebase); `refresh` = rebase+regenerate+re-validate → new commit +
-     fresh-approval-required; `rollback` = privileged revert of integrated run with downstream-reference
-     dependency checks (`has-dependents` refusal / compensating plan); `reject`; `cleanup`; `verify`
-     (manifest↔index repair + audit-head external-anchor check). Signed append-only `refs/audit/runs`
-     event stream (audit-attestation key distinct from approval key; broker sole ref writer); WORM anchor
-     anti-truncation.
-   - Interfaces — **Produces:** the `git *` commands + audit event emission per *Audit SSOT*. **Consumes:**
-     Phase-1 broker core, `contracts`, `workflows`.
-   - Test: `approval-boundary.adversarial.test` — agent `approve`/direct ref write fails EACCES;
-     forged/replayed/copied signature; commit mutation after signing; `--yes` alone; stale-base
-     `refresh-required` never rebases; TOCTOU refused; non-interactive challenge/response drift rejected;
-     audit-head truncation detected. `rollback.dependents.test` — `has-dependents` refusal + compensating plan.
-6. **Claims/evidence + rendition-upgrade staleness protocol**
-   - What: `claims`/`claim_evidence` canonical in Markdown (`claims:` block); `verification ∈
-     {valid,stale,pending,failed}` authored in Markdown (never bare SQLite); `AttachEvidence` resolves
-     `sourceId`→`renditionId` at boundary, persists pinned components, idempotent via `evidence_id`;
-     rendition bump enqueues one re-verification job per owning-note (key `(contentId, newRenditionId,
-     owningNoteId)`), re-anchors quoteHash → valid/pending(Tier-3)/failed; gating: stale/pending/failed
-     evidence can't support Tier-2 or trusted synthesis.
-   - Interfaces — **Produces:** `attachEvidence`, `UpdateEvidenceVerification` op flow. **Consumes:**
-     `policies` gating, `jobs`.
-   - Test: `evidence.reverify.test` — multi-note bump enqueues one non-colliding job per note; three
-     outcomes; gating assertion; all changes flow through ChangePlan+git (bare SQLite write lost on rebuild).
-7. **Trust promotion/revocation**
-   - What: `brain source trust show|promote|revoke` + `PromoteTrust`/`RevokeTrust` ops, broker-authorized,
-     bound to `sourceId`+`rawContentHash`; revocation of pre-integration run ⇒ `failed@<checkpoint>`
-     (`trust-revoked`); of integrated run ⇒ new Tier-3 remediation run (forward, never backward edge).
-   - Interfaces — **Consumes:** broker, `workflows`. **Produces:** trust ledger records.
-   - Test: `trust.lifecycle.test` — forged/agent promotion refused; hash-change invalidates; replay rejected;
-     revocation spawns remediation run.
-8. **`brain enrich|reconcile|maintain|validate` + `note show|related|history`**
-   - What: uniform preview/`--apply`; Tier-3 destructive proposals (merge/delete/archive) stop at
-     `review-pending` exit `6`; `maintain` proposes never silently destroys.
-   - Test: `workflow.review-gate.test` — Tier-3 apply produces durable run + exit `6`, no canonical FF.
-9. **`brain purge` — human-authorized erasure**
-   - What: broker-authorized Tier-3-equivalent; `--note|--source|--data-category` selector → printed
-     inventory before challenge; preview default / `--apply`; touches all storage classes (Markdown+git
-     history, worktrees, SQLite projection+ledger, LanceDB, logs, quarantine, every backup, audit ref via
-     opaque-ID unlink / signed tombstone + WORM checkpoint); holds `vault-maintenance` lock; key-accepting +
-     resumable; post-purge verification asserts no re-linkable copy remains.
-   - Interfaces — **Consumes:** broker, all stores, audit-ref reconciliation. **Produces:** erasure record.
-   - Test: `purge.e2e.test` (**Phase-4 exit criterion**) — seed every storage class; unauthorized/agent
-     denial + replay protection; complete inventory; git-history handling; ordering+tombstones; audit-ref
-     reconciliation; backup expiration; interruption/resume; post-purge cross-class no-prohibited-copy.
+### Tasks
 
-#### Risks
-- **Approval-signature ↔ commit binding subtleties (stale base):** mitigated by `refresh-required`
-  contract + adversarial suite; `approve` never rebases.
-- **Rollback dangling provenance:** mitigated by downstream-reference set + `has-dependents` refusal.
-- **Concurrent auto-integration lost updates:** mitigated by CAS + regenerate/re-retrieve tests.
+0. **Task 1.0 — Host + CI provisioning (both runtime identities)**
+   - What: idempotent provisioning scripts creating a **dedicated non-login agent UID** plus users
+     **`atlas-broker`** and **`atlas-egress`**, group **`atlas-git`** (**members: agent UID +
+     `atlas-broker` only — NOT `atlas-egress`**, D18); protected-ref permission layout per Task 0.3
+     (dirs `0750`, ref files `0640`, `refs/agent/` agent-owned `0770`); WORM anchor file at D8's path
+     (broker-owned `0600`, parent `0700` — a **local append-only file outside the repo**, the
+     accepted local-first V1 threat model; remote isolated-host anchor is V2); key provisioning per
+     the ACL matrix (D9) including the **`atlas-test-approver`** approval keypair usable **only under
+     `ATLAS_TEST_MODE=1`** (D20). **Service-binary integrity (D16):** `setup.sh` builds + hashes the
+     broker/egress release artifact and installs it hash-verified into a **root-owned, non-agent-
+     writable** dir (`/usr/local/lib/atlas/bin` on macOS, `/opt/atlas/bin` on Linux, `0755`
+     root:wheel) — the privileged binaries are **never** run from the agent-writable repo `dist/`;
+     launchers are root-owned with fixed exec paths. **Agent network denial at the UID (D17):** the
+     agent UID's processes are **always** confined to a no-egress context (Linux: service-managed
+     netns/cgroup the UID cannot leave; macOS: per-UID `pf` anchor denying outbound + the Seatbelt
+     profile) — denial does **not** depend on the agent invoking a launcher; only `atlas-egress` has
+     outbound. CI setup (`provisioning/ci/setup.sh`, D1) + dev setup/teardown
+     (`provisioning/dev/{setup,teardown}.sh`). Fixes R2-F2, R4-F2 + review D16/D17/D18/D20.
+   - Files: `provisioning/dev/setup.sh`, `provisioning/dev/teardown.sh`, `provisioning/ci/setup.sh`,
+     `provisioning/bin/broker-launcher.sh`, `provisioning/bin/egress-launcher.sh`,
+     `provisioning/profiles/agent.sb`, `provisioning/linux/{netns.sh,agent-cgroup.sh}`,
+     `provisioning/macos/agent-pf.conf`, `provisioning/install-artifact.sh` (hash-verified install),
+     `provisioning/keys.acl.json` (machine-readable ACL matrix), `.github/workflows/ci.yml` (add
+     `sudo provisioning/ci/setup.sh` + `ATLAS_PROVISIONED=1`).
+   - Interfaces — **Consumes:** Task 0.3 contract. **Produces:** the provisioned-host contract every
+     broker/egress test consumes; `keys.acl.json` rows
+     `{key: string, path: {darwin: string, linux: string}, readableBy: Identity[], identity: "atlas-broker"|"atlas-egress"|"agent"}`.
+   - Test: `provisioning.separation.test` — agent read of each broker-only key path fails EACCES;
+     `atlas-egress` cannot read the approval/backup keys **nor any vault/object-store path** (D18);
+     `atlas-broker` cannot read `atlas.gemini.key`; agent `git update-ref` on a protected ref fails
+     EACCES while agent **read** of canonical succeeds; **a direct (non-launcher) outbound TCP from
+     the agent UID fails** (D17); egress outbound TCP succeeds; teardown removes agent UID + both
+     users + group + anchor. `provisioning.integrity.test` — the installed privileged binary matches
+     the recorded hash and is not agent-writable (D16); replacing the repo `dist/` binary does not
+     change what the launcher executes.
+   - Acceptance: setup → test → teardown is idempotent twice in a row on both OS; CI matrix runs it.
 
-#### Verification
-- Full enrich/reconcile/maintain/validate loop; review gating; rollback; purge E2E; safety-invariant CI
-  gate (retrieval-before-synthesis, review gating, approval boundary) green.
+1. **Task 1.1 — `@atlas/contracts` (leaf package)**
+   - What: stable ID mint/parse (D3 serialization), canonical serialization, the ChangePlan
+     **envelope** schema (target, rationale, sourceIds, retrievedEvidence, confidence,
+     `proposedRisk`, reversibility, `idempotencyKey?` — per-operation payload schemas are Phase 2's
+     gate, **not** promised here — fixes R2-F1/R3-F1), run-manifest schema, audit-event +
+     authorization schemas mirroring Task 0.3, provider-error union type (taxonomy only; adapter is
+     Phase 2), **and the shared cross-boundary DTOs (D14)** — `VaultSnapshot`, `ParsedNote`,
+     `SectionTree`, `WikiLink`, `NormalizedRendition`, `Chunk` — as structural types so workspace
+     packages consume them **from `contracts`, never from `apps/cli`** (breaks the package→app build
+     cycle). Zero runtime dependencies (Zod only).
+   - Files: `packages/contracts/src/{ids,canonical,changeplan-envelope,run-manifest,audit,authorization,provider-errors,dtos}.ts`,
+     `packages/contracts/src/index.ts`, `packages/contracts/test/*.test.ts`.
+   - Interfaces — **Consumes:** Task 0.3 doc. **Produces:** the DTO types above (consumed by
+     `sqlite-store`, `lancedb-index`, `vault`, `sources`), plus:
+     `newRunId(): string` (ULID) · `parseSourceHandle(s: string): ContentId | RenditionId` ·
+     `serializeRenditionId(r: RenditionId): string` ·
+     `canonicalSerialize(v: unknown): Uint8Array` (sorted keys, NFC, no NaN/Infinity) ·
+     `saltedOpaqueId(kind: "note"|"source", id: string, salt: Uint8Array): string` ·
+     `ChangePlanEnvelopeSchema: z.ZodType<ChangePlanEnvelope>` ·
+     `RunManifestSchema: z.ZodType<RunManifest>` ·
+     `AuditEventSchema: z.ZodType<AuditEvent>` · `SignedAuditEvent = {event: AuditEvent, signature: Uint8Array, signerId: string}` ·
+     `AuthorizationChallengeSchema` / `AuthorizationResponseSchema` ·
+     `ProviderError` (discriminated union of `validation|authentication|quota|rate_limit|timeout|transport|cancelled|partial_batch|model_incompatible`, each `{retryable: boolean, retryAfter?: number}`).
+   - Test: `contracts.canonical.test` (byte-identical serialization across key orders + Unicode
+     forms); `contracts.authorization.test` (Task 0.3's JSON examples validate);
+     `contracts.no-app-import.test` (D14 — the package's import graph contains no `apps/cli`
+     specifier; run repo-wide so no workspace package ever imports the app).
+   - Acceptance: package has zero deps besides `zod`; no workspace package imports `apps/cli`
+     (grep-guard); `pnpm --filter @atlas/contracts test` green.
+
+2. **Task 1.2 — `config` internal module**
+   - What: typed load + startup validation of `brain.config.yaml` (sections per spec:
+     `vault`, `sqlite` (incl. `ledger_backup.*`, `ledger_retention`, `raw_payload_store`),
+     `lancedb`, `indexing` (chunker_version=1, embedding model, `dimensions: 768`), `git`
+     (worktrees_path, auto_commit_risk_levels, `audit_anchor_path`), `models`, `policies`, `logs`,
+     `broker` (socket paths)); env-var overrides `ATLAS_<SECTION>_<KEY>`; ships the example config.
+   - Files: `apps/cli/src/config/{schema,load}.ts`, `brain.config.example.yaml`,
+     `apps/cli/test/config.test.ts`.
+   - Interfaces — **Consumes:** Task 1.1 (`canonicalSerialize` for config hash). **Produces:**
+     `loadConfig(cwd: string, env: NodeJS.ProcessEnv): AtlasConfig` (throws `ConfigError` with
+     file/key/location → exit `2`); `AtlasConfig` typed per section.
+   - Test: `config.test` — invalid enum/missing path fail with the offending key named; env
+     override wins; example config validates.
+   - Acceptance: every config key referenced anywhere in this plan exists in the schema + example.
+
+3. **Task 1.3 — `vault` + `markdown` read layer**
+   - What: vault reader (enumerate notes, parse frontmatter to typed fields incl. `id`, `type`,
+     `schema_version`, `aliases`, `sources`, `declaredSensitivity`, `data_categories`; wikilink
+     extraction; content hashing), identity-key canonicalization (NFC, case-fold,
+     whitespace/punctuation normalization), and the vault **writer primitive** used only by
+     workflow code (atomic write-temp-rename within the vault). Section/AST patch **generation** is
+     Phase 4 (Task 4.2); this task ships the section **model** (heading tree with stable section
+     selectors) that both reader and future patcher share.
+   - Files: `apps/cli/src/vault/{reader,writer,frontmatter,identity}.ts`,
+     `apps/cli/src/markdown/{parse,sections}.ts`, `apps/cli/test/vault.test.ts`.
+   - Interfaces — **Consumes:** 1.1 (the `VaultSnapshot`/`ParsedNote`/`SectionTree`/`WikiLink` DTO
+     *types* now live in `@atlas/contracts`, D14 — this module produces **values** of them, it does
+     not own the types), 1.2. **Produces:**
+     `readVault(cfg: AtlasConfig): Promise<VaultSnapshot>` (shapes: `VaultSnapshot =
+     {notes: ParsedNote[], errors: VaultError[]}`; `ParsedNote = {id: string, path: string,
+     type: NoteType, schemaVersion: number, aliases: string[], sources: string[],
+     declaredSensitivity: Sensitivity, links: WikiLink[], sections: SectionTree, contentHash: string,
+     raw: string}` — **all defined in `@atlas/contracts`**) ·
+     `normalizeIdentityKey(s: string): string` · `writeNoteFile(path: string, content: string): Promise<void>`.
+   - Test: `vault.identity.test` — mixed Hebrew/English alias normalization is rune-safe and
+     deterministic; duplicate-id fixture surfaces both offenders.
+   - Acceptance: `small-valid` parses with zero errors; `broken-links`/`duplicate-ids` produce the
+     expected typed errors (not throws).
+
+4. **Task 1.4 — `@atlas/sqlite-store`: connection, migrations, projections, `db` core commands**
+   - What: better-sqlite3 connection (WAL, FKs on), checksum-guarded migration runner +
+     `db_schema_migrations` bootstrap, `0001_core` DDL verbatim from the dictionary, repositories
+     for projection + ledger tables, projection rebuild (transactional replace of the Phase-1
+     projection set from a `VaultSnapshot`), the post-restore rebuild **hook registry** (fixes
+     R1-F1: restore triggers whatever rebuild steps are registered; Phase 3 registers the index
+     step), invariant queries (`db verify`), and the composite indexes + query-plan assertions from
+     the index contract.
+   - Files: `packages/sqlite-store/src/{connection,migrate,rebuild,verify,repos/*.ts}.ts`,
+     `packages/sqlite-store/migrations/0001_core.ts`, `packages/sqlite-store/test/*.test.ts`.
+   - Interfaces — **Consumes:** 0.2 dictionary, 1.1 (`VaultSnapshot` DTO **from `@atlas/contracts`**,
+     not from `apps/cli` — D14; sqlite-store never imports the app). **Produces:**
+     `openStore(cfg: SqliteConfig): Store` ·
+     `Store.migrate(): MigrationReport` · `Store.registerMigration(m: Migration): void` (jobs
+     registers `0002` here) ·
+     `Store.rebuildProjections(snapshot: VaultSnapshot): RebuildReport` ·
+     `Store.verify(): VerifyReport` ·
+     `registerPostRestoreRebuild(step: (ctx: RebuildCtx) => Promise<void>): void` ·
+     `Migration = {id: string, checksum: string, up(db: Database): void}`.
+   - Test: `db.migrate-ownership.test` — every §2.7 table is created by exactly its declared
+     migration (fresh DB diff vs dictionary); `db.rebuild.test` — rebuild after note edits converges;
+     ledger rows survive rebuild untouched; query-plan assertions use the contract's indexes.
+   - Acceptance: `db migrate` idempotent; rebuild transactional (crash mid-rebuild leaves old
+     projection readable — asserted with a failpoint).
+
+5. **Task 1.5 — `@atlas/git` (plumbing client)**
+   - What: typed git plumbing over the vault repo: read refs/heads, resolve commits, write objects,
+     create agent branches (`refs/agent/<runId>`), worktree add/remove, commit with signed-manifest
+     trailer, read protected refs (read-only from the agent side). No protected-ref writes here —
+     that is broker-only.
+   - Files: `packages/git/src/{repo,refs,worktree,commit}.ts`, `packages/git/test/*.test.ts`.
+   - Interfaces — **Consumes:** 1.1. **Produces:**
+     `openRepo(dir: string): Repo` · `Repo.readRef(name: string): Promise<string | null>` ·
+     `Repo.createAgentBranch(runId: string, base: string): Promise<string>` ·
+     `Repo.addWorktree(ref: string, dir: string): Promise<Worktree>` ·
+     `Worktree.commit(msg: string, manifest: RunManifest): Promise<string>` ·
+     `Repo.removeWorktree(dir: string): Promise<void>`.
+   - Test: `git.plumbing.test` — agent branch + worktree + commit round-trip on a fixture repo;
+     manifest trailer parses back to an equal `RunManifest`.
+   - Acceptance: no code path in this package opens protected refs for writing (grep-guarded test
+     `git.no-protected-write.test` asserting the write API surface only accepts `refs/agent/*`).
+
+6. **Task 1.6 — `@atlas/broker`: authorization core + protected-ref primitives + audit append**
+   - What: the broker daemon (runs as `atlas-broker` via the launcher; unix-socket server per D10)
+     with: challenge mint/verify (nonce store, expiry, drift rejection per Task 0.3), Ed25519
+     verification, protected-ref CAS advance with ancestry + signature + audit-event re-verification,
+     **`integrateSourceCapture`** (the narrowly scoped Tier-1 capture integration Phase 2 consumes —
+     verifies the capture commit touches only `sources/**` + manifest paths and fast-forwards
+     canonical under CAS — fixes R1-F2), audit-ref append (monotonic seq check, signed events only),
+     WORM-anchor update on every append, and the client library. **No `@atlas/sqlite-store` import**
+     (§2.8 direction; enforced by test). Includes `tools/test-signer.ts` (signs a challenge with the
+     provisioned `atlas-test-approver` key) so every privileged flow is executable in tests/CI.
+   - Files: `packages/broker/src/{server,client,authorize,refs,audit-append,anchor}.ts`,
+     `packages/broker/bin/atlas-broker.ts`, `tools/test-signer.ts`,
+     `packages/broker/test/*.test.ts`.
+   - Interfaces — **Consumes:** 0.3, 1.0 (identities/keys), 1.1, 1.5. **Produces:**
+     `BrokerClient.connect(socketPath: string): Promise<BrokerClient>` ·
+     `BrokerClient.appendAuditEvent(e: SignedAuditEvent): Promise<{seq: number, head: string}>` ·
+     `BrokerClient.advanceProtectedRef(r: RefAdvanceRequest): Promise<RefAdvanceResult>` where
+     `RefAdvanceRequest = {ref: ProtectedRef, expectedOld: string, newCommit: string, manifest: RunManifest, authorization?: AuthorizationResponse, auditEvent: SignedAuditEvent}` ·
+     `BrokerClient.integrateSourceCapture(r: {captureCommit: string, expectedBase: string, manifest: RunManifest, auditEvent: SignedAuditEvent}): Promise<RefAdvanceResult>` ·
+     `BrokerClient.mintChallenge(op: PrivilegedOpDescriptor): Promise<AuthorizationChallenge>` ·
+     `BrokerClient.execAuthorized(op: PrivilegedOpDescriptor, auth: AuthorizationResponse): Promise<PrivilegedOpResult>` ·
+     `tools/test-signer.ts` CLI: `node tools/test-signer.ts --key atlas-test-approver < challenge.json > authorization.json`.
+   - Test: `broker.no-ledger-dep.test` (import graph contains no sqlite-store);
+     `approval-boundary.adversarial.test` (Phase-1 subset): agent direct `update-ref` on protected
+     refs → EACCES; forged/replayed/expired signature → typed refusal; append with non-monotonic
+     seq → refusal; `anchor.anti-truncation.test`: truncate the audit ref, broker startup + verify
+     detect count regression vs anchor.
+   - Acceptance: broker runs under `broker-launcher.sh` on both OS; all adversarial cases refused
+     with the contract's stable error codes.
+
+7. **Task 1.7 — Ledger finalization + encrypted backup/restore (`db backup|restore|verify --backup`)**
+   - What: `finalizeLedgerWrite` implementing §2.8 exactly (intent txn + seq allocation → broker
+     append → ledger commit → backup + watermark), `reconcileInterruptedRuns`, the AEAD backup
+     writer (Online Backup API snapshot, temp-then-rename, content hash + schema stamp, retention
+     pruning), watermark fail-closed gate (blocks the ledger-writing command set with
+     `backup-unhealthy` exit `2` until covered; audited `db backup --force-unblock` override), and
+     the **privileged restore**: challenge/authorization via broker (`op: "db.restore"`, challenge
+     carries backupRef + content hash), exclusive `vault-maintenance`+`ledger-maintenance` locks,
+     transactional ledger-table restore, then the post-restore hook registry (projection rebuild
+     now; index rebuild added Phase 3). D6 audit rows for backup/restore/force-unblock.
+   - Files: `packages/sqlite-store/src/ledger/{finalize,intents,reconcile}.ts`,
+     `packages/sqlite-store/src/backup/{backup,restore,watermark}.ts`,
+     `apps/cli/src/commands/db-backup.ts`, `apps/cli/src/commands/db-restore.ts`,
+     `packages/sqlite-store/test/ledger/*.test.ts`.
+   - Interfaces — **Consumes:** 0.4 contract, 1.1, 1.4, 1.6 (`appendAuditEvent`), 1.2 (config).
+     **Produces:**
+     `finalizeLedgerWrite<T>(store: Store, broker: BrokerClient, run: RunContext, write: (tx: LedgerTx) => T): Promise<T>` ·
+     `reconcileInterruptedRuns(store: Store, broker: BrokerClient): Promise<ReconcileReport>` ·
+     `takeBackup(store: Store, cfg: LedgerBackupConfig): Promise<{backupRef: string, seq: number}>` ·
+     `verifyBackup(cfg: LedgerBackupConfig, backupRef: string): Promise<void>` ·
+     `restoreBackup(store: Store, backupRef: string): Promise<void>` (invoked only by the
+     authorized CLI path) · `watermarkHealth(store: Store): {seq: number, coveredSeq: number, healthy: boolean}`.
+   - Test: `ledger.dr-roundtrip.test` — backup → wipe DB → authorized restore (via
+     `tools/test-signer.ts`) → every ledger row recovered byte-equal; `restore.atomicity.test` —
+     crash mid-restore leaves the prior DB intact; `ledger.fail-closed-watermark.test` — injected
+     backup failure blocks a subsequent ledger-writing run with `backup-unhealthy`, read-only
+     commands still work, verified backup unblocks, `--force-unblock` records the audited RPO gap;
+     `audit.cross-store-ordering.test` per §2.8; wrong/revoked key + truncated/corrupt backup
+     rejection.
+   - Acceptance: the Phase-1 exit criteria — destructive restore + corruption tests — are green in
+     CI on both OS.
+
+8. **Task 1.8 — CLI foundation: entrypoint, renderer, envelope, locks, diagnostics**
+   - What: the `brain` entrypoint (command routing from the registry, `--json|--quiet|--verbose`,
+     exit-code mapping), the **terminal-safe renderer** as the single human-output channel (strips/
+     escapes ANSI/CSI/OSC-8/OSC-52/C0-C1/CR-overwrite; isolates bidi controls; preserves
+     newline/tab), `--plain` + `NO_COLOR`/`--no-color`/`TERM=dumb`/non-TTY degradation with
+     append-only progress lines, the JSON error envelope emitter (0.5 schema), the **lock manager**
+     (named scopes + §2.5 global order incl. `jobs-runner`; owner pid + start time;
+     `locked:<scope>` exit `2`; `doctor --reclaim-locks` for dead-pid locks), and **diagnostics
+     logging** (structured JSONL to `logs.dir`, rotation + retention per `logs.*`, run/job-id
+     correlation, redaction boundary — never raw prompts/quotes/secrets). Fixes R1-F13's missing
+     owners.
+   - Files: `apps/cli/src/{main,router}.ts`, `apps/cli/src/render/{safe,plain,progress}.ts`,
+     `apps/cli/src/errors/envelope.ts`, `apps/cli/src/locks/manager.ts`,
+     `apps/cli/src/diag/logger.ts`, `apps/cli/test/{renderer,locks,envelope}.test.ts`.
+   - Interfaces — **Consumes:** 0.5 schemas, 1.2. **Produces:**
+     `runCli(argv: string[], env: NodeJS.ProcessEnv): Promise<number>` ·
+     `render(text: string, opts: RenderOpts): string` (the ONLY human-output path) ·
+     `withLock<T>(scope: LockScope, fn: () => Promise<T>): Promise<T>` where
+     `LockScope = "vault-maintenance"|"ledger-maintenance"|"jobs-runner"|"canonical-integration"` ·
+     `emitError(e: CliError): never` · `diag(runId: string | null): Logger` where
+     `Logger = {info(msg: string, ctx?: object): void; warn(msg: string, ctx?: object): void; error(msg: string, ctx?: object): void; child(ctx: object): Logger}`
+     (full method signatures, fixes R2-F6).
+   - Test: `terminal-renderer.safety.test` — adversarial ANSI/OSC-8/OSC-52/CR/bidi fixtures neutered;
+     `plain-mode.announcements.test` — long-running command in `--plain` emits append-only
+     `started…/progress: N/M/done` lines, non-duplicated; `locks.conflict-matrix.test` — the
+     contract's coexistence matrix, incl. dead-pid reclaim.
+   - Acceptance: no command bypasses `render()` (lint rule banning direct `process.stdout.write` of
+     non-JSON outside the renderer + JSON emitter modules).
+
+9. **Task 1.9 — `inspect`, `doctor`, `status` + Tier-0/projection audit wiring**
+   - What: `inspect` (vault + projection summary), `doctor` (Phase-1 check inventory per 0.5:
+     file/dir modes 0700/0600 across vault/SQLite/worktrees/temp, encrypted-volume marker where
+     detectable, lock liveness + `--reclaim-locks`, backup watermark health, audit-head anchor
+     check, provisioning presence), `status` per D12. Executed `inspect`/`status` append one
+     terminal **`run.readonly`** event via §2.8 (fixes R2-F4); executed `db rebuild` (from 1.4)
+     appends **`run.projection`** — wired here so the Phase-1 projection-only command is audited from
+     day one. **Read-run backup coalescing (review-inline):** a readonly run writes its ledger row +
+     audit event but does **not** each force a full encrypted backup — the watermark **coalesces**
+     (a backup covers up to the latest ledger seq, debounced), so cheap high-frequency reads cannot
+     amplify into unbounded backup/storage growth (bounds the read-DoS finding). Previews/`doctor`
+     emit no run events (doctor is a health surface, not a run — per the spec's closed Tier-0
+     enumeration).
+   - Files: `apps/cli/src/commands/{inspect,doctor,status}.ts`, `apps/cli/src/audit/readonly.ts`,
+     `apps/cli/test/e2e/phase1.e2e.test.ts`.
+   - Interfaces — **Consumes:** 1.3, 1.4, 1.6, 1.7 (`finalizeLedgerWrite`), 1.8. **Produces:**
+     `recordReadonlyRun(kind: "run.readonly"|"run.projection", cmd: string, store, broker): Promise<RunId>`
+     (consumed by `query` in 3.5 and `index` ops in 3.6).
+   - Test: `phase1.e2e.test` — on `small-valid`: `inspect --json` exit 0 + schema-valid; `doctor`
+     exit 0 on a provisioned host / names the failing check otherwise; `status` shows watermark;
+     the audit ref gained exactly one `run.readonly` per executed inspect (cardinality assertion);
+     `db rebuild` emits exactly one `run.projection`.
+   - Acceptance: Phase-1 exit — all named suites green + the Verification block below passes on
+     both OS.
+
+### Risks
+- **Provisioning friction on dev machines** (sudo, users): mitigated by `ATLAS_PROVISIONED` skips
+  locally + mandatory CI coverage; `doctor` names exactly what is missing.
+- **better-sqlite3 Online Backup API coverage:** if the binding lacks it, fall back to
+  `VACUUM INTO` + WAL checkpoint under `ledger-maintenance` lock — decision recorded in Task 0.4's
+  contract before Task 1.7 starts.
+- **macOS Seatbelt deprecation churn:** the sandbox/network profiles are pinned per macOS major and
+  capability-probed at startup (`doctor` fails loud), per the sandbox contract.
+
+### Verification (run from repo root; requires `sudo provisioning/dev/setup.sh` once)
+```bash
+pnpm -r build && pnpm -r test                              # all Phase-0/1 suites green
+ATLAS_PROVISIONED=1 pnpm --filter @atlas/broker --filter @atlas/sqlite-store test
+V=fixtures/small-valid
+node apps/cli/dist/index.js --vault "$V" db migrate        # exit 0, idempotent on rerun
+node apps/cli/dist/index.js --vault "$V" db rebuild        # exit 0; emits one run.projection
+node apps/cli/dist/index.js --vault "$V" inspect --json    # exit 0; validates inspect.schema.json
+node apps/cli/dist/index.js --vault "$V" doctor            # exit 0 on provisioned host
+REF=$(node apps/cli/dist/index.js --vault "$V" db backup --json | jq -r .backupRef)
+node apps/cli/dist/index.js --vault "$V" db verify --backup "$REF"   # exit 0
+node apps/cli/dist/index.js --vault "$V" db restore "$REF" --export-challenge > /tmp/ch.json
+node tools/test-signer.ts --key atlas-test-approver < /tmp/ch.json > /tmp/auth.json
+node apps/cli/dist/index.js --vault "$V" db restore "$REF" --authorization /tmp/auth.json  # exit 0
+```
+
+### Rollback
+- Precondition: Phase-1 PR merged; Phase 2 not started.
+- Procedure (single branch): `git revert <phase1-PR-merge-sha>` on a branch → revert PR → merge.
+  Host provisioning is **not** torn down by a code revert (it is stateful host config;
+  `provisioning/dev/teardown.sh` is run only when decommissioning a host).
+- Schema compatibility: `0001_core` DDL already applied to local DBs remains readable; the migration
+  runner no-ops on re-apply after a roll-forward; **no downgrade DDL is ever run**.
+- Verify supported state (commands that survive the revert — Phase-0 harness only):
+  `pnpm -r build && pnpm -r test` and `node tools/gen-cli-contract.ts --check` exit 0.
 
 ---
 
-### Phase 5: Graduate to real vault
+## Phase 2: Ingest loop — scanner, sandbox, capture, jobs, egress broker
+**Goal:** `brain ingest`/`source add` capture local files (md/txt/pdf/html) as immutable,
+provenanced source notes through the broker; jobs queue runs; the Gemini adapter exists behind the
+egress broker and is provably restricted to non-mutating extraction/classification.
+**Dependencies:** Phase 1. Lands as **two PRs**: PR-A (Task 2.1, retained) then PR-B (all else).
+**Estimated effort:** L
 
-**Goal:** Operate against a **sandbox copy** of `main-vault`, agent-branch-only, after a fail-closed scan
-and a deterministic review-gated bootstrap migration.
-**Dependencies:** Phase 4; Phase-5 contracts (`bootstrap-migration.md`, retrieval-eval + scale thresholds).
+### Tasks
+
+0. **Task 2.0 — Phase-2 contracts gate**
+   - What: author + approve `jobs-contract.md` (legal transitions, retry classification + bounded
+     defaults, backoff schedule, terminal semantics, **`jobs-runner` process-lock ownership** (D5),
+     dead-runner startup recovery), `sandbox-contract.md` (per-guarantee isolation primitive on
+     macOS Seatbelt + Linux userns/seccomp/netns/rlimits, startup capability checks, supported-host
+     matrix), `normalization-contract.md` (per-format MIME signatures + canonical media tokens,
+     encodings, rejection codes `unsupported-encoding`/`encrypted-source`/`no-extractable-text`,
+     partial-extraction-is-rejection, determinism requirement, size limits, conformance fixture
+     list, media alt-text rules), the **per-operation ChangePlan schemas** as code in `contracts`
+     (all 17 ops as a discriminated union incl. reserved `CreateTask`/`UpdateTaskState`; exact
+     files below — fixes R3-F1), the provider-interface contract doc (request/result types, batch
+     semantics, `AbortSignal`, error taxonomy binding), and `cli-contract/*` schemas for `ingest`,
+     `source add|list|show`, `source trust show`, `note show|related|history`,
+     `jobs list|run|retry|cancel`, `git status|cleanup`.
+   - Files: `docs/specs/jobs-contract.md`, `docs/specs/sandbox-contract.md`,
+     `docs/specs/normalization-contract.md`, `docs/specs/provider-interface.md`,
+     `packages/contracts/src/ops/{create-note,update-section,append-section,frontmatter,add-alias,links,relationship,claim,evidence,merge,rename,archive,trust,task}.ts`,
+     `packages/contracts/src/changeplan.ts` (`ChangePlanSchema` union),
+     `docs/specs/cli-contract/{ingest,source-add,source-list,source-show,source-trust-show,note-show,note-related,note-history,jobs-list,jobs-run,jobs-retry,jobs-cancel,git-status,git-cleanup}.schema.json`.
+   - Interfaces — **Consumes:** 1.1 envelope. **Produces:**
+     `ChangePlanSchema: z.ZodType<ChangePlan>` (envelope × discriminated op payloads) ·
+     `ChangePlanOperation` union type · per-op result/error-code types.
+     Byte-identity across the process seam is asserted by `contracts.operations.test`.
+   - Test: `contracts.operations.test` — every op schema round-trips canonical serialization
+     byte-identically in two separate processes (CLI-side + broker-side harness).
+   - Acceptance: all Phase-2 registry rows have schemas; contract docs' fenced examples validate.
+
+1. **Task 2.1 — PR-A (retained): `0003_provenance` migration + manifest fold**
+   - What: the provenance DDL (per dictionary: `content_blobs` with component-column active
+     rendition, `source_captures` with `UNIQUE(contentId-components, origin)`, `source_renditions`,
+     `note_sources`) + `foldProvenanceManifests` — the rebuild reader that reconstructs all three
+     entities (and `note_sources`) from canonical Markdown manifests, registered into
+     `rebuildProjections`. Lands as its own PR that later reverts never touch (fixes R4-F5, R3-F9).
+   - Files: `packages/sqlite-store/migrations/0003_provenance.ts`,
+     `packages/sqlite-store/src/provenance/fold.ts`, `packages/sqlite-store/test/provenance-fold.test.ts`.
+   - Interfaces — **Consumes:** 0.2, 1.4 (`registerMigration`, rebuild pipeline). **Produces:**
+     `foldProvenanceManifests(snapshot: VaultSnapshot, tx: RebuildTx): void` (consumed by 1.4's
+     rebuild from now on); the provenance repos
+     (`upsertBlob`, `recordCapture`, `recordRendition`, `setActiveRendition`, `resolveSourceHandle(h: ContentId | RenditionId): RenditionRow | null`).
+   - Test: `provenance-fold.test` — hand-authored manifest fixtures rebuild to the exact expected
+     rows, including the derived active-rendition pointer.
+   - Acceptance: with **only** PR-A merged, `db rebuild` on `source-heavy` reproduces provenance
+     projections from manifests alone.
+
+2. **Task 2.2 — `@atlas/scan` leaf package: engine + guards (+ CLI quarantine orchestration)**
+   - What: the scan engine (representative secret formats + entropy heuristics; deterministic,
+     versioned ruleset), **`PrePersistenceGuard`** (raw bytes + normalized output; consumed by
+     normalize/capture as a required dependency) and **`GeneratedArtifactGuard`** (exact serialized
+     form of model responses + derived artifacts incl. future patches/diffs/commit messages — the
+     same engine, second enforcement point; exists from the first model call). **The engine + guards
+     live in a NEW leaf workspace package `@atlas/scan`** (structural inputs only, consumes just
+     `@atlas/contracts`) so the workspace packages that need it — `@atlas/sources` (2.3/2.4) and the
+     `@atlas/broker` egress side (2.8) — import it **without** an `apps/cli` back-edge (same
+     no-app-import invariant as D14). Only the **quarantine store orchestration** stays CLI-side:
+     AEAD (key per ACL matrix, trusted-CLI identity), mode-0700 dir **outside the repo**, minimized
+     filenames, bounded retention, crash-safe purge (temp-then-rename; no plaintext ever on disk),
+     `doctor` quarantine-security checks.
+   - Files: `packages/scan/src/{engine,rules,pre-persistence,generated-artifact}.ts`,
+     `apps/cli/src/quarantine/store.ts`, `packages/scan/test/*.test.ts`.
+   - Interfaces — **Consumes:** `@atlas/contracts` (structural types only — no config/diag import in
+     the leaf; the CLI injects config + a diag sink at call time). **Produces:**
+     `scanBytes(input: {bytes: Uint8Array, context: ScanContext}): ScanVerdict`
+     (`ScanVerdict = {clean: true} | {clean: false, findings: SecretFinding[]}`) ·
+     `PrePersistenceGuard.assertClean(a: {bytes: Uint8Array, origin: string}): Promise<void>`
+     (throws `SecretDetectedError` after quarantining; exit `3` at the CLI boundary) ·
+     `GeneratedArtifactGuard.assertClean(a: {text: string, sink: PersistenceSink, runId: string}): Promise<void>` ·
+     `PersistenceSink = "sqlite"|"worktree"|"git-object"|"lancedb"|"log"|"audit"`.
+   - Test: `quarantine.security.test` — ciphertext-only at rest (AEAD integrity), parser/model
+     identities cannot read the key, filenames minimized, rotation + retention expiry, crash
+     mid-quarantine leaves no plaintext; `scan.engine.test` — representative formats detected,
+     clean fixtures pass.
+   - Acceptance: guard refusal quarantines + aborts with exit `3`; nothing persists to any sink.
+
+3. **Task 2.3 — `@atlas/sources`: sandboxed parser worker (scans inside the sandbox — D15)**
+   - What: the sandbox launcher per `sandbox-contract.md` — dedicated low-privilege spawn,
+     **allowlisted empty environment**, no network, isolated FS namespace (read-only input handle +
+     a **disposable, worker-private** temp), CPU/memory/time/output caps, syscall restrictions,
+     MIME-signature validation before parse, scripts/external resources disabled; startup capability
+     probes that fail fast (wired into `doctor`). **Scan-before-persist (D15):** the worker runs the
+     secret scanner (engine injected from Task 2.2) **inside the sandbox** over its normalized output
+     and emits an **attested clean byte stream through a pipe / sealed memory-backed fd** — it
+     **never** writes normalized bytes to a shared `outputDir` the trusted process later reads, so no
+     normalized byte reaches any temp/parser sink unscanned. `runInSandbox` returns a readable stream
+     + a scan attestation, not a directory path. Both backends (macOS Seatbelt, Linux
+     userns+seccomp+netns+rlimits).
+   - Files: `packages/sources/src/sandbox/{launcher,darwin,linux,probes}.ts`,
+     `packages/sources/src/worker/main.ts`, `packages/sources/test/{sandbox-containment,scan-before-persist}.test.ts`.
+   - Interfaces — **Consumes:** 0.3 (identities), 2.0 sandbox contract, 2.2 scan engine (injected into
+     the worker). **Produces:**
+     `runInSandbox(req: {inputPath: string, format: SourceFormat, limits: SandboxLimits}): Promise<WorkerResult>`
+     (`WorkerResult = {ok: true, stream: ReadableStream<Uint8Array>, attestation: ScanAttestation} | {ok: false, rejection: NormalizationRejection}`) ·
+     `probeSandbox(): Promise<SandboxCapabilityReport>` (consumed by `doctor`).
+   - Test: `sandbox.containment.test` (adversarial): probe parsers assert network, env, keychain,
+     inherited FDs, out-of-scope paths, subprocess spawn, forbidden syscalls all fail; caps enforce
+     incl. cleanup after forced termination. `scan-before-persist.test` (D15) — a secret-bearing
+     source yields **no** file on any temp/parser/worktree sink before the reject; a filesystem probe
+     during the run finds no unscanned normalized bytes.
+   - Acceptance: containment + scan-before-persist suites green on both OS in CI.
+
+4. **Task 2.4 — Normalization per contract (consumes the guard)**
+   - What: md/txt/pdf/html normalizers running in the worker, driven by `normalization-contract.md`:
+     canonical media-type detection, encoding rules, typed rejections, deterministic output +
+     locator schemes (byte/char offsets, pdf page+span, DOM anchor), per-format size limits, media
+     alt-text handling (preserve useful `alt`, `alt=""` for decorative, meaningful-image gap records
+     — auto-generated descriptions are out of Phase 2 since they'd be synthesis; the Tier-3 gate
+     applies when Phase 4 enables them). `normalize` **requires** a `PrePersistenceGuard` and scans
+     raw bytes before parse and normalized output before return (fixes R4-F3).
+   - Files: `packages/sources/src/normalize/{index,markdown,text,pdf,html,media}.ts`,
+     `packages/sources/test/normalization-conformance.test.ts`.
+   - Interfaces — **Consumes:** 2.0 contract, 2.2 guard, 2.3 sandbox. **Produces:**
+     `normalize(input: {path: string, guard: PrePersistenceGuard}): Promise<NormalizeResult>`
+     (`NormalizeResult = {ok: true, rendition: NormalizedRendition} | {ok: false, rejection: NormalizationRejection}`;
+     `NormalizedRendition = {contentId: ContentId, extractorVersion: number, normalizerVersion: number, normalizedContentHash: string, sizeBytes: number, locatorScheme: LocatorScheme, text: string, gaps: RepresentedGap[]}`).
+   - Test: `normalization-conformance.test` — the contract's fixture matrix per format (encodings,
+     encrypted/scanned PDF rejections, script-bearing HTML static-DOM, partial-extraction rejection,
+     determinism: same bytes+versions ⇒ byte-identical hash); `normalize.scans-before-return.test` —
+     a secret-bearing fixture never yields a rendition and lands in quarantine.
+   - Acceptance: conformance matrix green; determinism proven by double-run hash equality.
+
+5. **Task 2.5 — `workflows` core: persisted run state machine + reconciler**
+   - What: the run lifecycle engine per `recovery-state-machine.md`: durable checkpoints in
+     `agent_runs` (single atomic write per transition with the gating artifacts/hashes),
+     `failed@`/`cancelled@` semantics, `AbortSignal` plumbing, startup reconciler (integrated-but-
+     unfinalized → finalize; review-pending → leave intact; applied-uncommitted → commit iff plan
+     hash + base unmoved else `failed@worktree-applied`; orphaned worktrees → clean), run-report
+     assembly, and the **caller-idempotency layer** for key-accepting workflow commands (persist
+     normalized request hash + terminal result per `(command, --idempotency-key)`; identical retry
+     returns the prior result; key reuse with different input rejected; concurrent duplicates block
+     on the persisted key). Consumed by capture now, synthesis in Phase 4.
+   - Files: `apps/cli/src/workflows/{engine,checkpoints,reconciler,run-report}.ts`,
+     `apps/cli/test/workflows-core.test.ts`.
+   - Interfaces — **Consumes:** 0.1 table, 1.4 repos, 1.7 (`finalizeLedgerWrite`), 1.5/1.6 (git,
+     broker). **Produces:**
+     `startRun(kind: RunKind, input: RunInput): Promise<RunHandle>` ·
+     `RunHandle.checkpoint(state: RunState, artifacts: CheckpointArtifacts): Promise<void>` ·
+     `RunHandle.fail(at: RunState, reason: string): Promise<TerminalRun>` ·
+     `RunHandle.cancel(at: RunState): Promise<TerminalRun>` ·
+     `reconcileRunsOnStartup(deps: {store: Store, repo: Repo, broker: BrokerClient}): Promise<ReconcileReport>`.
+   - Test: `workflows-core.test` — each legal transition persists exactly its contract artifacts;
+     illegal transitions throw; reconciler cases from the contract table (subset exercised here;
+     full generated matrix in Task 4.11).
+   - Acceptance: a capture run driven through the engine survives kill -9 at every checkpoint and
+     reconciles per the table.
+
+6. **Task 2.6 — Capture pipeline + `ingest` / `source add`**
+   - What: `captureSource` — dedup + capture-event idempotency per the spec (blob by
+     `(rawContentHash, canonicalMediaType)`, capture keyed `(contentId, origin)`, changed bytes ⇒
+     new blob), immutable raw-byte copy under `sources/`, the three canonical Markdown manifests,
+     deterministic capture commit on an agent branch, integration via
+     `broker.integrateSourceCapture` (Tier-1 CAS), projections via `finalizeLedgerWrite`, RunReport.
+     `ingest` (preview default: prints planned capture + extraction preview; `--apply` captures) and
+     `source add` (immediate capture, D11) both funnel here. **`captureSource` requires the guard**
+     (scan-before-persist — fixes R4-F3).
+   - Files: `apps/cli/src/ingest/{capture,manifests}.ts`,
+     `apps/cli/src/commands/{ingest,source-add}.ts`, `apps/cli/test/e2e/ingest.e2e.test.ts`.
+   - Interfaces — **Consumes:** 2.1 repos, 2.2 guard, 2.4 normalize, 2.5 engine, 1.6
+     (`integrateSourceCapture`). **Produces:**
+     `captureSource(req: {path: string, guard: PrePersistenceGuard, deps: CaptureDeps}): Promise<CaptureResult>`
+     (`CaptureResult = {contentId: ContentId, captureId: string, renditionId: RenditionId, noteId: string, runId: string, reused: {blob: boolean, capture: boolean}}`).
+   - Test: `capture.scans-before-persist.test` — secret-bearing file: no vault/SQLite/worktree/git/
+     temp persistence, quarantined, exit `3`; `provenance.versioning.test` — the spec's table-driven
+     matrix (same bytes new path ⇒ capture not blob; changed bytes ⇒ new blob; extractor upgrade ⇒
+     new rendition + re-pointed active; retried same-path ingest ⇒ no new capture) — **provenance
+     behavior only; dependent-evidence staleness asserted in Phase 4** (fixes R4-F4);
+     `ingest.e2e.test` — preview creates nothing (asserted against all sinks), `--apply` commits via
+     broker CAS, canonical advanced exactly one commit.
+   - Acceptance: capture idempotency proven under retry + crash injection at each checkpoint.
+
+7. **Task 2.7 — PR-B: `@atlas/jobs` + `jobs` CLI**
+   - What: `0002_jobs` migration (authored here; **the CLI composition root (`apps/cli/src/main.ts`)
+     imports `@atlas/jobs` and calls `registerJobsMigration(store)` before `store.migrate()`** so
+     `db migrate` discovers `0002` — sole ownership, no undiscoverable migration), repository +
+     transactions (state enum, attempts, `lease_epoch` reserved-written, `next_run_at` backoff,
+     idempotency keys unique per (workflow, key), side-effect-id recording), synchronous single-runner
+     (`jobs-runner` lock, bounded attempts, backoff), startup dead-runner recovery (reset to
+     `pending` under the lock), `jobs list|run|retry|cancel` per D5 + the registry (bulk selection
+     semantics, per-job result array + aggregate exit).
+   - Files: `packages/jobs/migrations/0002_jobs.ts`, `packages/jobs/src/{repo,runner,recovery,register}.ts`,
+     `apps/cli/src/main.ts` (add the `registerJobsMigration` call at the composition root),
+     `apps/cli/src/commands/jobs.ts`, `packages/jobs/test/*.test.ts`.
+   - Interfaces — **Consumes:** 2.0 jobs-contract, 1.4 (`registerMigration`), 1.8 (`withLock`).
+     **Produces:**
+     `enqueue(tx: LedgerTx, job: JobSpec): JobId` (`JobSpec = {workflow: string, idempotencyKey: string, payload: unknown, maxAttempts?: number}`) ·
+     `runAll(deps: JobsDeps, selector: {jobId?: string, all?: boolean}): Promise<JobRunReport>` ·
+     `readSnapshot(store: Store, id: JobId): JobSnapshot` (the one-way API sqlite-store consumers use).
+   - Test: `jobs.single-runner-exclusion.test` — two concurrent `jobs run` processes: one drains,
+     the other exits `2` `locked:jobs-runner`, every job executes exactly once;
+     `jobs.lifecycle.test` — idempotency collisions, retry exhaustion → terminal, startup recovery,
+     cancel queued-vs-running, controlled clocks + crash injection.
+   - Acceptance: jobs-contract acceptance section green; `jobs retry`/`cancel` with no selector
+     exit `5`.
+
+8. **Task 2.8 — Egress broker + `@atlas/models` (Gemini, extraction-only) + operation gate**
+   - What: the egress-broker daemon (runs as `atlas-egress` via its launcher; unix socket per D10):
+     sole credential holder, sole outbound-network process; scans the **exact serialized payload**
+     in-broker on every request/response (engine from 2.2). **Every call carries a run-bound
+     capability (D19)** minted CLI-side per run — `{runId, operation, model, maxBytes, maxTokens,
+     costCeiling, allowedSensitivity}` — and the broker enforces the capability + a **per-run
+     cost/byte budget** and refuses a payload whose `effectiveSensitivity` exceeds
+     `allowedSensitivity`, in addition to the scan (bounds a compromised agent's export/spend through
+     the sanctioned RPC). **Audit cardinality (D6):** each transmission writes a **`model_calls`
+     ledger row** (request/response hashes, destination, model, tokens, latency, cost, retries) — a
+     run has many; it does **NOT** emit a `run.*` terminal audit-ref event per call (those stay
+     one-terminal-per-run, owned by the run's workflow). `@atlas/models` = typed IPC client
+     (`generateText`/`generateObject<T>`/`embed`, versioned request/result types, `AbortSignal`,
+     adapter-owned retry, taxonomy mapping incl. `retryAfter` propagation). The Gemini adapter lives
+     **inside** the egress broker. Plus **`policies.operationGate`** — the narrow Phase-2 policy
+     subset (fixes R1-F3): capture/projection ops allowed, synthesis ops rejected fail-closed,
+     reserved task ops rejected always.
+   - Files: `packages/models/src/{client,types,capability}.ts`,
+     `packages/broker/src/egress/{server,gemini,scan,budget}.ts`, `packages/broker/bin/atlas-egress.ts`,
+     `apps/cli/src/policies/operation-gate.ts`, `packages/models/test/*.test.ts`.
+   - Interfaces — **Consumes:** 2.0 provider contract, 2.2 engine, 1.0 (identity/keys), 1.1
+     (`ProviderError`), 4.3 (`effectiveSensitivity` — forward ref; Phase-2 uses the declared value
+     until 4.3 lands). **Produces:**
+     `mintEgressCapability(run: RunContext, limits: EgressLimits): EgressCapability` (CLI-side) ·
+     `generateText(req: GenerateTextRequest, cap: EgressCapability, signal?: AbortSignal): Promise<GenerateTextResult>` ·
+     `generateObject<T>(req: {schema: z.ZodType<T>, prompt: PromptRef, input: string}, cap: EgressCapability, signal?: AbortSignal): Promise<T>` ·
+     `embed(req: {texts: string[], dimensions: number}, cap: EgressCapability, signal?: AbortSignal): Promise<EmbedResult>`
+     (batch semantics: `partial_batch` names succeeded indices, never persisted as complete) ·
+     `assertOperationAllowed(op: ChangePlanOperation, phase: 2 | 4): void` (throws typed
+     `OperationForbiddenError`; Phase-4 extends the same owner with tier gating — single source).
+   - Test: `egress.bypass.test` — a direct (non-launcher) outbound from the agent UID fails at the OS
+     layer (D17); a secret planted in a prompt is blocked in-broker, quarantined, `model_calls` row
+     written; `egress.capability-budget.test` (D19) — a call exceeding the run's byte/cost ceiling or
+     exporting above `allowedSensitivity` is refused; adapter suite per the spec (doubles by default;
+     malformed/truncated output, schema violations, timeouts, rate-limit `retryAfter → retryAfterMs`,
+     cancellation before/during/mid-batch, auth failures: stable `authentication`, `retryable: false`,
+     zero retries, sanitized diagnostics).
+   - Acceptance: `ATLAS_LIVE_GEMINI=1` smoke passes nightly; no provider key readable outside
+     `atlas-egress` (re-asserted by `provisioning.separation.test`).
+
+9. **Task 2.9 — Read/maintenance commands: `source list|show`, `source trust show`, `note show|related|history`, `git status|cleanup`**
+   - What: registry-driven read commands over projections + git (pagination contract: `--limit`
+     default 50/max 500 + `--offset`, defined sort key + unique tie-breaker, `total`/`hasMore`,
+     documented best-effort anomalies); `source trust show` reads the trust state (default
+     untrusted pre-Phase-4); `git status` lists open agent branches/worktrees with run id/risk/
+     validation/base; `git cleanup` prunes terminal-run branches/worktrees.
+   - Files: `apps/cli/src/commands/{source,note,git-status,git-cleanup}.ts`,
+     `apps/cli/test/pagination.contract.test.ts`.
+   - Interfaces — **Consumes:** 1.4/2.1 repos, 1.5, 1.8. **Produces:** — (leaf commands).
+   - Test: `pagination.contract.test` — deterministic ordering with tie-breakers, out-of-range
+     offset/limit bounds (exit `5`), stable JSON schemas, concurrent-insert anomaly bounds.
+   - Acceptance: each command's generated contract fixtures pass.
+
+10. **Task 2.10 — Phase-2 non-integration exit test + observability rows**
+    - What: the release-blocking E2E proving the Phase-2 restriction: submit model-derived
+      operations at every proposed risk level + prompt-injection-shaped inputs; assert canonical
+      HEAD + canonical Markdown never change, **no synthesis ChangePlan is even created** (gate
+      rejects), no approval path integrates a model-derived artifact, only deterministic capture
+      commits. Plus the Phase-2 rows of the observability run-matrix (capture Tier-1, readonly,
+      projection, failed@, cancelled@ — asserting ledger completeness + audit cardinality + `--from-git`
+      reproduction for these classes; full matrix completes in Task 4.11).
+    - Files: `apps/cli/test/e2e/phase2-non-integration.e2e.test.ts`,
+      `apps/cli/test/observability-matrix.test.ts` (phase-2 rows).
+    - Interfaces — **Consumes:** everything above. **Produces:** —.
+    - Test: `phase2.non-integration.test` — the assertions above, byte-level canonical comparison
+      before/after.
+    - Acceptance: suite is in the required CI gate; a synthetic gate-bypass mutation makes it fail
+      (proven once by mutation).
+
+### Risks
+- **Sandbox capability variance across macOS versions:** startup probes + `doctor` fail loud;
+  contract pins the supported major (mitigation lives in 2.3, not prose).
+- **PDF extraction determinism:** pin the extractor library version in the rendition identity
+  (`extractorVersion` bumps with the dependency) so an upgrade is a new rendition, never silent drift.
+- **Egress IPC latency for embeddings:** batch API amortizes; measured in Phase-5 scale gate before
+  any optimization.
+
+### Verification (run from repo root)
+```bash
+pnpm -r build && pnpm -r test
+ATLAS_PROVISIONED=1 pnpm --filter @atlas/sources --filter @atlas/jobs --filter @atlas/broker test
+V=$(mktemp -d)/vault && cp -R fixtures/small-valid "$V" && git -C "$V" init -q && git -C "$V" add -A && git -C "$V" commit -qm seed
+node apps/cli/dist/index.js --vault "$V" db migrate
+node apps/cli/dist/index.js --vault "$V" ingest fixtures/inputs/sample.md        # preview; exit 0; no sinks written
+node apps/cli/dist/index.js --vault "$V" ingest fixtures/inputs/sample.md --apply --json | jq -e .runId
+node apps/cli/dist/index.js --vault "$V" source list --json | jq -e '.total >= 1'
+node apps/cli/dist/index.js --vault "$V" jobs list --json                        # exit 0
+pnpm --filter ./apps/cli test -- --grep "phase2.non-integration"                 # release gate green
+```
+
+### Rollback
+- Precondition: Phase-2 PR-B merged (PR-A retained by design).
+- Procedure (single branch): `git revert <phase2-PR-B-merge-sha>` → revert PR → merge. **PR-A
+  (`0003_provenance` + fold) is never reverted** — so `db rebuild` keeps reproducing provenance
+  projections from manifests via the retained fold + registration; there is no sub-case where
+  provenance rebuild is unsupported (fixes R4-F5).
+- Schema compatibility: applied `0002_jobs`/`0003_provenance` DDL stays; runner no-ops re-apply;
+  persisted job rows remain readable (jobs repo code is reverted, tables idle).
+- Verify supported state (survives the revert): Phase-1 Verification block passes; plus
+  `node apps/cli/dist/index.js --vault "$V" db rebuild` exits 0 and `db verify` reports provenance
+  projections consistent with manifests.
+
+---
+
+## Phase 3: Retrieval — LanceDB, embeddings, hybrid search, `query`, index ops
+**Goal:** hybrid retrieval over the fixture vaults with generation-fenced consistency; `brain query`
+answers with packed context; index maintenance commands exist.
+**Dependencies:** Phase 2 (egress broker for embeddings).
 **Estimated effort:** M
 
-#### Tasks
-1. **Fail-closed full-vault secret + sensitive-data scan (before any rebuild/index/migrate/model call)**
-   - What: scan the copied sandbox; findings block graduation → reviewed-remediation / encrypted-quarantine
-     (accounting for pre-existing git history).
-   - Test: `graduation.scan.test` — planted secret blocks graduation.
-2. **Read-only bootstrap audit**
-   - What: inventory notes missing `id`/`type`/`schema_version`, ambiguous aliases, duplicate identities,
-     incompatible links.
-   - Interfaces — **Produces:** audit report (no mutation).
-3. **Deterministic review-gated bootstrap migration**
-   - What: per `bootstrap-migration.md` — ID-derivation + collision rules, `type`-inference precedence,
-     link-rewrite/preservation, per-note checkpoints, review artifacts, rollback; quarantine identity
-     conflicts; init `schema_version: 1`; set `declaredSensitivity` only; per-quarantine-category
-     `inspect`/`resolve` operator commands.
-   - Interfaces — **Consumes:** `workflows` state machine, `validation`. **Produces:** migrated vault.
-   - Test: `bootstrap.migration.test` — interrupted+rerun idempotent; unknown-frontmatter + provenance
-     preserved; rebuild-after-migration; rollback of failed bootstrap.
-4. **Agent-branch-only real-vault run + DR verification + retrieval eval + real-vault purge exercise**
-   - What: run workflows agent-branch-only (never `main`); verify git-rollback + full derived-state rebuild;
-     retrieval eval on labeled set (recall@10 ≥ 0.85, MRR ≥ 0.7); exercise `purge` against uniquely-
-     identifiable classified content in every class.
-   - Test: `realvault.e2e.test` — agent branch only; rollback + rebuild; eval thresholds; purge cross-class.
+### Tasks
 
-#### Risks
-- **Live-vault data risk:** mitigated — **sandbox copy only, agent-branch-only, never `main`** (spec decision).
-- **Bootstrap ambiguity:** mitigated by quarantine + zero-unresolved graduation criterion.
+0. **Task 3.0 — Phase-3 contracts gate**
+   - What: retrieval/index contract doc (chunking rules: semantic sections, heading hierarchy,
+     title+aliases in chunk text; generation identity; reconciliation steps; staleness detection;
+     RRF weights + layer precedence: exact id → slug → unique alias → fts/vector fusion) +
+     `cli-contract/*` for `query`, `index status|verify|repair|rebuild`.
+   - Files: `docs/specs/retrieval-index-contract.md`,
+     `docs/specs/cli-contract/{query,index-status,index-verify,index-repair,index-rebuild}.schema.json`.
+   - Interfaces — **Consumes:** D4, D7. **Produces:** the contract consumed by 3.1–3.6.
+   - Test: `contract-lint.test` schema-presence for Phase-3 rows.
+   - Acceptance: registry rows flip to implemented as tasks land.
 
-#### Verification
-- Zero unresolved quarantines; projections rebuild clean; retrieval eval meets thresholds before any
-  real-vault workflow; purge verified.
+1. **Task 3.1 — `@atlas/lancedb-index`: schema + chunker + generations**
+   - What: LanceDB table schema (`SearchChunk`: chunk text, noteId, section path, `contentHash`,
+     `chunkerVersion`, `embeddingModel`, `embeddingDimensions`, `generationId`, embedding vector),
+     the deterministic section chunker (v1 per D4), immutable generation ids
+     (`noteId`,`contentHash`,`chunkerVersion`,`embeddingModel`,`embeddingDimensions`).
+   - Files: `packages/lancedb-index/src/{schema,chunker,generation}.ts`,
+     `packages/lancedb-index/test/chunker.test.ts`.
+   - Interfaces — **Consumes:** 1.3 (`SectionTree`), 3.0. **Produces:**
+     `chunkNote(note: ParsedNote, cfg: IndexingConfig): Chunk[]` ·
+     `generationId(note: ParsedNote, cfg: IndexingConfig): GenerationId`.
+   - Test: `chunker.test` — deterministic chunk set for fixture notes; heading hierarchy + aliases
+     present; rune-safe on Hebrew/English mixed content.
+   - Acceptance: same input ⇒ byte-identical chunk set.
+
+2. **Task 3.2 — Embedding + index write path (fenced)**
+   - What: embed chunks via `models.embed` (through the egress broker; batch; D7 dimensions from
+     config), write chunks tagged with their generation, then the SQLite CAS activation
+     (`notes.active_generation` flips iff `contentHash` unchanged), then independently-retryable
+     retirement + `indexed` marker — the spec's reconciliation pipeline, each step crash-safe.
+   - Files: `packages/lancedb-index/src/{writer,activate,retire}.ts`,
+     `packages/sqlite-store/src/repos/generation.ts` (adds the `activateGeneration` CAS repo method
+     to sqlite-store — SQLite is the activation authority),
+     `packages/lancedb-index/test/generation-fencing.test.ts`.
+   - Interfaces — **Consumes:** 2.8 (`embed`), 1.4 (activation CAS lives in sqlite-store repo API:
+     `Store.activateGeneration(noteId: string, gen: GenerationId, expectedContentHash: string): boolean`),
+     3.1. **Produces:**
+     `indexNote(note: ParsedNote, deps: IndexDeps): Promise<IndexOutcome>` ·
+     `reconcileIndex(deps: IndexDeps): Promise<IndexReconcileReport>` (retirement + markers).
+   - Test: `index.generation-fencing.test` — stale worker's CAS fails after a newer activation;
+     orphaned/mixed generations are filtered from retrieval and later compacted; crash between every
+     pipeline step converges on rerun.
+   - Acceptance: fencing suite green; a permanent embedding failure surfaces as a typed outcome
+     (repairable via `index repair`).
+
+3. **Task 3.3 — Hybrid search + `retrieval` module**
+   - What: id/alias/fts/vector/hybrid layers with RRF fusion per the contract; metadata filters
+     (note type, sensitivity flag pass-through); context packing (dedup by note, section-aware
+     assembly, evidence trust flags surfaced-but-unverified per the gating rules).
+   - Files: `packages/lancedb-index/src/search.ts`, `apps/cli/src/retrieval/{layers,rrf,pack}.ts`,
+     `apps/cli/test/retrieval.test.ts`.
+   - Interfaces — **Consumes:** 3.1/3.2, 1.4 (identity resolution), 2.8 (`embed` for query vector).
+     **Produces:**
+     `retrieve(q: RetrievalQuery, deps: RetrievalDeps): Promise<RetrievalResult>`
+     (`RetrievalQuery = {text: string, k?: number, filters?: RetrievalFilters}`;
+     `RetrievalResult = {items: RankedItem[], layersUsed: Layer[], retrievalRunId: string}`) ·
+     `packContext(r: RetrievalResult, budget: TokenBudget): ContextPack`.
+   - Test: `retrieval.test` — resolver precedence (exact id beats slug beats alias; ambiguous
+     normalized value ⇒ typed ambiguity error, never a silent pick); RRF fusion deterministic.
+   - Acceptance: layered retrieval returns traceable per-layer provenance in `retrieval_results`.
+
+4. **Task 3.4 — `brain query`**
+   - What: the Tier-0 command: retrieve → packed context → `generateText` answer with cited note
+     ids; records `retrieval_runs`/`retrieval_results`/`model_calls` via `finalizeLedgerWrite`;
+     executed run emits `run.readonly` (reuses 1.9's `recordReadonlyRun`); post-run backup applies
+     (it writes ledger rows).
+   - Files: `apps/cli/src/commands/query.ts`, `apps/cli/test/e2e/query.e2e.test.ts`.
+   - Interfaces — **Consumes:** 3.3, 2.8, 1.7, 1.9. **Produces:** —.
+   - Test: `query.audit-readonly.test` — one executed query ⇒ exactly one `run.readonly` terminal
+     event + complete correlated ledger rows; no canonical/worktree mutation (asserted across sinks).
+   - Acceptance: `query` returns grounded answers on `source-heavy` with per-item citations.
+
+5. **Task 3.5 — `index status|verify|repair|rebuild` + staleness + restore hook**
+   - What: staleness detection (hash/chunker/model/dimensions drift), `index verify` (SQLite↔Lance
+     consistency report), `index repair` (converge divergences incl. permanent-failure re-embed),
+     `index rebuild` (full regeneration from Markdown), all projection-only ⇒ each executed run
+     emits `run.projection`; registers the index rebuild step into the post-restore hook registry
+     (completes R1-F1's restore contract: from this phase, `db restore` triggers projection +
+     index rebuild).
+   - Files: `apps/cli/src/commands/index.ts`, `packages/lancedb-index/src/{staleness,verify,repair}.ts`,
+     `apps/cli/test/index-ops.test.ts`.
+   - Interfaces — **Consumes:** 3.2, 1.4 (`registerPostRestoreRebuild`), 1.9. **Produces:**
+     `indexVerify(deps: IndexDeps): Promise<IndexVerifyReport>` ·
+     `indexRepair(deps: IndexDeps, report?: IndexVerifyReport): Promise<IndexRepairReport>` (both
+     full signatures — fixes R2-F6).
+   - Test: `index-ops.test` — delete LanceDB entirely → `index rebuild` reconstructs; `verify`
+     detects an injected mismatch; `repair` converges it; each op appended exactly one
+     `run.projection`.
+   - Acceptance: post-restore hook proven: `db restore` on a Phase-3 host ends with a consistent
+     rebuilt index (extends the 1.7 round-trip test).
+
+6. **Task 3.6 — Retrieval eval harness (labeled fixtures)**
+   - What: the versioned labeled fixture set (queries → expected canonical notes) + the eval runner
+     computing recall@K and MRR; wired as an opt-in suite now, threshold-gated in Phase 5 per
+     `acceptance-thresholds.md`.
+   - Files: `fixtures/retrieval-eval/{queries.json,labels.json}`, `tools/retrieval-eval.ts`,
+     `apps/cli/test/retrieval-eval.test.ts` (opt-in via `ATLAS_LIVE_GEMINI=1`).
+   - Interfaces — **Consumes:** 3.3. **Produces:**
+     `runRetrievalEval(deps): Promise<{recallAt10: number, mrr: number, perQuery: EvalRow[]}>`.
+   - Test: the harness itself is tested with a stubbed retriever (metric math verified against
+     hand-computed values).
+   - Acceptance: eval runs end-to-end on `source-heavy` + the labeled set under live embeddings.
+
+### Risks
+- **Embedding cost/latency in CI:** offline suites use recorded vectors (deterministic doubles);
+  live embedding only in nightly + Phase-5 gate.
+- **LanceDB FTS maturity:** if FTS quality blocks, hybrid degrades to vector+id/alias with RRF —
+  the layer interface isolates the change to `search.ts`; decision recorded in the Phase-3 contract.
+
+### Verification (run from repo root)
+```bash
+pnpm -r build && pnpm -r test
+V=$(mktemp -d)/vault && cp -R fixtures/source-heavy "$V" && git -C "$V" init -q && git -C "$V" add -A && git -C "$V" commit -qm seed
+node apps/cli/dist/index.js --vault "$V" db migrate && node apps/cli/dist/index.js --vault "$V" db rebuild
+ATLAS_LIVE_GEMINI=1 node apps/cli/dist/index.js --vault "$V" index rebuild        # exit 0; run.projection appended
+ATLAS_LIVE_GEMINI=1 node apps/cli/dist/index.js --vault "$V" query "what sources discuss meridian" --json | jq -e '.items | length > 0'
+node apps/cli/dist/index.js --vault "$V" index verify --json | jq -e '.consistent == true'
+```
+
+### Rollback
+- Precondition: Phase-3 PR merged.
+- Procedure (single branch): `git revert <phase3-PR-merge-sha>` → revert PR → merge.
+- Schema compatibility: Phase 3 registers **no SQLite migration** (activation state uses `notes`
+  columns from `0001_core`); LanceDB directory is disposable derived state — after revert, delete
+  `lancedb.dir` wholesale (it is a projection; nothing references it).
+- Verify supported state (survives the revert): Phase-2 Verification block passes; `db rebuild`
+  exits 0; `rm -rf <lancedb.dir>` leaves `inspect`/`doctor` green (index checks report
+  not-configured, not failed — asserted by the doctor fixture).
+
+---
+
+## Phase 4: Workflows — ChangePlan pipeline, review gate, rollback, trust, claims, purge
+**Goal:** the full mutation loop: `enrich`/`reconcile`/`maintain`/`validate` with risk-tiered
+auto-commit vs review; `git approve|refresh|reject|rollback|verify`; trust lifecycle; claims +
+evidence with re-verification; `purge`. Lands as **PR-A (Task 4.1, retained)** then PR-B.
+**Dependencies:** Phase 3.
+**Estimated effort:** L
+
+### Tasks
+
+0. **Task 4.0 — Phase-4 contracts gate**
+   - What: `acceptance-thresholds.md` **§workflow** (Tier-2 thresholds verbatim from §2.5; doctor/
+     verify check inventories consolidated; per-command failure exit codes), the workflow/risk
+     contract (per-type mutation policy table → `policies` inputs; tier definitions; CAS/refresh
+     semantics), and `cli-contract/*` for `enrich`, `reconcile`, `maintain`, `validate`,
+     `git review|refresh|approve|reject|rollback|verify`, `purge`,
+     `source trust promote|revoke`.
+   - Files: `docs/specs/acceptance-thresholds.md` (§workflow), `docs/specs/workflow-risk-contract.md`,
+     `docs/specs/cli-contract/{enrich,reconcile,maintain,validate,git-review,git-refresh,git-approve,git-reject,git-rollback,git-verify,purge,source-trust-promote,source-trust-revoke}.schema.json`.
+   - Interfaces — **Consumes:** 0.1, 0.3. **Produces:** contracts consumed by 4.3–4.11.
+   - Test: `contract-lint.test` schema-presence; threshold values asserted equal to §2.5 constants
+     by a literal-comparison test (no drift between plan/spec/contract).
+   - Acceptance: all Phase-4 registry rows have schemas before any Phase-4 feature code merges.
+
+1. **Task 4.1 — PR-A (retained): `0004_claims` migration + claims fold**
+   - What: `claims` + `claim_evidence` DDL per dictionary (non-null `evidence_id` hash with
+     sentinels, UNIQUE index, `verification` CHECK enum, composite rendition FK) + the claims-block
+     Markdown fold into rebuild (canonical `claims:` block parser → rows), registered retained.
+   - Files: `packages/sqlite-store/migrations/0004_claims.ts`,
+     `packages/sqlite-store/src/claims/fold.ts`, `packages/sqlite-store/test/claims-fold.test.ts`.
+   - Interfaces — **Consumes:** 0.2, 1.4. **Produces:** claims repos
+     (`upsertClaim`, `attachEvidence` (idempotent by `evidence_id`), `setEvidenceVerification`,
+     `evidenceForRendition(contentId: ContentId): EvidenceRow[]`); fold consumed by rebuild.
+   - Test: `claims-fold.test` — `conflicting-claims` fixture rebuilds to expected rows; evidence
+     idempotency under sentinel encoding (absent locator/quoteHash never bypasses uniqueness).
+   - Acceptance: with only PR-A merged, rebuild of a claims-bearing vault is lossless.
+
+2. **Task 4.2 — `markdown` patch generator**
+   - What: section/AST-level patch generation + application: per-op patch construction with
+     precondition tokens (section selector + expected content hash), unknown frontmatter +
+     formatting preservation, stale-context safe failure, human-readable diff summaries.
+   - Files: `apps/cli/src/markdown/{patch,apply,diff-summary}.ts`, `apps/cli/test/patch.test.ts`.
+   - Interfaces — **Consumes:** 1.3 (`SectionTree`), 2.0 op schemas. **Produces:**
+     `generatePatch(note: ParsedNote, op: ChangePlanOperation): Patch` ·
+     `applyPatch(raw: string, patch: Patch): {ok: true, next: string} | {ok: false, error: StaleContextError}` ·
+     `Patch = {noteId: string, ops: PatchOp[], preconditions: Precondition[], summary: string}`.
+   - Test: `patch.test` — property-style round-trips on fixture notes (apply → reparse → semantic
+     equality); stale hash ⇒ typed failure, file untouched; unknown frontmatter keys survive.
+   - Acceptance: whole-file rewrites impossible by construction (API takes ops, not content).
+
+3. **Task 4.3 — `policies`: effective risk + effective sensitivity (single producers)**
+   - What: extend the 2.8 gate module (same owner): `effectiveRisk` derived deterministically from
+     operation type × target note type × scope × config (the model's `proposedRisk` never gates);
+     `effectiveSensitivity` computed-on-read (D2) as most-restrictive over declared + input chain;
+     per-type mutation policy table (immutability of sources/decisions, append-only rules);
+     Tier-2 thresholds consumed from `acceptance-thresholds.md` values via config.
+   - Files: `apps/cli/src/policies/{risk,sensitivity,mutation-policy}.ts`,
+     `apps/cli/test/policies.test.ts`.
+   - Interfaces — **Consumes:** 4.0 contract, 2.0 ops, 1.3. **Produces:**
+     `effectiveRisk(plan: ChangePlan, ctx: PolicyContext): RiskTier` (`RiskTier = 0|1|2|3`) ·
+     `effectiveSensitivity(noteId: string, deps: SensitivityDeps): Sensitivity` ·
+     `mutationPolicyFor(type: NoteType): MutationPolicy`.
+   - Test: `policies.test` — table-driven: every op×type cell yields the contract's tier; source
+     mutation ⇒ policy violation; sensitivity chain (source→claim→note) takes the max; `proposedRisk`
+     is demonstrably ignored for gating.
+   - Acceptance: exactly one call site computes risk (grep-guard test: no other module references
+     `proposedRisk` for control flow).
+
+4. **Task 4.4 — `validation` module**
+   - What: deterministic checks: schema validation per op, path policy, identity-namespace
+     validation (alias/slug collisions pre-commit), dangling `sourceId`/`noteId`/`claimId`,
+     duplicate evidence, provenance requirements (`require_sources_for_synthesis`), Markdown
+     accessibility checks (single top-level heading, no skipped levels, descriptive links, list
+     structure, alt rules), reserved-task-op rejection (fail-closed), evidence-verification gating
+     inputs (non-`valid` evidence cannot support Tier-2).
+   - Files: `apps/cli/src/validation/{index,identity,provenance,accessibility}.ts`,
+     `apps/cli/test/validation.test.ts`.
+   - Interfaces — **Consumes:** 2.0 ops, 4.1 repos, 4.3, 1.3. **Produces:**
+     `validatePlan(plan: ChangePlan, ctx: ValidationContext): ValidationReport`
+     (`ValidationReport = {ok: boolean, findings: ValidationFinding[], gates: {tier2Eligible: boolean}}`).
+   - Test: `validation.test` — each check has a triggering fixture + a passing fixture; a
+     `CreateTask`-bearing plan is rejected with the stable code `reserved-operation`.
+   - Acceptance: `brain validate` (Task 4.11) is a thin wrapper over this owner.
+
+5. **Task 4.5 — ChangePlan pipeline: synthesis stages + tiered integration + refresh**
+   - What: extend the 2.5 engine with synthesis stages: plan (LLM `generateObject<ChangePlan>`
+     via egress, **retrieval-first enforced in orchestration**: the plan stage takes a
+     `RetrievalResult` handle it must present) → validate (4.4) → patch (4.2) → worktree apply →
+     agent commit (manifest per 1.5) → tier branch: Tier-1/2 CAS auto-integrate via
+     `advanceProtectedRef` with rebase-regenerate-revalidate on CAS miss; Tier-3 stop at
+     `review-pending` (exit `6`, success-shaped `review_pending` + runId). `git refresh`
+     implementation (new commit + manifest, supersession record, back to review-pending,
+     key-accepting identity per the spec). The `GeneratedArtifactGuard` wraps every persisted
+     artifact (plans, patches, diffs, worktree contents, manifests, commit messages).
+   - Files: `apps/cli/src/workflows/{synthesis,integrate,refresh}.ts`,
+     `apps/cli/test/workflows-synthesis.test.ts`.
+   - Interfaces — **Consumes:** 2.5 engine, 2.8 models+gate, 3.3 retrieve, 4.2–4.4, 1.6 broker,
+     1.7. **Produces:**
+     `runSynthesisWorkflow(kind: "enrich"|"reconcile"|"maintain", input: WorkflowInput, mode: "preview"|"apply"): Promise<WorkflowOutcome>` ·
+     `refreshRun(runId: string, deps): Promise<{newCommit: string, superseded: string}>`.
+   - Test: `retrieval.order-invariant.test` — inject retrieval failure/empty: no ChangePlan, patch,
+     worktree mutation, or commit exists for a synthesis mutation (checkpoint + event-sequence
+     inspection); `concurrent-integration.test` — canonical moved between validation and commit ⇒
+     CAS fails, regenerate+revalidate, no lost update/duplicate commit; Tier-3 apply ⇒ durable
+     plan/branch/worktree/commit + exit `6`.
+   - Acceptance: preview mode provably side-effect-free across all sinks (same all-sink assertion
+     harness as 2.6).
+
+6. **Task 4.6 — Claims & evidence operations**
+   - What: `CreateClaim`/`AttachEvidence`/`UpdateEvidenceVerification` op execution: canonical
+     `claims:` block serialization in the owning note (Markdown is SSOT for `verification`),
+     `sourceId` → active `renditionId` resolution at the command boundary, persisted pinned
+     components only; `CreateRelationship` typed wikilinks → `note_links`.
+   - Files: `apps/cli/src/workflows/ops/{claims,evidence,relationship}.ts`,
+     `apps/cli/test/evidence.test.ts`.
+   - Interfaces — **Consumes:** 4.1 repos, 4.2, 2.1 (`resolveSourceHandle`), 4.5 pipeline.
+     **Produces:** op executors registered with the pipeline
+     (`executeOp(op: ChangePlanOperation, ctx: OpContext): Promise<OpOutcome>` per op module).
+   - Test: `evidence.test` — evidence persists rendition components (never the alias); a bare
+     SQLite verification write is impossible through any public API (only the ChangePlan path);
+     rebuild reproduces verification state from Markdown.
+   - Acceptance: dangling/duplicate evidence rejected per 4.4.
+
+7. **Task 4.7 — Rendition-bump re-verification (staleness protocol)**
+   - What: on `setActiveRendition` re-point: deterministic affected-evidence enumeration, one
+     re-verification **job per owning note** (idempotency key `(contentId, newRenditionId,
+     owningNoteId)`), deterministic quoteHash re-anchoring with the three outcomes (exact ⇒ `valid`
+     re-pinned; ambiguous/moved ⇒ `pending` + Tier-3 escalation; not-found ⇒ `failed`), transitional
+     `stale` marking, all applied as validated `UpdateEvidenceVerification` ChangePlans per note.
+   - Files: `apps/cli/src/workflows/reverify.ts`, `apps/cli/test/evidence-reverification.test.ts`.
+   - Interfaces — **Consumes:** 2.7 (`enqueue`), 4.6, 4.5. **Produces:**
+     `enqueueReverification(tx: LedgerTx, bump: RenditionBump): JobId[]` (one per owning note).
+   - Test: `evidence.reverification.test` — a bump spanning N notes enqueues N non-colliding jobs;
+     each of the three outcomes; the Phase-2-deferred assertion lands here: **extractor upgrade
+     marks dependent evidence `stale`** (fixes R4-F4); gating: `stale`/`pending`/`failed` evidence
+     blocks Tier-2 auto-commit + trusted grounding.
+   - Acceptance: no affected note left `stale` after its job completes; retry idempotent.
+
+8. **Task 4.8 — Trust lifecycle + taint**
+   - What: `source trust promote|revoke` (privileged; challenge/authorization; bound to
+     `sourceId`+`rawContentHash`; trust ledger ref advanced by broker; immutable audit record),
+     transitive taint (claim/context/synthesis derived from untrusted stays untrusted; mixed
+     evidence ⇒ untrusted; no laundering), Tier-2 block for untrusted-derived mutations, revocation
+     semantics: pre-integration run ⇒ `failed@<checkpoint>` reason `trust-revoked`; integrated run ⇒
+     spawn Tier-3 **remediation run** referencing source + affected run.
+   - Files: `apps/cli/src/trust/{state,taint,revoke}.ts`,
+     `apps/cli/src/commands/source-trust.ts`, `apps/cli/test/trust-lifecycle.test.ts`.
+   - Interfaces — **Consumes:** 1.6 (challenge + ref advance), 4.5, 2.7. **Produces:**
+     `trustStateFor(contentId: ContentId): TrustState` · `taintOf(inputs: EvidenceRef[]): "trusted"|"untrusted"` ·
+     `spawnRemediationRun(revokedSource: ContentId, affectedRun: string): Promise<RunId>`.
+   - Test: `trust.lifecycle.test` — the spec's full matrix: forged/agent promotion refused, hash
+     change invalidates authorization, replay rejected, multi-hop taint, revocation both branches,
+     audit records present.
+   - Acceptance: an untrusted-ingest-driven Tier-2 mutation is forced to review until promotion.
+
+9. **Task 4.9 — Full `git` surface: `review|approve|reject|rollback|verify`**
+   - What: `review` (diff + manifest, read-only), `approve` (challenge-bound; FF-only CAS of the
+     exact signed commit; stale base ⇒ stable `refresh-required` exit `6`; idempotent re-approve),
+     `reject` (terminal + cleanup), `rollback` (privileged; deterministic revert-commit derivation
+     in the challenge; **operation-class semantics**: capture-only run ⇒ tombstone/deactivate
+     rendition+capture, retain blob; downstream dependents ⇒ `has-dependents` refusal listing them,
+     compensating-ChangePlan path; self-contained ⇒ direct revert; mandatory reconciliation +
+     single `run.rolled_back`), `git verify` (manifest↔index convergent repair + anchor validation).
+   - Files: `apps/cli/src/commands/git-{review,approve,reject,rollback,verify}.ts`,
+     `packages/broker/src/ops/{approve,rollback}.ts`, `apps/cli/test/e2e/review-lifecycle.e2e.test.ts`.
+   - Interfaces — **Consumes:** 1.6, 4.5, 4.1 (dependency enumeration via claims/evidence repos),
+     3.5 (reconciliation). **Produces:** — (terminal command surface).
+   - Test: `approval-boundary.adversarial.test` (full): signature copied between plans/commits,
+     commit mutation after signing, `--yes`-only attempt, stale-base refresh-required (never
+     rebases), TOCTOU canonical move pre-merge — each refused; `rollback.dependency-checks.test` —
+     three operation classes + dependents refusal + tombstone semantics; non-interactive round trip
+     for approve/rollback via `tools/test-signer.ts` asserting drift rejection (canonical moved,
+     nonce expired/replayed, wrong signer).
+   - Acceptance: review lifecycle E2E green: Tier-3 enrich → review → approve → reindex → finalize;
+     then rollback with reconciliation.
+
+10. **Task 4.10 — `purge` + audit-ref reconciliation + retention execution**
+    - What: `purge` per its normative command contract (selector → printed erasure inventory →
+      challenge bound to inventory digest → `vault-maintenance` lock → per-storage-class erasure
+      with resumable per-class checkpoints → tombstones → projection+index rebuild → post-purge
+      verification across **every** storage class incl. no re-linkable audit identifier);
+      audit-ref reconciliation (ordinary erasure = ledger-mapping deletion renders opaque IDs
+      unlinkable; legally-required removal = broker signed-tombstone replacement + external
+      checkpoint per 0.3); git-history rewrite protocol where required; **retention/compaction
+      execution** — the scheduled-work owner (R1-F13): retention jobs enforcing
+      `retention-matrix.md` (LanceDB generation compaction post-activation, log rotation expiry,
+      backup pruning, quarantine expiry) enqueued via 2.7 and run by `jobs run`/workflow drains.
+    - Files: `apps/cli/src/commands/purge.ts`, `apps/cli/src/purge/{inventory,erase,verify}.ts`,
+      `packages/broker/src/ops/audit-tombstone.ts`, `apps/cli/src/retention/jobs.ts`,
+      `apps/cli/test/e2e/purge.e2e.test.ts`.
+    - Interfaces — **Consumes:** 0.4 matrix, 1.6, 1.7, 2.2 (quarantine), 3.5, 2.7. **Produces:**
+      `computeErasureInventory(sel: PurgeSelector): Promise<ErasureInventory>` ·
+      `registerRetentionJobs(deps): void`.
+    - Test: `purge.e2e.test` (privileged, fixture vault): seed uniquely-identifiable content in
+      every storage class; unauthorized/agent caller denied + replay-protected; full inventory;
+      interruption + resume (never restarting a completed class); backup re-minimization/expiry;
+      post-purge cross-class search proves no prohibited copy; `retention.jobs.test` — each matrix
+      row's trigger fires its job.
+    - Acceptance: Phase-4 exit criterion — purge E2E green on fixtures (re-exercised on the Phase-5
+      copy).
+
+11. **Task 4.11 — Workflow commands + `validate` + generated failpoints + full observability matrix**
+    - What: `enrich <note>`, `reconcile`, `maintain` (orphans/broken-links/stale → proposals;
+      destructive proposals always Tier-3), `validate` (4.4 wrapper) — uniform preview/apply per
+      §2.5; the **failpoint suite generated from `recovery-state-machine.md`'s `stateTable`**
+      (crash before/after every external git effect + checkpoint write, incl. integration-hash
+      idempotency anchor both sides, reconciliation transitions, failed/cancelled artifact
+      retention); the **complete observability run-matrix** (every run class × ledger completeness ×
+      audit cardinality × `--from-git` reproduction incl. read-only/projection/failed/cancelled);
+      `db rebuild --from-git` fold rules implementation (supersession, revert records, explicit
+      gaps).
+    - Files: `apps/cli/src/commands/{enrich,reconcile,maintain,validate}.ts`,
+      `packages/sqlite-store/src/rebuild-from-git.ts`, `tools/gen-failpoints.ts`,
+      `apps/cli/test/{crash-recovery.failpoints,observability-matrix}.test.ts`.
+    - Interfaces — **Consumes:** 4.5, 4.4, 1.6, 0.1 `stateTable`. **Produces:**
+      `rebuildFromGit(store: Store, repo: Repo): Promise<FromGitReport>` (gaps surfaced, never
+      dropped).
+    - Test: `crash-recovery.failpoints.test` (generated; asserts convergence, no duplicate chunks/
+      lost updates/false-indexed/orphaned worktrees/double-commits/half-integrated refs);
+      `observability.run-matrix.test` (full); `audit-dr.from-git.test` — delete SQLite + backup,
+      rebuild mutating rows best-effort, tampered/partial history surfaces gaps.
+    - Acceptance: Phase-4 exit — every suite in the safety-invariant CI gate green.
+
+### Risks
+- **Failpoint matrix runtime:** generated tests are many; shard by state in CI and keep each
+  deterministic (controlled clocks, no sleeps).
+- **Rollback dependency enumeration completeness:** derived from FK graph in the dictionary — the
+  `db verify` invariant queries double-check orphan absence after every rollback test.
+- **LLM plan quality:** irrelevant to safety (validation + tiers gate); quality iterated via
+  prompt versions recorded per call.
+
+### Verification (run from repo root)
+```bash
+pnpm -r build && pnpm -r test
+V=$(mktemp -d)/vault && cp -R fixtures/source-heavy "$V" && git -C "$V" init -q && git -C "$V" add -A && git -C "$V" commit -qm seed
+node apps/cli/dist/index.js --vault "$V" db migrate && node apps/cli/dist/index.js --vault "$V" db rebuild
+node apps/cli/dist/index.js --vault "$V" enrich project-meridian                 # preview; exit 0 or 6; no sinks written
+set +e
+OUT=$(ATLAS_LIVE_GEMINI=1 node apps/cli/dist/index.js --vault "$V" enrich project-meridian --apply --json)
+RC=$?
+set -e
+test "$RC" -eq 6                                                                # Tier-3 ⇒ review-pending
+RUN_ID=$(printf '%s' "$OUT" | jq -r .runId)
+node apps/cli/dist/index.js --vault "$V" git review "$RUN_ID"                    # exit 0
+node apps/cli/dist/index.js --vault "$V" git approve "$RUN_ID" --export-challenge > /tmp/ch.json
+node tools/test-signer.ts --key atlas-test-approver < /tmp/ch.json > /tmp/auth.json
+node apps/cli/dist/index.js --vault "$V" git approve "$RUN_ID" --authorization /tmp/auth.json   # exit 0; FF integrate
+node apps/cli/dist/index.js --vault "$V" git rollback "$RUN_ID" --export-challenge > /tmp/ch2.json
+node tools/test-signer.ts --key atlas-test-approver < /tmp/ch2.json > /tmp/auth2.json
+node apps/cli/dist/index.js --vault "$V" git rollback "$RUN_ID" --authorization /tmp/auth2.json # exit 0; revert + reconcile
+pnpm --filter ./apps/cli test -- --grep "crash-recovery.failpoints|observability"
+```
+(The `set +e` wrapper captures the deliberate exit-6 without tripping `set -e` CI shells — fixes R3-F11.)
+
+### Rollback
+- Precondition: Phase-4 PR-B merged (PR-A retained).
+- Procedure (single branch): protect data first — `node apps/cli/dist/index.js db backup`; then
+  `git revert <phase4-PR-B-merge-sha>` → revert PR → merge. Canonical **vault** content changes are
+  never reverted by code rollback; an unwanted integrated vault change uses the broker `git
+  rollback` path **before** reverting the code that provides it (fixes R3-F10 ordering).
+- Schema compatibility: `0004_claims` (PR-A) stays applied + folded by rebuild; feature tables none.
+- Verify supported state (survives the revert — Phases 1–3 commands only): Phase-3 Verification
+  block passes; `db rebuild` + `index rebuild` + `doctor` exit 0; `ledger.dr-roundtrip` +
+  `audit.cross-store-ordering` suites green. (Never `git verify`/failpoints — the revert removes
+  them; fixes R3-F10.)
+
+---
+
+## Phase 5: Graduation to the real vault (copy)
+**Goal:** the copied `main-vault` passes fail-closed scanning, read-only audit, and the review-gated
+bootstrap migration; agent-branch-only operation verified; eval + scale gates met.
+**Dependencies:** Phase 4.
+**Estimated effort:** M
+
+### Tasks
+
+0. **Task 5.0 — Phase-5 contracts gate**
+   - What: `bootstrap-migration.md` (ID-derivation + collision rules, `type`-inference precedence,
+     link-rewrite/preservation algorithm, per-note checkpoints, review artifacts, rollback,
+     per-quarantine-category operator flows, executable migration fixtures);
+     `acceptance-thresholds.md` **§retrieval + §scale** (recall@10 ≥ 0.85, MRR ≥ 0.7;
+     representative + maximum vault profiles; latency/throughput/memory/disk/recovery thresholds);
+     `cli-contract/*` + registry `implemented` flips for `graduation scan|audit|migrate`,
+     `quarantine inspect|resolve` (rows seeded in Task 0.0; spec's CLI-surface prose already
+     regenerated from the registry by `gen-cli-contract.ts`, so no drift).
+   - Files: `docs/specs/bootstrap-migration.md`, `docs/specs/acceptance-thresholds.md` (§retrieval,
+     §scale), `docs/specs/cli-contract/{graduation-scan,graduation-audit,graduation-migrate,quarantine-inspect,quarantine-resolve}.schema.json`.
+   - Interfaces — **Consumes:** 0.0 registry. **Produces:** contracts consumed by 5.1–5.4.
+   - Test: `contract-lint.test` schema-presence for Phase-5 rows.
+   - Acceptance: migration fixtures in the contract are executable (consumed by 5.3's suite).
+
+1. **Task 5.1 — `graduation scan` (fail-closed full-vault scan on the copy)**
+   - What: create the disposable copy (`.scratch/atlas-graduation-copy`, full clone of `main-vault`
+     incl. history); run the full-vault secret + sensitive-data scan (2.2 engine) over working tree
+     **and git history** before any rebuild/index/migration/model call; findings block graduation
+     and route to reviewed-remediation / encrypted-quarantine (accounting for history copies).
+   - Files: `apps/cli/src/commands/graduation-scan.ts`, `apps/cli/src/graduation/copy.ts`,
+     `apps/cli/test/e2e/graduation-scan.e2e.test.ts`.
+   - Interfaces — **Consumes:** 2.2, 1.8. **Produces:**
+     `createGraduationCopy(src: string, dst: string): Promise<{head: string}>` ·
+     `scanFullVault(dir: string, opts: {includeHistory: true}): Promise<VaultScanReport>`.
+   - Test: `graduation-scan.e2e.test` — a seeded secret in an **old commit** (not the working tree)
+     is found and blocks with exit `3`; clean copy passes.
+   - Acceptance: no downstream graduation step runs while findings are unresolved (enforced by a
+     persisted scan-state gate the later commands check).
+
+2. **Task 5.2 — `graduation audit` (read-only bootstrap audit)**
+   - What: inventory legacy notes missing `id`/`type`/`schema_version`, ambiguous aliases,
+     duplicate identities, incompatible links — **zero mutation**.
+   - Files: `apps/cli/src/commands/graduation-audit.ts`, `apps/cli/test/bootstrap-audit.test.ts`.
+   - Interfaces — **Consumes:** 1.3, 5.1 gate. **Produces:**
+     `bootstrapAudit(dir: string): Promise<BootstrapAuditReport>` (per-category note lists).
+   - Test: `bootstrap.audit-readonly.test` — key assertions: report covers **every** category
+     (missing-id/type/schema_version, ambiguous alias, duplicate identity, incompatible link) on a
+     legacy fixture, **and the vault tree hash is byte-identical before/after** (fixes R1-F17's
+     missing named test).
+   - Acceptance: report categories map 1:1 to `bootstrap-migration.md` quarantine categories.
+
+3. **Task 5.3 — `graduation migrate` + `quarantine inspect|resolve`**
+   - What: the deterministic, review-gated bootstrap migration per the contract: assign stable ids,
+     infer `type` by the contract's precedence, initialize `schema_version: 1`, preserve/rewrite
+     links, quarantine identity conflicts; per-note checkpoints (idempotent, resumable), review
+     artifacts, rollback via per-note checkpoints (`graduation migrate --rollback`);
+     `quarantine inspect|resolve` operator commands; graduation criteria enforcement (zero unresolved
+     quarantines; projections rebuild clean). Runs under `vault-maintenance` lock, Tier-3
+     review-gated (broker-authorized apply). **`quarantine inspect|resolve` are privileged ops**
+     (they decrypt detected-credential quarantine content): broker challenge-bound (purpose = reveal,
+     caller + vault-bound, expiry/replay-protected), least-privilege reveal (metadata by default,
+     full content only under an explicit authorized reveal), each write an audit record — registered
+     in `commands.json` with `privilege: "privileged"` (D-registry, §2.5).
+   - Files: `apps/cli/src/commands/{graduation-migrate,quarantine}.ts`,
+     `apps/cli/src/graduation/{migrate,quarantine}.ts`, `apps/cli/test/e2e/bootstrap-migration.e2e.test.ts`.
+   - Interfaces — **Consumes:** 5.0 contract, 5.2, 4.5 (review gate), 1.6 (challenge/authorization).
+     **Produces:**
+     `runBootstrapMigration(dir: string, mode: "preview"|"apply"): Promise<MigrationReport>` ·
+     `resolveQuarantine(category: QuarantineCategory, noteId: string, resolution: Resolution, auth: AuthorizationResponse): Promise<void>`.
+   - Test: `bootstrap.migration.test` — the contract's executable fixtures: interrupted + rerun
+     idempotent; unsupported/future `schema_version` refused; unknown frontmatter + provenance
+     preserved; rebuild-after-migration clean; rollback of a failed bootstrap via checkpoints.
+     `quarantine.authorization.test` — unauthorized/agent `quarantine inspect` refused; reveal is
+     challenge-bound + replay-protected.
+   - Acceptance: graduation criteria queryable (`graduation audit` post-migrate reports zero
+     unresolved).
+
+4. **Task 5.4 — Graduation E2E: real-copy operation, purge, eval, scale**
+   - What: on the migrated copy — agent-branch-only workflow runs (Tier-2 auto-commit + Tier-3
+     review round via test signer), git-rollback verification, full derived-state rebuild (`db
+     rebuild` + `index rebuild` byte-consistent projections), the purge E2E re-exercised with
+     uniquely-identifiable classified content in **every** storage class, the retrieval eval vs
+     §retrieval thresholds, and the §scale benchmark profiles (ingest/query/index/reconcile/
+     migrate/rebuild) with the stable regression subset wired into CI.
+   - Files: `apps/cli/test/e2e/graduation.e2e.test.ts`, `tools/scale-bench.ts`,
+     `.github/workflows/ci.yml` (nightly job: live eval + bench regression subset).
+   - Interfaces — **Consumes:** everything. **Produces:** — (terminal phase).
+   - Test: `graduation.e2e.test` — the sequence above end-to-end; eval asserts recall@10 ≥ 0.85 ∧
+     MRR ≥ 0.7; bench asserts §scale thresholds.
+   - Acceptance: **V1 acceptance criteria** (spec §Acceptance) all demonstrably green; the live
+     `main-vault` was never touched (asserted: its HEAD unchanged across the whole phase).
+
+### Risks
+- **Real-vault content surprises** (encodings, giant files, weird frontmatter): the copy is
+  disposable; scan/audit run first by construction; quarantine absorbs conflicts.
+- **Eval thresholds miss:** thresholds gate *graduation*, not earlier merges — iterate chunker/
+  RRF weights (config-owned) on the copy without touching phase code.
+
+### Verification — two flows (D20: real-copy uses the PRODUCTION authorizer, not the test signer)
+
+**Flow A — fixture CI (test-mode, automated):** proves the mechanics with the test signer under
+explicit test mode; runs on a throwaway migration fixture, never the real-vault copy.
+```bash
+pnpm -r build && pnpm -r test
+export ATLAS_TEST_MODE=1                                                      # broker accepts atlas-test-approver ONLY here
+V=$(mktemp -d)/legacy && cp -R fixtures/schema-v1 "$V" && git -C "$V" init -q && git -C "$V" add -A && git -C "$V" commit -qm seed
+node apps/cli/dist/index.js --config "$CFG" --vault "$V" graduation audit --json | jq -e '.categories'
+node apps/cli/dist/index.js --config "$CFG" --vault "$V" graduation migrate --apply --export-challenge > /tmp/ch.json
+node tools/test-signer.ts --key atlas-test-approver < /tmp/ch.json > /tmp/auth.json
+node apps/cli/dist/index.js --config "$CFG" --vault "$V" graduation migrate --apply --authorization /tmp/auth.json
+```
+
+**Flow B — real-copy graduation (production authorizer; operator runbook, ONLY on the copy):** no
+`ATLAS_TEST_MODE`, so the broker hard-rejects the test signer; apply is authorized by the enrolled
+**OS-presence / hardware-backed** production authorizer.
+```bash
+pnpm -r build && pnpm -r test
+unset ATLAS_TEST_MODE
+MAIN_VAULT="$HOME/Code/Vaults/main-vault"; LIVE_HEAD=$(git -C "$MAIN_VAULT" rev-parse HEAD)
+node apps/cli/dist/index.js --config "$CFG" graduation scan --source "$MAIN_VAULT" --copy .scratch/atlas-graduation-copy   # exit 0 (or 3 with findings)
+node apps/cli/dist/index.js --config "$CFG" --vault .scratch/atlas-graduation-copy graduation audit --json | jq -e '.unresolved == 0 or .categories'
+node apps/cli/dist/index.js --config "$CFG" --vault .scratch/atlas-graduation-copy graduation migrate            # preview
+# apply: OS-presence interactive path (Touch ID / hardware key) — the test signer is REFUSED here:
+! node tools/test-signer.ts --key atlas-test-approver < /dev/null 2>/dev/null | \
+    node apps/cli/dist/index.js --config "$CFG" --vault .scratch/atlas-graduation-copy graduation migrate --apply --authorization /dev/stdin   # MUST fail
+node apps/cli/dist/index.js --config "$CFG" --vault .scratch/atlas-graduation-copy graduation migrate --apply   # prompts for the production presence assertion
+ATLAS_LIVE_GEMINI=1 node tools/retrieval-eval.ts --config "$CFG" --vault .scratch/atlas-graduation-copy          # thresholds met
+test "$(git -C "$MAIN_VAULT" rev-parse HEAD)" = "$LIVE_HEAD"                                     # live vault untouched
+```
+`graduation.e2e.test` asserts Flow B's negative (test signer refused outside test mode) via
+`broker.rejects-test-signer-in-prod.test` (D20).
+
+### Rollback
+- Precondition: any Phase-5 failure at any step.
+- Procedure (single branch — the copy is disposable): 1) if a bootstrap apply is mid-flight, roll it
+  back via its per-note checkpoints:
+  `node apps/cli/dist/index.js --vault .scratch/atlas-graduation-copy graduation migrate --rollback`;
+  2) discard the copy wholesale: `rm -rf .scratch/atlas-graduation-copy` (no dirty-worktree
+  reconciliation exists — agent branches die with the copy; fixes R2-F10); 3) if Phase-5 code must
+  come out: `git revert <phase5-PR-merge-sha>` → revert PR → merge.
+- Schema compatibility: Phase 5 introduces **no SQLite DDL** (reuses `0001`–`0004`); nothing to
+  downgrade.
+- Verify supported state: `git -C "$MAIN_VAULT" rev-parse HEAD` equals the recorded `$LIVE_HEAD`;
+  `test ! -e .scratch/atlas-graduation-copy`; Phase-4 Verification block still passes on fixtures.
 
 ---
 
 ## 4. Integration Points
 
-- **`contracts` (process seam):** CLI (`domain` re-export) + both brokers produce/verify identical stable
-  IDs, ChangePlan/run-manifest schemas, canonical serialization. Byte-identity is the contract.
-- **`sqlite-store` ↔ `jobs`:** `sqlite-store` owns connection + migration runner + non-jobs tables; `jobs`
-  registers its own migrations and solely owns `jobs`/`job_attempts`; `sqlite-store` is one-way read consumer.
-- **SQLite ↔ LanceDB:** SQLite is the sole activation authority via generation-fencing CAS; LanceDB filtered
-  by active generation. No distributed transaction.
-- **Integration broker seam:** agents write objects + `refs/agent/*` only; broker (separate uid) is sole
-  mutator of canonical/`refs/audit/runs`/trust refs; re-verifies signature + CAS + ancestry + audit event.
-- **Egress broker seam:** agents have no credential + no network; `models` is a typed IPC client; broker
-  scans + audits every payload.
-- **Audit SSOT:** SQLite ledger is system of record; encrypted backup is primary DR; `refs/audit/runs` is
-  a signed best-effort cross-check; `--from-git` folds mutating-run rows best-effort.
-- **Config:** `brain.config.yaml` is the single owner of thresholds/paths; tasks read from config, never hardcode.
-- **CLI contract registry:** `commands.json` owns membership; schemas generate docs + fixtures + acceptance.
-
----
+- **`@atlas/contracts` (process seam):** CLI (`domain` re-export), `sqlite-store`, `git`, and both
+  broker daemons produce/verify identical stable IDs, `RunManifestSchema`,
+  `ChangePlanEnvelopeSchema`, and canonical serialization from Phase 1; the per-operation
+  `ChangePlanSchema` joins at the Phase-2 gate. **Byte-identity across the seam is the contract**
+  (`contracts.operations.test` runs the serialization in two processes).
+- **Acyclic broker↔ledger seam (§2.8):** `@atlas/broker` primitives never import
+  `@atlas/sqlite-store` (`broker.no-ledger-dep.test`); `finalizeLedgerWrite` is the sole
+  cross-store orchestrator and calls broker primitives. Every ledger writer — readonly/projection
+  runs (1.9), capture (2.6), egress transmissions (2.8), query (3.4), synthesis/integration (4.5),
+  trust (4.8), rollback/purge (4.9/4.10), re-verification jobs (4.7) — funnels through it, which is
+  what threads the fail-closed backup watermark everywhere (R2-F5).
+- **`sqlite-store` ↔ `jobs`:** `jobs` authors + registers + owns `0002_jobs`; `sqlite-store` owns
+  the connection + runner + all other tables and consumes jobs read-only via `readSnapshot`.
+- **Tier-1 capture seam:** Phase-2 capture lands canonical commits **only** through
+  `broker.integrateSourceCapture` (delivered Phase 1); no agent advances canonical directly.
+- **Scanner-before-persistence seam:** `PrePersistenceGuard` is a required constructor dependency
+  of `normalize` and `captureSource`; `GeneratedArtifactGuard` wraps every model-derived artifact
+  sink from the first model call (2.8) through patches/commits (4.5).
+- **SQLite ↔ LanceDB:** SQLite is the sole activation authority (generation CAS); retrieval filters
+  by active generation; retirement + markers are independently retryable convergence steps.
+- **Integration-broker seam:** agents hold object-write + `refs/agent/*` + protected-ref **read**;
+  `atlas-broker` is the sole protected-ref **mutator**, re-verifying signature + CAS + ancestry +
+  audit event per request.
+- **Egress-broker seam:** agents have no provider credential and no outbound network (Task 1.0);
+  `@atlas/models` is a typed IPC client; `atlas-egress` scans + audits every payload in-process.
+- **Audit SSOT:** SQLite ledger = system of record; encrypted backup = primary DR;
+  `refs/audit/runs` = signed best-effort cross-check anchored to the external WORM file;
+  `db rebuild --from-git` folds mutating rows best-effort with explicit gaps. Cardinality owner:
+  each terminal event type exactly once per run.
+- **Config:** `brain.config.yaml` is the single owner of every threshold/path this plan names
+  (D4/D7/D8/D10 values live there); tasks consume config, never literals.
+- **CLI contract registry:** `commands.json` owns command membership from Phase 0 (with `phase` +
+  `implemented`); `gen-cli-contract.ts` generates docs + fixtures + the acceptance inventory; the
+  graduation/quarantine groups are ordinary rows, so no inventory can drift.
 
 ## 5. Testing Strategy
 
-- **Unit:** parse/hash/ID-normalize/chunk/patch/risk/schema/canonical-serialization.
-- **Integration:** sqlite repos, lancedb indexing, SQLite↔LanceDB consistency + fencing, git worktrees,
-  job retries, model adapter (doubles), provenance versioning, evidence re-verification.
-- **E2E:** ingest one source; update existing note; reject duplicate-id creation; require review for
-  high-risk; recover after index failure; rebuild all derived state; rollback applied change; purge.
-- **Safety-invariant CI gate (release-blocking):** retrieval-before-synthesis ordering; review gating;
-  approval boundary (broker EACCES + challenge/response); rollback; rebuild; source immutability; Phase-2
-  non-integration; single-runner exclusion; ledger DR round-trip; crash-recovery failpoints (generated
-  from transition table); quarantine crash-safety; egress bypass; generated-artifact persistence guard.
-- **Security negative:** fail-closed scan on every egress path; path-traversal/symlink-escape/symlink-race;
-  disguised/oversized attachments; injection-shaped Markdown/frontmatter; indirect prompt injection;
-  provider response echoing a secret; assert no persistence to **any** sink (raw storage, worktrees, git
-  objects+refs, LanceDB, temp/parser, diagnostics, audit, every backup).
-- **What first:** persistence + broker + ledger DR (Phase 1) before any ingest; sandbox containment +
-  non-integration exit (Phase 2) before retrieval; retrieval mechanics (Phase 3) before workflows;
-  full safety gate (Phase 4) before real vault (Phase 5). **What can wait:** retrieval-quality eval,
-  scale/perf thresholds — Phase 5. **Deferred:** multi-worker/lease crash matrix; multi-version migration matrices.
-- **Env matrix:** macOS + Linux integration suites (sandbox availability, permission modes, symlink
-  behavior/races, git worktrees, SQLite WAL+locking, encrypted-volume detection); offline suite on every
-  change, live-Gemini opt-in/nightly, flaky quarantined.
+- **Unit:** parse/hash/identity-normalize/chunk/patch/risk/schema/canonical-serialization/per-op
+  payloads — colocated per package, offline, deterministic.
+- **Integration:** sqlite repos + migrations ownership, provenance fold, lancedb fencing, git
+  worktrees, jobs retries/recovery, model adapter (doubles), evidence re-verification, cross-store
+  audit ordering (§2.8), locks conflict matrix.
+- **E2E (fixture vaults):** ingest one source; update existing note (Tier-2); reject duplicate-id;
+  Tier-3 review round; recover after index failure; rebuild all derived state; rollback applied
+  change; purge.
+- **Safety-invariant CI gate (release-blocking, offline):** `provisioning.separation` ·
+  `broker.no-ledger-dep` · `approval-boundary.adversarial` · `anchor.anti-truncation` ·
+  `ledger.dr-roundtrip` · `ledger.fail-closed-watermark` · `audit.cross-store-ordering` ·
+  `restore.atomicity` · `pre-persistence-guard` (`normalize.scans-before-return` +
+  `capture.scans-before-persist`) · `quarantine.security` · `sandbox.containment` ·
+  `egress.bypass` · `phase2.non-integration` · `jobs.single-runner-exclusion` ·
+  `retrieval.order-invariant` · `index.generation-fencing` · `crash-recovery.failpoints` ·
+  `observability.run-matrix` · `trust.lifecycle` · `rollback.dependency-checks` · `purge.e2e` ·
+  `terminal-renderer.safety` · `db.migrate-ownership` · **`provisioning.integrity`** (D16) ·
+  **`scan-before-persist`** (D15) · **`egress.capability-budget`** (D19) ·
+  **`broker.rejects-test-signer-in-prod`** (D20) · **`contracts.no-app-import`** (D14) ·
+  **`quarantine.authorization`**. Any regression here is release-blocking.
+- **Security negative:** fail-closed scan on every egress path; path-traversal/symlink-escape/
+  symlink-race; disguised/oversized attachments; injection-shaped Markdown/frontmatter; indirect
+  prompt injection; a provider response echoing a secret — always asserting **no persistence to any
+  sink** (raw storage, worktrees, git objects+refs, LanceDB, temp/parser, diagnostics, audit,
+  `raw_payloads`, every backup).
+- **Order of arrival:** provisioning + broker + ledger DR + finalization gate (Phase 1) before any
+  ingest; scanner + sandbox + non-integration exit (Phase 2) before retrieval; fencing (Phase 3)
+  before workflows; the full gate (Phase 4) before the real-vault copy (Phase 5). **Deferred with
+  their milestones:** multi-worker/lease crash matrix; multi-version migration matrices.
+- **Environment matrix:** macOS (arm64) + Linux for provisioning/sandbox/permission/symlink/WAL
+  suites; offline suite on every change; live-Gemini opt-in + nightly (`ATLAS_LIVE_GEMINI=1`);
+  flaky tests quarantined (vitest retry-tagged, tracked, never silently retried in the safety gate).
 
----
+Aggregate offline gate (CI, every change — working directory **repo root**; fixes R5-F2):
+```bash
+pnpm -r build && pnpm -r test
+```
 
 ## 6. Rollback Plan
 
-- **Phase 0:** revert contract PR; no code depends yet.
-- **Phase 1:** revert PR; ledger DR is the safety net — `db restore` from encrypted backup recovers ledger;
-  `db rebuild`+`index rebuild` recover projections. Broker/git seam is additive; disabling it reverts to no
-  privileged ops (dev-only).
-- **Phase 2:** revert; immutable source captures remain valid Markdown; drop `jobs`/`sources`/egress via PR
-  revert; captured sources are keep-forever and unaffected.
-- **Phase 3:** LanceDB is disposable — `index rebuild` reconstructs; revert retrieval PR with no canonical impact.
-- **Phase 4:** every canonical change is a git commit → `brain git rollback` (broker-authorized, dependency-
-  checked revert commit, never history rewrite) + projection reconciliation. Purge/trust are additive commands.
-- **Phase 5:** operates on a **copy** of `main-vault`, agent-branch-only — discard the sandbox; live vault
-  never touched. Bootstrap migration has per-note checkpoints + documented rollback.
-- **General:** all cleanup commands transactional + auditable; audit-referenced rows tombstone (never cascade);
-  git-history rewrite only within the documented `purge` protocol under the broker.
+Each phase carries exactly **one deterministic rollback branch** inline above (preconditions, exact
+commands, schema-compatibility statement, and a verify step using only commands that survive the
+revert). Shared rules:
 
----
+- **All rollbacks are PR reverts** — never force-pushes over shared branches. Unwanted **vault**
+  content reversal uses the broker `git rollback` path (dependency-checked revert commit) *before*
+  reverting the code that provides it; never a raw `git revert` of vault content.
+- **The Phase-0 harness is never reverted** (Task 0.0) — `contract-lint` + `gen-cli-contract
+  --check` are always runnable, and lint is clean even with every contract doc reverted (∅ == ∅).
+- **Retained PR-A discipline:** `0003_provenance` (2.1) and `0004_claims` (4.1) land in retained
+  PRs so `db rebuild` reproduces provenance/claims projections after any feature revert — there is
+  no unsupported-rebuild sub-case.
+- **DB schema is forward-compatible within V1:** migrations are additive + checksum-guarded; the
+  runner no-ops applied migrations and never drops tables on downgrade; each table has exactly one
+  owning migration (§2.7).
+- **Protect the ledger before any code revert:** `db backup` first; recover via authorized
+  `db restore` (+ post-restore hooks per phase).
+- **Cleanup is transactional + auditable:** audit-referenced rows tombstone, never cascade;
+  git-history rewrite only inside the documented purge protocol.
+- **Provisioning teardown** (`provisioning/dev/teardown.sh`) only when decommissioning a host,
+  verified by `provisioning.separation.test` finding no atlas artifacts.
 
-## Open ambiguities flagged for implementers
+## 7. Spec-coverage matrix
 
-1. **Broker OS-identity on CI:** the spec mandates a separate uid but not the CI mechanism — decide
-   container-user vs dedicated-account before Phase 1; document in the deployment doc.
-2. **`effectiveSensitivity` persistence:** spec allows compute-on-read *or* rebuildable projection — pick
-   one in Phase 4's `policies` contract to avoid a second source of truth.
-3. **`sourceId` alias handle ergonomics:** CLI returns `contentId`/`captureId`/`renditionId` separately;
-   confirm which commands accept the `sourceId` alias vs explicit `renditionId` in each Phase-2/4 schema.
-4. **Chunker version bootstrapping:** `indexing.chunker_version` initial value + bump policy is config-owned
-   but its first value isn't specified — fix in the Phase-3 index contract.
+**Commands → delivering task** (registry `phase` column mirrors this):
+
+| Command | Task | Command | Task |
+|---|---|---|---|
+| `inspect` | 1.9 | `index status\|verify\|repair\|rebuild` | 3.5 |
+| `doctor` | 1.9 | `db status\|verify\|migrate\|rebuild` | 1.4 |
+| `status` | 1.9 | `db backup\|restore`, `db verify --backup` | 1.7 |
+| `ingest` | 2.6 | `jobs list\|run\|retry\|cancel` | 2.7 |
+| `query` | 3.4 | `git status\|cleanup` | 2.9 |
+| `enrich`/`reconcile`/`maintain` | 4.11 | `git review\|refresh\|approve\|reject\|rollback\|verify` | 4.9 (refresh: 4.5) |
+| `validate` | 4.11 | `purge` | 4.10 |
+| `source add\|list\|show` | 2.6 / 2.9 | `graduation scan\|audit\|migrate` | 5.1 / 5.2 / 5.3 |
+| `source trust show` | 2.9 | `quarantine inspect\|resolve` | 5.3 |
+| `source trust promote\|revoke` | 4.8 | `note show\|related\|history` | 2.9 |
+
+**Normative capabilities → owner task:** provisioning/separation 1.0 · contracts seam 1.1/2.0 ·
+config 1.2 · identity namespace 1.3 (validation 4.4) · migrations + rebuild 1.4 (§2.7) · git
+plumbing 1.5 · broker auth core + anchor 1.6 · ledger DR + fail-closed watermark + §2.8 1.7 ·
+renderer/a11y/`--plain` + JSON envelope + locks + diagnostics 1.8 · Tier-0/projection audit 1.9 ·
+per-op schemas 2.0 · provenance entities + fold 2.1 · scanner/guards/quarantine 2.2 · sandbox 2.3 ·
+normalization envelope + media alt 2.4 · run state machine 2.5 · capture + dedup/idempotency 2.6 ·
+jobs queue + `jobs-runner` lock 2.7 · egress broker + provider taxonomy + operation gate 2.8 ·
+pagination 2.9 · Phase-2 restriction proof 2.10 · chunking/generations 3.1 · fencing 3.2 · hybrid
+RRF + packing 3.3 · query audit 3.4 · staleness/repair + restore hook 3.5 · eval harness 3.6 ·
+claims schema + fold 4.1 · patches 4.2 · risk/sensitivity single producers 4.3 · validation +
+accessibility + reserved-op rejection 4.4 · synthesis pipeline + CAS/refresh + artifact guard 4.5 ·
+evidence ops 4.6 · re-verification protocol 4.7 · trust/taint/revocation 4.8 · approve/rollback
+semantics 4.9 · purge + audit-ref erasure + retention execution 4.10 · failpoints + observability +
+`--from-git` 4.11 · graduation scan/audit/migrate/quarantine 5.1–5.3 · eval + scale gates 5.4 ·
+raw-payload opt-in store: table 1.4 (§2.7), config 1.2, backup inclusion 1.7, retention 4.10.
+
+**Deferred by the spec (not planned, listed so absence is deliberate):** MCP server/cloud hub;
+network adapters; reranking; scheduling daemons; multi-worker leases/fencing; autonomous
+destructive ops; local inference; task-workflow *behavior* (schemas ship in 2.0, rejected by 4.4);
+contradiction `disputed`/`superseded` transitions; opaque pagination cursors; OCR; ID-migration
+protocol; multi-version schema chains.
+
