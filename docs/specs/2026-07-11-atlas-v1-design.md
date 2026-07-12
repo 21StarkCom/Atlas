@@ -136,7 +136,12 @@ local file ─▶ Capture + Normalize ─▶ Immutable source note (sources/)
    and the **canonical integration commit** are recorded as separate hashes. A Tier-3 run
    halts at `review-pending` after `agent-committed`; from `review-pending` the **only** legal
    transitions are **approve** (→ `integrated`), **refresh** (→ back to `review-pending` on a
-   new commit), and **reject** (→ terminal `rejected`). `rollback` is **not** a legal
+   new commit), and **reject** (→ terminal `rejected`). These are the only **reviewer-initiated**
+   transitions; the exceptional **system-failure/abort** transitions `failed@review-pending`
+   (validation/broker/internal failure) and `cancelled@review-pending` (the owning agent's abort,
+   or trust revocation of the run before integration) are the *only* other legal exits, are
+   performed by the system or the owning agent (never a third party), prune the agent branch via
+   the normal cleanup path, and each emit their terminal audit event. `rollback` is **not** a legal
    review-pending transition — it applies only to an already-`integrated`/`finalized` run.
    Tier-1/Tier-2 runs transition `agent-committed → integrated` under the concurrent-integration
    CAS. Reindex/finalization run **only** after `integrated`, never off a bare agent-branch
@@ -352,10 +357,13 @@ deduplicate **iff** they normalize to the same canonical media type; media-type 
 bytes (e.g. a file that is both valid text and valid HTML) to **exactly one** canonical media
 token from bytes alone, so identity is never caller-dependent; any distinct interpretation must
 be a validated, explicitly-requested interpretation folded into content identity, and polyglot
-conformance fixtures assert ingestion cannot assign divergent identities accidentally. Re-ingesting an existing `contentId` records a **new
-capture event** (a legitimate recapture) but reuses the blob — capture-event idempotency is
-keyed on `(contentId, origin)` so a retried ingest of the same path does **not** add a
-duplicate capture, while a genuinely new path does. A path whose content changed produces a
+conformance fixtures assert ingestion cannot assign divergent identities accidentally. Re-ingesting an existing `contentId` from the **same** `origin` is an idempotent **recapture**
+that does not add a row; the `(contentId, origin)` capture row is an **observation record**
+carrying `first_seen_at`, `last_seen_at`, and `observation_count` (updated on each re-observation)
+rather than one row per physical ingest — so repeated captures of the unchanged file at the same
+path are represented without unbounded duplication, while a genuinely **new** `origin` adds a
+distinct capture row. A per-ingest idempotency key deduplicates retries from genuine later
+observations when updating the counters. A path whose content changed produces a
 **new `contentId`** (new immutable blob), never mutating the old one. Handles are unambiguous:
 the CLI returns `contentId`, `captureId`, and `renditionId` **separately**; the `sourceId`
 alias for `renditionId` resolves to the **active rendition** (the highest
@@ -396,6 +404,14 @@ the active rendition belongs to the same content blob and exactly one is selecte
 `source_renditions`, and the `sourceId` CLI alias resolves to `content_blobs.active_rendition_id`.
 Each table has a canonical Markdown manifest form that `brain db rebuild` folds back (the
 active-rendition pointer is derivable from the manifests, so it too rebuilds deterministically).
+**The canonical Markdown serialization for every rebuildable entity (content blobs, captures,
+renditions, claims, evidence + verification, `note_sources` links, and vault migrations) is fixed
+by a normative vault-format contract (`docs/specs/vault-format.md`, landing before the first
+rebuild/ingest implementation in Phase 1): paths, filenames, per-entity document schema, canonical
+ordering + escaping, composite-ID encoding, `claims:`/evidence block syntax, unknown-field
+preservation, duplicate/conflict handling, validation errors, schema evolution, and atomic
+multi-manifest invariants — with round-trip fixtures so independent implementations produce
+byte-compatible manifests and a deterministic rebuild.**
 
 ### Claims & provenance
 Claims carry evidence pinned to a **stable `renditionId`** (+ optional `locator` +
@@ -442,7 +458,11 @@ bump produces a new rendition with a changed `normalizedContentHash` and re-poin
    `locator` + `quoteHash` is required for any evidence that may become `valid`. Outcomes are
    transactional per owning note, applied as one validated ChangePlan
    (`UpdateEvidenceVerification` operations) committed on an agent branch:
-   - **exact re-match** → `valid`, `renditionId`/`locator` re-pinned to the new rendition;
+   - **exact re-match** → `valid`; re-anchoring is an **atomic supersede** that inserts a new
+     evidence record (new immutable `evidenceId`, new `renditionId`/`locator`, new payload-hash)
+     and **tombstones the old one** linked by `supersedesEvidenceId`, so the derived-payload
+     UNIQUE index never collides and ledger references to the former `evidenceId` stay
+     interpretable via the tombstone;
    - **ambiguous / moved** (quote found but relocated, or multiple matches) → `pending`,
      escalated to Tier-3 review (never auto-committed);
    - **not found** → `failed`.
@@ -466,15 +486,21 @@ re-verification acceptance cases are in the retention + acceptance contracts.
 **Deferred** until a concrete contradiction-resolution workflow is designed +
 accepted: structured predicates, the `active → disputed → superseded` transitions, and
 `supersedes`/`disputes` inter-claim references (columns may exist for forward-compatibility
-but no V1 workflow drives them — contradiction erasure is explicitly Tier-3/review-only). Evidence idempotency is
-enforced by a **non-null `evidenceId`** = hash over tagged
-(`claimId`,`renditionId`,`locator`,`quoteHash`) values (absent `locator`/`quoteHash` encoded
+but no V1 workflow drives them — contradiction erasure is explicitly Tier-3/review-only). Evidence identity uses an **immutable surrogate `evidenceId`** (assigned once, never derived
+from mutable fields), with idempotency enforced by a **separate UNIQUE index over the derived
+payload hash** of tagged (`claimId`,`renditionId`,`locator`,`quoteHash`) values (absent `locator`/`quoteHash` encoded
 as explicit sentinels, never SQL NULL — so a unique index cannot be bypassed by
 NULL-distinctness), with checks defining the valid `locator`/`quoteHash` combinations —
 making `AttachEvidence` idempotent.
 `CreateRelationship` writes a typed relationship (predicate + source/target `noteId`) as a
 canonical typed wikilink in frontmatter, rebuilt into `note_links`. Validation rejects
-dangling `sourceId`/`noteId`/`claimId` references and duplicate evidence.
+dangling `sourceId`/`noteId`/`claimId` references and duplicate evidence. **Note-level provenance
+(`note_sources` + frontmatter `sources`) pins the immutable `contentId`** (composite
+raw-hash + canonical-media-type components) when a note cites a raw source generally, or the
+**`renditionId` composite components** when it must cite a specific extraction — **never the
+mutable `sourceId` alias**, whose meaning a rendition upgrade would silently change. The data
+dictionary fixes cardinality, the composite FK, uniqueness, upgrade behavior, and the rebuild
+rule for `note_sources`.
 
 ### SQLite tables (V1 subset)
 `notes, note_identity_keys, note_links, content_blobs, source_captures, source_renditions,
@@ -487,7 +513,8 @@ contract** (Phase 0) maps concrete access patterns to composite indexes — job 
 (`state`,`next_run_at`), bidirectional `note_links` traversal, run lookup by `status`,
 identity resolution on `note_identity_keys(normalized_key)`, notes-needing-index scans by
 (`active_generation`,`contentHash`), and audit lookup by `run_id` — verified with query-plan
-assertions at representative and maximum vault sizes.
+assertions at the **evidence-based V1 vault profile plus its growth margin only** (maximum-scale
+profiles are deferred until measured usage establishes a concrete larger target).
 
 **Two migration ledgers, never conflated:**
 - **`db_schema_migrations`** — the operational ledger of applied **SQLite DDL** migrations
@@ -542,6 +569,17 @@ It is authoritative; this section states the binding rules the dictionary MUST s
   authoritative disaster-recovery path is the **required, tested, encrypted SQLite ledger
   backup/restore** (see *Ledger backup subsystem* and *Audit SSOT*). The git audit ref is a
   **best-effort partial** cross-check only, never the ledger's DR system of record.
+
+**Complete state inventory (normative — `docs/specs/state-inventory.md`).** The two-class model
+above is not the full set of primary state: the **broker-owned trust-ledger ref**, the **backup
+watermark + backup catalog**, the **external WORM audit-head anchor**, the **authorization
+nonce/replay state**, and the **encrypted quarantine store** are each additional primary state.
+The state-inventory contract enumerates every persistent store with its authority, owner,
+rebuildability, backup source, restore ordering, consistency checks, retention, purge behavior,
+corruption response, and fail-closed behavior — and explicitly defines how trust state,
+watermarks, anchors, nonces, and quarantine are reconciled (forced fail-closed on disagreement)
+after any restore. Losing the trust ledger forces all affected content to untrusted until an
+authorized repair completes (see *Untrusted-input trust model*).
 
 **Three DR guarantees, stated separately:**
 1. **Projection rebuild** — `brain db rebuild` + `brain index rebuild` reconstruct SQLite
@@ -609,6 +647,12 @@ is delivered by a concrete V1 subsystem, not just a config key:
   (`brain db backup --force-unblock`, under the separation-of-duties boundary) that records the
   accepted-RPO-gap in the audit stream; there is no path in which repeated backup failures
   silently accumulate unrecoverable ledger rows.
+- **Failure model (normative — what V1 promises to survive):** the default beside-the-DB
+  destination covers **logical corruption, accidental deletion, and process crashes** (RPO one
+  run); it does **not** by itself survive filesystem/device/host loss. V1 therefore either
+  requires a configured destination on an **independent failure domain** (validated by
+  `db verify --backup`) or, if left local, **narrows the guarantee to local logical recovery**
+  and documents an operator-owned off-device replication procedure with its RPO/RTO.
 - **Destination / key handling:** configurable local path (default beside the DB, mode 0600);
   AEAD key in the OS keychain / hardware-backed store (never in the vault or env), with defined
   rotation/revocation — same key custody rules as quarantine.
@@ -715,17 +759,21 @@ activation; all cleanup commands are transactional and auditable.
   **rejects any ChangePlan containing a task operation** in V1 (a fail-closed guard, so the
   reserved surface cannot be driven accidentally). This is deliberate in-scope schema, not a
   shipped task capability — the *Scope* list and this section agree on that classification.
-- **Effective risk has exactly one producer.** The `policies` package deterministically
-  derives and persists `effectiveRisk` from operation type + target note type + scope +
-  configured policy; the model's `proposedRisk` is never trusted for gating. Git auto-commit
-  vs. mandatory-review gating consumes **only** `effectiveRisk`.
+- **Effective risk has exactly one *authoritative* producer — the broker.** The deterministic
+  policy definitions + canonical configuration live in one shared versioned contract consumed by
+  both the CLI `policies` package and the broker; the CLI's `effectiveRisk`/`effectiveSensitivity`
+  computation is **non-persisted preview output only**, while the **broker's independent
+  recomputation at the privilege boundary is the sole authoritative, persisted value** that gates
+  integration and egress. The model's `proposedRisk` is never trusted. Because both sides derive
+  from the same versioned contract they cannot drift, and only the broker result is
+  gating-authoritative (any CLI value that disagrees is discarded in favor of the broker's).
 - **Caller idempotency.** **Every state-changing command is classified** as either
   *key-accepting* or *intrinsically idempotent* — with **no command left unclassified**.
   Key-accepting (accept `--idempotency-key`,
   persisting a normalized request hash + terminal result): `ingest`, `enrich`, `reconcile`,
   `maintain`, `source add`, `source trust promote`, `source trust revoke`, `jobs run`,
   `jobs retry`, `jobs cancel`, `git approve`, `git refresh`, `rollback`, `db backup`,
-  `db restore`, `purge`. Intrinsically idempotent (converge on repeat, no key needed): `git reject`,
+  `db restore`, `purge`, `bootstrap resolve` (operation identity = (quarantine-category selector digest, resolved-inventory digest, canonical base hash); a safe retry returns the prior resolution, a concurrent duplicate blocks on the persisted key, and it checkpoints per resolved quarantine so a rerun never re-applies a completed one). Intrinsically idempotent (converge on repeat, no key needed): `git reject`,
   `git cleanup`, `git verify`, `index repair`, `index rebuild`, `db migrate`, `db rebuild` —
   each a no-op or deterministic convergence when already in the target state.
   - **`git refresh` is key-accepting** because it *creates* a new agent commit + manifest +
@@ -831,14 +879,29 @@ different count. The governing rule is **each terminal event type exactly once p
 preceded by the lifecycle events that run passed through — **never** "exactly one event per
 run". A run is **not** one mutable event —
 `refs/audit/runs` is an **append-only stream of one-or-more lifecycle events per run**,
-correlated by `runId` and ordered by a per-ref monotonic `seq`. Defined event types (a **versioned discriminated union** with required + optional fields **per
+correlated by `runId` and ordered by a per-ref monotonic `seq`. **Every event carries a
+producer-stable `eventId`** (a deterministic hash over run id, checkpoint occurrence, and event
+type — so a repeatable checkpoint such as a `refresh`-produced lifecycle event has a distinct,
+stable occurrence identity) used as the broker's uniqueness/deduplication key; the durable outbox
+acknowledges by `eventId` and retries are idempotent against it, so `(runId, type)` collisions
+from legitimate repeats never double-append. **Ledger↔ref dual-write protocol (normative):** the
+broker persists the event payload **and its allocated `seq`** in a broker-owned outbox
+transaction (SQLite), appends idempotently to `refs/audit/runs` keyed by `eventId`, then marks
+the outbox row delivered; recovery replays undelivered outbox rows on startup and `git verify`,
+and every crash point — SQLite-committed/Git-missing and Git-appended/SQLite-outbox-unmarked — is
+reconciled deterministically (no ledger-only event, no Git-only event, no reused or gapped `seq`)
+rather than claimed atomic. Defined event types (a **versioned discriminated union** with required + optional fields **per
 type** — early events such as `run.started` carry no agent/integration hash, so those hash
 fields are optional and populated only on the events whose checkpoint has produced them):
 `run.started`, `run.planned`, `run.agent_committed`, `run.review_pending`, `run.integrated`
 (carries the integration commit hash — appended as a **new event** after the commit exists,
 never mutating an earlier event on the append-only ref), `run.reindexed`, `run.finalized`,
 `run.rejected`, `run.rolled_back`, `run.failed`, `run.cancelled`, and the read-only /
-projection-only `run.readonly` / `run.projection` terminal events. Deterministic fold rules are
+projection-only `run.readonly` / `run.projection` terminal events. Per-provider-call auditing adds versioned **`egress.request`** and **`egress.result`** event
+types (stable `callId`, `runId`, destination, payload hash, `effectiveSensitivity`, outcome,
+idempotency key) so a run that makes multiple model calls records each; fold rules define
+ordering for a crash between dispatch, response receipt, ledger persistence, and terminal run
+emission. Deterministic fold rules are
 defined for every valid sequence. Each event carries `runId`, `seq`, `type` (always), plus the **type-appropriate optional
 fields** — base/agent/integration commit hashes, plan/patch hashes, changed note/source IDs,
 effective risk, validation outcome, job snapshot + attempt outcomes, and references (ids/hashes)
@@ -900,9 +963,9 @@ attestation is never conflated with Tier-3 approval authorization.
 - `reject <runId>` — records the rejection, deletes the branch + worktree, leaves canonical
   untouched. **Terminal rejection of a review-pending run is a broker-authorized privileged
   operation** (a broker-verifiable reviewer/operator authorization is required); immutable
-  plan/commit/diff artifacts are retained per policy. An agent may only `cancel` a run **it owns
-  and before it reaches `review-pending`** — it can never reject another party's pending review,
-  so it cannot destroy review artifacts or deny service.
+  plan/commit/diff artifacts are retained per policy. An agent may only `cancel` a run **it owns and before integration** (including its own
+  review-pending run, which exits via `cancelled@review-pending`) — it can never reject or cancel
+  another party's pending review, so it cannot destroy review artifacts or deny service.
 - `rollback <runId>` — reverts an **already-`integrated`/`finalized`** canonical change
   (creates a revert commit; never rewrites shared history) and reconciles projections.
   **`rollback` is illegal from `review-pending`** (and any pre-integration state): a
@@ -965,8 +1028,10 @@ process can advance a protected ref**, even with direct git plumbing:
   every request, **re-verifies from scratch**: the approval (or privileged-op) signature against
   the exact plan+commit, the CAS precondition (canonical still at recorded base), commit
   **ancestry** (the target commit descends from the recorded base and contains only the
-  approved tree), and that the corresponding **audit event** is present — then atomically
-  advances the protected ref **and** appends the audit event in one broker-side transaction.
+  approved tree), and that the corresponding **audit event** is present — then
+  advances the protected ref **and** appends the audit event via the normative ledger↔ref
+  dual-write protocol (outbox + `eventId`, see *Event-stream model*), with deterministic crash
+  recovery at every point rather than a claimed cross-store atomic write.
   **For every integration — including Tier-1/Tier-2 auto-commit — the broker (in broker-trusted
   code, from broker-owned configuration) parses the candidate tree + diff, validates it exactly
   implements the canonical `ChangePlan`, independently applies path/note-type/provenance/taint/
@@ -975,6 +1040,16 @@ process can advance a protected ref**, even with direct git plumbing:
   The agent-supplied `effectiveRisk` label is never trusted for gating.
   A compromised agent cannot integrate a Tier-3 change without a valid signature the broker
   verifies, because the agent physically cannot write the ref.
+- **Purge history-rewrite exception (broker-only).** Canonical Git-history rewrite required by
+  `brain purge` is the single defined exception to the descend-from-base and
+  append-only-object-store rules: it runs as a distinct **broker-authorized signed
+  non-fast-forward canonical-ref replacement** (Tier-3-equivalent authorization bound to
+  op=`purge`, the old head, and the deterministically derived replacement head), after which the
+  broker **securely garbage-collects the superseded objects** (moved out of the append-only class
+  into an erasable storage class for this operation), **externally checkpoints both the old and
+  replacement heads** in the WORM anchor, and runs post-purge verification that no erased object
+  remains reachable. Ordinary (non-purge) integration retains the strict descend-from-base +
+  append-only guarantees.
 - **Audit-head anchoring / anti-truncation.** The broker records the `refs/audit/runs` head
   (hash + monotonically increasing event count, signed by the broker) into an **append-only /
   WORM location outside the agent-writable repository** (a broker-owned, agent-unreadable
@@ -982,6 +1057,16 @@ process can advance a protected ref**, even with direct git plumbing:
   verify`, the current audit head is checked against that external anchor: **any truncation or
   rewrite of a valid audit suffix is detectable** even after SQLite loss, because the anchor's
   event count exceeds what a truncated ref carries. Agents cannot write the anchor.
+
+**Broker deployment & lifecycle contract (normative — `docs/specs/broker-deployment.md`, a
+Phase-1 installation gate).** Because the entire safety boundary depends on the integration and
+egress brokers running as separate privileged OS identities, a supported-host deployment contract
+defines: user/group provisioning; privileged installation; broker process supervision (launchd on
+macOS / systemd on Linux); socket ownership + peer authentication; repository/object-store
+permissions + modes; hardware-backed key enrollment; startup ordering; broker↔CLI version
+compatibility; health checks; upgrade/rollback; crash recovery; and uninstall. **Successful
+privilege-boundary verification is a Phase-1 installation gate** — `brain doctor` refuses
+privileged operations until the deployment contract is satisfied on the host.
 
 **What "user presence" actually proves.** A plain stdin/PTY confirmation is **not** a proof of human presence — an agent
 that can launch the CLI can synthesize stdin or allocate a PTY and answer the prompt.
@@ -1006,14 +1091,21 @@ prompts. Key provisioning, storage (OS keychain / hardware-backed, never in the 
 visible to the agent), rotation, revocation, signer identity, signature algorithm (Ed25519),
 and per-approval nonce replay-protection are defined in the git/broker package contract. The
 same broker boundary governs **every privileged canonical or destructive operation** —
-`approve`, `refresh`-integration, `rollback`, erasure/`purge`, `db restore`, and trust
-`promote`/`revoke` — each requiring user-presence or a separately held signature bound to
+`approve`, `refresh`-integration, `rollback`, erasure/`purge`, `db restore`, trust
+`promote`/`revoke`, **terminal `git reject` of a review-pending run, and the `db backup
+--force-unblock` backup-health override** — each requiring user-presence or a separately held signature bound to
 (target run, canonical commit, intended effect, replay nonce); none is invocable by an agent
 workflow.
 
 **Non-interactive authorization CLI contract (challenge/response — finding: no usable
 contract).** Every privileged command supports a two-step, fully non-interactive protocol with
-JSON schemas (in `cli-contract/`):
+JSON schemas (in `cli-contract/`). The **canonical privileged-command registry** enumerates every
+privileged variant — `approve`, `refresh`-integration, `rollback`, `purge`, `db restore`, trust
+`promote`/`revoke`, **`git reject`, and `db backup --force-unblock`** — and generates each one's
+broker policy, challenge fields (op-specific `intendedEffect`), permitted signers, nonce/replay +
+drift checks, stable authorization errors, and idempotency behavior; a `--force-unblock`
+challenge is bound to (op=`backup-force-unblock`, latest ledger sequence, accepted-RPO-gap,
+nonce):
 1. **Challenge / export** — `brain <cmd> --export-challenge <target>` emits a JSON
    **authorization challenge**: `{ op, runId?, targetCommit?, canonicalBaseCommit,
    intendedEffect, nonce, expiresAt, payloadCanonicalization, signingPayload }` where
@@ -1077,7 +1169,9 @@ brain purge (--note <id> | --source <contentId> | --data-category <label>) [--dr
 ```
 Human + JSON + quiet + verbose modes; stable exit codes
 (`0` ok · `1` validation · `2` config/vault · `3` secret-scan · `4` internal · `5` user/usage ·
-`6` action-required, e.g. an accepted-but-not-integrated review-pending run).
+`6` action-required, e.g. an accepted-but-not-integrated review-pending run · `7`
+provider-retryable, e.g. a `rate_limit`/`quota`/transient-transport failure the caller may
+retry).
 
 **Mutation default.** For **all four state-changing workflow commands** — `ingest`, `enrich`,
 `reconcile`, `maintain` — the default is a **non-mutating preview**; `--apply` performs the
@@ -1168,7 +1262,7 @@ neither, `run` defaults to `--all` while `retry`/`cancel` **require** an explici
 (ordered by `(next_run_at, jobId)`), processes each job independently, returns a **per-job
 result array** plus an **aggregate exit status** chosen by a **deterministic precedence table**
 over mixed per-job outcomes (`0` only if all succeeded; otherwise the highest-precedence failure
-category wins in the fixed order `4` internal ⊐ `2` config/vault/lock ⊐ `1` validation ⊐
+category wins in the fixed order `4` internal ⊐ `2` config/vault/lock ⊐ `1` validation ⊐ `7`
 provider-retryable ⊐ `5` usage, with `skipped`/`cancelled` outcomes not raising the aggregate
 above `0` on their own — the JSON body always distinguishes per-job outcomes), encoded in the
 jobs command schemas + contract fixtures, and a job that changes state
@@ -1196,7 +1290,14 @@ provider-directed timing programmatically. `retryAfterMs` is present iff the pro
 timing; `retryable` remains the boolean gate. The stable per-command `code` catalog (each mapped to an exit category) is enumerated
 in the per-command contract files. **stdout is reserved for results — diagnostics go to
 stderr.** Each `code` maps to one of the process exit categories above (so validation vs.
-user/usage failures are distinguishable).
+user/usage failures are distinguishable). **Batch commands** (`jobs run/retry/cancel` with
+`--all` or multiple targets) do **not** use the single-error envelope; they emit one canonical
+**batch-result object** `{ "items": [<per-job result-or-error>], "aggregate": { "exitCode":
+<number>, "succeeded": n, "failed": n, "skipped": n }, "error"?: <top-level envelope for a
+whole-batch failure> }`. Per-item failures use the standard error-envelope shape inside
+`items[]`; the top-level `error` is present only when the batch could not run at all. This is the
+sole exception to the one-envelope-per-failure rule and is encoded in the jobs command schemas +
+contract fixtures.
 
 **Accessibility contract (human mode).** All meaning is carried in text — never color or
 symbol alone; **colored output uses a high-contrast palette policy (no dim text for required
@@ -1221,6 +1322,10 @@ linearizes tables, box drawing, and alignment-dependent layouts into labeled rec
 text even on an interactive TTY**, and screen-reader-oriented tests cover collection, status,
 review, and diagnostic commands in a TTY under `--plain`. Contract tests exercise
 long-running commands in `--plain` mode and assert append-only, non-duplicated announcements.
+**Narrow-width / enlarged-text profiles (equivalent to 200% scaling)** are defined test profiles:
+at those widths output MUST wrap without content loss and **automatically switch
+alignment-dependent layouts (tables, diffs, status views) to the linear representation** when
+available width is insufficient, verified by contract tests.
 
 **Terminal-safe rendering.** Human-mode commands display
 attacker-influenced text (normalized sources, model answers, note content, diffs, paths,
@@ -1289,7 +1394,7 @@ way it enforces canonical writes — with an **OS-level privilege boundary**:
   restrictive-permission Unix socket with **peer-credential verification** (only permitted local
   uids); the broker accepts **only fixed operation schemas**, derives `effectiveSensitivity`
   independently and enforces provider/region policy, **pins an allowlist of HTTPS destinations**,
-  and **rejects any caller-supplied URL, endpoint, header, or credential**. It constrains
+  and **rejects any caller-supplied URL, endpoint, header, or credential**. **Per-request egress capability (content authorization, not just caller authentication):** peer-credential checks alone do not authorize *what* is sent, so every egress request additionally carries a **short-lived, single-use capability** minted for a specific run — bound to run ID, operation, approved prompt-template id+version, the content/retrieval-set hashes, `effectiveSensitivity`, destination, and a token budget; the broker rejects any request whose payload hashes or sensitivity do not match its capability, and where feasible **assembles the payload itself from broker-verified authorized objects** rather than transmitting arbitrary agent-supplied prompt bytes, so a compromised process under an allowed uid cannot exfiltrate arbitrary readable content. It constrains
   headers, proxy, DNS resolution, and redirect handling to the pinned provider, and applies
   request size, rate, and operation-scope limits — so no local process can use it as a
   credentialed network oracle and no caller-controlled routing can leave the Google-only
@@ -1299,15 +1404,19 @@ way it enforces canonical writes — with an **OS-level privilege boundary**:
   (hashes/classifications/destinations, never raw payloads), which it submits through a **durable
   outbox** to the **integration broker — the sole owner of audit sequence allocation and
   `refs/audit/runs` appends** (see *Audit SSOT* / *Two brokers*). That sole audit writer
-  atomically records the request in the operational ledger and appends it to the audit ref, with
+  records the request in the operational ledger and appends it to the audit ref via the normative ledger↔ref dual-write protocol (outbox + `eventId` idempotency, see *Event-stream model*) — never a claimed cross-store atomic write — with
   idempotent dedup on retry. The egress broker never writes the audit ref or allocates sequence
   numbers directly, so an agent can neither bypass the scan nor suppress the audit record, and
   there is exactly one audit writer with no split-brain ordering.
 Detected secrets block or redact the call; failures fail closed and quarantine. Query,
 enrichment, indexing, rebuild, and retry paths are all in scope. This egress broker is the same
 privilege-separation pattern as the integration broker (*Authorization boundary*) applied to
-the outbound-network seam; the two may share the broker OS identity but are distinct
-capabilities (egress-network vs protected-ref-write).
+the outbound-network seam; the two run under **separate OS identities** with separate keychain ACLs, sockets, files, and
+sandbox profiles: the egress identity is **denied all protected-ref/object-store access**, and
+the integration identity is **denied outbound network and the provider credential**, and
+cross-process inspection/tracing between them is prevented — so compromising the network-facing
+egress broker cannot reach canonical or audit state (egress-network vs protected-ref-write are
+distinct capabilities that are never collapsed onto one uid).
 
 **Generated-artifact persistence guard (non-bypassable — finding: model output can bypass
 no-secrets-at-rest).** Schema + provenance validation do not stop a model from emitting
@@ -1337,7 +1446,12 @@ the `contentId` is persisted, so a later rendition upgrade (which preserves the 
 re-points the alias) can never silently re-target an authorization. **The broker-owned
 trust-ledger ref is the single authoritative store of current promotion/revocation state;**
 policy evaluation and taint propagation consume it, and canonical Markdown + audit records are
-derived views reconciled from it. Only a user-presence /
+derived views reconciled from it. **The trust ledger is append-only, its head + sequence are
+externally anchored in the same WORM store as the audit head, and its authoritative state is
+included in the encrypted recovery backup and verified on every startup / `git verify`.** A
+missing, truncated, or rolled-back-past-a-revocation trust history **forces all affected content
+to untrusted** (fail-closed) until an authorized repair completes — a stale trust ref can never
+silently re-trust previously revoked content. Only a user-presence /
 signing-key-authorized caller (same boundary as `git approve` — never an agent workflow) may
 promote or revoke. Each promotion/revocation writes an immutable audit record; revocation
 re-taints dependent claims/syntheses and re-opens the plans that relied on the now-untrusted
@@ -1435,12 +1549,18 @@ protocol, not left to chance:
    (itself in the erasable ledger), an event cannot be re-linked to content. Ordinary erasure
    therefore needs **no** audit-ref rewrite: deleting the ledger mapping renders the audit
    event's opaque IDs non-identifying while preserving the integrity chain.
-2. **When true removal from the audit ref is legally required**, a **privileged signed
-   audit-ref replacement** is performed by the broker: it writes **signed tombstone events**
-   for the redacted `seq` range and produces a new audit head, **externally checkpointing the
-   replacement head** (in the same WORM anchor used for truncation detection) so the rewrite is
-   itself attested and auditable rather than a silent force-update. Integrity is preserved: the
-   replacement is signed, the prior head is recorded as superseded, and `git verify` validates
+2. **When true removal from the audit ref is legally required**, the erasable identifiers are
+   never in immutable audit objects in the first place: audit events reference subjects **only
+   via opaque IDs backed by per-subject envelope-encryption keys**, so cryptographically
+   destroying a subject's key renders every retained audit object permanently non-relinkable
+   without physically rewriting the ref. Where physical event removal is nonetheless required, a
+   **privileged signed audit-ref replacement** is performed by the broker: it writes **signed
+   tombstone events** for the redacted `seq` range, produces a new audit head, and moves the
+   **superseded objects into an erasable storage class** (securely garbage-collected, not
+   retained in the append-only class). The WORM anchor records **only a non-relinkable
+   attestation of the rewrite** (the new head + a signed proof a redaction occurred) — it does
+   **not** retain a usable reference to the old object graph. Integrity is preserved: the
+   replacement is signed, the prior head is attested as superseded, and `git verify` validates
    the chain against the external checkpoint.
 3. **Backups:** the erasure inventory includes every encrypted ledger backup containing the
    redacted rows; erasure either re-writes a minimized backup or expires the affected backups
@@ -1456,6 +1576,16 @@ embedding_provider=google, embedding_model=gemini-embedding-001, dimensions), `g
 (worktrees_path, auto_commit_risk_levels), `models` (default_provider=google,
 gemini config), `policies` (require_sources_for_synthesis, allow_auto_merge=false,
 allow_auto_delete=false).
+
+**Normative configuration contract (versioned — `docs/specs/config-schema.md`, phase-gated with
+Phase 1).** The keys above are illustrative, not exhaustive. The config schema defines **every**
+key — including broker endpoints/identities, backup paths + retention, lock-file locations,
+sandbox resource limits, egress policy + provider regions, key references, quarantine,
+`raw_payload_store`, logging, and all retention bounds — with type, default, bounds, cross-field
+constraints, secret-vs-non-secret classification, the **explicit allowlist of permitted
+environment overrides** (provider credentials are never overridable into an agent-visible env),
+path resolution, unknown/deprecated-key handling, version migration, and sanitized `doctor`
+diagnostics.
 
 ## Phased build plan
 
@@ -1490,7 +1620,11 @@ at Phase 5.
    and `db backup` under the separation-of-duties boundary (challenge/response +
    OS-presence/`--authorization`, protected-ref/credential custody, audit-event append). The
    broker's full canonical-integration surface (`approve`/`refresh`/`rollback`) is wired in
-   Phase 4, but its authorization core and the protected-ref/audit-ref ownership exist from
+   Phase 4, and its **Tier-1 source-capture integration primitive** (CAS advance + broker-side
+   policy re-verification + audit append for the deterministic source-capture commit) is
+   delivered in **Phase 2** so that phase's canonical captures advance canonical through the
+   broker like every other canonical write; its authorization core and the
+   protected-ref/audit-ref ownership exist from
    Phase 1, so no phase depends on a broker capability delivered later than the phase needs it.
    `brain db backup` / `db restore` / `db verify --backup` ship here.
 2. **Ingest loop** — `sources` normalize (md/txt/pdf/html) in a **sandboxed parser worker**
@@ -1574,7 +1708,9 @@ Retrieval eval (recall@K, MRR, canonical-note discovery, source-grounding) befor
 quality.
 
 **Security (negative) tests.** Fail-closed secret scanning on every egress path
-(query/enrich/index/rebuild/retry); path-traversal + symlink-escape + symlink-race;
+(**Phase-2 ingest preview/apply extraction+classification**/query/enrich/index/rebuild/retry) —
+including secret-bearing and prompt-injection-shaped ingest inputs asserted blocked before any
+provider request, with the expected sanitized ledger/audit outcome recorded; path-traversal + symlink-escape + symlink-race;
 disguised/oversized attachments; representative secret formats; injection-shaped
 Markdown/frontmatter; adversarial indirect-prompt-injection sources; **plus a provider response
 that itself introduces/echoes a secret** (generated-artifact persistence guard). For blocked
@@ -1584,6 +1720,12 @@ audit records, and every ledger backup** (not just Markdown + SQLite). **Quarant
 assert quarantine contains only **authenticated ciphertext (AEAD integrity)**, the key is
 **inaccessible to parser/model processes**, filenames are minimized, key rotation/revocation
 works, retention expiry purges, and a **crash mid-quarantine leaves no plaintext** behind.
+
+**Optional raw-payload store.** Tests assert that with `sqlite.raw_payload_store` **off** raw
+payloads are absent from **every** sink; when **on**, payloads exist **only as AEAD ciphertext**
+in the dedicated store with a **separate key** — covering key separation + revocation,
+bounded-retention expiry, inclusion in + recovery from the ledger backup, corruption handling,
+and purge removal.
 
 **Parser-sandbox containment (adversarial).** Probe parsers run inside the real sandbox
 launcher assert that network access, environment variables, keychain/credential access,
@@ -1676,8 +1818,9 @@ versions, interrupted `brain db migrate` reruns, and concurrent migrate attempts
 either complete migration or deterministic recovery with **no falsely recorded schema version**.
 
 **Markdown accessibility.** Deterministic checks + fixtures for one logical top-level heading,
-non-skipped heading levels, descriptive link labels, valid list structure, and image alt-text
-rules — run during `validate` so a change cannot apply if it degrades navigation.
+non-skipped heading levels, descriptive link labels, valid list structure, image alt-text
+rules, **identifiable table headers + captions-or-surrounding-description, and equivalent
+text/tabular data for every chart or other visual-data representation** — run during `validate` so a change cannot apply if it degrades navigation.
 
 **Diagnostic logging.** Structured runtime diagnostics (CLI, parser-worker, recovery,
 reconciliation) write to a configured destination separate from the audit ledger, correlated
@@ -1715,9 +1858,17 @@ EACCES because the ref is broker-owned; absent/forged/replayed signatures; a sig
 between plans or between commits; commit mutation after signing; `--yes` alone attempting
 Tier-3 integration; **`approve` on a stale base returns `refresh-required` and never
 rebases/creates a new commit**; stale-base races; and a canonical-branch move / TOCTOU change
-immediately before merge — each refused by the broker's re-verification. **Non-interactive
-authorization:** `--export-challenge` → sign → `--authorization`
-round trip for `approve`/`rollback`/`purge`/`db restore`/trust ops, asserting the execute step
+immediately before merge — each refused by the broker's re-verification. **Broker-side risk/policy recomputation (adversarial):** submit a candidate whose manifest
+falsely labels a Tier-3 or untrusted-derived change as Tier-1/Tier-2 (tampered `effectiveRisk`,
+validation results, trust labels, plan payload, and candidate tree) and assert the broker
+**independently** re-derives the higher risk/taint, refuses the protected-ref advance, and
+requires a valid human approval where applicable. **Non-interactive
+authorization:** the matrix is **generated from the canonical privileged-command registry** and
+covers `approve`/`rollback`/`purge`/`db restore`/trust ops **plus broker-authorized `git reject`
+and the `db backup --force-unblock` override** — each tested for unauthorized-agent invocation,
+wrong signer, drift, expiry, replay, cancellation, and successful authorized execution with the
+required audit record — via `--export-challenge` → sign → `--authorization`
+round trip, asserting the execute step
 **rejects any drift** from the exported challenge (canonical moved, nonce expired/replayed,
 target commit changed, wrong signer) and that `rollback`'s challenge carries the deterministically
 derived revert commit. **Audit-head anti-truncation:** truncate/rewrite the audit suffix and
@@ -1740,10 +1891,14 @@ recovered); AEAD encryption + file-mode (0600) assertions; **wrong / revoked key
 **truncated / corrupt backup** rejection; **interrupted-restore atomicity** (all-or-nothing);
 **schema-version compatibility** gate; and post-restore projection rebuild consistency. **Plus
 the fail-closed backup contract:** inject a failing/unverifiable post-run backup and assert the
-**watermark does not advance**, the health surface goes **degraded**, **further ledger-writing
-runs are blocked** with the stable `backup-unhealthy` (exit `2`) while read-only commands still
-work, a subsequent successful+verified backup **unblocks** by advancing the watermark to the
-latest ledger sequence, and the audited `--force-unblock` privileged override records the
+**watermark does not advance**, the health surface goes **degraded**, and a **table-driven
+degraded-mode matrix per command class** holds: ledger-writing runs **and audited/model-backed
+reads (e.g. `query`)** are blocked with the stable `backup-unhealthy` (exit `2`), while **only
+genuinely non-persisting diagnostics** (pure `inspect`/`status`/`doctor`/`--json` health) remain
+available; **`db restore` remains broker-authorizable and completes atomically even while backup
+health is degraded** (the emergency-restore path), establishing a fresh watermark and recording
+the accepted loss window; a subsequent successful+verified backup **unblocks** by advancing the
+watermark to the latest ledger sequence, and the audited `--force-unblock` privileged override records the
 accepted RPO gap. **Post-commit crash-window failpoints** inject abrupt process death after the
 ledger commit, during Online-Backup snapshotting, after the encrypted-file rename, after
 verification, and before/after watermark advancement; on restart the suite asserts watermark lag
@@ -1777,7 +1932,10 @@ tombstone + external checkpoint), **backup treatment/expiration**, **interruptio
 projection rebuild, audit output, and **post-purge searches across every storage class proving
 no prohibited copy (including no re-linkable audit identifier) remains.**
 
-**Performance & scale.** **One evidence-based V1 vault profile** — derived from the copied real `main-vault` plus a
+**Performance & scale.** **One evidence-based V1 vault profile** — seeded from a **provisional fixture-based profile
+before Phase 5** and revised from **read-only, sanitized vault-statistics** collected when the
+`main-vault` copy is scanned at the start of Phase 5 (the copy+scan is explicitly sequenced
+*before* the Phase-5 threshold contract is finalized) plus a
 modest near-term growth margin (defined in `docs/specs/acceptance-thresholds.md`) — drives
 automated benchmarks for ingest, query, indexing, reconciliation, migration, and rebuild with
 latency/throughput/memory/disk-growth/recovery-time thresholds. **Only the critical interactive
@@ -1844,13 +2002,17 @@ install.
   (`docs/specs/acceptance-thresholds.md`) that must land **before the phase whose behavior it
   gates** (workflow thresholds before Phase 4; retrieval-eval + scale profiles before Phase 5)
   — per the phase-gated contract rule, not all before Phase 1. V1 seeds it with concrete
-  defaults: Tier-2 auto-commit requires model+validation confidence
-  ≥ 0.8 **and** patch size ≤ 50 changed lines across ≤ 3 sections of a single note (larger
+  defaults: Tier-2 auto-commit requires **two separately typed confidence inputs — model confidence
+  (from the provider adapter) and validation confidence (from the deterministic `validation`
+  layer), each independently ≥ 0.8**, reduced across the plan's operations + evidence by
+  **minimum** (a missing/malformed/conflicting value **fails closed to Tier-3**, and the broker
+  re-verifies the gate; calibration fixtures fix rounding + missing-value behavior) **and** patch
+  size ≤ 50 changed lines across ≤ 3 sections of a single note (larger
   ⇒ Tier-3); retrieval eval on the versioned labeled fixture set must hit recall@10 ≥ 0.85
   and MRR ≥ 0.7 for canonical-note discovery; a **versioned labeled source-grounding set** must
   hit release-blocking thresholds for evidence-source recall, locator/quote accuracy, citation
   precision, unsupported-answer rate, and correct abstention when no valid evidence exists; `doctor`/`verify` enumerate their required
-  checks in the same contract; representative and maximum-scale vault profiles live there
-  too. Each failure has a defined exit code + JSON result. The per-command executable cases
+  checks in the same contract; the representative V1 vault profile + growth margin lives there
+  too (maximum-scale profiles deferred until measured usage sets a larger target). Each failure has a defined exit code + JSON result. The per-command executable cases
   + JSON schemas (above) live alongside it as `docs/specs/cli-contract/*` and each is required
   **before its own command's implementation** (phase-gated), not before all coding.
