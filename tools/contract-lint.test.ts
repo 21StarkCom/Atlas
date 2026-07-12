@@ -6,19 +6,25 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import {
   checkFixtureConsistency,
   checkImplementedSchemas,
   checkStateTableCompleteness,
+  checkTableInventory,
+  DATA_DICTIONARY_PATH,
   findRepoRoot,
+  loadDataDictionaryTables,
   loadFixtureNames,
   loadRegistry,
   loadStateTable,
   normativeStateSet,
+  parseDataDictionaryTables,
   parseFixture,
   parseStateTable,
   renderOverview,
+  sqlite27Tables,
   validateRegistry,
   type Registry,
 } from "./cli-contract.ts";
@@ -27,6 +33,7 @@ const root = findRepoRoot();
 const registry = loadRegistry(root);
 const fixtureNames = loadFixtureNames(root);
 const stateTable = loadStateTable(root);
+const dictionaryTables = loadDataDictionaryTables(root);
 
 describe("registry integrity", () => {
   it("has rows and a version", () => {
@@ -194,6 +201,115 @@ describe("stateTable completeness gate (the load-bearing guarantee)", () => {
     };
     const errors = checkStateTableCompleteness(mutated);
     expect(errors.some((e) => e.includes("failed@planned") && e.includes('must be "terminal"'))).toBe(true);
+  });
+});
+
+describe("sqlite data-dictionary table inventory (against plan §2.7)", () => {
+  it("the dictionary defines exactly the §2.7 table set — no missing, extra, or duplicate table", () => {
+    expect(checkTableInventory(dictionaryTables)).toEqual([]);
+  });
+
+  it("every §2.7 table has a CREATE TABLE in the dictionary and vice versa", () => {
+    expect([...new Set(dictionaryTables)].sort()).toEqual(sqlite27Tables());
+  });
+});
+
+describe("table-inventory gate (the load-bearing guarantee)", () => {
+  it("dropping a §2.7 table from the dictionary fails the inventory check", () => {
+    const dropped = sqlite27Tables()[0]!;
+    const mutated = dictionaryTables.filter((t) => t !== dropped);
+    const errors = checkTableInventory(mutated);
+    expect(errors.some((e) => e.includes(dropped) && e.includes("missing a CREATE TABLE"))).toBe(true);
+  });
+
+  it("a CREATE TABLE with no owning §2.7 migration fails the inventory check", () => {
+    const mutated = [...dictionaryTables, "totally_new_table"];
+    const errors = checkTableInventory(mutated);
+    expect(errors.some((e) => e.includes("totally_new_table") && e.includes("no owning migration"))).toBe(true);
+  });
+
+  it("defining the same table twice fails the inventory check", () => {
+    const mutated = [...dictionaryTables, dictionaryTables[0]!];
+    const errors = checkTableInventory(mutated);
+    expect(errors.some((e) => e.includes(dictionaryTables[0]!) && e.includes("more than once"))).toBe(true);
+  });
+});
+
+describe("data-dictionary parser", () => {
+  it("extracts CREATE TABLE names and ignores CREATE INDEX / REFERENCES", () => {
+    const sql = [
+      "```sql",
+      "CREATE TABLE notes ( note_id TEXT PRIMARY KEY );",
+      "CREATE TABLE IF NOT EXISTS jobs ( job_id TEXT PRIMARY KEY );",
+      "CREATE UNIQUE INDEX idx_x ON notes(note_id);",
+      "CREATE INDEX idx_y ON jobs(state, next_run_at);",
+      "-- FOREIGN KEY (x) REFERENCES source_renditions(y)",
+      "```",
+    ].join("\n");
+    expect(parseDataDictionaryTables(sql)).toEqual(["notes", "jobs"]);
+  });
+
+  it("ignores CREATE TABLE mentioned in prose outside a sql fence", () => {
+    const md = [
+      "Each migration copies its `CREATE TABLE ghost_prose` verbatim from here.",
+      "> Prose can name CREATE TABLE another_ghost without declaring it.",
+      "",
+      "```text",
+      "CREATE TABLE fenced_but_not_sql ( x TEXT );",
+      "```",
+      "",
+      "```sql",
+      "CREATE TABLE real_table ( id TEXT PRIMARY KEY ) STRICT;",
+      "```",
+    ].join("\n");
+    // Only the CREATE TABLE inside a ```sql fence counts.
+    expect(parseDataDictionaryTables(md)).toEqual(["real_table"]);
+  });
+
+  it("ignores commented-out CREATE TABLE (line and block comments) inside a sql fence", () => {
+    const md = [
+      "```sql",
+      "-- CREATE TABLE line_commented_ghost ( x TEXT );",
+      "/* CREATE TABLE block_commented_ghost ( x TEXT ); */",
+      "CREATE TABLE real_table ( id TEXT PRIMARY KEY ) STRICT;  -- CREATE TABLE trailing_ghost",
+      "/*",
+      "  CREATE TABLE multiline_block_ghost ( x TEXT );",
+      "*/",
+      "```",
+    ].join("\n");
+    expect(parseDataDictionaryTables(md)).toEqual(["real_table"]);
+  });
+});
+
+describe("data-dictionary is text-safe and executable DDL", () => {
+  const rawDictionary = readFileSync(join(root, DATA_DICTIONARY_PATH), "utf8");
+
+  it("contains no NUL (or other C0 control) bytes — stays a text file, safe to copy verbatim", () => {
+    expect(rawDictionary.includes("\x00")).toBe(false);
+    // Only tab / newline are permitted C0 controls in the Markdown source.
+    // eslint-disable-next-line no-control-regex
+    const badControl = /[\x01-\x08\x0B\x0C\x0E-\x1F]/.exec(rawDictionary);
+    expect(badControl, badControl ? `control char U+${badControl[0].codePointAt(0)!.toString(16)}` : "")
+      .toBeNull();
+  });
+
+  it("every fenced sql block executes against SQLite (STRICT DDL + invariant queries run clean)", () => {
+    const fence = /```sql\b[^\n]*\n([\s\S]*?)```/gi;
+    const blocks: string[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = fence.exec(rawDictionary)) !== null) blocks.push(m[1]!);
+    expect(blocks.length).toBeGreaterThan(0);
+
+    const db = new DatabaseSync(":memory:");
+    try {
+      // Execute in document order: CREATE TABLE/INDEX blocks precede the §7
+      // SELECT invariant queries; forward FK references are legal at CREATE time.
+      for (const block of blocks) {
+        expect(() => db.exec(block)).not.toThrow();
+      }
+    } finally {
+      db.close();
+    }
   });
 });
 

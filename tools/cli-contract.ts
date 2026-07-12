@@ -134,6 +134,115 @@ export const FIXTURE_PATH = "docs/specs/cli-contract/cli-surface.fixture.txt";
 export const OVERVIEW_PATH = "docs/specs/cli-contract/commands-overview.md";
 export const CLI_CONTRACT_DIR = "docs/specs/cli-contract";
 export const RECOVERY_STATE_MACHINE_PATH = "docs/specs/recovery-state-machine.md";
+export const DATA_DICTIONARY_PATH = "docs/specs/sqlite-data-dictionary.md";
+
+/**
+ * Migration ownership — transcribed verbatim from the plan's §2.7 (the single
+ * authoritative migration-ownership table). Exactly one migration creates each
+ * table; this constant is the SSOT the `sqlite-data-dictionary.md` table
+ * inventory is linted against. It must not be silently widened or narrowed —
+ * a table added to the dictionary without a §2.7 row (or vice versa) must fail
+ * the lint, mirroring the registry↔fixture and stateTable completeness gates.
+ *
+ * Keys are the §2.7 migration ids (plus the runner-bootstrap pseudo-migration
+ * that creates `db_schema_migrations` itself, not a numbered migration).
+ */
+export const MIGRATION_OWNERSHIP: Readonly<Record<string, readonly string[]>> = {
+  "0001_core": [
+    "notes",
+    "note_identity_keys",
+    "note_links",
+    "vault_schema_migrations",
+    "agent_runs",
+    "model_calls",
+    "retrieval_runs",
+    "retrieval_results",
+    "change_plans",
+    "patches",
+    "patch_operations",
+    "validation_results",
+    "git_operations",
+    "audit_events",
+    "audit_intents",
+    "backup_watermark",
+    "raw_payloads",
+  ],
+  "0002_jobs": ["jobs", "job_attempts"],
+  "0003_provenance": ["content_blobs", "source_captures", "source_renditions", "note_sources"],
+  "0004_claims": ["claims", "claim_evidence"],
+  "(runner bootstrap)": ["db_schema_migrations"],
+} as const;
+
+/** The full, sorted set of tables §2.7 says the data dictionary MUST define. */
+export function sqlite27Tables(): string[] {
+  return [...new Set(Object.values(MIGRATION_OWNERSHIP).flat())].sort();
+}
+
+/**
+ * Strip SQL comments from a fragment of DDL: block comments (`/* … *\/`) and
+ * line comments (`-- … <eol>`). Applied before scanning for `CREATE TABLE` so a
+ * commented-out declaration inside a `sql` fence cannot satisfy the inventory
+ * gate. String-literal handling is intentionally omitted — the data dictionary
+ * is authored DDL with no `--`/`/*` sequences inside string literals.
+ */
+export function stripSqlComments(sql: string): string {
+  return sql.replace(/\/\*[\s\S]*?\*\//g, "").replace(/--[^\n]*/g, "");
+}
+
+/**
+ * Parse the table names actually defined by the data dictionary: every
+ * `CREATE TABLE [IF NOT EXISTS] <name>` in a fenced ```` ```sql ```` code block,
+ * after SQL comments are stripped. Prose (`CREATE TABLE` mentioned in text) and
+ * commented-out DDL therefore CANNOT satisfy the inventory gate — only real,
+ * executable `CREATE TABLE` statements inside a SQL fence count. `CREATE INDEX`
+ * / `CREATE UNIQUE INDEX` are intentionally not matched. Parsing the real DDL —
+ * not headings or prose — guarantees the inventory check gates the presence of
+ * the actual `CREATE TABLE` each migration copies verbatim.
+ */
+export function parseDataDictionaryTables(markdown: string): string[] {
+  const fence = /```sql\b[^\n]*\n([\s\S]*?)```/gi;
+  const table = /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)/gi;
+  const names: string[] = [];
+  let block: RegExpExecArray | null;
+  while ((block = fence.exec(markdown)) !== null) {
+    const sql = stripSqlComments(block[1]!);
+    table.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = table.exec(sql)) !== null) names.push(m[1]!);
+  }
+  return names;
+}
+
+export function loadDataDictionaryTables(root: string): string[] {
+  return parseDataDictionaryTables(readFileSync(join(root, DATA_DICTIONARY_PATH), "utf8"));
+}
+
+/**
+ * Assert the data dictionary defines exactly the §2.7 table set — every §2.7
+ * table has a `CREATE TABLE`, and no `CREATE TABLE` exists that §2.7 doesn't
+ * own (and none is defined twice). Returns human-readable errors (empty = OK).
+ */
+export function checkTableInventory(dictionaryTables: string[]): string[] {
+  const errors: string[] = [];
+  const expected = new Set(sqlite27Tables());
+  const present = new Set<string>();
+
+  for (const name of dictionaryTables) {
+    if (present.has(name)) {
+      errors.push(`${DATA_DICTIONARY_PATH}: table "${name}" is defined more than once (duplicate CREATE TABLE)`);
+    }
+    present.add(name);
+    if (!expected.has(name)) {
+      errors.push(`${DATA_DICTIONARY_PATH}: table "${name}" has no owning migration in §2.7`);
+    }
+  }
+  for (const name of expected) {
+    if (!present.has(name)) {
+      errors.push(`§2.7 table "${name}" is missing a CREATE TABLE in ${DATA_DICTIONARY_PATH}`);
+    }
+  }
+  return errors;
+}
 
 /** Walk up from a starting directory until the repo root (pnpm-workspace.yaml) is found. */
 export function findRepoRoot(startDir?: string): string {
@@ -273,6 +382,7 @@ export function lintAll(root: string, reg: Registry, fixtureNames: string[]): st
     ...validateRegistry(reg),
     ...checkFixtureConsistency(reg, fixtureNames),
     ...checkImplementedSchemas(root, reg),
+    ...checkTableInventory(loadDataDictionaryTables(root)),
   ];
 }
 
