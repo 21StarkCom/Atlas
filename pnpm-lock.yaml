@@ -117,6 +117,9 @@ importers:
 
   packages/testing:
     devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.13.3
       typescript:
         specifier: 'catalog:'
         version: 5.9.3

@@ -1,0 +1,4 @@
+Sample plain-text ingest input.
+
+This file has no frontmatter and no markup. It exercises the txt normalizer with
+byte/char offset locators. Line three.

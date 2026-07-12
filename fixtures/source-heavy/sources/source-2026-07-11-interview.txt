@@ -1,0 +1,3 @@
+Interview transcript (raw).
+Q: How much can be automated?
+A: A large share of detectable defects, but judgment calls still need a human.
