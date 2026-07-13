@@ -1,13 +1,10 @@
 {
-  "name": "@atlas/cli",
+  "name": "@atlas/scan",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "bin": {
-    "brain": "./dist/bin.js"
-  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -19,17 +16,10 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
-    "@atlas/broker": "workspace:*",
-    "@atlas/contracts": "workspace:*",
-    "@atlas/scan": "workspace:*",
-    "@atlas/sqlite-store": "workspace:*",
-    "yaml": "catalog:",
-    "zod": "catalog:"
+    "@atlas/contracts": "workspace:*"
   },
   "devDependencies": {
-    "@atlas/testing": "workspace:*",
     "@types/node": "catalog:",
-    "ajv": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
   }

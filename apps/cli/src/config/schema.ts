@@ -132,6 +132,71 @@ const BrokerConfig = z
   })
   .strict();
 
+/**
+ * Encrypted-quarantine store (Task 2.2 / #28). The store holds AEAD-sealed,
+ * detected-secret content. `dir` MUST be OUTSIDE the repo + vault (the plan requires
+ * an outside-repository location — `.gitignore` is not an isolation boundary); it is
+ * created mode 0700 with no symlink components. LEFT UNSET (the default), it resolves
+ * to an OS state directory (`quarantine/config.ts#quarantineDir`); a configured value
+ * is validated to be outside the repo + vault. The AEAD key is trusted-CLI-only +
+ * parser/model-denied (ACL matrix row `quarantine-aead`) and is read from platform
+ * custody by `key_id` — never from config/env. `revoked_key_ids` fail closed on read.
+ * The whole section defaults, so an existing config loads unchanged.
+ */
+/** A quarantine key id must be a single safe path component (mirrors quarantine/config `SAFE_KEY_ID`). */
+const SAFE_KEY_ID = /^[A-Za-z0-9._-]{1,64}$/;
+const isSafeKeyId = (id: string): boolean => SAFE_KEY_ID.test(id) && id !== "." && id !== "..";
+
+export const QuarantineConfig = z
+  .object({
+    // Optional: unset ⇒ OS state dir; a set value is validated outside repo + vault.
+    dir: z.string().min(1).optional(),
+    keep: z.number().int().positive().default(200), // keep-N most-recent
+    retention_days: z.number().int().positive().default(30), // TTL → expiresAt
+    key_id: z.string().min(1).default("cli-custody-v1"), // current key id (§7 rotation)
+    revoked_key_ids: z.array(z.string().min(1)).default([]), // ids that fail closed on read
+  })
+  .strict()
+  // Finding: a config could revoke the CURRENT key_id (or carry unsafe/duplicate ids),
+  // so the store would write new bundles under a key `keyForRead` immediately rejects —
+  // making freshly quarantined data unreadable. Enforce safe syntax, uniqueness, and
+  // that the current key_id is never revoked.
+  .superRefine((q, ctx) => {
+    if (!isSafeKeyId(q.key_id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["key_id"],
+        message: `quarantine.key_id ${JSON.stringify(q.key_id)} is not a safe key id (must match [A-Za-z0-9._-]{1,64})`,
+      });
+    }
+    const seen = new Set<string>();
+    q.revoked_key_ids.forEach((id, i) => {
+      if (!isSafeKeyId(id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["revoked_key_ids", i],
+          message: `quarantine.revoked_key_ids[${i}] ${JSON.stringify(id)} is not a safe key id (must match [A-Za-z0-9._-]{1,64})`,
+        });
+      }
+      if (seen.has(id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["revoked_key_ids", i],
+          message: `quarantine.revoked_key_ids contains a duplicate id ${JSON.stringify(id)}`,
+        });
+      }
+      seen.add(id);
+      if (id === q.key_id) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["revoked_key_ids", i],
+          message: `quarantine.key_id ${JSON.stringify(q.key_id)} cannot appear in revoked_key_ids — new bundles would be unreadable`,
+        });
+      }
+    });
+  })
+  .default({});
+
 /** The full `brain.config.yaml` schema. Every section is required; keys default per the plan. */
 export const AtlasConfigSchema = z
   .object({
@@ -145,6 +210,7 @@ export const AtlasConfigSchema = z
     policies: PoliciesConfig,
     logs: LogsConfig,
     broker: BrokerConfig,
+    quarantine: QuarantineConfig,
   })
   .strict();
 
@@ -162,6 +228,7 @@ export const CONFIG_SECTIONS = [
   "policies",
   "logs",
   "broker",
+  "quarantine",
 ] as const;
 export type ConfigSection = (typeof CONFIG_SECTIONS)[number];
 
