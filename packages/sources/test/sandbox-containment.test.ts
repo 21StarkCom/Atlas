@@ -48,14 +48,21 @@ const REAL_WORKER = fileURLToPath(new URL("../dist/worker/main.js", import.meta.
 const LIMITS: SandboxLimits = { ...DEFAULT_SANDBOX_LIMITS, wallClockMs: 25_000 };
 
 /**
- * A CI runner on a supported OS is PROVISIONED — the sandbox MUST be supported there,
- * so an unsupported report is a hard failure, not a silent skip (wing round-2 finding:
- * the suite used to green-skip on CI when unsupported, exercising no containment). Set
- * by CI; also implied on any `CI=true` runner on darwin/linux.
+ * A PROVISIONED host MUST support the sandbox — an unsupported report there is a hard
+ * failure, not a silent skip (wing round-2 finding: the suite used to green-skip on CI
+ * when unsupported, exercising no containment).
+ *
+ * macOS: hosted CI runners can run the Seatbelt backend, so any `CI=true` darwin runner
+ *   is treated as provisioned and strict.
+ * Linux: the `resource-caps` (cgroup) primitive needs delegated writable cgroups that
+ *   STOCK GitHub-hosted runners do not provide, so bare `CI=true` is NOT enough to call
+ *   a Linux host provisioned. Strictness there is opt-in via `ATLAS_SANDBOX_REQUIRE=1`,
+ *   which CI sets ONLY once cgroup delegation is provisioned (tracked on #5 / PR #72).
+ *   Until then a hosted Linux runner loud-skips instead of hard-failing.
  */
 const REQUIRE_SUPPORTED =
   process.env.ATLAS_SANDBOX_REQUIRE === "1" ||
-  (process.env.CI === "true" && (platform() === "darwin" || platform() === "linux"));
+  (process.env.CI === "true" && platform() === "darwin");
 
 let supported = false;
 let skipReason = "";
@@ -70,6 +77,7 @@ beforeAll(async () => {
           `Refusing to green-skip the containment suite.`,
       );
     }
+    console.warn(`[sandbox.containment] SKIP: ${skipReason} (set ATLAS_SANDBOX_REQUIRE=1 on a provisioned host to enforce)`);
   }
 });
 

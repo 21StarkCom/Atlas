@@ -34,13 +34,16 @@ const SECRET_TOKEN = "AKIA" + "A".repeat(16);
 const SECRET_MARKDOWN = `---\ntitle: leak\n---\n\n# Note\n\nembedded credential: ${SECRET_TOKEN}\n`;
 
 /**
- * A provisioned CI runner on a supported OS MUST support the sandbox — an unsupported
- * report there is a hard failure, not a silent skip that greens CI without exercising
- * D15 (wing round-2 finding). Set by CI; implied on any `CI=true` darwin/linux runner.
+ * A PROVISIONED host MUST support the sandbox — an unsupported report there is a hard
+ * failure, not a silent skip that greens CI without exercising D15 (wing round-2 finding).
+ * macOS: hosted CI can run Seatbelt ⇒ `CI=true` darwin is strict. Linux: cgroup
+ * `resource-caps` needs delegated cgroups stock GitHub-hosted runners lack, so Linux
+ * strictness is opt-in via `ATLAS_SANDBOX_REQUIRE=1` (set by CI once cgroup delegation is
+ * provisioned — tracked on #5 / PR #72); until then a hosted Linux runner loud-skips.
  */
 const REQUIRE_SUPPORTED =
   process.env.ATLAS_SANDBOX_REQUIRE === "1" ||
-  (process.env.CI === "true" && (platform() === "darwin" || platform() === "linux"));
+  (process.env.CI === "true" && platform() === "darwin");
 
 let supported = false;
 beforeAll(async () => {
