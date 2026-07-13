@@ -6,5 +6,11 @@ coverage/
 *.log
 .scratch/
 
+# Atlas runtime state (SQLite DB, ledger backups, worktrees, logs, lancedb, and
+# the encrypted-quarantine store) — never committed. The default config points
+# these under ./.atlas/; keeping the tree out of git is what makes the quarantine
+# store's "nothing ever committed" property hold for the in-repo default dir.
+.atlas/
+
 # copilot worktrees
 .worktrees/

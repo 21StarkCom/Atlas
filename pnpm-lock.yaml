@@ -47,6 +47,9 @@ importers:
       '@atlas/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@atlas/scan':
+        specifier: workspace:*
+        version: link:../../packages/scan
       '@atlas/sqlite-store':
         specifier: workspace:*
         version: link:../../packages/sqlite-store
@@ -150,6 +153,22 @@ importers:
 
   packages/models:
     devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+      vitest:
+        specifier: 'catalog:'
+        version: 3.2.7(@types/node@24.13.3)(yaml@2.9.0)
+
+  packages/scan:
+    dependencies:
+      '@atlas/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.13.3
       typescript:
         specifier: 'catalog:'
         version: 5.9.3

@@ -115,6 +115,12 @@
         "title": "Audit-head anchor check",
         "description": "Verify the refs/audit/runs head and monotonic event count against the external WORM anchor (D8). action-required on count regression or head mismatch (anti-truncation).",
         "phase": 1
+      },
+      {
+        "id": "quarantine-security",
+        "title": "Quarantine store security",
+        "description": "Validate the encrypted-quarantine store's at-rest posture (Task 2.2 / #28): the resolved dir is outside the repo+vault and (when present) mode 0700 with no symlink or stray non-bundle files, and the `quarantine-aead` key ACL posture (readableBy ['trusted-cli'], parserModelDenied, identity 'agent', file 'quarantine-aead.key', mode 0600) plus the atlas-egress group exclusion (D18) match the security contract. action-required on any drift, invalid/unreadable dir, or (on a provisioned host) a missing ACL matrix; degraded on crash-leftover temps.",
+        "phase": 2
       }
     ]
   }

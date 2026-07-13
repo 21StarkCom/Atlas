@@ -55,3 +55,19 @@ logs:
 broker:
   socket_path: /usr/local/var/run/atlas/broker.sock # D10 (macOS; Linux: /var/run/atlas/broker.sock)
   egress_socket_path: /usr/local/var/run/atlas/egress.sock # D10
+
+quarantine:
+  # Encrypted store for detected-secret content (Task #28). `dir` MUST be OUTSIDE
+  # the repo + vault (an outside-repository location is required — .gitignore is not
+  # an isolation boundary); created mode 0700 with no symlink components. LEAVE IT
+  # UNSET to use the OS state dir (macOS: ~/Library/Application Support/atlas/
+  # quarantine; Linux: $XDG_STATE_HOME or ~/.local/state/atlas/quarantine). A set
+  # value is rejected at startup if it falls inside the repo or vault.
+  # dir: /var/lib/atlas/quarantine
+  keep: 200 # keep-N most-recent (enforced on every write + on purge)
+  retention_days: 30 # item TTL
+  # The AEAD key is trusted-CLI-only + parser/model-denied (ACL matrix
+  # `quarantine-aead`), read as raw 32 bytes from platform custody
+  # (<keysDir>/agent/quarantine-aead.key) by key_id — never from config/env.
+  key_id: cli-custody-v1
+  # revoked_key_ids: []  # key ids whose items must fail closed on read (§7 rotation)

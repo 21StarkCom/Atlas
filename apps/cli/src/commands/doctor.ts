@@ -19,7 +19,7 @@
  * warns/degrades), and 6 (action-required) when any check reports an operator
  * action is required — NAMING the failing check in its `detail`.
  */
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { platform } from "node:os";
@@ -30,6 +30,8 @@ import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { lockManager, LOCK_SCOPES } from "../locks/manager.js";
 import { ledgerDbPath, backupConfig } from "./backup-config.js";
+import { quarantineDir, quarantineStoreFromContext } from "../quarantine/config.js";
+import { isBundleFilename, isTempFilename, validateBundleStructure } from "../quarantine/store.js";
 import { verifyAuditAnchor, type AuditChainProbe } from "../audit/anchor-check.js";
 
 type CheckStatus = "ok" | "warning" | "degraded" | "action-required";
@@ -150,7 +152,16 @@ function gidOf(name: string): number | null {
 
 /** The machine-readable ACL matrix shape (subset consumed here). */
 interface AclMatrix {
-  keys: { key: string; mode: string; identity: string; file: string; groupReadable?: boolean }[];
+  keys: {
+    key: string;
+    mode: string;
+    identity: string;
+    file: string;
+    groupReadable?: boolean;
+    readableBy?: string[];
+    parserModelDenied?: boolean;
+  }[];
+  group?: { notMembers?: string[] };
   paths: Record<string, { darwin: string; linux: string }>;
 }
 
@@ -410,6 +421,156 @@ function checkEncryptedVolume(ctx: RunContext): Check {
   }
 }
 
+/**
+ * Validate the `quarantine-aead` custody POSTURE in the ACL matrix (finding: the
+ * check used to only assert the row EXISTS). Verifies every field the security
+ * contract pins — `readableBy` (trusted-CLI only), `parserModelDenied`, `identity`,
+ * `file`, `mode` — plus that the internet-facing egress identity is not a group
+ * member (D18). Returns drift strings (empty ⇒ posture is correct). A missing matrix
+ * is reported by the caller.
+ */
+function quarantineKeyAclDrift(acl: AclMatrix): string[] {
+  const drift: string[] = [];
+  const row = acl.keys.find((k) => k.key === "quarantine-aead");
+  if (row === undefined) {
+    drift.push("ACL matrix has no `quarantine-aead` row");
+    return drift;
+  }
+  if (!(Array.isArray(row.readableBy) && row.readableBy.length === 1 && row.readableBy[0] === "trusted-cli")) {
+    drift.push(`quarantine-aead readableBy is ${JSON.stringify(row.readableBy)} (must be exactly ["trusted-cli"])`);
+  }
+  if (row.parserModelDenied !== true) drift.push("quarantine-aead is not parserModelDenied:true (parser/model must be denied)");
+  if (row.identity !== "agent") drift.push(`quarantine-aead identity is ${JSON.stringify(row.identity)} (must be "agent")`);
+  if (row.file !== "quarantine-aead.key") drift.push(`quarantine-aead file is ${JSON.stringify(row.file)} (must be "quarantine-aead.key")`);
+  if (row.mode !== "0600") drift.push(`quarantine-aead mode is ${JSON.stringify(row.mode)} (must be "0600")`);
+  const notMembers = acl.group?.notMembers ?? [];
+  if (!notMembers.includes("atlas-egress")) {
+    drift.push("atlas-egress is not excluded from the atlas-git group (D18: the internet-facing identity must have no vault/key reach)");
+  }
+  return drift;
+}
+
+/**
+ * Quarantine-security check (Task 2.2 / #28). The encrypted-quarantine store holds
+ * AEAD-sealed detected-secret content; this verifies its at-rest posture:
+ *   - the resolved dir is valid + (when present) mode 0700 — never group/other-accessible;
+ *   - it holds ONLY sealed `q-*.aqz` bundles — an unexpected file could be a
+ *     plaintext leak (action-required); a leftover `.qtmp-*` is a crash remnant
+ *     (degraded — swept automatically on the next quarantine write / `db backup` purge);
+ *   - the `quarantine-aead` key ACL posture (readableBy/parserModelDenied/identity/
+ *     file/mode + egress exclusion) matches the security contract.
+ * A misconfigured/invalid/unreadable dir is `action-required` (never an escaping
+ * internal failure). An ABSENT dir is otherwise `ok` (nothing quarantined yet).
+ */
+function checkQuarantineSecurity(ctx: RunContext): Check {
+  const id = "quarantine-security";
+  const title = "Quarantine store security";
+  const drift: string[] = [];
+  const warn: string[] = [];
+
+  // Resolving the dir validates the configured location (outside repo + vault). A
+  // misconfiguration surfaces as action-required, not an internal crash.
+  let dir: string;
+  try {
+    dir = quarantineDir(ctx);
+  } catch (e) {
+    return { id, title, status: "action-required", detail: `quarantine dir invalid: ${e instanceof Error ? e.message : String(e)}` };
+  }
+
+  // ACL custody posture (platform-independent; validated whenever the matrix is reachable).
+  const acl = loadAclMatrix(ctx.cwd);
+  if (acl === null) {
+    // Under the test seam a missing matrix is tolerable; on a provisioned host it is action-required.
+    if (ctx.env.ATLAS_TEST_MODE !== "1" && ctx.env.ATLAS_PROVISIONED === "1") {
+      drift.push("provisioning/keys.acl.json not found — cannot verify quarantine-aead custody posture");
+    }
+  } else {
+    drift.push(...quarantineKeyAclDrift(acl));
+  }
+
+  // Filesystem posture — any fs error here is action-required, never an escaping throw.
+  // Uses lstat throughout so a SYMLINKED store dir/bundle is caught (statSync would
+  // follow the link and defeat the check), and validates each q-*.aqz entry is a
+  // regular, structurally-valid sealed bundle — a plaintext/corrupt file or a
+  // directory wearing a bundle name is NOT reported healthy.
+  try {
+    if (existsSync(dir)) {
+      const dst = lstatSync(dir);
+      if (dst.isSymbolicLink()) {
+        drift.push(`quarantine dir ${dir} is a symlink (must be a real directory)`);
+      } else {
+        if (!dst.isDirectory()) {
+          drift.push(`quarantine path ${dir} is not a directory`);
+        }
+        if (platform() === "darwin" || platform() === "linux") {
+          const mode = dst.mode & 0o777;
+          if ((mode & 0o077) !== 0) {
+            drift.push(`quarantine dir ${dir} is group/other-accessible (mode ${mode.toString(8)}; must be 0700)`);
+          }
+        }
+      }
+      let staleTemps = 0;
+      let bundleCount = 0;
+      if (!dst.isSymbolicLink() && dst.isDirectory()) {
+        for (const name of readdirSync(dir)) {
+          if (isBundleFilename(name)) {
+            bundleCount++;
+            const err = validateBundleStructure(dir, name);
+            if (err !== null) {
+              drift.push(`invalid quarantine entry: ${err}`);
+            }
+            continue;
+          }
+          if (isTempFilename(name)) {
+            const tp = join(dir, name);
+            // A temp remnant must itself be a regular file, not a symlink smuggled in.
+            if (lstatSync(tp).isSymbolicLink()) {
+              drift.push(`quarantine temp remnant ${name} is a symlink (must be a regular file)`);
+            } else {
+              staleTemps++;
+            }
+            continue;
+          }
+          drift.push(`unexpected file in quarantine dir: ${name} (only sealed q-*.aqz bundles belong here)`);
+        }
+        // AEAD integrity: authenticate every committed bundle (catches tamper the
+        // structural check cannot). If committed bundles exist, custody MUST resolve —
+        // the store could only have written them with the key available, so a custody
+        // failure now (missing/insecure/wrong-owner key) is action-required, NOT healthy.
+        // Only when the dir holds no committed bundle is custody legitimately absent.
+        try {
+          const store = quarantineStoreFromContext(ctx);
+          for (const c of store.listWithErrors().corrupt) {
+            drift.push(`quarantine bundle failed integrity: ${c.name} (${c.error})`);
+          }
+        } catch (e) {
+          if (bundleCount > 0) {
+            drift.push(
+              `quarantine holds ${bundleCount} sealed bundle(s) but the AEAD custody key is unavailable, so their integrity cannot be verified: ${e instanceof Error ? e.message : String(e)}`,
+            );
+          }
+          // No committed bundles ⇒ custody legitimately absent; structural check stands.
+        }
+      }
+      if (staleTemps > 0) {
+        warn.push(`${staleTemps} crash-leftover temp file(s) — swept automatically on the next quarantine write (already ciphertext, not plaintext)`);
+      }
+    } else if (drift.length === 0 && warn.length === 0) {
+      return { id, title, status: "ok", detail: "no quarantine store yet (nothing quarantined)" };
+    }
+  } catch (e) {
+    return { id, title, status: "action-required", detail: `quarantine dir unreadable: ${e instanceof Error ? e.message : String(e)}` };
+  }
+
+  if (drift.length > 0) {
+    return { id, title, status: "action-required", detail: drift.join("; ") };
+  }
+  if (warn.length > 0) {
+    return { id, title, status: "degraded", detail: warn.join("; ") };
+  }
+  return { id, title, status: "ok" };
+}
+
 async function doctor(ctx: RunContext): Promise<number> {
   const args = parseArgs(ctx.argv);
 
@@ -418,6 +579,7 @@ async function doctor(ctx: RunContext): Promise<number> {
   const watermark = checkBackupWatermark(ctx);
   const anchor = await checkAuditAnchor(ctx);
   const provisioning = checkProvisioning(ctx);
+  const quarantine = checkQuarantineSecurity(ctx);
   const encrypted = checkEncryptedVolume(ctx);
 
   let reclaimedLocks: { scope: string; holderPid: number }[] | undefined;
@@ -432,7 +594,7 @@ async function doctor(ctx: RunContext): Promise<number> {
     }
   }
 
-  const checks: Check[] = [modes, livenessCheck, watermark, anchor, provisioning, encrypted];
+  const checks: Check[] = [modes, livenessCheck, watermark, anchor, provisioning, quarantine, encrypted];
 
   const anyActionRequired = checks.some((c) => c.status === "action-required");
   const anyDegraded = checks.some((c) => c.status === "degraded" || c.status === "warning");
@@ -457,4 +619,4 @@ async function doctor(ctx: RunContext): Promise<number> {
 
 registerCommand("doctor", doctor);
 
-export { doctor };
+export { doctor, checkQuarantineSecurity };

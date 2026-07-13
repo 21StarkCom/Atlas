@@ -8,6 +8,7 @@ import { mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCli, type CommandHandler, type RunContext } from "../src/main.js";
+import { SecretDetectedError } from "@atlas/scan";
 import { CliError, EXIT } from "../src/errors/envelope.js";
 import { parseArgv, loadRegistry } from "../src/router.js";
 
@@ -150,6 +151,24 @@ describe("runCli", () => {
     expect(code).toBe(EXIT.ACTION_REQUIRED);
     const env = JSON.parse(out);
     expect(env).toMatchObject({ code: "backup-unhealthy", retryable: true });
+  });
+
+  it("maps a scan guard's SecretDetectedError to the secret-scan exit code (3)", async () => {
+    const { code, out } = await run(["status", "--json"], {}, {
+      status: () => {
+        throw new SecretDetectedError(
+          "note.md",
+          [{ ruleId: "aws-access-key-id", title: "AWS access key id", severity: "high", startOffset: 0, endOffset: 20, redactedPreview: "‹redacted:20 chars›" }],
+          "pre-persistence",
+        );
+      },
+    });
+    expect(code).toBe(EXIT.SECRET_SCAN);
+    const env = JSON.parse(out);
+    expect(env.code).toBe("secret-scan");
+    expect(env.message).toContain("note.md");
+    // The redacted preview must not leak the raw secret through the envelope.
+    expect(out).not.toContain("AKIA");
   });
 
   it("honours --json for an argument-PARSE failure (JSON envelope, not human text)", async () => {

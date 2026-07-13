@@ -130,6 +130,21 @@ export class CliError extends Error {
       ...(cause !== undefined ? { cause } : {}),
     });
   }
+
+  /**
+   * Convenience: a `secret-scan` refusal (exit 3). Maps a scan guard's
+   * {@link SecretDetectedError} to the CLI boundary — the offending bytes are
+   * already quarantined (AEAD, ciphertext-only) by the time this is raised.
+   */
+  static secretScan(message: string, hint = "", cause?: unknown): CliError {
+    return new CliError({
+      code: "secret-scan",
+      message,
+      hint,
+      exitCode: EXIT.SECRET_SCAN,
+      ...(cause !== undefined ? { cause } : {}),
+    });
+  }
 }
 
 /** True when `e` is (or quacks like) a {@link CliError}. */
