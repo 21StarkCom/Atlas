@@ -16,7 +16,7 @@ describe("db.migrate-ownership", () => {
     try {
       const report = store.migrate();
       expect(new Set(report.newlyApplied)).toEqual(
-        new Set(["0001_core", "0003_provenance", "0004_claims"]),
+        new Set(["0001_core", "0003_provenance", "0004_claims", "0005_ledger_finalize"]),
       );
 
       const expected = dictionaryTablesFor("0001_core");

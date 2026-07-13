@@ -25,45 +25,19 @@ import {
   type ExitCode,
 } from "./errors/envelope.js";
 import { render, type RenderOpts } from "./render/safe.js";
-import { createProgress, type ProgressReporter } from "./render/progress.js";
+import { createProgress } from "./render/progress.js";
 import { resolveOutputMode, type OutputMode } from "./render/plain.js";
-import { configureLocks, withLock, type LockManager } from "./locks/manager.js";
+import { configureLocks, withLock } from "./locks/manager.js";
 import { configureDiag, diag, type Logger } from "./diag/logger.js";
 import { loadRegistry, parseArgv, findCommand, sniffOutputFlags, type Registry } from "./router.js";
+import { HANDLERS, registerCommand, type CommandHandler, type RunContext } from "./handlers.js";
+// Side-effect import: register the implemented command handlers (Task 1.7+). Must
+// come AFTER the handler-registry import so `HANDLERS` is initialized before a
+// command module's import-time `registerCommand(...)` runs.
+import "./commands/index.js";
 
-/** Everything a command handler receives. */
-export interface RunContext {
-  /** ULID correlating every log line + audit event of this invocation. */
-  readonly runId: string;
-  /** The matched registry command name. */
-  readonly command: string;
-  /** Residual argv for the command (global flags already consumed). */
-  readonly argv: string[];
-  /** Loaded, validated config. */
-  readonly config: LoadedConfig;
-  readonly env: NodeJS.ProcessEnv;
-  readonly cwd: string;
-  /** Resolved output mode/degradation. */
-  readonly output: OutputMode;
-  /** The ONLY human-output path (bound to this run's mode/quiet). */
-  render(text: string, opts?: Partial<RenderOpts>): string;
-  /** Append-only progress reporter for long-running work. */
-  readonly progress: ProgressReporter;
-  /** Run-correlated diagnostics logger. */
-  readonly log: Logger;
-  /** Named-scope lock acquisition (global-order enforced). */
-  readonly withLock: LockManager["withLock"];
-}
-
-/** A command handler returns its process-exit code (0 on success). */
-export type CommandHandler = (ctx: RunContext) => Promise<number> | number;
-
-const HANDLERS = new Map<string, CommandHandler>();
-
-/** Register the handler for a registry command. Later tasks call this at import time. */
-export function registerCommand(name: string, handler: CommandHandler): void {
-  HANDLERS.set(name, handler);
-}
+// Re-export the registry seam so existing importers (`../main.js`) keep working.
+export { registerCommand, type CommandHandler, type RunContext };
 
 /** Options for {@link runCli} (test/DI seams; production uses defaults). */
 export interface RunCliOptions {

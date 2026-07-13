@@ -208,8 +208,8 @@ describe("runCli", () => {
   });
 
   it("reports a not-implemented command from the registry (exit 5)", async () => {
-    // `inspect` is a real registry command with no handler wired in this build.
-    const { code, out } = await run(["inspect", "--json"], {}, {});
+    // `db migrate` is a real registry command with no handler wired in this build.
+    const { code, out } = await run(["db", "migrate", "--json"], {}, {});
     expect(code).toBe(EXIT.USAGE);
     expect(JSON.parse(out).code).toBe("not-implemented");
   });

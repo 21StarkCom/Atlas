@@ -19,7 +19,9 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
+    "@atlas/broker": "workspace:*",
     "@atlas/contracts": "workspace:*",
+    "@atlas/sqlite-store": "workspace:*",
     "yaml": "catalog:",
     "zod": "catalog:"
   },

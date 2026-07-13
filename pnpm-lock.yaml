@@ -41,9 +41,15 @@ importers:
 
   apps/cli:
     dependencies:
+      '@atlas/broker':
+        specifier: workspace:*
+        version: link:../../packages/broker
       '@atlas/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@atlas/sqlite-store':
+        specifier: workspace:*
+        version: link:../../packages/sqlite-store
       yaml:
         specifier: 'catalog:'
         version: 2.9.0
@@ -68,7 +74,23 @@ importers:
         version: 3.2.7(@types/node@24.13.3)(yaml@2.9.0)
 
   packages/broker:
+    dependencies:
+      '@atlas/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@atlas/git':
+        specifier: workspace:*
+        version: link:../git
+      zod:
+        specifier: 'catalog:'
+        version: 3.25.76
     devDependencies:
+      '@atlas/testing':
+        specifier: workspace:*
+        version: link:../testing
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.13.3
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
@@ -156,6 +178,9 @@ importers:
         specifier: 'catalog:'
         version: 2.9.0
     devDependencies:
+      '@atlas/broker':
+        specifier: workspace:*
+        version: link:../broker
       '@types/better-sqlite3':
         specifier: 'catalog:'
         version: 7.6.13
@@ -182,6 +207,13 @@ importers:
         version: 3.2.7(@types/node@24.13.3)(yaml@2.9.0)
 
   tools:
+    dependencies:
+      '@atlas/broker':
+        specifier: workspace:*
+        version: link:../packages/broker
+      '@atlas/contracts':
+        specifier: workspace:*
+        version: link:../packages/contracts
     devDependencies:
       '@types/node':
         specifier: 'catalog:'

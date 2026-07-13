@@ -168,6 +168,20 @@ export function writeErrorEnvelope(
 }
 
 /**
+ * Emit a structured JSON success payload as a single NDJSON line. This is the
+ * JSON-success counterpart to {@link writeErrorEnvelope}; keeping it here means
+ * command handlers never write to stdout themselves (the "single output channel"
+ * invariant — enforced by `no-render-bypass.test.ts`, which allowlists this file
+ * as the JSON emitter). Callers gate on `--json` mode before calling.
+ */
+export function emitJson(
+  obj: unknown,
+  stream: NodeJS.WritableStream = process.stdout,
+): void {
+  stream.write(`${JSON.stringify(obj)}\n`);
+}
+
+/**
  * Emit `e`'s envelope to stdout and terminate the process with its exit code.
  * The `never` return reflects that this is a terminal operation; `runCli` uses
  * {@link writeErrorEnvelope} instead so it can return a code for tests.

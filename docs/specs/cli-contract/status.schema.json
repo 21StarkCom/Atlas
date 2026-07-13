@@ -36,11 +36,12 @@
     "audit": {
       "type": "object",
       "unevaluatedProperties": false,
-      "required": ["headSeq", "head", "anchorOk"],
+      "required": ["headSeq", "head", "anchorOk", "anchorSource"],
       "properties": {
         "headSeq": { "type": "integer", "minimum": 0 },
         "head": { "type": "string", "description": "The refs/audit/runs head commit, or empty when no events exist." },
-        "anchorOk": { "type": "boolean", "description": "True when the head + event count reconcile with the WORM anchor." }
+        "anchorOk": { "type": "boolean", "description": "True when the head + event count reconcile with the WORM anchor. Interpret together with anchorSource: an anchorOk:true under anchorSource:\"sqlite-only\" is a DEGRADED verdict — the authoritative protected ref could not be verified (broker unavailable), only the SQLite projection was structurally checked." },
+        "anchorSource": { "type": "string", "enum": ["git", "sqlite-only"], "description": "\"git\" when the authoritative refs/audit/runs chain + WORM anchor were verified via the broker; \"sqlite-only\" when the broker/ref was unreachable and only the SQLite projection could be structurally checked (the protected ref itself is UNVERIFIED)." }
       }
     }
   },
@@ -51,7 +52,7 @@
       "jobs": { "queued": 0, "failed": 0 },
       "quarantineCount": 0,
       "backup": { "watermarkSeq": 907, "coveredSeq": 907, "healthy": true },
-      "audit": { "headSeq": 907, "head": "a1b2c3d4", "anchorOk": true }
+      "audit": { "headSeq": 907, "head": "a1b2c3d4", "anchorOk": true, "anchorSource": "git" }
     },
     {
       "command": "status",
@@ -59,7 +60,7 @@
       "jobs": { "queued": 3, "failed": 1 },
       "quarantineCount": 2,
       "backup": { "watermarkSeq": 811, "coveredSeq": 907, "healthy": false },
-      "audit": { "headSeq": 907, "head": "a1b2c3d4", "anchorOk": true }
+      "audit": { "headSeq": 907, "head": "a1b2c3d4", "anchorOk": true, "anchorSource": "git" }
     }
   ],
   "x-atlas-contract": {

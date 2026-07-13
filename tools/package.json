@@ -10,6 +10,10 @@
     "gen": "node gen-cli-contract.ts --write",
     "check": "node gen-cli-contract.ts --check"
   },
+  "dependencies": {
+    "@atlas/broker": "workspace:*",
+    "@atlas/contracts": "workspace:*"
+  },
   "devDependencies": {
     "@types/node": "catalog:",
     "ajv": "catalog:",

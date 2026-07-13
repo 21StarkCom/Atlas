@@ -420,6 +420,7 @@ CREATE TABLE audit_intents (
   run_id        TEXT    NOT NULL,
   seq           INTEGER NOT NULL,
   payload_hash  TEXT    NOT NULL,                         -- canonical event payload hash (matches audit_events)
+  event_json    TEXT    NOT NULL,                         -- canonical unsigned event (§2.8): lets the reconciler re-drive step 2 idempotently
   state         TEXT    NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'done')),
   created_at    TEXT    NOT NULL,
   updated_at    TEXT    NOT NULL,
@@ -429,6 +430,11 @@ CREATE TABLE audit_intents (
 ```
 
 - **FK:** none (scalar `run_id`; no ledger parent, no cross-class FK).
+- **`event_json`:** the canonical unsigned audit event (allowlisted metadata only, `prevAuditHead`
+  excluded — the broker fills + signs it, F4). Persisting it in the intent txn (step 1) is what lets
+  `reconcileInterruptedRuns` re-drive step 2 for a `pending` intent that has no git event yet: the
+  broker append is idempotent on `(runId, seq)`, so replaying the exact event converges with no gap in
+  the git-anchored seq chain.
 - **Upsert:** conflict target **`(run_id, seq)`** — `ON CONFLICT(run_id, seq) DO UPDATE SET state='done'`
   (the reconciler completes a `pending` intent idempotently on crash recovery).
 
