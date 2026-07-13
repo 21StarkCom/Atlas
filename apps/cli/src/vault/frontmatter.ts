@@ -16,20 +16,35 @@ const SENSITIVITY = ["public", "internal", "confidential", "restricted"] as cons
 /** The only schema version this reader understands (schema-v1 fixture note). */
 export const SUPPORTED_SCHEMA_VERSION = 1;
 
+/** Default lifecycle status for a note whose frontmatter omits `status` (dictionary convention). */
+export const DEFAULT_NOTE_STATUS = "active";
+
 /**
- * Frontmatter schema. Extra keys (`title`, `status`, `created`, `updated`, …) are
- * passed through untouched — the reader only consumes the fields below. Optional
- * list/label fields default to empty; `declaredSensitivity` defaults to `internal`.
+ * Frontmatter schema. `title`, `created`, and `updated` are the canonical
+ * projection inputs for the `notes` table (dictionary §2, all `NOT NULL`) and
+ * are therefore required; `status` defaults to {@link DEFAULT_NOTE_STATUS} when
+ * a note omits it. Optional list/label fields default to empty;
+ * `declaredSensitivity` defaults to `internal`. `created`/`updated` are accepted
+ * as strings or YAML dates (unquoted `2026-07-11` parses to a `Date`) and
+ * normalized to an RFC-3339-ish string so the projected value round-trips.
  *
  * `data_categories` is parsed and validated here per the plan, but the D14
  * `ParsedNote` DTO carries no field for it, so the reader does not surface it on
  * the note (it is validated-and-dropped until a DTO field exists).
  */
+const TimestampField = z
+  .union([z.string().min(1), z.date()])
+  .transform((v) => (v instanceof Date ? v.toISOString().slice(0, 10) : v));
+
 const FrontmatterSchema = z
   .object({
     id: z.string().min(1),
     type: z.string().min(1),
     schema_version: z.number().int(),
+    title: z.string().min(1),
+    status: z.string().min(1).default(DEFAULT_NOTE_STATUS),
+    created: TimestampField,
+    updated: TimestampField,
     aliases: z.array(z.string()).default([]),
     sources: z.array(z.string()).default([]),
     declaredSensitivity: z.enum(SENSITIVITY).default("internal"),
@@ -42,6 +57,10 @@ export interface Frontmatter {
   readonly id: string;
   readonly type: string;
   readonly schemaVersion: number;
+  readonly title: string;
+  readonly status: string;
+  readonly created: string;
+  readonly updated: string;
   readonly aliases: readonly string[];
   readonly sources: readonly string[];
   readonly declaredSensitivity: Sensitivity;
@@ -103,6 +122,10 @@ export function parseFrontmatter(frontmatter: string | null): FrontmatterResult 
       id: parsed.data.id,
       type: parsed.data.type,
       schemaVersion: parsed.data.schema_version,
+      title: parsed.data.title,
+      status: parsed.data.status,
+      created: parsed.data.created,
+      updated: parsed.data.updated,
       aliases: parsed.data.aliases,
       sources: parsed.data.sources,
       declaredSensitivity: parsed.data.declaredSensitivity,

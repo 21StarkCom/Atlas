@@ -4,12 +4,15 @@ packages:
   - tools
 
 allowBuilds:
+  better-sqlite3: true
   esbuild: true
 
 # Single source of dependency versions across the monorepo (referenced as `catalog:`).
 catalog:
   "@types/node": ^24.0.0
+  "@types/better-sqlite3": ^7.6.11
   ajv: ^8.17.1
+  better-sqlite3: ^12.2.0
   typescript: ^5.8.3
   vitest: ^3.2.4
   yaml: ^2.4.2

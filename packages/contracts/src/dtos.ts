@@ -45,6 +45,22 @@ export interface ParsedNote {
   readonly path: string;
   readonly type: NoteType;
   readonly schemaVersion: number;
+  /**
+   * Canonical human-readable title from frontmatter `title`. This is
+   * authoritative projection input for `notes.title` — consumers MUST NOT
+   * fabricate it from headings or constants (dictionary §0: projections are
+   * projected from canonical Markdown, never invented).
+   */
+  readonly title: string;
+  /**
+   * Canonical lifecycle status from frontmatter `status` (defaults to `active`
+   * when the note omits it). Authoritative projection input for `notes.status`.
+   */
+  readonly status: string;
+  /** Canonical creation timestamp from frontmatter `created` (projected verbatim). */
+  readonly created: string;
+  /** Canonical last-update timestamp from frontmatter `updated` (projected verbatim). */
+  readonly updated: string;
   readonly aliases: readonly string[];
   readonly sources: readonly string[];
   readonly declaredSensitivity: Sensitivity;

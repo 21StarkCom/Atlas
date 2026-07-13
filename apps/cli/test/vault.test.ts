@@ -211,7 +211,7 @@ describe("wiki-link resolution precedence + collisions", () => {
     aliases: readonly string[],
     body = "",
   ): Promise<void> {
-    const fm = `---\nid: ${id}\ntype: concept\nschema_version: 1\naliases: [${aliases
+    const fm = `---\nid: ${id}\ntype: concept\nschema_version: 1\ntitle: ${id}\ncreated: 2026-07-11\nupdated: 2026-07-11\naliases: [${aliases
       .map((a) => JSON.stringify(a))
       .join(", ")}]\n---\n# ${id}\n${body}`;
     await writeNoteFile(join(dir, file), fm);
