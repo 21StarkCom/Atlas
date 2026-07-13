@@ -10,6 +10,7 @@
  * `docs/specs/sandbox-contract.md §4` (SSOT): a clean digest-bound stream, a
  * distinct exit-3 scan rejection, or a typed normalization rejection.
  */
+import type { RepresentedGap } from "@atlas/contracts";
 import type { SourceFormat } from "./formats.js";
 
 /** Re-exported so consumers get the format token set from one place. */
@@ -132,6 +133,13 @@ export type WorkerResult =
       readonly ok: true;
       readonly stream: ReadableStream<Uint8Array>;
       readonly attestation: ScanAttestation;
+      /**
+       * The deterministic {@link RepresentedGap} records the in-sandbox normalizer
+       * produced (e.g. HTML `image-no-alt`/`image-decorative`). Carried on the control
+       * message (metadata, not document bytes) so the gap records survive the sandbox
+       * path into the assembled rendition (wing round-2 finding 2).
+       */
+      readonly gaps: readonly RepresentedGap[];
     }
   | {
       readonly ok: false;
@@ -140,6 +148,14 @@ export type WorkerResult =
       /** Plan §2.5 secret-scan exit code. */
       readonly exit: 3;
       readonly scannerRulesetVersion: number;
+      /**
+       * The offending NORMALIZED bytes the in-sandbox scan flagged, for trusted-side
+       * quarantine (AEAD, ciphertext-only). Present for every real hit — the whole output
+       * when it fits the control channel's bound, else a bounded window around the match
+       * (wing round-3 finding 5). These bytes never reach fd 1 or any real sink — only the
+       * quarantine store.
+       */
+      readonly quarantineBytes?: Uint8Array;
     }
   | {
       readonly ok: false;

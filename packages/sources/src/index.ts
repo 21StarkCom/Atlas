@@ -73,3 +73,21 @@ export {
   type SandboxCapabilityCheck,
   type SandboxCapabilityReport,
 } from "./types.js";
+
+// Task 2.4 — the guard-enforced normalization API + version pins ONLY. The raw per-format
+// parsers (`normalize/{markdown,text,pdf,html}`) and `classifyMedia` are DELIBERATELY NOT
+// exported (wing round-2 finding 3): exposing them would offer a supported bypass around
+// both the PrePersistenceGuard and sandbox containment. They stay internal to the worker;
+// the only public normalization surface is the guarded `normalize()` and its contract
+// types/constants.
+export {
+  normalize,
+  EXTRACTOR_VERSION,
+  NORMALIZER_VERSION,
+  EXTRACTOR_PINS,
+  LOCATOR_SCHEME,
+  UnsupportedSourceError,
+  IrregularSourceError,
+  type NormalizeInput,
+  type NormalizeResult,
+} from "./normalize/index.js";

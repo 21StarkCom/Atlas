@@ -18,6 +18,9 @@ catalogs:
     better-sqlite3:
       specifier: ^12.2.0
       version: 12.11.1
+    parse5:
+      specifier: 8.0.1
+      version: 8.0.1
     typescript:
       specifier: ^5.8.3
       version: 5.9.3
@@ -187,6 +190,9 @@ importers:
       '@atlas/scan':
         specifier: workspace:*
         version: link:../scan
+      parse5:
+        specifier: 'catalog:'
+        version: 8.0.1
     devDependencies:
       '@types/node':
         specifier: 'catalog:'
@@ -669,6 +675,10 @@ packages:
   end-of-stream@1.4.5:
     resolution: {integrity: sha512-ooEGc6HP26xXq/N+GCGOT0JKCLDGrq2bQUZrQ7gyrJiZANJ/8YDTxTpQBXGMn+WbIQXNVpyWymm7KYVICQnyOg==}
 
+  entities@8.0.0:
+    resolution: {integrity: sha512-zwfzJecQ/Uej6tusMqwAqU/6KL2XaB2VZ2Jg54Je6ahNBGNH6Ek6g3jjNCF0fG9EWQKGZNddNjU5F1ZQn/sBnA==}
+    engines: {node: '>=20.19.0'}
+
   es-module-lexer@1.7.0:
     resolution: {integrity: sha512-jEQoCwk8hyb2AZziIOLhDqpm5+2ww5uIE6lkO/6jcOCusfk6LhMHpXXfBLXTZ7Ydyt0j4VoUQv6uGNYbdW+kBA==}
 
@@ -765,6 +775,9 @@ packages:
 
   once@1.4.0:
     resolution: {integrity: sha512-lNaJgI+2Q5URQBkccEKHTQOPaXdUxnZZElQTZY0MFUAuaEqe1E+Nyvgdz/aIyNi6Z9MzO5dv1H8n58/GELp3+w==}
+
+  parse5@8.0.1:
+    resolution: {integrity: sha512-z1e/HMG90obSGeidlli3hj7cbocou0/wa5HacvI3ASx34PecNjNQeaHNo5WIZpWofN9kgkqV1q5YvXe3F0FoPw==}
 
   pathe@2.0.3:
     resolution: {integrity: sha512-WUjGcAqP1gQacoQe+OBJsFA7Ld4DyXuUIjZ5cc75cLHvJ7dtNsTugphxIADwspS+AraAUePCKrSVtPLFj/F88w==}
@@ -1258,6 +1271,8 @@ snapshots:
     dependencies:
       once: 1.4.0
 
+  entities@8.0.0: {}
+
   es-module-lexer@1.7.0: {}
 
   esbuild@0.28.1:
@@ -1349,6 +1364,10 @@ snapshots:
   once@1.4.0:
     dependencies:
       wrappy: 1.0.2
+
+  parse5@8.0.1:
+    dependencies:
+      entities: 8.0.0
 
   pathe@2.0.3: {}
 

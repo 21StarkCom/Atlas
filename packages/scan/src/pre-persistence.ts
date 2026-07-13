@@ -12,7 +12,7 @@
  * nothing reaches the real sink.
  */
 import { scanBytes } from "./engine.js";
-import { SecretDetectedError, type QuarantineSink } from "./types.js";
+import { SecretDetectedError, type QuarantineSink, type SecretFinding } from "./types.js";
 
 export class PrePersistenceGuard {
   /** @param sink the CLI-side quarantine store (structural — the leaf never imports it). */
@@ -43,4 +43,40 @@ export class PrePersistenceGuard {
     await this.sink.quarantine({ bytes: snapshot, origin: a.origin, findings: verdict.findings });
     throw new SecretDetectedError(a.origin, verdict.findings, "pre-persistence");
   }
+
+  /**
+   * UNCONDITIONALLY quarantine `bytes` for a refusal ALREADY decided upstream — WITHOUT
+   * re-scanning. Used when a subordinate scanner (the in-sandbox D15 scan) flagged a secret
+   * but the trusted side cannot re-derive the exact offending bytes (the confined worker
+   * omitted the payload): a valid non-empty quarantine artifact is still MANDATORY
+   * (finding 7), so the trusted RAW snapshot is captured here. Skipping the re-scan is
+   * deliberate — the raw bytes may be individually clean (a secret that only becomes
+   * matchable AFTER normalization, e.g. entity-decoded HTML), so a re-scan would wave them
+   * through; the sandbox verdict is the authority. The caller raises
+   * {@link SecretDetectedError} after this resolves (quarantine-before-throw), so a
+   * secret-bearing source lands in quarantine and never merely rejects.
+   *
+   * NON-EMPTY INVARIANT (round-2 finding): the artifact must ALWAYS be non-empty. If the
+   * captured bytes are empty (an empty raw source PLUS an absent worker payload), quarantining
+   * them would create an empty artifact despite the mandatory-artifact invariant — so we
+   * substitute a deterministic non-empty sentinel that records the refusal. The enforcement
+   * lives HERE (the single quarantine authority) so no caller can bypass it.
+   */
+  async quarantineRejection(a: {
+    readonly bytes: Uint8Array;
+    readonly origin: string;
+    readonly findings?: readonly SecretFinding[];
+  }): Promise<void> {
+    const captured = a.bytes.length > 0 ? a.bytes.slice() : EMPTY_SOURCE_SENTINEL.slice();
+    await this.sink.quarantine({ bytes: captured, origin: a.origin, findings: a.findings ?? [] });
+  }
 }
+
+/**
+ * Deterministic non-empty artifact quarantined when a scan-rejection has no offending bytes at
+ * all (empty raw source + absent worker payload) — so the mandatory non-empty quarantine
+ * invariant holds even in the degenerate empty-input case. Carries no origin/secret content.
+ */
+const EMPTY_SOURCE_SENTINEL = new TextEncoder().encode(
+  "atlas: empty source quarantined on scan rejection (mandatory non-empty artifact)",
+);
