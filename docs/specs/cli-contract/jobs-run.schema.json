@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/jobs-run.schema.json",
+  "title": "brain jobs run — --json success output",
+  "description": "Claim and drain queued jobs synchronously under the exclusive jobs-runner process lock (D5). A second concurrent runner exits 2 `locked:jobs-runner`. Selectors are the SSOT `[<jobId> | --all]` (mutually exclusive; --all is the default when neither is given). Bulk selection is deterministic (ordered by (next_run_at, jobId)); each job runs independently and exactly once. Output is the canonical batch object `{ items, aggregate }` — never the single-error envelope. A job that changes state mid-batch is `skipped:state-changed`, not an error.",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["command", "items", "aggregate"],
+  "$defs": {
+    "errorEnvelope": {
+      "type": "object",
+      "description": "The complete CLI error envelope (error-envelope.schema.json) — used per-item for a failed job and at the top level for a whole-batch failure. Kept as a local $def (not a cross-file $ref) so each schema compiles standalone under the harness's per-file Ajv.",
+      "unevaluatedProperties": false,
+      "required": ["code", "message", "retryable"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1, "description": "Stable failure classification (allowlisted metadata)." },
+        "message": { "type": "string" },
+        "hint": { "type": "string" },
+        "details": { "type": "object" },
+        "retryable": { "type": "boolean" },
+        "retryAfterMs": { "type": "integer", "minimum": 0 },
+        "jobId": { "type": "string", "minLength": 1 }
+      }
+    }
+  },
+  "properties": {
+    "command": { "const": "jobs run" },
+    "items": {
+      "type": "array",
+      "description": "One entry per processed job, in deterministic (next_run_at, jobId) order. Each item is a discriminated result-OR-error: a result carries an outcome and never an error; a failed item carries outcome=failed plus the standard error envelope.",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A non-failed result. No `error` may accompany it.",
+            "unevaluatedProperties": false,
+            "required": ["jobId", "outcome"],
+            "properties": {
+              "jobId": { "type": "string", "minLength": 1 },
+              "workflow": { "type": "string", "minLength": 1 },
+              "outcome": {
+                "enum": ["succeeded", "retry-scheduled", "action-required", "skipped:state-changed", "cancelled"]
+              },
+              "attempts": { "type": "integer", "minimum": 1 },
+              "runId": { "type": "string", "minLength": 1, "description": "Present for action-required (e.g. a Tier-3 review-pending run) and any run-producing outcome." },
+              "retryAfterMs": { "type": "integer", "minimum": 0, "description": "Provider-directed retry timing propagated from a rate_limit/quota error." }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A per-item failure: outcome=failed with the standard error envelope required.",
+            "unevaluatedProperties": false,
+            "required": ["jobId", "outcome", "error"],
+            "properties": {
+              "jobId": { "type": "string", "minLength": 1 },
+              "workflow": { "type": "string", "minLength": 1 },
+              "outcome": { "const": "failed" },
+              "attempts": { "type": "integer", "minimum": 1 },
+              "error": { "$ref": "#/$defs/errorEnvelope" }
+            }
+          }
+        ]
+      }
+    },
+    "error": {
+      "$ref": "#/$defs/errorEnvelope",
+      "description": "Optional whole-batch failure envelope (e.g. the drain aborted before per-item processing). Present only for a batch-level failure; per-item failures live in items[]."
+    },
+    "aggregate": {
+      "type": "object",
+      "description": "Batch roll-up. exitCode is chosen by the deterministic precedence 4 ⊐ 2 ⊐ 1 ⊐ 7 ⊐ 6 ⊐ 5; skipped/cancelled outcomes do not raise it above 0 on their own.",
+      "unevaluatedProperties": false,
+      "required": ["exitCode", "succeeded", "failed", "skipped", "actionRequired"],
+      "properties": {
+        "exitCode": { "type": "integer", "enum": [0, 1, 2, 4, 5, 6, 7] },
+        "succeeded": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "skipped": { "type": "integer", "minimum": 0 },
+        "actionRequired": { "type": "integer", "minimum": 0 }
+      }
+    }
+  },
+  "examples": [
+    {
+      "command": "jobs run",
+      "items": [],
+      "aggregate": { "exitCode": 0, "succeeded": 0, "failed": 0, "skipped": 0, "actionRequired": 0 }
+    },
+    {
+      "command": "jobs run",
+      "items": [
+        { "jobId": "job-1", "workflow": "capture", "outcome": "succeeded", "attempts": 1 },
+        { "jobId": "job-2", "workflow": "capture", "outcome": "retry-scheduled", "attempts": 2, "retryAfterMs": 2000 },
+        { "jobId": "job-3", "workflow": "reverify", "outcome": "action-required", "runId": "01J9Z8Q0000000000000000000" }
+      ],
+      "aggregate": { "exitCode": 6, "succeeded": 1, "failed": 0, "skipped": 0, "actionRequired": 1 }
+    },
+    {
+      "command": "jobs run",
+      "items": [
+        { "jobId": "job-4", "workflow": "capture", "outcome": "failed", "attempts": 5, "error": { "code": "validation", "message": "permanent classification", "retryable": false } }
+      ],
+      "aggregate": { "exitCode": 1, "succeeded": 0, "failed": 1, "skipped": 0, "actionRequired": 0 }
+    }
+  ],
+  "x-atlas-contract": {
+    "command": "jobs run",
+    "phase": 2,
+    "privilege": "shared",
+    "idempotency": "key-accepting",
+    "executionClass": "mutating",
+    "summary": "Claim + drain queued jobs synchronously (single-runner lock).",
+    "args": [{ "name": "<jobId>", "required": false, "description": "Drain a single job; mutually exclusive with --all." }],
+    "flags": [
+      { "name": "--all", "description": "Drain every eligible job (default when neither <jobId> nor --all is given)." },
+      { "name": "--idempotency-key <key>", "description": "Caller idempotency key for the drain invocation." }
+    ],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "batchProtocol": {
+      "envelope": "{ items, aggregate }",
+      "ordering": "(next_run_at, jobId)",
+      "selectors": "[<jobId> | --all] mutually exclusive; --all default",
+      "exitPrecedence": ["4 internal", "2 config/vault/lock", "1 validation", "7 provider-retryable", "6 action-required", "5 usage"]
+    },
+    "sideEffects": [
+      "acquires the exclusive jobs-runner lock for the drain",
+      "advances job state + attempts + backoff per jobs-contract.md",
+      "each executed job's workflow writes its own ledger/audit records"
+    ],
+    "prohibitedEffects": ["never runs concurrently with another jobs-runner (exclusive lock)", "no job executes more than once"],
+    "locks": [
+      { "scope": "jobs-runner", "mode": "exclusive" },
+      { "scope": "canonical-integration", "mode": "exclusive", "note": "acquired per draining job that integrates" }
+    ],
+    "exitCodes": [0, 1, 2, 4, 5, 6, 7],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "<jobId> and --all both given, or unknown flag/argument" },
+      { "code": "locked:jobs-runner", "exit": 2, "when": "another jobs-runner holds the exclusive lock", "retryable": true },
+      { "code": "backup-unhealthy", "exit": 2, "when": "ledger-writing is blocked pending a verified backup" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure while draining" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}

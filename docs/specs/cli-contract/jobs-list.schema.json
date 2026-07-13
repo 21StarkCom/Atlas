@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/jobs-list.schema.json",
+  "title": "brain jobs list — --json success output",
+  "description": "Paginated read-only list of queue jobs (per jobs-contract.md). Read-only; does not acquire the jobs-runner lock.",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["command", "jobs", "pagination"],
+  "properties": {
+    "command": { "const": "jobs list" },
+    "jobs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["jobId", "workflow", "state", "attempts", "maxAttempts"],
+        "properties": {
+          "jobId": { "type": "string", "minLength": 1 },
+          "workflow": { "type": "string", "minLength": 1 },
+          "state": { "enum": ["pending", "running", "succeeded", "failed", "cancelled"] },
+          "attempts": { "type": "integer", "minimum": 0 },
+          "maxAttempts": { "type": "integer", "minimum": 1 },
+          "nextRunAt": { "type": "string", "description": "RFC-3339 next-eligible time (backoff); absent for terminal jobs." },
+          "lastError": { "type": "string", "description": "Stable classification of the last failure (allowlisted metadata)." }
+        }
+      }
+    },
+    "pagination": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "required": ["limit", "offset", "total", "hasMore"],
+      "properties": {
+        "limit": { "type": "integer", "minimum": 1, "maximum": 500 },
+        "offset": { "type": "integer", "minimum": 0 },
+        "total": { "type": "integer", "minimum": 0, "description": "Live (non-snapshot) total job count for the current filter; best-effort under concurrency." },
+        "hasMore": { "type": "boolean" }
+      }
+    }
+  },
+  "examples": [
+    {
+      "command": "jobs list",
+      "jobs": [
+        { "jobId": "job-1", "workflow": "capture", "state": "failed", "attempts": 3, "maxAttempts": 5, "nextRunAt": "2026-07-13T10:05:00.000Z", "lastError": "transient" }
+      ],
+      "pagination": { "limit": 50, "offset": 0, "total": 1, "hasMore": false }
+    }
+  ],
+  "x-atlas-contract": {
+    "command": "jobs list",
+    "phase": 2,
+    "privilege": "shared",
+    "idempotency": "none",
+    "executionClass": "read",
+    "summary": "Paginated list of queue jobs.",
+    "ordering": { "sortKey": "createdAt", "direction": "desc", "tieBreaker": "jobId", "note": "stable total order (createdAt, jobId); jobId (PK) is unique so ties are fully resolved. Best-effort under concurrency (plan §2.5)." },
+    "args": [],
+    "flags": [
+      { "name": "--state <state>", "constraint": "one of pending|running|succeeded|failed|cancelled" },
+      { "name": "--limit <n>", "default": 50, "constraint": "1..500" },
+      { "name": "--offset <n>", "default": 0, "constraint": ">=0" }
+    ],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "sideEffects": [],
+    "prohibitedEffects": ["no job-state mutation", "does not acquire jobs-runner lock"],
+    "locks": [{ "scope": "shared", "mode": "shared" }],
+    "exitCodes": [0, 2, 4, 5],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "unknown --state or out-of-range pagination" },
+      { "code": "config-invalid", "exit": 2, "when": "brain.config.yaml fails schema validation" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}

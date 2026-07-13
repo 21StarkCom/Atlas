@@ -8,6 +8,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
+import { ProviderErrorSchema } from "@atlas/contracts";
 import {
   checkAuthzContractCompleteness,
   checkFixtureConsistency,
@@ -443,6 +444,168 @@ describe("data-dictionary is text-safe and executable DDL", () => {
       }
     } finally {
       db.close();
+    }
+  });
+});
+
+describe("Phase-2 cli-contract schema presence (Task 2.0)", () => {
+  const phase2 = registry.commands.filter((c) => c.phase === 2);
+
+  it("has Phase-2 rows", () => {
+    expect(phase2.length).toBeGreaterThan(0);
+  });
+
+  it("every Phase-2 row has an existing schema file (independent of implementation status)", () => {
+    // This is a contract-only gate: the schemas ship now, the handlers land in
+    // later Phase-2 tasks. Schema presence is asserted directly, NOT via the
+    // implemented flag (which stays false until the handler exists).
+    for (const r of phase2) {
+      expect(existsSync(join(root, r.schemaRef)), `${r.name} schema ${r.schemaRef}`).toBe(true);
+    }
+  });
+
+  it("every Phase-2 row is still implemented:false at this contract-only gate", () => {
+    for (const r of phase2) {
+      expect(r.implemented, `${r.name} implemented`).toBe(false);
+    }
+  });
+
+  it("the Phase-2 command set matches the plan Task 2.0 inventory", () => {
+    expect(phase2.map((c) => c.name).sort()).toEqual(
+      [
+        "git cleanup",
+        "git status",
+        "ingest",
+        "jobs cancel",
+        "jobs list",
+        "jobs retry",
+        "jobs run",
+        "note history",
+        "note related",
+        "note show",
+        "source add",
+        "source list",
+        "source show",
+        "source trust show",
+      ].sort(),
+    );
+  });
+});
+
+describe("Phase-2 contract docs — fenced examples validate (Task 2.0)", () => {
+  const docs = [
+    "docs/specs/jobs-contract.md",
+    "docs/specs/sandbox-contract.md",
+    "docs/specs/normalization-contract.md",
+    "docs/specs/provider-interface.md",
+  ];
+
+  for (const rel of docs) {
+    describe(rel, () => {
+      const raw = readFileSync(join(root, rel), "utf8");
+
+      it("exists and is a text file with no C0 control bytes (byte-stable)", () => {
+        expect(raw.length).toBeGreaterThan(0);
+        // eslint-disable-next-line no-control-regex
+        const bad = /[\x00-\x08\x0B\x0C\x0E-\x1F]/.exec(raw);
+        expect(bad, bad ? `control U+${bad[0].codePointAt(0)!.toString(16)}` : "").toBeNull();
+      });
+
+      it("every fenced ```json block is well-formed JSON", () => {
+        const blocks = extractJsonBlocks(raw);
+        expect(blocks.length).toBeGreaterThan(0);
+        for (const b of blocks) {
+          expect(() => JSON.parse(b), b.slice(0, 60)).not.toThrow();
+        }
+      });
+    });
+  }
+
+  it("jobs-contract state machine covers the 5 DDL job states + 3 terminals", () => {
+    const raw = readFileSync(join(root, "docs/specs/jobs-contract.md"), "utf8");
+    const block = /```json\s+jobsStateMachine\s*\n([\s\S]*?)\n```/.exec(raw);
+    expect(block, "jobsStateMachine block").not.toBeNull();
+    const sm = JSON.parse(block![1]!);
+    // Exactly the authoritative jobs.state CHECK set — no separate `claimed` state.
+    expect(sm.states.sort()).toEqual(
+      ["cancelled", "failed", "pending", "running", "succeeded"].sort(),
+    );
+    expect(sm.terminals.sort()).toEqual(["cancelled", "failed", "succeeded"].sort());
+    // every transition names states from the declared set
+    const states = new Set<string>(sm.states);
+    for (const t of sm.transitions) {
+      expect(states.has(t.from), `from ${t.from}`).toBe(true);
+      expect(states.has(t.to), `to ${t.to}`).toBe(true);
+    }
+    // dead-runner recovery MUST be able to move a running job back to pending.
+    const hasRecovery = sm.transitions.some(
+      (t: { from: string; to: string }) => t.from === "running" && t.to === "pending",
+    );
+    expect(hasRecovery, "running -> pending (dead-runner-recovery)").toBe(true);
+  });
+
+  it("jobs-list schema state enum matches the DDL 5-state set (R3-F5: no stale `claimed`)", () => {
+    const raw = readFileSync(join(root, "docs/specs/jobs-contract.md"), "utf8");
+    const sm = JSON.parse(/```json\s+jobsStateMachine\s*\n([\s\S]*?)\n```/.exec(raw)![1]!);
+    const ddlStates: string[] = [...sm.states].sort();
+    // The public `jobs list` state enum + its --state flag constraint must be
+    // EXACTLY the authoritative DDL state set — no `claimed`, no drift.
+    const schema = JSON.parse(
+      readFileSync(join(root, "docs/specs/cli-contract/jobs-list.schema.json"), "utf8"),
+    );
+    const enumStates: string[] = [...schema.properties.jobs.items.properties.state.enum].sort();
+    expect(enumStates).toEqual(ddlStates);
+    expect(enumStates).not.toContain("claimed");
+    const stateFlag = schema["x-atlas-contract"].flags.find((f: { name: string }) =>
+      f.name.startsWith("--state"),
+    );
+    expect(stateFlag.constraint).not.toContain("claimed");
+    for (const s of ddlStates) expect(stateFlag.constraint).toContain(s);
+  });
+
+  it("sandbox-contract declares required guarantees with a darwin + linux primitive each", () => {
+    const raw = readFileSync(join(root, "docs/specs/sandbox-contract.md"), "utf8");
+    const block = /```json\s+sandboxContract\s*\n([\s\S]*?)\n```/.exec(raw);
+    expect(block, "sandboxContract block").not.toBeNull();
+    const sc = JSON.parse(block![1]!);
+    expect(Array.isArray(sc.guarantees) && sc.guarantees.length).toBeGreaterThan(0);
+    for (const g of sc.guarantees) {
+      expect(typeof g.guarantee).toBe("string");
+      expect(typeof g.darwin, `${g.guarantee} darwin`).toBe("string");
+      expect(typeof g.linux, `${g.guarantee} linux`).toBe("string");
+    }
+    // the scan-before-persist guarantee (D15) is present and required
+    const sbp = sc.guarantees.find((g: { guarantee: string }) => g.guarantee === "scan-before-persist");
+    expect(sbp?.required).toBe(true);
+  });
+
+  it("normalization-contract gives every format a canonical media token + accepted encodings", () => {
+    const raw = readFileSync(join(root, "docs/specs/normalization-contract.md"), "utf8");
+    const block = /```json\s+normalizationContract\s*\n([\s\S]*?)\n```/.exec(raw);
+    expect(block, "normalizationContract block").not.toBeNull();
+    const nc = JSON.parse(block![1]!);
+    const tokens = new Set<string>();
+    for (const f of nc.formats) {
+      expect(f.canonicalMediaType, `${f.format} token`).toBeTruthy();
+      expect(tokens.has(f.canonicalMediaType), `duplicate token ${f.canonicalMediaType}`).toBe(false);
+      tokens.add(f.canonicalMediaType);
+      expect(Array.isArray(f.mimeSignatures) && f.mimeSignatures.length).toBeGreaterThan(0);
+      expect(Array.isArray(f.encodings) && f.encodings.length).toBeGreaterThan(0);
+    }
+    // the required rejection codes are all declared
+    for (const code of ["unsupported-encoding", "encrypted-source", "no-extractable-text"]) {
+      expect(nc.rejectionCodes.includes(code), `rejection ${code}`).toBe(true);
+    }
+  });
+
+  it("provider-interface ProviderError examples validate against the @atlas/contracts schema", () => {
+    const raw = readFileSync(join(root, "docs/specs/provider-interface.md"), "utf8");
+    const block = /```json\s+providerErrors\s*\n([\s\S]*?)\n```/.exec(raw);
+    expect(block, "providerErrors block").not.toBeNull();
+    const errors = JSON.parse(block![1]!) as unknown[];
+    expect(errors.length).toBeGreaterThan(0);
+    for (const e of errors) {
+      expect(() => ProviderErrorSchema.parse(e), JSON.stringify(e)).not.toThrow();
     }
   });
 });

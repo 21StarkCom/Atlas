@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/source-add.schema.json",
+  "title": "brain source add — --json success output",
+  "description": "Deterministic Tier-1 source capture that APPLIES immediately (D11) — no preview mode. Funnels through captureSource: scan-before-persist (secret detection ⇒ exit 3, quarantined, nothing persisted), dedup by (rawContentHash, canonicalMediaType), capture keyed (contentId, origin), broker Tier-1 CAS integration. Reports the minted ids + what was reused.",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["command", "contentId", "captureId", "renditionId", "noteId", "runId", "reused"],
+  "properties": {
+    "command": { "const": "source add" },
+    "contentId": { "type": "string", "minLength": 1 },
+    "captureId": { "type": "string", "minLength": 1 },
+    "renditionId": { "type": "string", "minLength": 1 },
+    "noteId": { "type": "string", "minLength": 1 },
+    "runId": { "type": "string", "minLength": 1 },
+    "reused": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "required": ["blob", "capture"],
+      "properties": {
+        "blob": { "type": "boolean", "description": "True when an existing content blob was reused (identical bytes)." },
+        "capture": { "type": "boolean", "description": "True when an existing capture (contentId, origin) was reused (idempotent re-add)." }
+      }
+    }
+  },
+  "examples": [
+    {
+      "command": "source add",
+      "contentId": "sha256:aaaa:text/markdown",
+      "captureId": "cap-1",
+      "renditionId": "sha256:aaaa:text/markdown:1:1",
+      "noteId": "source-sample",
+      "runId": "01J9Z8Q0000000000000000000",
+      "reused": { "blob": false, "capture": false }
+    }
+  ],
+  "x-atlas-contract": {
+    "command": "source add",
+    "phase": 2,
+    "privilege": "shared",
+    "idempotency": "key-accepting",
+    "executionClass": "mutating",
+    "summary": "Deterministic Tier-1 source capture; applies immediately.",
+    "args": [{ "name": "<path>", "required": true, "description": "Path to the source file to capture." }],
+    "flags": [{ "name": "--idempotency-key <key>" }],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "sideEffects": [
+      "copies raw bytes immutably under sources/",
+      "writes the content-blob/capture/rendition manifests + a source note",
+      "integrates the capture commit via broker Tier-1 CAS (advances canonical exactly one commit)",
+      "writes ledger rows + one terminal run.integrated audit-ref event via finalizeLedgerWrite"
+    ],
+    "prohibitedEffects": [
+      "no byte persists or transmits before the secret scan passes (scan-before-persist)",
+      "never mutates a note other than the created source note"
+    ],
+    "locks": [
+      { "scope": "canonical-integration", "mode": "exclusive" }
+    ],
+    "exitCodes": [0, 1, 2, 3, 4, 5],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "missing <path> argument" },
+      { "code": "validation-error", "exit": 1, "when": "the source cannot be normalized (typed normalization rejection)" },
+      { "code": "secret-detected", "exit": 3, "when": "the secret scanner flagged the bytes; source quarantined, nothing persisted" },
+      { "code": "locked:canonical-integration", "exit": 2, "when": "an integration holds the lock", "retryable": true },
+      { "code": "backup-unhealthy", "exit": 2, "when": "ledger-writing is blocked pending a verified backup" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}

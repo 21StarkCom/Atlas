@@ -58,6 +58,26 @@ export {
   REVERSIBILITY,
 } from "./changeplan-envelope.js";
 
+// ChangePlan operation payloads + full ChangePlan schema (Task 2.0 — Phase-2 gate)
+export {
+  type ChangePlan,
+  type ChangePlanOperation,
+  type ChangePlanOpName,
+  type ReservedOpName,
+  type OpResult,
+  type OpResultStatus,
+  ChangePlanSchema,
+  ChangePlanOperationSchema,
+  CHANGE_PLAN_OPERATION_NAMES,
+  CHANGE_PLAN_OPS,
+  RESERVED_OPS,
+  OP_RESULT_STATUSES,
+  isReservedOp,
+} from "./changeplan.js";
+
+// Per-operation payload schemas, error-code tuples, and result types (ops/*)
+export * from "./ops/index.js";
+
 // Run manifest
 export {
   type RunManifest,

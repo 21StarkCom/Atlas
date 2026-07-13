@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/source-list.schema.json",
+  "title": "brain source list — --json success output",
+  "description": "Paginated read-only list of captured sources. Best-effort under concurrency (plan §2.5). Tier-0 read; no mutation.",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["command", "sources", "pagination"],
+  "properties": {
+    "command": { "const": "source list" },
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["contentId", "canonicalMediaType", "capturedAt", "renditionCount"],
+        "properties": {
+          "contentId": { "type": "string", "minLength": 1, "description": "Serialized D3 contentId." },
+          "canonicalMediaType": { "type": "string", "minLength": 1 },
+          "capturedAt": { "type": "string", "description": "RFC-3339 capture timestamp." },
+          "renditionCount": { "type": "integer", "minimum": 0 },
+          "activeRenditionId": { "type": "string", "description": "Serialized D3 renditionId of the active rendition, if any." },
+          "trustLevel": { "enum": ["untrusted", "provisional", "trusted", "authoritative"] }
+        }
+      }
+    },
+    "pagination": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "required": ["limit", "offset", "total", "hasMore"],
+      "properties": {
+        "limit": { "type": "integer", "minimum": 1, "maximum": 500 },
+        "offset": { "type": "integer", "minimum": 0 },
+        "total": { "type": "integer", "minimum": 0, "description": "Live (non-snapshot) total row count across all pages; best-effort under concurrent inserts/deletes." },
+        "hasMore": { "type": "boolean" }
+      }
+    }
+  },
+  "examples": [
+    {
+      "command": "source list",
+      "sources": [
+        { "contentId": "sha256:aaaa:text/markdown", "canonicalMediaType": "text/markdown", "capturedAt": "2026-07-13T10:00:00.000Z", "renditionCount": 1, "activeRenditionId": "sha256:aaaa:text/markdown:1:1", "trustLevel": "provisional" }
+      ],
+      "pagination": { "limit": 50, "offset": 0, "total": 1, "hasMore": false }
+    }
+  ],
+  "x-atlas-contract": {
+    "command": "source list",
+    "phase": 2,
+    "privilege": "shared",
+    "idempotency": "none",
+    "executionClass": "read",
+    "summary": "Paginated list of captured sources.",
+    "ordering": { "sortKey": "capturedAt", "direction": "desc", "tieBreaker": "contentId", "note": "stable total order (capturedAt, contentId); contentId is unique so ties are fully resolved. Best-effort under concurrency (plan §2.5)." },
+    "args": [],
+    "flags": [
+      { "name": "--limit <n>", "default": 50, "constraint": "1..500" },
+      { "name": "--offset <n>", "default": 0, "constraint": ">=0" }
+    ],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "sideEffects": [],
+    "prohibitedEffects": ["no vault/projection/ledger mutation", "no git or audit-ref write"],
+    "locks": [{ "scope": "shared", "mode": "shared" }],
+    "exitCodes": [0, 2, 4, 5],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "unknown flag or out-of-range --limit/--offset" },
+      { "code": "config-invalid", "exit": 2, "when": "brain.config.yaml fails schema validation" },
+      { "code": "vault-error", "exit": 2, "when": "the configured vault/store is missing or unreadable" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}

@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/note-show.schema.json",
+  "title": "brain note show — --json success output",
+  "description": "Show a note by id or slug: canonical frontmatter fields, section outline, links, and provenance sources. Read-only projection query; never mutates.",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["command", "note"],
+  "properties": {
+    "command": { "const": "note show" },
+    "note": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "required": ["id", "path", "type", "title", "status", "aliases", "links", "sources", "sections", "contentHash"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "type": { "type": "string" },
+        "title": { "type": "string" },
+        "status": { "type": "string" },
+        "declaredSensitivity": { "enum": ["public", "internal", "confidential", "restricted"] },
+        "aliases": { "type": "array", "items": { "type": "string" } },
+        "links": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "unevaluatedProperties": false,
+            "required": ["target"],
+            "properties": {
+              "target": { "type": "string" },
+              "alias": { "type": "string" },
+              "resolved": { "type": "boolean" }
+            }
+          }
+        },
+        "sources": { "type": "array", "items": { "type": "string" }, "description": "Serialized source handles." },
+        "sections": { "type": "array", "items": { "type": "string" }, "description": "Stable section paths in document order." },
+        "contentHash": { "type": "string", "minLength": 1 }
+      }
+    }
+  },
+  "examples": [
+    {
+      "command": "note show",
+      "note": {
+        "id": "concept-atlas",
+        "path": "notes/atlas.md",
+        "type": "concept",
+        "title": "Atlas",
+        "status": "active",
+        "declaredSensitivity": "internal",
+        "aliases": ["Atlas Engine"],
+        "links": [{ "target": "concept-vault", "resolved": true }],
+        "sources": ["sha256:aaaa:text/markdown:1:1"],
+        "sections": ["Overview", "Overview/Goals"],
+        "contentHash": "sha256:cccc"
+      }
+    }
+  ],
+  "x-atlas-contract": {
+    "command": "note show",
+    "phase": 2,
+    "privilege": "shared",
+    "idempotency": "none",
+    "executionClass": "read",
+    "summary": "Show a note by id or slug.",
+    "args": [{ "name": "<id-or-slug>", "required": true, "description": "Note id or slug; ambiguity is an error, never a silent pick." }],
+    "flags": [],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "sideEffects": [],
+    "prohibitedEffects": ["no vault/projection/ledger mutation", "no git or audit-ref write"],
+    "locks": [{ "scope": "shared", "mode": "shared" }],
+    "exitCodes": [0, 1, 2, 4, 5],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "missing <id-or-slug> argument" },
+      { "code": "note-not-found", "exit": 1, "when": "no note matches the id/slug" },
+      { "code": "ambiguous-note", "exit": 1, "when": "the id/slug matches more than one note" },
+      { "code": "config-invalid", "exit": 2, "when": "brain.config.yaml fails schema validation" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}

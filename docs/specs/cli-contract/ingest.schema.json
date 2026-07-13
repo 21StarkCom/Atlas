@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/ingest.schema.json",
+  "title": "brain ingest — --json success output",
+  "description": "Capture + extraction/classification PREVIEW by default (D11): prints the planned capture + extraction preview and persists nothing (no audit-ref event). `--apply` performs the capture (same captureSource path as source add). `--dry-run` + `--apply` together ⇒ exit 5. Scan-before-persist applies in both modes (a secret in the raw/normalized bytes ⇒ exit 3, quarantined).",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["command", "path", "mode", "applied"],
+  "properties": {
+    "command": { "const": "ingest" },
+    "path": { "type": "string", "minLength": 1 },
+    "mode": { "enum": ["preview", "apply"] },
+    "applied": { "type": "boolean", "description": "True only when --apply performed the capture." },
+    "preview": {
+      "type": "object",
+      "description": "Present in preview mode: what a capture WOULD produce (no persistence).",
+      "unevaluatedProperties": false,
+      "required": ["contentId", "canonicalMediaType"],
+      "properties": {
+        "contentId": { "type": "string", "minLength": 1 },
+        "canonicalMediaType": { "type": "string", "minLength": 1 },
+        "sizeBytes": { "type": "integer", "minimum": 0 },
+        "wouldReuseBlob": { "type": "boolean" },
+        "extraction": {
+          "type": "object",
+          "unevaluatedProperties": false,
+          "required": ["extractorVersion", "normalizerVersion", "normalizedContentHash"],
+          "properties": {
+            "extractorVersion": { "type": "integer", "minimum": 0 },
+            "normalizerVersion": { "type": "integer", "minimum": 0 },
+            "normalizedContentHash": { "type": "string", "minLength": 1 },
+            "gapCount": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "capture": {
+      "type": "object",
+      "description": "Present in apply mode: the committed capture result.",
+      "unevaluatedProperties": false,
+      "required": ["contentId", "captureId", "renditionId", "noteId", "runId", "reused"],
+      "properties": {
+        "contentId": { "type": "string", "minLength": 1 },
+        "captureId": { "type": "string", "minLength": 1 },
+        "renditionId": { "type": "string", "minLength": 1 },
+        "noteId": { "type": "string", "minLength": 1 },
+        "runId": { "type": "string", "minLength": 1 },
+        "reused": {
+          "type": "object",
+          "unevaluatedProperties": false,
+          "required": ["blob", "capture"],
+          "properties": { "blob": { "type": "boolean" }, "capture": { "type": "boolean" } }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "$comment": "preview mode: never applied, WOULD-produce payload present, no committed capture.",
+      "if": { "properties": { "mode": { "const": "preview" } }, "required": ["mode"] },
+      "then": {
+        "properties": { "applied": { "const": false } },
+        "required": ["preview"],
+        "not": { "required": ["capture"] }
+      }
+    },
+    {
+      "$comment": "apply mode: applied true, committed capture present (carrying runId), no preview payload.",
+      "if": { "properties": { "mode": { "const": "apply" } }, "required": ["mode"] },
+      "then": {
+        "properties": { "applied": { "const": true } },
+        "required": ["capture"],
+        "not": { "required": ["preview"] }
+      }
+    }
+  ],
+  "examples": [
+    {
+      "command": "ingest",
+      "path": "/inbox/sample.md",
+      "mode": "preview",
+      "applied": false,
+      "preview": {
+        "contentId": "sha256:aaaa:text/markdown",
+        "canonicalMediaType": "text/markdown",
+        "sizeBytes": 1024,
+        "wouldReuseBlob": false,
+        "extraction": { "extractorVersion": 1, "normalizerVersion": 1, "normalizedContentHash": "sha256:bbbb", "gapCount": 0 }
+      }
+    },
+    {
+      "command": "ingest",
+      "path": "/inbox/sample.md",
+      "mode": "apply",
+      "applied": true,
+      "capture": {
+        "contentId": "sha256:aaaa:text/markdown",
+        "captureId": "cap-1",
+        "renditionId": "sha256:aaaa:text/markdown:1:1",
+        "noteId": "source-sample",
+        "runId": "01J9Z8Q0000000000000000000",
+        "reused": { "blob": false, "capture": false }
+      }
+    }
+  ],
+  "x-atlas-contract": {
+    "command": "ingest",
+    "phase": 2,
+    "privilege": "shared",
+    "idempotency": "key-accepting",
+    "executionClass": "preview-or-mutating",
+    "summary": "Capture + extraction/classification preview; --apply performs it.",
+    "args": [{ "name": "<path>", "required": true, "description": "Path to the source file to ingest." }],
+    "flags": [
+      { "name": "--apply", "description": "Perform the capture (default is a non-persisting preview)." },
+      { "name": "--dry-run", "description": "Explicit preview; combined with --apply ⇒ exit 5." },
+      { "name": "--idempotency-key <key>" }
+    ],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "sideEffects": [
+      "preview: NONE (no vault/projection/ledger/git/temp persistence, no audit-ref event)",
+      "apply: same as source add — immutable raw copy, manifests, broker Tier-1 CAS, finalizeLedgerWrite"
+    ],
+    "prohibitedEffects": [
+      "preview must persist nothing to any sink",
+      "no byte persists or transmits before the secret scan passes (scan-before-persist)"
+    ],
+    "locks": [{ "scope": "canonical-integration", "mode": "exclusive", "note": "apply mode only" }],
+    "exitCodes": [0, 1, 2, 3, 4, 5],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "missing <path>, unknown flag, or --dry-run with --apply" },
+      { "code": "validation-error", "exit": 1, "when": "typed normalization rejection (unsupported-encoding/encrypted-source/no-extractable-text)" },
+      { "code": "secret-detected", "exit": 3, "when": "the secret scanner flagged the bytes; quarantined, nothing persisted" },
+      { "code": "locked:canonical-integration", "exit": 2, "when": "apply blocked by an active integration", "retryable": true },
+      { "code": "backup-unhealthy", "exit": 2, "when": "apply blocked pending a verified backup" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}
