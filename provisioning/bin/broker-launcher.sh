@@ -7,10 +7,15 @@
 # Invoked as:  sudo -u atlas-broker /usr/local/lib/atlas/bin/broker-launcher.sh
 set -euo pipefail
 OS="$(uname -s)"
-if [ "$OS" = "Darwin" ]; then BIN=/usr/local/lib/atlas/bin/atlas-broker; SOCK=/usr/local/var/run/atlas/broker.sock; KEYS=/usr/local/etc/atlas/keys/atlas-broker;
-else BIN=/opt/atlas/bin/atlas-broker; SOCK=/var/run/atlas/broker.sock; KEYS=/etc/atlas/keys/atlas-broker; fi
+if [ "$OS" = "Darwin" ]; then BIN=/usr/local/lib/atlas/bin/atlas-broker; SOCK=/usr/local/var/run/atlas/broker.sock; KEYS=/usr/local/etc/atlas/keys/atlas-broker; ANCHOR=/usr/local/var/atlas/audit-anchor;
+else BIN=/opt/atlas/bin/atlas-broker; SOCK=/var/run/atlas/broker.sock; KEYS=/etc/atlas/keys/atlas-broker; ANCHOR=/var/lib/atlas/audit-anchor; fi
 export ATLAS_BROKER_SOCKET="$SOCK"
 export ATLAS_BROKER_KEYS_DIR="$KEYS"
+# WORM anchor path (D8) — the broker also defaults to this per-OS if unset.
+export ATLAS_AUDIT_ANCHOR_PATH="${ATLAS_AUDIT_ANCHOR_PATH:-$ANCHOR}"
+# The vault git repo the broker mutates (deployment-specific; overridable). The
+# broker is the sole protected-ref writer over this repo.
+export ATLAS_VAULT_REPO_DIR="${ATLAS_VAULT_REPO_DIR:-/var/lib/atlas/vault}"
 # ATLAS_TEST_MODE is intentionally NOT set here (D20): the production launcher never
 # enables the test signer. Test runs set it explicitly in the CI fixture environment.
 exec "$BIN" "$@"

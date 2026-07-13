@@ -1,0 +1,184 @@
+/**
+ * Broker key + config loading (D9 custody: per-identity `0700` key dirs).
+ *
+ * The production launcher (`provisioning/bin/broker-launcher.sh`) sets
+ * `ATLAS_BROKER_SOCKET` + `ATLAS_BROKER_KEYS_DIR` and, per D20, DOES NOT set
+ * `ATLAS_TEST_MODE`. This module reads the keys dir + env into a
+ * `BrokerServiceConfig`. Key files hold the `ed25519:` serialized form this
+ * package emits; the signer registry is `signers.json` (an array of §9.2 entries).
+ */
+import { createPublicKey } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { platform } from "node:os";
+import {
+  SignerRegistryEntrySchema,
+  type SignerRegistryEntry,
+} from "@atlas/contracts";
+import { parsePrivateKeyFlexible, parsePublicKeyFlexible, serializePublicKey } from "./crypto.js";
+import { TEST_SIGNER_ID } from "./authorize.js";
+import type { AttestationKey, BrokerServiceConfig } from "./service.js";
+import type { ProtectedRefs } from "./refs.js";
+
+/** The default audit-attestation signer id (§6/§9.2). */
+export const DEFAULT_ATTESTATION_SIGNER_ID = "atlas-audit-attestation-v1";
+
+/** The default enrolled-approver signer id (the `approval-verify.pub` identity). */
+export const DEFAULT_APPROVER_SIGNER_ID = "approval-verify";
+
+/**
+ * The op set an enrolled **signature** approver (`approval-verify`) may sign
+ * authorizations for. This is the registry-privileged set (security/broker
+ * contract §7) RESTRICTED to the `broker-signature` mechanism — it deliberately
+ * EXCLUDES `quarantine inspect` / `quarantine resolve`, which the contract
+ * authorizes via **`os-presence`** (trusted-CLI local presence + quarantine-AEAD
+ * custody, §7.4 lines), never via an Ed25519 signature. Granting a signature
+ * signer those ops would let an approval key authorize an operation the contract
+ * reserves for os-presence — so they are not in any signature signer's
+ * `permittedOps`. This matches the contract's §9.2 example `permittedOps`
+ * verbatim (nine ops, no quarantine). `git reject` is likewise excluded — it is
+ * shared, not privileged. Consumed as the default `permittedOps` when deriving
+ * the signer registry from provisioned key files (round-3 finding 1).
+ */
+export const SIGNATURE_AUTHORIZABLE_OPS = [
+  "db restore",
+  "git approve",
+  "git refresh",
+  "git rollback",
+  "graduation migrate",
+  "purge",
+  "source trust promote",
+  "source trust revoke",
+  "db backup --force-unblock",
+] as const;
+
+/** The provisioning-generated key-file names (Task 1.0 / `keys.acl.json`). */
+const PROVISIONED_FILES = {
+  approverPub: "approval-verify.pub",
+  attestationKey: "audit-attestation.key",
+  attestationPub: "audit-attestation.pub",
+  testApproverKey: "atlas-test-approver.key",
+} as const;
+
+/** A fixed enrollment timestamp for provisioning-derived registry entries. */
+const PROVISIONED_ENROLLED_AT = "2026-07-01T00:00:00.000Z";
+
+/** A non-empty PEM/`ed25519:` payload (skips the `touch`-seeded placeholders). */
+function readKeyFileIfPresent(path: string): string | null {
+  if (!existsSync(path)) return null;
+  const raw = readFileSync(path, "utf8").trim();
+  return raw.length === 0 ? null : raw;
+}
+
+/** The WORM anchor default path per OS (D8): outside the vault + repo. */
+export function defaultAnchorPath(): string {
+  return platform() === "darwin" ? "/usr/local/var/atlas/audit-anchor" : "/var/lib/atlas/audit-anchor";
+}
+
+/** The default protected-ref set (§3.1). */
+export const DEFAULT_PROTECTED_REFS: ProtectedRefs = {
+  canonical: "refs/heads/main",
+  audit: "refs/audit/runs",
+  trust: "refs/trust/ledger",
+};
+
+/**
+ * Load the signer registry. An explicit `<keysDir>/signers.json` (an array of
+ * §9.2 entries) wins when present; OTHERWISE the registry is DERIVED from the
+ * provisioning-generated key files (round-3 finding 1) so the broker runs
+ * against exactly what Task-1.0 provisioning installs — no separate registry
+ * file to keep in sync:
+ *   - `approval-verify.pub`      → the enrolled approver (registry-privileged ops);
+ *   - `audit-attestation.pub`    → the audit-attestation identity (no approval ops);
+ *   - `atlas-test-approver.key`  → the fixture signer (D20-gated at verify time).
+ * Placeholder (empty, `touch`-seeded) files are skipped.
+ */
+export function loadSignerRegistry(keysDir: string): SignerRegistryEntry[] {
+  const explicit = join(keysDir, "signers.json");
+  if (existsSync(explicit)) {
+    const raw = JSON.parse(readFileSync(explicit, "utf8")) as unknown[];
+    return raw.map((r) => SignerRegistryEntrySchema.parse(r));
+  }
+  return deriveSignerRegistryFromKeyFiles(keysDir);
+}
+
+/** Build the in-memory signer registry from provisioning-generated key files. */
+export function deriveSignerRegistryFromKeyFiles(keysDir: string): SignerRegistryEntry[] {
+  const entries: SignerRegistryEntry[] = [];
+
+  const attPub = readKeyFileIfPresent(join(keysDir, PROVISIONED_FILES.attestationPub));
+  if (attPub !== null) {
+    entries.push({
+      signerId: DEFAULT_ATTESTATION_SIGNER_ID,
+      publicKey: serializePublicKey(parsePublicKeyFlexible(attPub)),
+      permittedOps: [], // attestation signs the audit stream, never authorizations
+      status: "active",
+      enrolledAt: PROVISIONED_ENROLLED_AT,
+    });
+  }
+
+  const approverPub = readKeyFileIfPresent(join(keysDir, PROVISIONED_FILES.approverPub));
+  if (approverPub !== null) {
+    entries.push({
+      signerId: DEFAULT_APPROVER_SIGNER_ID,
+      publicKey: serializePublicKey(parsePublicKeyFlexible(approverPub)),
+      permittedOps: [...SIGNATURE_AUTHORIZABLE_OPS],
+      status: "active",
+      enrolledAt: PROVISIONED_ENROLLED_AT,
+    });
+  }
+
+  // The fixture signer is registered (so the D20 gate produces a precise
+  // `authz.signer_not_permitted`+`d20` refusal rather than `signer_unknown`),
+  // but the broker hard-rejects it outside ATLAS_TEST_MODE regardless.
+  const testKey = readKeyFileIfPresent(join(keysDir, PROVISIONED_FILES.testApproverKey));
+  if (testKey !== null) {
+    entries.push({
+      signerId: TEST_SIGNER_ID,
+      publicKey: serializePublicKey(createPublicKey(parsePrivateKeyFlexible(testKey))),
+      permittedOps: [...SIGNATURE_AUTHORIZABLE_OPS],
+      status: "active",
+      enrolledAt: PROVISIONED_ENROLLED_AT,
+    });
+  }
+
+  return entries;
+}
+
+/**
+ * Load the audit-attestation keypair from `<keysDir>/audit-attestation.key`
+ * (native `ed25519:` OR provisioned OpenSSL PEM).
+ */
+export function loadAttestationKey(keysDir: string, signerId: string): AttestationKey {
+  const path = join(keysDir, PROVISIONED_FILES.attestationKey);
+  const priv = parsePrivateKeyFlexible(readFileSync(path, "utf8"));
+  const pub = createPublicKey(priv);
+  return { signerId, privateKey: priv, publicKey: pub };
+}
+
+/**
+ * Assemble a `BrokerServiceConfig` from the environment (production path). Reads
+ * `ATLAS_BROKER_KEYS_DIR`, the vault repo dir, the anchor path, and
+ * `ATLAS_TEST_MODE` (D20). Missing required env is a hard error.
+ */
+export function loadBrokerConfigFromEnv(env: NodeJS.ProcessEnv = process.env): BrokerServiceConfig {
+  const keysDir = env.ATLAS_BROKER_KEYS_DIR;
+  if (keysDir === undefined) throw new Error("ATLAS_BROKER_KEYS_DIR is required");
+  const repoDir = env.ATLAS_VAULT_REPO_DIR;
+  if (repoDir === undefined) throw new Error("ATLAS_VAULT_REPO_DIR is required");
+  // Anchor path defaults to the D8 per-OS location; overridable for tests/non-standard installs.
+  const anchorPath = env.ATLAS_AUDIT_ANCHOR_PATH ?? defaultAnchorPath();
+
+  const signers = loadSignerRegistry(keysDir);
+  const attestation = loadAttestationKey(keysDir, DEFAULT_ATTESTATION_SIGNER_ID);
+
+  return {
+    repoDir,
+    refs: DEFAULT_PROTECTED_REFS,
+    anchorPath,
+    signers,
+    attestation,
+    // D20: fixture signer usable ONLY when the env explicitly opts into test mode.
+    testMode: env.ATLAS_TEST_MODE === "1",
+  };
+}
