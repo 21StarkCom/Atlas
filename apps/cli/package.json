@@ -5,6 +5,9 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "brain": "./dist/bin.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -15,7 +18,15 @@
     "build": "tsc -p tsconfig.json",
     "test": "vitest run --passWithNoTests"
   },
+  "dependencies": {
+    "@atlas/contracts": "workspace:*",
+    "yaml": "catalog:",
+    "zod": "catalog:"
+  },
   "devDependencies": {
+    "@atlas/testing": "workspace:*",
+    "@types/node": "catalog:",
+    "ajv": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
   }

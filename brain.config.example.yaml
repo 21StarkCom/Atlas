@@ -1,0 +1,48 @@
+# Atlas `brain.config.yaml` — example (Task 1.2 / #18).
+# Single owner of every threshold/path the plan names. Copy to `brain.config.yaml`
+# and adjust paths. Every `ATLAS_<SECTION>_<KEY>` env var overrides the matching key
+# (e.g. ATLAS_INDEXING_DIMENSIONS=768, ATLAS_SQLITE_LEDGER_BACKUP_KEEP=20).
+
+vault:
+  path: ./vault
+
+sqlite:
+  path: ./.atlas/atlas.db
+  ledger_backup:
+    dir: ./.atlas/backups
+    keep: 10 # keep-N most-recent + keep-forever-latest
+  ledger_retention: keep-forever
+  raw_payload_store: false # opt-in AEAD raw-payload store (default off)
+
+lancedb:
+  dir: ./.atlas/lancedb
+
+indexing:
+  chunker_version: 1 # D4
+  embedding_model: gemini-embedding-001
+  dimensions: 768 # D7 — changing this opens a new index generation
+
+git:
+  worktrees_path: ./.atlas/worktrees
+  auto_commit_risk_levels: [1, 2] # Tier-1/2 auto-integrate; Tier-3 → review
+  audit_anchor_path: /usr/local/var/atlas/audit-anchor # D8 (macOS; Linux: /var/lib/atlas/audit-anchor)
+
+models:
+  generation_model: gemini-3-5-flash
+  embedding_model: gemini-embedding-001
+
+policies:
+  tier2_min_confidence: 0.8 # plan §2.5 Tier-2 auto-commit thresholds
+  tier2_max_changed_lines: 50
+  tier2_max_sections: 3
+  default_sensitivity: internal
+  require_sources_for_synthesis: true
+
+logs:
+  dir: ./.atlas/logs
+  max_files: 10
+  max_bytes: 10485760 # 10 MiB
+
+broker:
+  socket_path: /usr/local/var/run/atlas/broker.sock # D10 (macOS; Linux: /var/run/atlas/broker.sock)
+  egress_socket_path: /usr/local/var/run/atlas/egress.sock # D10
