@@ -1,0 +1,45 @@
+{
+  "case": "crash-window",
+  "description": "A crash left one note migrated (on-disk matches its recorded postImage) and one note pending (on-disk still equals its recorded preImage — the mutation was never applied). Resume verifies each note against the checkpoint by sha256: it skips the proven-migrated note and APPLIES the still-legacy pending note (it does not skip an unapplied mutation), converging to the same id map a fresh run produces.",
+  "bootstrapTimestamp": "2026-07-12T00:00:00Z",
+  "resume": {
+    "preCheckpoint": [
+      { "path": "Done.md", "newId": "note-done-note", "status": "migrated", "postImageSha256": "711e5e561c425c127d55fc958306af2f33cfce34e8352e4b9c773363a7a65662" },
+      { "path": "Pending.md", "newId": "note-pending-note", "status": "pending", "preImageSha256": "3e851084168d2308d62092e051cb8d32cd533e0f7313cd1895160ca3312aff5d", "postImageSha256": null }
+    ],
+    "rerunMode": "applied",
+    "skipped": ["Done.md"],
+    "applied": ["Pending.md"],
+    "reapplied": [],
+    "idMap": { "Done.md": "note-done-note", "Pending.md": "note-pending-note" },
+    "finalStatuses": { "Done.md": "migrated", "Pending.md": "migrated" },
+    "verifiedPostImage": { "Done.md": true },
+    "verifiedPreImage": { "Pending.md": true }
+  },
+  "migrate": {
+    "command": "graduation migrate",
+    "mode": "applied",
+    "migrationRunId": "01J9ZD0000000000000000000A",
+    "idMap": { "Done.md": "note-done-note", "Pending.md": "note-pending-note" },
+    "notes": [
+      {
+        "path": "Pending.md",
+        "oldId": null,
+        "newId": "note-pending-note",
+        "type": { "value": "note", "source": "default" },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "note-pending-note",
+          "type": "note",
+          "schema_version": 1,
+          "title": "Pending Note",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z"
+        },
+        "linkRewrites": []
+      }
+    ],
+    "quarantined": []
+  }
+}

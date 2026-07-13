@@ -1,0 +1,72 @@
+{
+  "case": "guards",
+  "description": "A future/unsupported schema_version is refused (never downgraded or silently rewritten); unknown frontmatter and provenance fields are preserved verbatim alongside the injected reader-required frontmatter (id/type/schema_version/title/created/updated). An explicit `type` outside the managed set — an unknown value (Alien.md: `type: alien`) or a malformed non-string value (MalformedType.md: `type: 42`) — is REFUSED under `unknown-type` (bootstrap-migration.md §3): migration owns the `type` key and can neither overwrite the asserted value nor guess, so the note is never mutated.",
+  "bootstrapTimestamp": "2026-07-12T00:00:00Z",
+  "audit": {
+    "categories": {
+      "missing-id": ["Alien.md", "MalformedType.md", "Provenance.md"],
+      "missing-type": ["Provenance.md"],
+      "missing-schema-version": ["Alien.md", "MalformedType.md", "Provenance.md"],
+      "ambiguous-alias": [],
+      "duplicate-identity": [],
+      "incompatible-link": [],
+      "detected-credential": [],
+      "unknown-type": ["Alien.md", "MalformedType.md"],
+      "unsupported-schema-version": ["FromFuture.md"]
+    },
+    "treeHashUnchanged": true
+  },
+  "migrate": {
+    "command": "graduation migrate",
+    "mode": "applied",
+    "migrationRunId": "01J9ZG0000000000000000000A",
+    "idMap": {
+      "Provenance.md": "note-provenance-note"
+    },
+    "notes": [
+      {
+        "path": "Provenance.md",
+        "oldId": null,
+        "newId": "note-provenance-note",
+        "type": { "value": "note", "source": "default" },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "note-provenance-note",
+          "type": "note",
+          "schema_version": 1,
+          "title": "Provenance Note",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z"
+        },
+        "preservedFrontmatter": ["custom_field", "source_url", "tags"],
+        "linkRewrites": []
+      }
+    ],
+    "refused": [
+      {
+        "path": "Alien.md",
+        "assertedType": "alien",
+        "category": "unknown-type",
+        "outcome": "refused",
+        "mutated": false
+      },
+      {
+        "path": "FromFuture.md",
+        "assertedSchemaVersion": 99,
+        "supportedMax": 1,
+        "category": "unsupported-schema-version",
+        "outcome": "refused",
+        "mutated": false
+      },
+      {
+        "path": "MalformedType.md",
+        "assertedType": "42",
+        "category": "unknown-type",
+        "outcome": "refused",
+        "mutated": false
+      }
+    ],
+    "quarantined": []
+  }
+}

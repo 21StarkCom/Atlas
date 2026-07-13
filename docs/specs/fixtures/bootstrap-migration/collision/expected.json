@@ -1,0 +1,68 @@
+{
+  "case": "collision",
+  "description": "Distinct notes deriving the same id get deterministic numeric suffixes by sorted path; notes asserting the SAME explicit id are a genuine duplicate identity and are quarantined, never silently suffixed.",
+  "bootstrapTimestamp": "2026-07-12T00:00:00Z",
+  "audit": {
+    "categories": {
+      "missing-id": ["AtlasOne.md", "AtlasTwo.md"],
+      "missing-type": ["AtlasOne.md", "AtlasTwo.md"],
+      "missing-schema-version": ["AtlasOne.md", "AtlasTwo.md", "ExplicitA.md", "ExplicitB.md"],
+      "ambiguous-alias": [],
+      "duplicate-identity": ["ExplicitA.md", "ExplicitB.md"],
+      "incompatible-link": [],
+      "detected-credential": [],
+      "unsupported-schema-version": []
+    },
+    "treeHashUnchanged": true
+  },
+  "migrate": {
+    "command": "graduation migrate",
+    "mode": "applied",
+    "migrationRunId": "01J9ZC0000000000000000000A",
+    "idMap": {
+      "AtlasOne.md": "note-atlas",
+      "AtlasTwo.md": "note-atlas-2"
+    },
+    "notes": [
+      {
+        "path": "AtlasOne.md",
+        "oldId": null,
+        "newId": "note-atlas",
+        "type": { "value": "note", "source": "default" },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "note-atlas",
+          "type": "note",
+          "schema_version": 1,
+          "title": "Atlas",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z"
+        },
+        "linkRewrites": []
+      },
+      {
+        "path": "AtlasTwo.md",
+        "oldId": null,
+        "newId": "note-atlas-2",
+        "type": { "value": "note", "source": "default" },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "collision": { "derivedId": "note-atlas", "disambiguatedTo": "note-atlas-2", "rule": "numeric-suffix-by-sorted-path" },
+        "initializedFrontmatter": {
+          "id": "note-atlas-2",
+          "type": "note",
+          "schema_version": 1,
+          "title": "Atlas",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z"
+        },
+        "linkRewrites": []
+      }
+    ],
+    "quarantined": [
+      { "path": "ExplicitA.md", "assertedId": "shared-x", "category": "duplicate-identity", "peers": ["ExplicitB.md"] },
+      { "path": "ExplicitB.md", "assertedId": "shared-x", "category": "duplicate-identity", "peers": ["ExplicitA.md"] }
+    ]
+  }
+}

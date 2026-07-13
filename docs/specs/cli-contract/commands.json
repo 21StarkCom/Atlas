@@ -160,7 +160,7 @@
       "phase": 5,
       "idempotency": "none",
       "privilege": "shared",
-      "implemented": false
+      "implemented": true
     },
     {
       "name": "graduation migrate",
@@ -168,7 +168,7 @@
       "phase": 5,
       "idempotency": "key-accepting",
       "privilege": "privileged",
-      "implemented": false
+      "implemented": true
     },
     {
       "name": "graduation scan",
@@ -176,7 +176,7 @@
       "phase": 5,
       "idempotency": "none",
       "privilege": "shared",
-      "implemented": false
+      "implemented": true
     },
     {
       "name": "index rebuild",
@@ -304,7 +304,7 @@
       "phase": 5,
       "idempotency": "none",
       "privilege": "privileged",
-      "implemented": false
+      "implemented": true
     },
     {
       "name": "quarantine resolve",
@@ -312,7 +312,7 @@
       "phase": 5,
       "idempotency": "key-accepting",
       "privilege": "privileged",
-      "implemented": false
+      "implemented": true
     },
     {
       "name": "query",

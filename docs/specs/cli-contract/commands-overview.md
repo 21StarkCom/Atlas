@@ -52,8 +52,8 @@ Registry version: **1** · Commands: **49**
 | 4 | `source trust promote` | key-accepting | privileged | no | `docs/specs/cli-contract/source-trust-promote.schema.json` |
 | 4 | `source trust revoke` | key-accepting | privileged | no | `docs/specs/cli-contract/source-trust-revoke.schema.json` |
 | 4 | `validate` | none | shared | no | `docs/specs/cli-contract/validate.schema.json` |
-| 5 | `graduation audit` | none | shared | no | `docs/specs/cli-contract/graduation-audit.schema.json` |
-| 5 | `graduation migrate` | key-accepting | privileged | no | `docs/specs/cli-contract/graduation-migrate.schema.json` |
-| 5 | `graduation scan` | none | shared | no | `docs/specs/cli-contract/graduation-scan.schema.json` |
-| 5 | `quarantine inspect` | none | privileged | no | `docs/specs/cli-contract/quarantine-inspect.schema.json` |
-| 5 | `quarantine resolve` | key-accepting | privileged | no | `docs/specs/cli-contract/quarantine-resolve.schema.json` |
+| 5 | `graduation audit` | none | shared | yes | `docs/specs/cli-contract/graduation-audit.schema.json` |
+| 5 | `graduation migrate` | key-accepting | privileged | yes | `docs/specs/cli-contract/graduation-migrate.schema.json` |
+| 5 | `graduation scan` | none | shared | yes | `docs/specs/cli-contract/graduation-scan.schema.json` |
+| 5 | `quarantine inspect` | none | privileged | yes | `docs/specs/cli-contract/quarantine-inspect.schema.json` |
+| 5 | `quarantine resolve` | key-accepting | privileged | yes | `docs/specs/cli-contract/quarantine-resolve.schema.json` |

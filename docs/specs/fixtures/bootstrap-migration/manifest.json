@@ -1,0 +1,65 @@
+{
+  "$comment": "Executable bootstrap-migration fixtures — the machine-consumable contract for Task 5.3's suite (docs/specs/bootstrap-migration.md). Each case is an input vault tree plus an expected-output JSON. The suite runs the migration over `input/` and asserts the result equals `expected.json` (audit categories, id map, per-note type inference, link rewrites, quarantine/refusal, checkpoint resume). Keep cases sorted by id.",
+  "version": 1,
+  "supportedSchemaVersion": 1,
+  "$comment_bootstrapTimestamp": "Deterministic fallback for created/updated when a note's path has no git history in the copy (the fixtures are plain dirs, so every note uses this fallback). Config-pinned, never wall-clock (bootstrap-migration.md §1/§6).",
+  "bootstrapTimestamp": "2026-07-12T00:00:00Z",
+  "cases": [
+    {
+      "id": "basic",
+      "input": "basic/input",
+      "output": "basic/output",
+      "expected": "basic/expected.json",
+      "exercises": ["type-inference", "id-derivation", "schema-version-init", "required-field-init", "link-rewrite", "unresolved-link-preservation", "incompatible-link-authorized-release", "audit-categories", "byte-exact-output-artifacts", "reader-required-frontmatter"]
+    },
+    {
+      "id": "collision",
+      "input": "collision/input",
+      "expected": "collision/expected.json",
+      "exercises": ["id-collision-numeric-suffix", "duplicate-identity-quarantine"]
+    },
+    {
+      "id": "crash-after-rename",
+      "input": "crash-after-rename/input",
+      "expected": "crash-after-rename/expected.json",
+      "exercises": ["checkpoint-crash-after-rename", "resume-promotes-pending-post-match", "both-hashes-persisted-before-rename"]
+    },
+    {
+      "id": "crash-window",
+      "input": "crash-window/input",
+      "expected": "crash-window/expected.json",
+      "exercises": ["checkpoint-crash-window", "resume-applies-pending", "pre-image-consistency"]
+    },
+    {
+      "id": "explicit-collision",
+      "input": "explicit-collision/input",
+      "expected": "explicit-collision/expected.json",
+      "exercises": ["explicit-id-reservation-before-derivation", "derived-sorts-before-and-after-explicit-owner"]
+    },
+    {
+      "id": "guards",
+      "input": "guards/input",
+      "output": "guards/output",
+      "expected": "guards/expected.json",
+      "exercises": ["unsupported-schema-version-refusal", "unknown-type-refusal", "malformed-type-refusal", "unknown-frontmatter-preservation", "required-field-init", "byte-exact-output-artifacts", "reader-required-frontmatter"]
+    },
+    {
+      "id": "idempotent",
+      "input": "idempotent/input",
+      "expected": "idempotent/expected.json",
+      "exercises": ["checkpoint-resume", "idempotent-rerun", "pre-post-image-verification"]
+    },
+    {
+      "id": "rollback",
+      "input": "rollback/input",
+      "expected": "rollback/expected.json",
+      "exercises": ["byte-exact-rollback", "reverse-sorted-path-order", "idempotent-rollback"]
+    },
+    {
+      "id": "rollback-conflict",
+      "input": "rollback-conflict/input",
+      "expected": "rollback-conflict/expected.json",
+      "exercises": ["rollback-current-byte-verification", "conflicting-edit-fails-closed", "clean-note-rolls-back"]
+    }
+  ]
+}
