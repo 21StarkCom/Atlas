@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/note-related.schema.json",
+  "title": "brain note related — --json success output",
+  "description": "Paginated related-notes traversal from a seed note over the link/relationship graph. Read-only; deterministic ordering (by distance, then note id) so pagination is stable. Best-effort under concurrency.",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["command", "noteId", "related", "pagination"],
+  "properties": {
+    "command": { "const": "note related" },
+    "noteId": { "type": "string", "minLength": 1 },
+    "related": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["noteId", "via", "distance"],
+        "properties": {
+          "noteId": { "type": "string", "minLength": 1 },
+          "via": { "enum": ["link", "backlink", "relationship"] },
+          "predicate": { "type": "string", "description": "Relationship predicate when via=relationship." },
+          "distance": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "pagination": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "required": ["limit", "offset", "total", "hasMore"],
+      "properties": {
+        "limit": { "type": "integer", "minimum": 1, "maximum": 500 },
+        "offset": { "type": "integer", "minimum": 0 },
+        "total": { "type": "integer", "minimum": 0, "description": "Live (non-snapshot) total related-note count within --depth; best-effort under concurrency." },
+        "hasMore": { "type": "boolean" }
+      }
+    }
+  },
+  "examples": [
+    {
+      "command": "note related",
+      "noteId": "concept-atlas",
+      "related": [
+        { "noteId": "concept-vault", "via": "link", "distance": 1 },
+        { "noteId": "concept-broker", "via": "relationship", "predicate": "depends-on", "distance": 1 }
+      ],
+      "pagination": { "limit": 50, "offset": 0, "total": 2, "hasMore": false }
+    }
+  ],
+  "x-atlas-contract": {
+    "command": "note related",
+    "phase": 2,
+    "privilege": "shared",
+    "idempotency": "none",
+    "executionClass": "read",
+    "summary": "Paginated related-notes traversal.",
+    "ordering": { "sortKey": "distance", "direction": "asc", "tieBreaker": "noteId", "note": "stable total order (distance, noteId); noteId is unique so ties are fully resolved, making offset pagination deterministic." },
+    "args": [{ "name": "<id-or-slug>", "required": true, "description": "The seed note." }],
+    "flags": [
+      { "name": "--limit <n>", "default": 50, "constraint": "1..500" },
+      { "name": "--offset <n>", "default": 0, "constraint": ">=0" },
+      { "name": "--depth <n>", "default": 1, "constraint": ">=1" }
+    ],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "sideEffects": [],
+    "prohibitedEffects": ["no vault/projection/ledger mutation", "no git or audit-ref write"],
+    "locks": [{ "scope": "shared", "mode": "shared" }],
+    "exitCodes": [0, 1, 2, 4, 5],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "missing seed or out-of-range --limit/--offset/--depth" },
+      { "code": "note-not-found", "exit": 1, "when": "the seed note does not exist" },
+      { "code": "ambiguous-note", "exit": 1, "when": "the seed id/slug matches more than one note" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}

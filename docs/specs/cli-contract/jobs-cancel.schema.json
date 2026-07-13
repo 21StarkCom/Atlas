@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/jobs-cancel.schema.json",
+  "title": "brain jobs cancel — --json success output",
+  "description": "Cancel pending/running jobs (terminal `cancelled`) per jobs-contract.md. A running job is cooperatively signalled and reconciled on its next checkpoint. Selectors are the SSOT `[<jobId> | --all]` (mutually exclusive); a bare invocation with NO selector exits 5. Bulk selection is deterministic (ordered by (next_run_at, jobId)). Output is the canonical batch object `{ items, aggregate }`.",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["command", "items", "aggregate"],
+  "$defs": {
+    "errorEnvelope": {
+      "type": "object",
+      "description": "The complete CLI error envelope (error-envelope.schema.json) — used per-item for a failed job and at the top level for a whole-batch failure. Kept as a local $def (not a cross-file $ref) so each schema compiles standalone under the harness's per-file Ajv.",
+      "unevaluatedProperties": false,
+      "required": ["code", "message", "retryable"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1 },
+        "message": { "type": "string" },
+        "hint": { "type": "string" },
+        "details": { "type": "object" },
+        "retryable": { "type": "boolean" },
+        "retryAfterMs": { "type": "integer", "minimum": 0 },
+        "jobId": { "type": "string", "minLength": 1 }
+      }
+    }
+  },
+  "properties": {
+    "command": { "const": "jobs cancel" },
+    "items": {
+      "type": "array",
+      "description": "Discriminated result-OR-error per selected job: a result carries an outcome and never an error; a failed item carries outcome=failed plus the standard error envelope.",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A non-failed result. No `error` may accompany it.",
+            "unevaluatedProperties": false,
+            "required": ["jobId", "outcome"],
+            "properties": {
+              "jobId": { "type": "string", "minLength": 1 },
+              "outcome": { "enum": ["cancelled", "cancel-requested", "already-terminal", "not-found", "skipped:state-changed"] }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A per-item failure: outcome=failed with the standard error envelope required.",
+            "unevaluatedProperties": false,
+            "required": ["jobId", "outcome", "error"],
+            "properties": {
+              "jobId": { "type": "string", "minLength": 1 },
+              "outcome": { "const": "failed" },
+              "error": { "$ref": "#/$defs/errorEnvelope" }
+            }
+          }
+        ]
+      }
+    },
+    "error": {
+      "$ref": "#/$defs/errorEnvelope",
+      "description": "Optional whole-batch failure envelope. Present only for a batch-level failure; per-item failures live in items[]."
+    },
+    "aggregate": {
+      "type": "object",
+      "description": "Batch roll-up. exitCode by the deterministic precedence 4 ⊐ 2 ⊐ 1 ⊐ 7 ⊐ 6 ⊐ 5; cancelled/cancel-requested/already-terminal/not-found do not raise it above 0.",
+      "unevaluatedProperties": false,
+      "required": ["exitCode", "succeeded", "failed", "skipped", "actionRequired"],
+      "properties": {
+        "exitCode": { "type": "integer", "enum": [0, 1, 2, 4, 5, 6, 7] },
+        "succeeded": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "skipped": { "type": "integer", "minimum": 0 },
+        "actionRequired": { "type": "integer", "minimum": 0 }
+      }
+    }
+  },
+  "examples": [
+    {
+      "command": "jobs cancel",
+      "items": [{ "jobId": "job-1", "outcome": "cancelled" }],
+      "aggregate": { "exitCode": 0, "succeeded": 1, "failed": 0, "skipped": 0, "actionRequired": 0 }
+    },
+    {
+      "command": "jobs cancel",
+      "items": [{ "jobId": "job-2", "outcome": "cancel-requested" }],
+      "aggregate": { "exitCode": 0, "succeeded": 1, "failed": 0, "skipped": 0, "actionRequired": 0 }
+    },
+    {
+      "command": "jobs cancel",
+      "items": [{ "jobId": "job-3", "outcome": "failed", "error": { "code": "internal", "message": "cancel signal write failed", "retryable": false } }],
+      "aggregate": { "exitCode": 4, "succeeded": 0, "failed": 1, "skipped": 0, "actionRequired": 0 }
+    }
+  ],
+  "x-atlas-contract": {
+    "command": "jobs cancel",
+    "phase": 2,
+    "privilege": "shared",
+    "idempotency": "key-accepting",
+    "executionClass": "mutating",
+    "summary": "Cancel pending/running jobs.",
+    "args": [{ "name": "<jobId>", "required": false, "description": "Cancel a single job; mutually exclusive with --all." }],
+    "flags": [
+      { "name": "--all", "description": "Cancel every job in `pending`/`running`." },
+      { "name": "--idempotency-key <key>" }
+    ],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "batchProtocol": {
+      "envelope": "{ items, aggregate }",
+      "ordering": "(next_run_at, jobId)",
+      "selectors": "[<jobId> | --all] mutually exclusive; bare (neither) ⇒ exit 5",
+      "exitPrecedence": ["4 internal", "2 config/vault/lock", "1 validation", "7 provider-retryable", "6 action-required", "5 usage"]
+    },
+    "sideEffects": ["transitions selected jobs to cancelled (or requests cooperative cancel for running jobs)"],
+    "prohibitedEffects": ["bare invocation (no selector) ⇒ exit 5 (never silently cancels all)"],
+    "locks": [{ "scope": "shared", "mode": "shared" }],
+    "exitCodes": [0, 2, 4, 5],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "no selector given, or <jobId> and --all both given" },
+      { "code": "config-invalid", "exit": 2, "when": "brain.config.yaml fails schema validation" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}

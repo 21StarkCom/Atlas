@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/note-history.schema.json",
+  "title": "brain note history — --json success output",
+  "description": "Paginated change history for a note, drawn from the audit/ledger + git-ref stream (allowlisted metadata only — identifiers, hashes, classifications; never raw content). Read-only.",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["command", "noteId", "events", "pagination"],
+  "properties": {
+    "command": { "const": "note history" },
+    "noteId": { "type": "string", "minLength": 1 },
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["seq", "at", "kind"],
+        "properties": {
+          "seq": { "type": "integer", "minimum": 0, "description": "Monotonic audit seq." },
+          "at": { "type": "string", "description": "RFC-3339 timestamp." },
+          "kind": { "type": "string", "description": "Audit event kind (closed set, §2.5)." },
+          "runId": { "type": "string" },
+          "commit": { "type": "string", "description": "Canonical commit hash, if applicable." }
+        }
+      }
+    },
+    "pagination": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "required": ["limit", "offset", "total", "hasMore"],
+      "properties": {
+        "limit": { "type": "integer", "minimum": 1, "maximum": 500 },
+        "offset": { "type": "integer", "minimum": 0 },
+        "total": { "type": "integer", "minimum": 0, "description": "Live (non-snapshot) total event count for the note; best-effort under concurrency." },
+        "hasMore": { "type": "boolean" }
+      }
+    }
+  },
+  "examples": [
+    {
+      "command": "note history",
+      "noteId": "concept-atlas",
+      "events": [
+        { "seq": 42, "at": "2026-07-13T10:00:00.000Z", "kind": "run.integrated", "runId": "01J9Z8Q0000000000000000000", "commit": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0" }
+      ],
+      "pagination": { "limit": 50, "offset": 0, "total": 1, "hasMore": false }
+    }
+  ],
+  "x-atlas-contract": {
+    "command": "note history",
+    "phase": 2,
+    "privilege": "shared",
+    "idempotency": "none",
+    "executionClass": "read",
+    "summary": "Paginated note change history.",
+    "ordering": { "sortKey": "seq", "direction": "desc", "tieBreaker": "seq", "note": "seq is the monotonic unique audit sequence, so it is its own tie-breaker and offset pagination is fully stable." },
+    "args": [{ "name": "<id-or-slug>", "required": true }],
+    "flags": [
+      { "name": "--limit <n>", "default": 50, "constraint": "1..500" },
+      { "name": "--offset <n>", "default": 0, "constraint": ">=0" }
+    ],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "sideEffects": [],
+    "prohibitedEffects": ["no mutation", "never surfaces raw payloads — allowlisted metadata only"],
+    "locks": [{ "scope": "shared", "mode": "shared" }],
+    "exitCodes": [0, 1, 2, 4, 5],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "missing seed or out-of-range pagination" },
+      { "code": "note-not-found", "exit": 1, "when": "the note does not exist" },
+      { "code": "ambiguous-note", "exit": 1, "when": "the id/slug matches more than one note" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}
