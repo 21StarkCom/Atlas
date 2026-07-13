@@ -24,9 +24,12 @@ jobs:
           node-version: 26
           cache: pnpm
 
-      # NOTE: the host-provisioning step (`sudo provisioning/ci/setup.sh` +
-      # ATLAS_PROVISIONED=1) is added by Task 1.0 — see the implementation plan.
-      # Phase 0 has no provisioning dependency.
+      # Host provisioning (Task 1.0 / #16): create the two runtime identities, the
+      # agent UID, atlas-git group, per-identity keys, WORM anchor, sockets, install
+      # dir + sudoers drop-in. Both runners have passwordless sudo. CI always
+      # provisions, so ATLAS_PROVISIONED-gated suites never skip here.
+      - name: Provision host
+        run: sudo -E provisioning/ci/setup.sh
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -36,6 +39,8 @@ jobs:
 
       - name: Test
         run: pnpm -r test
+        env:
+          ATLAS_PROVISIONED: "1"
 
       - name: CLI-contract determinism (--check clean)
         run: node tools/gen-cli-contract.ts --check
