@@ -582,9 +582,16 @@ function checkQuarantineSecurity(ctx: RunContext): Check {
  * loud at startup" the contract requires. Never fatal by itself beyond the aggregate
  * action-required exit.
  */
-async function checkSandboxCapability(): Promise<Check> {
+async function checkSandboxCapability(ctx: RunContext): Promise<Check> {
   const id = "sandbox-capability";
   const title = "Sandbox capability probe";
+  // An unsupported sandbox means untrusted input cannot be parsed safely — a true signal.
+  // It is BLOCKING (action-required) on a host required to sandbox, and a visible-but-non-
+  // blocking DEGRADED warning otherwise, because Linux sandbox hardening (cgroup delegation
+  // etc.) is an explicitly-deferred gap (#5 / PR #72). Set `ATLAS_SANDBOX_REQUIRE=1` to
+  // enforce (production / any host that must isolate before parsing untrusted sources).
+  const strict = ctx.env.ATLAS_SANDBOX_REQUIRE === "1";
+  const unsupportedStatus = strict ? "action-required" : "degraded";
   try {
     const r = await probeSandbox();
     if (r.supported) {
@@ -596,11 +603,13 @@ async function checkSandboxCapability(): Promise<Check> {
     return {
       id,
       title,
-      status: "action-required",
-      detail: `host ${r.host} cannot parse untrusted input safely — the sandbox refuses to launch. Missing: ${missing.join("; ")}`,
+      status: unsupportedStatus,
+      detail:
+        `host ${r.host} cannot parse untrusted input safely — the sandbox refuses to launch. Missing: ${missing.join("; ")}` +
+        (strict ? "" : " (non-blocking: set ATLAS_SANDBOX_REQUIRE=1 to enforce)"),
     };
   } catch (e) {
-    return { id, title, status: "action-required", detail: `sandbox probe failed: ${e instanceof Error ? e.message : String(e)}` };
+    return { id, title, status: unsupportedStatus, detail: `sandbox probe failed: ${e instanceof Error ? e.message : String(e)}` };
   }
 }
 
@@ -613,7 +622,7 @@ async function doctor(ctx: RunContext): Promise<number> {
   const anchor = await checkAuditAnchor(ctx);
   const provisioning = checkProvisioning(ctx);
   const quarantine = checkQuarantineSecurity(ctx);
-  const sandbox = await checkSandboxCapability();
+  const sandbox = await checkSandboxCapability(ctx);
   const encrypted = checkEncryptedVolume(ctx);
 
   let reclaimedLocks: { scope: string; holderPid: number }[] | undefined;
