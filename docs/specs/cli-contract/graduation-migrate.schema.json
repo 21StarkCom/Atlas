@@ -1,0 +1,311 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/graduation-migrate.schema.json",
+  "title": "brain graduation migrate [--apply | --rollback] [--export-challenge | --authorization <path>] — --json success output",
+  "description": "Privileged, deterministic, review-gated bootstrap migration of the graduation copy per bootstrap-migration.md: assign stable ids, infer type by the contract precedence, initialize schema_version 1, preserve/rewrite links, quarantine identity conflicts, refuse unsupported schema_version + unknown/malformed explicit type. Per-note checkpoints (with BOTH pre AND post images persisted before the atomic rename) make it idempotent + resumable; --rollback reverts via those checkpoints. Non-mutating preview by default. BOTH mutating modes (--apply and --rollback) are Tier-3 review-gated and authorized by the same broker op (graduation migrate, security-broker-contract.md §7.4/§7.5) via THREE distinct flows: (1) an interactive OS-presence assertion bound to the challenge in-process, (2) the --export-challenge → sign → --authorization out-of-band flow, or (3) a supplied --authorization; --yes never authorizes. --apply is a forward graduate binding intendedEffect{fromGeneration,toGeneration,migrationPlanDigest}; --rollback is the SAME op in the REVERSE direction — a graduate whose fromGeneration is the current (migrated) generation, toGeneration is the pre-migration generation, and migrationPlanDigest is the reversal plan digest (the broker SSOT's GraduateEffect, no rollback-specific fields). A stale rollback whose current generation no longer equals the challenge fromGeneration is rejected authz.generation_mismatch; a drifted reversal plan authz.migration_plan_mismatch; a replayed authorization authz.nonce_replayed. Exit 6 only when presence is unavailable/declined (and no --authorization) or a challenge is exported with --export-challenge (which emits an AuthorizationChallenge instead of this object). Runs under the vault-maintenance lock, agent-branch-only, never on main-vault.",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["command", "mode", "migrationRunId", "notes", "quarantined", "idMap"],
+  "properties": {
+    "command": { "const": "graduation migrate" },
+    "mode": { "enum": ["preview", "applied", "rolled-back"], "description": "preview ⇒ no mutation, no audit-ref event; applied ⇒ broker-authorized mutation; rolled-back ⇒ per-note checkpoint reversal." },
+    "migrationRunId": { "type": "string", "minLength": 1, "description": "ULID identifying this bootstrap run (checkpoint key)." },
+    "notes": {
+      "type": "array",
+      "description": "Per-note migration outcomes (bootstrap-migration.md §9 shape).",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["path", "newId", "type", "schemaVersion", "status"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "oldId": { "type": ["string", "null"] },
+          "newId": { "type": "string", "minLength": 1 },
+          "type": {
+            "type": "object",
+            "unevaluatedProperties": false,
+            "required": ["value", "source"],
+            "properties": {
+              "value": { "enum": ["note", "concept", "person", "source", "project"] },
+              "source": { "enum": ["frontmatter", "folder", "filename", "default"] }
+            }
+          },
+          "schemaVersion": { "const": 1 },
+          "status": { "enum": ["pending", "migrated", "quarantined", "refused", "failed"] },
+          "linkRewrites": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "unevaluatedProperties": false,
+              "required": ["from", "to", "resolution"],
+              "properties": {
+                "from": { "type": "string", "minLength": 1 },
+                "to": { "type": "string", "minLength": 1 },
+                "targetId": { "type": ["string", "null"] },
+                "resolution": { "enum": ["rewritten", "preserved-unresolved", "preserved-ambiguous"] }
+              }
+            }
+          },
+          "collision": {
+            "type": "object",
+            "unevaluatedProperties": false,
+            "required": ["derivedId", "disambiguatedTo", "rule"],
+            "properties": {
+              "derivedId": { "type": "string", "minLength": 1 },
+              "disambiguatedTo": { "type": "string", "minLength": 1 },
+              "rule": { "const": "numeric-suffix-by-sorted-path" }
+            }
+          },
+          "preservedFrontmatter": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "initializedFrontmatter": {
+            "type": "object",
+            "description": "The managed frontmatter migration deterministically writes so the migrated note satisfies the canonical reader's required set (apps/cli vault frontmatter schema): id, type, schema_version, title, created, updated. created/updated come from the copy's git history for the path, deterministically falling back to the config bootstrapTimestamp when the path has no history (§1: a pure function of input vault + config — no wall-clock).",
+            "unevaluatedProperties": false,
+            "required": ["id", "type", "schema_version", "title", "created", "updated"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "type": { "type": "string", "minLength": 1 },
+              "schema_version": { "const": 1 },
+              "title": { "type": "string", "minLength": 1 },
+              "created": { "type": "string", "minLength": 1 },
+              "updated": { "type": "string", "minLength": 1 }
+            }
+          },
+          "released": {
+            "type": "object",
+            "description": "Present when an incompatible-link note migrated because an operator authorized its release as-is (link preserved verbatim as prose).",
+            "unevaluatedProperties": false,
+            "required": ["category", "opaqueId", "resolution"],
+            "properties": {
+              "category": { "const": "incompatible-link" },
+              "opaqueId": { "type": "string", "minLength": 1 },
+              "resolution": { "const": "release" }
+            }
+          }
+        }
+      }
+    },
+    "quarantined": {
+      "type": "array",
+      "description": "Notes routed to quarantine (identity/alias/link conflicts); resolved with quarantine inspect|resolve.",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["path", "category"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "category": { "enum": ["ambiguous-alias", "duplicate-identity", "incompatible-link", "detected-credential"] },
+          "assertedId": { "type": "string" },
+          "peers": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+          "opaqueId": { "type": "string" }
+        }
+      }
+    },
+    "refused": {
+      "type": "array",
+      "description": "Notes refused (never mutated): an unsupported schema_version, or an explicit `type` outside the managed set (unknown-type — bootstrap-migration.md §3, since migration owns the `type` key it can neither overwrite the asserted value nor guess).",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["path", "category", "outcome", "mutated"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "category": { "enum": ["unsupported-schema-version", "unknown-type"] },
+          "assertedSchemaVersion": { "type": "integer" },
+          "supportedMax": { "type": "integer" },
+          "assertedType": { "type": "string", "description": "The unmanaged explicit type value that triggered an unknown-type refusal (serialized as a string)." },
+          "outcome": { "const": "refused" },
+          "mutated": { "const": false }
+        }
+      }
+    },
+    "idMap": {
+      "type": "object",
+      "description": "{ repo-relative path → assigned id } for every migrated note.",
+      "additionalProperties": { "type": "string", "minLength": 1 }
+    },
+    "rolledBack": {
+      "type": "array",
+      "description": "Present in mode=rolled-back: per-note reversal outcomes (reverse sorted-path order), each restoring the checkpoint pre-image ONLY after the note's current on-disk bytes are verified to still hash to the recorded postImageSha256 (a conflicting post-migration edit is refused, not clobbered — see rollbackConflicts).",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["path", "restoredToStatus", "preImageRestored"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "restoredToStatus": { "const": "pending" },
+          "preImageRestored": { "const": true },
+          "restoredToSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "sha256 of the restored pre-image bytes (equals the checkpoint preImageSha256 — a byte-exact reversal)." }
+        }
+      }
+    },
+    "rollbackConflicts": {
+      "type": "array",
+      "description": "Present in mode=rolled-back: notes whose CURRENT on-disk bytes no longer hash to the recorded postImageSha256 (a post-migration edit landed). Rollback FAILS CLOSED for these — the pre-image is NOT restored and the newer bytes are left untouched for operator review (bootstrap-migration.md §8.2).",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["path", "expectedPostImageSha256", "actualSha256", "outcome", "preImageRestored"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "expectedPostImageSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "actualSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "outcome": { "const": "conflict" },
+          "preImageRestored": { "const": false }
+        }
+      }
+    },
+    "rollbackOrder": {
+      "type": "array",
+      "description": "Present in mode=rolled-back: the reverse sorted-path order in which notes were processed for reversal.",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "releases": {
+      "type": "array",
+      "description": "Authorized incompatible-link releases: notes that migrated with an unresolved link left verbatim because an operator authorized the release (quarantine resolve --resolution release).",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["path", "category", "opaqueId", "resolution"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "category": { "const": "incompatible-link" },
+          "opaqueId": { "type": "string", "minLength": 1 },
+          "resolution": { "const": "release" },
+          "authorization": { "type": "string", "minLength": 1, "description": "Identifier of the authorization that released the item." }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "command": "graduation migrate",
+      "mode": "preview",
+      "migrationRunId": "01J9ZBOOTSTRAP0000000000000",
+      "notes": [
+        {
+          "path": "Concepts/Atlas.md",
+          "oldId": null,
+          "newId": "concept-atlas",
+          "type": { "value": "concept", "source": "folder" },
+          "schemaVersion": 1,
+          "status": "migrated",
+          "linkRewrites": [
+            { "from": "[[Koral]]", "to": "[[person-koral|Koral]]", "targetId": "person-koral", "resolution": "rewritten" }
+          ]
+        }
+      ],
+      "quarantined": [],
+      "idMap": { "Concepts/Atlas.md": "concept-atlas" }
+    },
+    {
+      "command": "graduation migrate",
+      "mode": "applied",
+      "migrationRunId": "01J9ZBOOTSTRAP0000000000001",
+      "notes": [
+        {
+          "path": "AtlasTwo.md",
+          "oldId": null,
+          "newId": "note-atlas-2",
+          "type": { "value": "note", "source": "default" },
+          "schemaVersion": 1,
+          "status": "migrated",
+          "collision": { "derivedId": "note-atlas", "disambiguatedTo": "note-atlas-2", "rule": "numeric-suffix-by-sorted-path" },
+          "linkRewrites": []
+        }
+      ],
+      "quarantined": [
+        { "path": "ExplicitA.md", "assertedId": "shared-x", "category": "duplicate-identity", "peers": ["ExplicitB.md"] }
+      ],
+      "refused": [
+        { "path": "FromFuture.md", "category": "unsupported-schema-version", "assertedSchemaVersion": 99, "supportedMax": 1, "outcome": "refused", "mutated": false }
+      ],
+      "idMap": { "AtlasTwo.md": "note-atlas-2" }
+    },
+    {
+      "command": "graduation migrate",
+      "mode": "rolled-back",
+      "migrationRunId": "01J9ZBOOTSTRAP0000000000001",
+      "notes": [
+        {
+          "path": "AtlasTwo.md",
+          "oldId": null,
+          "newId": "note-atlas-2",
+          "type": { "value": "note", "source": "default" },
+          "schemaVersion": 1,
+          "status": "pending"
+        }
+      ],
+      "quarantined": [],
+      "idMap": {},
+      "rolledBack": [
+        { "path": "AtlasTwo.md", "restoredToStatus": "pending", "preImageRestored": true }
+      ]
+    }
+  ],
+  "x-atlas-contract": {
+    "command": "graduation migrate",
+    "phase": 5,
+    "privilege": "privileged",
+    "idempotency": "key-accepting",
+    "requestHashScope": ["command", "fromGeneration", "toGeneration", "migrationPlanDigest", "migrationRunId", "idempotencyKey"],
+    "authz": {
+      "op": "graduation migrate",
+      "mechanism": "broker-signature",
+      "challengeFields": ["op", "intendedEffect", "nonce", "expiresAt"],
+      "driftCodes": ["authz.generation_mismatch", "authz.migration_plan_mismatch", "authz.signature_invalid", "authz.payload_mismatch", "authz.signer_unknown", "authz.signer_revoked", "authz.signer_not_permitted", "authz.nonce_unknown", "authz.nonce_expired", "authz.nonce_replayed"],
+      "universalCodes": ["authz.schema_invalid", "authz.canonicalization_unsupported"]
+    },
+    "executionClass": "ledger-writing",
+    "summary": "Broker-authorized, plan-digest-bound bootstrap migration; deterministic ids/types/links, per-note checkpoints (idempotent/resumable), rollback; preview by default, Tier-3 review-gated apply.",
+    "args": [],
+    "flags": [
+      { "flag": "--apply", "type": "boolean", "default": false, "description": "Mutate the copy (Tier-3, broker-authorized); without it the command is a non-mutating preview emitting no audit-ref event." },
+      { "flag": "--rollback", "type": "boolean", "default": false, "description": "Revert a prior bootstrap via the per-note checkpoints (restoring each note's verified pre-image), in reverse sorted-path order (idempotent). A rollback whose current on-disk bytes no longer match a note's recorded postImageSha256 FAILS CLOSED for that note (a post-migration edit is never clobbered). MUTATING + broker-authorized like --apply — the SAME op (graduation migrate) in the reverse direction, binding fromGeneration (current migrated generation) / toGeneration (pre-migration generation) / migrationPlanDigest (reversal plan). A stale rollback whose current generation no longer equals the challenge fromGeneration is rejected authz.generation_mismatch; a replayed authorization authz.nonce_replayed. Without an interactive presence assertion or --authorization it exits 6." },
+      { "flag": "--export-challenge", "type": "boolean", "default": false, "description": "Emit the broker AuthorizationChallenge to stdout and exit 6 instead of mutating; for --apply bound to intendedEffect{fromGeneration,toGeneration,migrationPlanDigest}, for --rollback the same fields in the reverse direction (reversal plan digest). Sign it out of band. Omitting it uses the interactive OS-presence flow instead." },
+      { "flag": "--authorization <path>", "type": "string", "default": null, "description": "Path to a signed AuthorizationResponse from a prior --export-challenge; presented to the broker to authorize --apply OR --rollback. Optional when the interactive OS-presence flow satisfies the challenge in-process." },
+      { "flag": "--idempotency-key <key>", "type": "string", "default": null, "description": "Caller-supplied idempotency key; a repeat --apply with the same key + request-hash (requestHashScope) returns the existing result rather than re-migrating (registry idempotency: key-accepting)." }
+    ],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "sideEffects": [
+      "on --apply: writes managed frontmatter (id/type/schema_version/title/created/updated) + rewritten links to the copy",
+      "persists per-note checkpoints with verified pre/post images + rollback progress (resumable, byte-exact reversible)",
+      "on --rollback: restores each migrated note's pre-image (reverse sorted-path order) and marks it pending",
+      "finalizeLedgerWrite (run.integrated on --apply; a distinct rollback run on --rollback)"
+    ],
+    "prohibitedEffects": [
+      "never mutates the live main-vault (copy + agent-branch only)",
+      "never authorized by --yes; never bypasses the broker challenge",
+      "never silently suffixes a duplicate explicit id (quarantines it)",
+      "never downgrades or rewrites an unsupported schema_version (refuses it)",
+      "preview never mutates and never emits an audit-ref event"
+    ],
+    "locks": [
+      { "scope": "vault-maintenance", "mode": "exclusive" },
+      { "scope": "shared", "mode": "shared" }
+    ],
+    "exitCodes": [0, 1, 2, 4, 5, 6],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "unknown flag/argument, --dry-run with --apply, --apply combined with --rollback, or --export-challenge combined with --authorization" },
+      { "code": "authorization-required", "exit": 6, "when": "--apply OR --rollback when the interactive OS-presence authorization is unavailable or declined and no --authorization is supplied, or a challenge was exported with --export-challenge" },
+      { "code": "authz.generation_mismatch", "exit": 6, "when": "broker drift: current generation != challenge fromGeneration — for --apply the forward from-generation, for --rollback the current (migrated) generation the reverse graduate starts from; a stale rollback against a moved generation (security-broker-contract.md §7.3)" },
+      { "code": "authz.migration_plan_mismatch", "exit": 6, "when": "broker drift (--apply): re-derived migration plan digest differs from the challenge" },
+      { "code": "authz.nonce_expired", "exit": 6, "when": "broker: the challenge nonce expired (expiresAt passed)" },
+      { "code": "authz.signature_invalid", "exit": 1, "when": "broker: Ed25519 signature verification failed" },
+      { "code": "authz.payload_mismatch", "exit": 1, "when": "broker: signingPayload differs from the broker-recomputed canonical bytes" },
+      { "code": "authz.schema_invalid", "exit": 1, "when": "broker: the challenge/response fails the contracts schema (universal broker validation failure)" },
+      { "code": "authz.canonicalization_unsupported", "exit": 1, "when": "broker: the response's payloadCanonicalization id is unknown (universal broker validation failure)" },
+      { "code": "authz.signer_unknown", "exit": 1, "when": "broker: signerId is not in the signer registry" },
+      { "code": "authz.signer_revoked", "exit": 1, "when": "broker: the signer is revoked" },
+      { "code": "authz.signer_not_permitted", "exit": 1, "when": "broker: the signer is not permitted for this op" },
+      { "code": "authz.nonce_unknown", "exit": 1, "when": "broker: the nonce was not issued by this broker" },
+      { "code": "authz.nonce_replayed", "exit": 1, "when": "broker: the nonce was already consumed" },
+      { "code": "unresolved-quarantine", "exit": 1, "when": "unresolved quarantines block graduation completion" },
+      { "code": "scan-gate-open", "exit": 2, "when": "the graduation scan gate is blocked or absent" },
+      { "code": "locked:vault-maintenance", "exit": 2, "when": "another vault-maintenance holder is active" },
+      { "code": "backup-unhealthy", "exit": 2, "retryable": true, "when": "the fail-closed backup watermark blocks a ledger-writing run" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure during migration" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}

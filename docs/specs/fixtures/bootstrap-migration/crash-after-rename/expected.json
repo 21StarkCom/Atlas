@@ -1,0 +1,51 @@
+{
+  "case": "crash-after-rename",
+  "description": "The exact failpoint finding R3-F4 flagged: the crash hit AFTER the atomic temp→note rename but BEFORE the checkpoint status flipped to migrated. Because both hashes are persisted BEFORE the rename (bootstrap-migration.md §5), the pending entry carries a postImageSha256 and the on-disk bytes equal it. Resume must PROMOTE pending+post-match to migrated (a no-op integration), never treat the valid post-image bytes as a failure and never re-mutate.",
+  "bootstrapTimestamp": "2026-07-12T00:00:00Z",
+  "resume": {
+    "preCheckpoint": [
+      {
+        "path": "Renamed.md",
+        "newId": "note-renamed-note",
+        "status": "pending",
+        "preImageSha256": "c065f7f3e84cda21655992e66e15b2a4cfc7975d8034177124ccaf581cc162f6",
+        "postImageSha256": "f0e9fbe86a72009c7274995ec8c68bea72cd57a330da6493c783d8ab2267c496"
+      }
+    ],
+    "rerunMode": "applied",
+    "skipped": [],
+    "applied": [],
+    "reapplied": [],
+    "promoted": ["Renamed.md"],
+    "idMap": { "Renamed.md": "note-renamed-note" },
+    "finalStatuses": { "Renamed.md": "migrated" },
+    "verifiedPostImage": { "Renamed.md": true },
+    "verifiedPreImage": {}
+  },
+  "migrate": {
+    "command": "graduation migrate",
+    "mode": "applied",
+    "migrationRunId": "01J9ZE0000000000000000000A",
+    "idMap": { "Renamed.md": "note-renamed-note" },
+    "notes": [
+      {
+        "path": "Renamed.md",
+        "oldId": null,
+        "newId": "note-renamed-note",
+        "type": { "value": "note", "source": "default" },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "note-renamed-note",
+          "type": "note",
+          "schema_version": 1,
+          "title": "Renamed Note",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z"
+        },
+        "linkRewrites": []
+      }
+    ],
+    "quarantined": []
+  }
+}

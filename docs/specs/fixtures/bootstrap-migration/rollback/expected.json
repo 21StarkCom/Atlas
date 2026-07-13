@@ -1,0 +1,26 @@
+{
+  "case": "rollback",
+  "description": "graduation migrate --rollback reverts an applied bootstrap using the per-note checkpoint pre-images, in REVERSE sorted-path order (Beta.md before Alpha.md). Each note is restored byte-exactly to its recorded preImage (verified by sha256) and marked pending; after a full rollback the tree matches the pre-migration state. Rollback is itself checkpointed and idempotent — a second --rollback re-reverts nothing.",
+  "bootstrapTimestamp": "2026-07-12T00:00:00Z",
+  "migrate": {
+    "command": "graduation migrate",
+    "mode": "rolled-back",
+    "migrationRunId": "01J9ZJ0000000000000000000A",
+    "idMap": {},
+    "notes": [
+      { "path": "Beta.md", "oldId": null, "newId": "note-beta", "type": { "value": "note", "source": "default" }, "schemaVersion": 1, "status": "pending" },
+      { "path": "Alpha.md", "oldId": null, "newId": "note-alpha", "type": { "value": "note", "source": "default" }, "schemaVersion": 1, "status": "pending" }
+    ],
+    "quarantined": [],
+    "rolledBack": [
+      { "path": "Beta.md", "restoredToStatus": "pending", "preImageRestored": true, "restoredToSha256": "c6ed0e80bafd6b049aa1589ff9cb531b090de61298333db2a640454e29ae23cf" },
+      { "path": "Alpha.md", "restoredToStatus": "pending", "preImageRestored": true, "restoredToSha256": "57858903f72c5dcc86d1d9ba0b4481b7dcf2c212fc5e8a7283711535064bbdbb" }
+    ],
+    "rollbackOrder": ["Beta.md", "Alpha.md"]
+  },
+  "rerunRollback": {
+    "mode": "rolled-back",
+    "reReverted": [],
+    "rolledBack": []
+  }
+}

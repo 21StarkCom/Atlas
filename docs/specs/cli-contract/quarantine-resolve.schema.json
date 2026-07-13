@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/quarantine-resolve.schema.json",
+  "title": "brain quarantine resolve <opaqueId> --resolution release|discard [--export-challenge | --authorization <path>] — --json success output",
+  "description": "PRIVILEGED operator command to resolve a quarantined item (bootstrap-migration.md §7.1). resolution=release re-enters the item into the migrable set on the next graduation migrate; resolution=discard drops it from graduation (recorded, never migrated). Authorized by an OS-mediated presence assertion bound to the broker challenge (op quarantine resolve, mechanism os-presence per security-broker-contract.md §7.4/§7.5) via THREE flows: (1) the interactive OS-presence prompt bound to the challenge in-process (the default), (2) the --export-challenge → sign → --authorization out-of-band flow, or (3) a supplied --authorization; --yes never authorizes. The challenge's intendedEffect binds the quarantine item opaque id + the resolution; the caller identity and the vault are bound by the os-presence mechanism (per-vault broker + trusted-CLI identity), so an authorization cannot cross items/vaults/callers. Each resolve writes an audit record. Idempotent: a repeat resolve with the same idempotency key + request-hash returns the existing outcome. Exit 6 only when presence is unavailable/declined (and no --authorization) or a challenge is exported with --export-challenge (which emits an AuthorizationChallenge instead of this object).",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["command", "opaqueId", "category", "resolution", "outcome"],
+  "properties": {
+    "command": { "const": "quarantine resolve" },
+    "opaqueId": { "type": "string", "minLength": 1, "description": "Stable opaque id of the quarantined item." },
+    "category": { "enum": ["ambiguous-alias", "duplicate-identity", "incompatible-link", "detected-credential"] },
+    "resolution": { "enum": ["release", "discard"], "description": "release ⇒ re-enters the migrable set; discard ⇒ dropped from graduation." },
+    "outcome": { "enum": ["released", "discarded"], "description": "Terminal disposition; released ⇔ resolution=release, discarded ⇔ resolution=discard." }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "resolution": { "const": "release" } } },
+      "then": { "properties": { "outcome": { "const": "released" } } }
+    },
+    {
+      "if": { "properties": { "resolution": { "const": "discard" } } },
+      "then": { "properties": { "outcome": { "const": "discarded" } } }
+    }
+  ],
+  "examples": [
+    {
+      "command": "quarantine resolve",
+      "opaqueId": "q-1c3d",
+      "category": "duplicate-identity",
+      "resolution": "release",
+      "outcome": "released"
+    },
+    {
+      "command": "quarantine resolve",
+      "opaqueId": "q-9f2a",
+      "category": "detected-credential",
+      "resolution": "discard",
+      "outcome": "discarded"
+    }
+  ],
+  "x-atlas-contract": {
+    "command": "quarantine resolve",
+    "phase": 5,
+    "privilege": "privileged",
+    "idempotency": "key-accepting",
+    "requestHashScope": ["command", "opaqueId", "resolution", "idempotencyKey"],
+    "authz": {
+      "op": "quarantine resolve",
+      "mechanism": "os-presence",
+      "challengeFields": ["op", "intendedEffect", "nonce", "expiresAt"],
+      "intendedEffectBinds": ["quarantineItemOpaqueId", "resolution"],
+      "mechanismBinds": ["callerIdentity", "vault"],
+      "driftCodes": ["authz.quarantine_item_unknown", "authz.quarantine_key_denied", "authz.presence_unverified", "authz.target_mismatch", "authz.nonce_unknown", "authz.nonce_expired", "authz.nonce_replayed"]
+    },
+    "executionClass": "ledger-writing",
+    "summary": "Privileged, presence-authorized resolution of a quarantined item (release/discard); audited, idempotent.",
+    "args": [
+      { "arg": "<opaqueId>", "type": "string", "required": true, "description": "The quarantined item to resolve." }
+    ],
+    "flags": [
+      { "flag": "--resolution <release|discard>", "type": "string", "default": null, "description": "Required disposition: release (re-migrable) or discard (dropped from graduation)." },
+      { "flag": "--export-challenge", "type": "boolean", "default": false, "description": "Emit the broker AuthorizationChallenge (op quarantine resolve, os-presence) to stdout and exit 6 instead of resolving. Omitting it uses the interactive OS-presence flow." },
+      { "flag": "--authorization <path>", "type": "string", "default": null, "description": "Path to a signed AuthorizationResponse from a prior --export-challenge; presented to the broker to authorize the resolution. Optional when the interactive OS-presence flow satisfies the challenge in-process." },
+      { "flag": "--idempotency-key <key>", "type": "string", "default": null, "description": "Caller-supplied idempotency key; a repeat resolve with the same key + request-hash (requestHashScope) returns the existing outcome rather than re-resolving (registry idempotency: key-accepting)." }
+    ],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "sideEffects": [
+      "updates the quarantine item's disposition (released/discarded)",
+      "writes an audit record of the resolution (allowlisted metadata; never the plaintext)"
+    ],
+    "prohibitedEffects": [
+      "never authorized by --yes; never bypasses the broker challenge / OS presence assertion",
+      "never migrates content itself (release only re-admits it to the next graduation migrate)"
+    ],
+    "locks": [{ "scope": "shared", "mode": "shared" }],
+    "exitCodes": [0, 1, 2, 4, 5, 6],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "unknown flag/argument, missing <opaqueId>, missing/invalid --resolution, or --export-challenge combined with --authorization" },
+      { "code": "authorization-required", "exit": 6, "when": "the interactive OS-presence assertion is unavailable or declined and no --authorization is supplied, or a challenge was exported with --export-challenge" },
+      { "code": "authz.presence_unverified", "exit": 6, "when": "broker: the OS presence assertion is absent or not bound to the challenge" },
+      { "code": "authz.target_mismatch", "exit": 6, "when": "broker drift: the resolution/item differs from the re-derived challenge" },
+      { "code": "authz.nonce_expired", "exit": 6, "when": "broker: the challenge nonce expired (expiresAt passed)" },
+      { "code": "authz.quarantine_item_unknown", "exit": 1, "when": "broker: the quarantine item opaque id is not found / not quarantined" },
+      { "code": "authz.nonce_unknown", "exit": 1, "when": "broker: the nonce was not issued by this broker" },
+      { "code": "authz.nonce_replayed", "exit": 1, "when": "broker: the nonce was already consumed" },
+      { "code": "authz.quarantine_key_denied", "exit": 2, "when": "broker: the quarantine AEAD key is not readable by this trusted-CLI identity" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure during resolution" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}

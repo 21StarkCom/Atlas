@@ -1,0 +1,85 @@
+{
+  "case": "explicit-collision",
+  "description": "Explicit ids are RESERVED in a first pass before any derived id is allocated, so a derived id can never squat an id a later explicit note owns. Here the explicit note MExplicit.md owns note-report; a derived note sorts BEFORE it (AReport.md) and another sorts AFTER it (ZReport.md). Both derived notes collide with the reserved explicit id and take deterministic numeric suffixes; the explicit owner keeps note-report. Without reservation, AReport.md (assigned before MExplicit.md is seen) would have taken note-report and duplicated the explicit owner's id.",
+  "bootstrapTimestamp": "2026-07-12T00:00:00Z",
+  "reservedExplicitIds": ["note-report"],
+  "audit": {
+    "categories": {
+      "missing-id": ["AReport.md", "ZReport.md"],
+      "missing-type": ["AReport.md", "MExplicit.md", "ZReport.md"],
+      "missing-schema-version": ["AReport.md", "MExplicit.md", "ZReport.md"],
+      "ambiguous-alias": [],
+      "duplicate-identity": [],
+      "incompatible-link": [],
+      "detected-credential": [],
+      "unsupported-schema-version": []
+    },
+    "treeHashUnchanged": true
+  },
+  "migrate": {
+    "command": "graduation migrate",
+    "mode": "applied",
+    "migrationRunId": "01J9ZF0000000000000000000A",
+    "idMap": {
+      "AReport.md": "note-report-2",
+      "MExplicit.md": "note-report",
+      "ZReport.md": "note-report-3"
+    },
+    "notes": [
+      {
+        "path": "AReport.md",
+        "oldId": null,
+        "newId": "note-report-2",
+        "type": { "value": "note", "source": "default" },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "collision": { "derivedId": "note-report", "disambiguatedTo": "note-report-2", "rule": "numeric-suffix-by-sorted-path" },
+        "initializedFrontmatter": {
+          "id": "note-report-2",
+          "type": "note",
+          "schema_version": 1,
+          "title": "Report",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z"
+        },
+        "linkRewrites": []
+      },
+      {
+        "path": "MExplicit.md",
+        "oldId": "note-report",
+        "newId": "note-report",
+        "type": { "value": "note", "source": "frontmatter" },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "note-report",
+          "type": "note",
+          "schema_version": 1,
+          "title": "Master Report",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z"
+        },
+        "linkRewrites": []
+      },
+      {
+        "path": "ZReport.md",
+        "oldId": null,
+        "newId": "note-report-3",
+        "type": { "value": "note", "source": "default" },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "collision": { "derivedId": "note-report", "disambiguatedTo": "note-report-3", "rule": "numeric-suffix-by-sorted-path" },
+        "initializedFrontmatter": {
+          "id": "note-report-3",
+          "type": "note",
+          "schema_version": 1,
+          "title": "Report",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z"
+        },
+        "linkRewrites": []
+      }
+    ],
+    "quarantined": []
+  }
+}

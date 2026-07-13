@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "migrationRunId": "01J9ZBOOTSTRAP0000000000000",
+  "bootstrapTimestamp": "2026-07-12T00:00:00Z",
+  "backupDir": ".bootstrap-backup",
+  "notes": [
+    {
+      "path": "Note.md",
+      "oldId": null,
+      "newId": "note-daily-log",
+      "schemaVersion": 1,
+      "status": "migrated",
+      "preImage": ".bootstrap-backup/Note.md",
+      "preImageSha256": "ac99c06f4607e7d5e3f8ebf8536f05f6ef300e51a3318d02122f71e5704ac61e",
+      "postImageSha256": "f48c6cc1d080e7b516b938747c4fc0f43ad456ab7d67192a5cece4a939651553",
+      "rollbackStatus": "not-started"
+    }
+  ]
+}

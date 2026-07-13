@@ -1,0 +1,29 @@
+{
+  "case": "rollback-conflict",
+  "description": "Finding R3-F5: rollback must not blindly overwrite post-migration edits. Before restoring a note's pre-image, rollback verifies the note's CURRENT on-disk bytes still hash to the recorded postImageSha256 (proving no edit landed after migration). Clean.md still matches its postImage → it rolls back byte-exactly. Edited.md was changed after migration (on-disk ≠ postImageSha256) → rollback FAILS CLOSED for that note: it is left untouched, marked conflicted, and the run reports the mismatch for operator review rather than clobbering the newer bytes.",
+  "bootstrapTimestamp": "2026-07-12T00:00:00Z",
+  "migrate": {
+    "command": "graduation migrate",
+    "mode": "rolled-back",
+    "migrationRunId": "01J9ZK0000000000000000000A",
+    "idMap": {},
+    "notes": [
+      { "path": "Edited.md", "oldId": null, "newId": "note-edited", "type": { "value": "note", "source": "default" }, "schemaVersion": 1, "status": "migrated" },
+      { "path": "Clean.md", "oldId": null, "newId": "note-clean", "type": { "value": "note", "source": "default" }, "status": "pending", "schemaVersion": 1 }
+    ],
+    "quarantined": [],
+    "rolledBack": [
+      { "path": "Clean.md", "restoredToStatus": "pending", "preImageRestored": true, "restoredToSha256": "4e4d0a9368239cedb5cc2e305ef0c74c491d1099d3b446092ffcb301dfe076a5" }
+    ],
+    "rollbackConflicts": [
+      {
+        "path": "Edited.md",
+        "expectedPostImageSha256": "bd71cf5f338cf757a035d541a29befda0889771a77bcb2044f7e8f46f69a94db",
+        "actualSha256": "367f2d8b25fcc956cf14b0c4a97ed054eed3566502182195bafa010f2a689d4c",
+        "outcome": "conflict",
+        "preImageRestored": false
+      }
+    ],
+    "rollbackOrder": ["Edited.md", "Clean.md"]
+  }
+}

@@ -1,0 +1,74 @@
+{
+  "case": "basic",
+  "description": "Type inference by folder, id derivation from title, deterministic initialization of all reader-required frontmatter (id/type/schema_version/title/created/updated), wikilink rewrite with alias preservation, unresolved link preserved verbatim and flagged incompatible; the unresolved-link note migrates only because the operator authorized its release as-is (release record present).",
+  "bootstrapTimestamp": "2026-07-12T00:00:00Z",
+  "audit": {
+    "categories": {
+      "missing-id": ["Concepts/Atlas.md", "People/Koral.md"],
+      "missing-type": ["Concepts/Atlas.md", "People/Koral.md"],
+      "missing-schema-version": ["Concepts/Atlas.md", "People/Koral.md"],
+      "ambiguous-alias": [],
+      "duplicate-identity": [],
+      "incompatible-link": ["Concepts/Atlas.md"],
+      "detected-credential": [],
+      "unsupported-schema-version": []
+    },
+    "treeHashUnchanged": true
+  },
+  "migrate": {
+    "command": "graduation migrate",
+    "mode": "applied",
+    "migrationRunId": "01J9ZB0000000000000000000A",
+    "idMap": {
+      "Concepts/Atlas.md": "concept-atlas",
+      "People/Koral.md": "person-koral"
+    },
+    "notes": [
+      {
+        "path": "Concepts/Atlas.md",
+        "oldId": null,
+        "newId": "concept-atlas",
+        "type": { "value": "concept", "source": "folder" },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "concept-atlas",
+          "type": "concept",
+          "schema_version": 1,
+          "title": "Atlas",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z"
+        },
+        "released": { "category": "incompatible-link", "opaqueId": "q-basic-atlas-link", "resolution": "release" },
+        "linkRewrites": [
+          { "from": "[[Koral]]", "to": "[[person-koral|Koral]]", "targetId": "person-koral", "resolution": "rewritten" },
+          { "from": "[[Missing Note]]", "to": "[[Missing Note]]", "targetId": null, "resolution": "preserved-unresolved" }
+        ]
+      },
+      {
+        "path": "People/Koral.md",
+        "oldId": null,
+        "newId": "person-koral",
+        "type": { "value": "person", "source": "folder" },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "person-koral",
+          "type": "person",
+          "schema_version": 1,
+          "title": "Koral",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z"
+        },
+        "preservedFrontmatter": ["aliases"],
+        "linkRewrites": [
+          { "from": "[[Atlas]]", "to": "[[concept-atlas|Atlas]]", "targetId": "concept-atlas", "resolution": "rewritten" }
+        ]
+      }
+    ],
+    "quarantined": [],
+    "releases": [
+      { "path": "Concepts/Atlas.md", "category": "incompatible-link", "opaqueId": "q-basic-atlas-link", "resolution": "release", "authorization": "authz_basic_atlas_link" }
+    ]
+  }
+}

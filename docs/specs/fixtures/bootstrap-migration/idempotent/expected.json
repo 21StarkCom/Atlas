@@ -1,0 +1,21 @@
+{
+  "case": "idempotent",
+  "description": "A rerun consulting the per-note checkpoint verifies the on-disk note matches the recorded postImage sha256 (so the mutation is proven already applied), skips it, re-applies nothing, and yields the same id map. The checkpoint retains the pre-image (bytes + sha256) so the same run is byte-exactly reversible.",
+  "resume": {
+    "preCheckpoint": [
+      {
+        "path": "Note.md",
+        "newId": "note-daily-log",
+        "status": "migrated",
+        "preImageSha256": "ac99c06f4607e7d5e3f8ebf8536f05f6ef300e51a3318d02122f71e5704ac61e",
+        "postImageSha256": "f48c6cc1d080e7b516b938747c4fc0f43ad456ab7d67192a5cece4a939651553"
+      }
+    ],
+    "rerunMode": "applied",
+    "skipped": ["Note.md"],
+    "reapplied": [],
+    "idMap": { "Note.md": "note-daily-log" },
+    "finalStatuses": { "Note.md": "migrated" },
+    "verifiedPostImage": { "Note.md": true }
+  }
+}

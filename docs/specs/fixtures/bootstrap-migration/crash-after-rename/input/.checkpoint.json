@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "migrationRunId": "01J9ZE0000000000000000000A",
+  "bootstrapTimestamp": "2026-07-12T00:00:00Z",
+  "backupDir": ".bootstrap-backup",
+  "notes": [
+    {
+      "path": "Renamed.md",
+      "oldId": null,
+      "newId": "note-renamed-note",
+      "schemaVersion": 1,
+      "status": "pending",
+      "preImage": ".bootstrap-backup/Renamed.md",
+      "preImageSha256": "c065f7f3e84cda21655992e66e15b2a4cfc7975d8034177124ccaf581cc162f6",
+      "postImageSha256": "f0e9fbe86a72009c7274995ec8c68bea72cd57a330da6493c783d8ab2267c496",
+      "rollbackStatus": "not-started"
+    }
+  ]
+}

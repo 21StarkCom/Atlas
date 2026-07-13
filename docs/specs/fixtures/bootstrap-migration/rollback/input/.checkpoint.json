@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "migrationRunId": "01J9ZJ0000000000000000000A",
+  "bootstrapTimestamp": "2026-07-12T00:00:00Z",
+  "backupDir": ".bootstrap-backup",
+  "notes": [
+    {
+      "path": "Alpha.md",
+      "oldId": null,
+      "newId": "note-alpha",
+      "schemaVersion": 1,
+      "status": "migrated",
+      "preImage": ".bootstrap-backup/Alpha.md",
+      "preImageSha256": "57858903f72c5dcc86d1d9ba0b4481b7dcf2c212fc5e8a7283711535064bbdbb",
+      "postImageSha256": "05ff273e96c3b805244dce1309c6d0950717de9519926beea0d249bfe5a80543",
+      "rollbackStatus": "not-started"
+    },
+    {
+      "path": "Beta.md",
+      "oldId": null,
+      "newId": "note-beta",
+      "schemaVersion": 1,
+      "status": "migrated",
+      "preImage": ".bootstrap-backup/Beta.md",
+      "preImageSha256": "c6ed0e80bafd6b049aa1589ff9cb531b090de61298333db2a640454e29ae23cf",
+      "postImageSha256": "2879be5d190669ca443780d0ff5aa449004fad009df75abffec7c589b259e56f",
+      "rollbackStatus": "not-started"
+    }
+  ]
+}

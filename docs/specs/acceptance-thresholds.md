@@ -12,7 +12,9 @@ Sections are authored per phase:
   `doctor`/`db verify`/`git verify` check inventories, and the per-command failure exit codes for the
   Phase-4 mutation surface.
 - **§retrieval + §scale** — added by Phase 5 (Task 5.0): retrieval eval (recall@10, MRR) and scale
-  gates. Not authored here.
+  gates (representative + maximum vault profiles; latency/throughput/memory/disk/recovery). The
+  retrieval constants (`0.85`, `0.7`) are pinned to plan §2.5 by a literal-comparison test
+  (`tools/contract-lint.test.ts`, "Phase-5 acceptance thresholds"), mirroring §workflow.
 
 ---
 
@@ -166,3 +168,100 @@ Notes:
   with those exits (asserted by the contract-lint per-command-exit test).
 - The fail-closed backup watermark (`backup-unhealthy`, exit `2`) blocks every ledger-writing command
   in this surface until backup coverage is restored.
+
+---
+
+## §retrieval
+
+The Phase-5 **retrieval eval gate** (Task 5.4, `runRetrievalEval`): the offline eval harness
+(`retrieval-index-contract.md`) computes ranked-retrieval quality over the graduation eval set and
+**gates graduation** — not earlier merges. Both metrics must hold **verbatim from plan §2.5**:
+
+- **recall@10 ≥ 0.85** — the fraction of eval queries whose relevant note appears in the top-10
+  fused results.
+- **MRR ≥ 0.7** — mean reciprocal rank of the first relevant note across eval queries.
+
+> These two numeric bounds — `0.85`, `0.7` — are the §2.5 constants. A literal-comparison test
+> (`tools/contract-lint.test.ts`, "Phase-5 acceptance thresholds") asserts the machine-readable block
+> below **equals** both the literals and the plan §2.5 line, so spec ⇄ plan cannot drift (mirrors the
+> §workflow anti-drift test). Thresholds gate *graduation*; the chunker/RRF weights they exercise are
+> config-owned (`retrieval-index-contract.md` §config) and iterated on the copy, never in phase code.
+
+The machine-readable form (parsed by the literal-comparison test):
+
+```json retrievalThresholds
+{
+  "version": 1,
+  "eval": {
+    "recallAt10": { "min": 0.85, "at": 10 },
+    "mrr": { "min": 0.7 },
+    "gates": "graduation",
+    "source": "runRetrievalEval"
+  }
+}
+```
+
+## §scale
+
+The Phase-5 **scale gate** (Task 5.4, `tools/scale-bench.ts`) benchmarks the migrated copy against
+two vault **profiles** and asserts per-operation thresholds. Plan §2.5 fixes the *dimensions* of this
+gate — **representative + maximum vault profiles** and **latency / throughput / memory / disk /
+recovery** thresholds; the concrete profile sizes and bounds below are the V1 gate values authored by
+this contract (Task 5.0) and consumed by `scale-bench.ts`. They are the *ceiling* the benchmark must
+stay under, not a promise of exact numbers; the stable regression subset is wired into CI (nightly).
+
+### Vault profiles
+
+| profile | notes | avg note size | total corpus | chunks (≈) | purpose |
+|---|---|---|---|---|---|
+| `representative` | 5,000 | 4 KB | ~20 MB | ~30,000 | the expected personal-vault working size; the CI regression subset |
+| `maximum` | 50,000 | 8 KB | ~400 MB | ~350,000 | the V1 upper bound the system must still operate within |
+
+### Per-operation thresholds
+
+Latency thresholds are **p95 wall-clock on the `representative` profile** unless noted; the `maximum`
+profile must complete without error and within the *maximum* column.
+
+| operation | metric | representative (p95) | maximum |
+|---|---|---|---|
+| `query` (answered) | latency | ≤ 2,000 ms | ≤ 5,000 ms |
+| `query` (retrieval-only) | latency | ≤ 500 ms | ≤ 1,500 ms |
+| `ingest` (per note) | throughput | ≥ 20 notes/s | ≥ 10 notes/s |
+| `index rebuild` (full) | throughput | ≥ 50 chunks/s | ≥ 30 chunks/s |
+| `reconcile` (startup, no work) | latency | ≤ 1,000 ms | ≤ 5,000 ms |
+| `graduation migrate` (full) | throughput | ≥ 25 notes/s | ≥ 15 notes/s |
+| `db rebuild` (projections) | latency | ≤ 30 s | ≤ 300 s |
+
+### Resource ceilings
+
+| resource | metric | representative | maximum |
+|---|---|---|---|
+| resident memory | peak RSS during rebuild/index | ≤ 1 GB | ≤ 4 GB |
+| disk footprint | SQLite + LanceDB / corpus bytes | ≤ 3× corpus | ≤ 3× corpus |
+| crash recovery | `reconcileInterruptedRuns` on startup after N interrupted runs | ≤ 2,000 ms | ≤ 10,000 ms |
+
+The machine-readable form (consumed by `scale-bench.ts`):
+
+```json scaleThresholds
+{
+  "version": 1,
+  "profiles": {
+    "representative": { "notes": 5000, "avgNoteBytes": 4096, "totalBytes": 20971520 },
+    "maximum": { "notes": 50000, "avgNoteBytes": 8192, "totalBytes": 419430400 }
+  },
+  "operations": {
+    "queryAnswered": { "metric": "latency-ms-p95", "representative": 2000, "maximum": 5000 },
+    "queryRetrievalOnly": { "metric": "latency-ms-p95", "representative": 500, "maximum": 1500 },
+    "ingest": { "metric": "throughput-notes-per-s-min", "representative": 20, "maximum": 10 },
+    "indexRebuild": { "metric": "throughput-chunks-per-s-min", "representative": 50, "maximum": 30 },
+    "reconcileStartup": { "metric": "latency-ms-p95", "representative": 1000, "maximum": 5000 },
+    "graduationMigrate": { "metric": "throughput-notes-per-s-min", "representative": 25, "maximum": 15 },
+    "dbRebuild": { "metric": "latency-ms-p95", "representative": 30000, "maximum": 300000 }
+  },
+  "resources": {
+    "peakRssBytes": { "representative": 1073741824, "maximum": 4294967296 },
+    "diskFootprintCorpusMultiple": { "representative": 3, "maximum": 3 },
+    "crashRecoveryMs": { "representative": 2000, "maximum": 10000 }
+  }
+}
+```

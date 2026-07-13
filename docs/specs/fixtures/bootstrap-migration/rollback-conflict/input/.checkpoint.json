@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "migrationRunId": "01J9ZK0000000000000000000A",
+  "bootstrapTimestamp": "2026-07-12T00:00:00Z",
+  "backupDir": ".bootstrap-backup",
+  "notes": [
+    {
+      "path": "Clean.md",
+      "oldId": null,
+      "newId": "note-clean",
+      "schemaVersion": 1,
+      "status": "migrated",
+      "preImage": ".bootstrap-backup/Clean.md",
+      "preImageSha256": "4e4d0a9368239cedb5cc2e305ef0c74c491d1099d3b446092ffcb301dfe076a5",
+      "postImageSha256": "153bcfd337bca4786297728963f6be1c10dce47368b9513fa9f71beebb45bded",
+      "rollbackStatus": "not-started"
+    },
+    {
+      "path": "Edited.md",
+      "oldId": null,
+      "newId": "note-edited",
+      "schemaVersion": 1,
+      "status": "migrated",
+      "preImage": ".bootstrap-backup/Edited.md",
+      "preImageSha256": "0aac85ce7cb03c13634172ce36668574667495c667b225a6aa89c6c25cd16ead",
+      "postImageSha256": "bd71cf5f338cf757a035d541a29befda0889771a77bcb2044f7e8f46f69a94db",
+      "rollbackStatus": "not-started"
+    }
+  ]
+}
