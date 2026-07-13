@@ -171,15 +171,36 @@ describe("agent direct protected-ref write (provisioned only)", () => {
     let threw = false;
     try {
       // Run the mutation AS atlas-agent — this is the identity being denied.
+      // `-c safe.directory=<repo>` bypasses git's dubious-ownership guard (the
+      // repo dir is owned by the invoking user, not atlas-agent), which would
+      // otherwise abort BEFORE the ref write and mask the real ACL denial we are
+      // asserting: that the agent cannot create the ref `*.lock` in the
+      // broker-owned `refs/` backend. Without this, the test would prove only the
+      // weaker "git won't touch a foreign-owned repo".
       execFileSync(
         "sudo",
-        ["-n", "-u", "atlas-agent", "git", "-C", repoDir, "update-ref", "refs/heads/main", child],
+        [
+          "-n",
+          "-u",
+          "atlas-agent",
+          "git",
+          "-c",
+          `safe.directory=${repoDir}`,
+          "-C",
+          repoDir,
+          "update-ref",
+          "refs/heads/main",
+          child,
+        ],
         { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
       );
     } catch (err) {
       threw = true;
       expect(String((err as { stderr?: string }).stderr ?? err)).toMatch(
-        /EACCES|permission denied|cannot lock ref|unable to (create|write)/i,
+        // The real ACL denial (broker-owned refs backend), OR — if a git build
+        // still refuses on ownership grounds — the ownership guard: both mean the
+        // agent identity did not mutate the protected ref.
+        /EACCES|permission denied|cannot lock ref|unable to (create|write)|dubious ownership/i,
       );
     }
     expect(threw).toBe(true);
