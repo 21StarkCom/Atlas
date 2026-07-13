@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/enrich.schema.json",
+  "title": "brain enrich <note> [--apply] — --json success output",
+  "description": "Model-authored synthesis enrichment of a single note. Non-mutating PREVIEW by default (emits the proposed ChangePlan + risk tier, no sinks written, no audit-ref event); --apply runs the tiered integration per workflow-risk-contract.md. Tier-1/2 auto-integrate via broker CAS (exit 0, applied); Tier-3 stops at review-pending (exit 6, success-shaped review_pending + runId). --dry-run + --apply together ⇒ exit 5. --yes never authorizes a privileged op. Thresholds per acceptance-thresholds.md §workflow.",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["command", "mode", "runId", "risk"],
+  "allOf": [
+    {
+      "description": "A Tier-2 auto-integrated result MUST carry BOTH independently-typed confidence inputs (acceptance-thresholds.md §workflow): a Tier-2 applied outcome cannot validate with either input absent — the min-reduction is fail-closed.",
+      "if": { "properties": { "mode": { "const": "applied" }, "risk": { "const": "tier-2" } }, "required": ["mode", "risk"] },
+      "then": { "required": ["modelConfidence", "validationConfidence", "integratedCommit"] }
+    }
+  ],
+  "properties": {
+    "command": { "const": "enrich" },
+    "mode": {
+      "description": "preview = non-mutating proposal; applied = Tier-1/2 auto-integrated; review_pending = Tier-3 stopped at the review gate (exit 6).",
+      "enum": ["preview", "applied", "review_pending"]
+    },
+    "runId": { "type": "string", "minLength": 1, "description": "ULID run id." },
+    "note": { "type": "string", "minLength": 1, "description": "Target note id/handle." },
+    "risk": { "enum": ["tier-0", "tier-1", "tier-2", "tier-3"], "description": "effectiveRisk (policies.effectiveRisk); proposedRisk never gates." },
+    "modelConfidence": { "type": "number", "minimum": 0, "maximum": 1, "description": "The generation model's self-reported confidence (acceptance-thresholds.md §workflow modelConfidence); independently gated at >= 0.8." },
+    "validationConfidence": { "type": "number", "minimum": 0, "maximum": 1, "description": "The deterministic validator's confidence (acceptance-thresholds.md §workflow validationConfidence); independently gated at >= 0.8. Tier-2 requires min(modelConfidence, validationConfidence) >= 0.8 — both must clear." },
+    "changedLines": { "type": "integer", "minimum": 0, "description": "Changed lines in the patch (gates Tier-2 at <= 50)." },
+    "sections": { "type": "integer", "minimum": 0, "description": "Distinct sections of the single note touched (gates Tier-2 at <= 3)." },
+    "integratedCommit": { "type": "string", "description": "Canonical commit after auto-integration (mode=applied only)." },
+    "plan": { "type": "object", "description": "The proposed ChangePlan envelope (preview) — shape per @atlas/contracts ChangePlanEnvelopeSchema." }
+  },
+  "examples": [
+    { "command": "enrich", "mode": "preview", "runId": "01J9Z8Q0000000000000000000", "note": "project-meridian", "risk": "tier-2", "modelConfidence": 0.91, "validationConfidence": 0.88, "changedLines": 12, "sections": 1, "plan": {} },
+    { "command": "enrich", "mode": "applied", "runId": "01J9Z8Q0000000000000000002", "note": "project-meridian", "risk": "tier-2", "modelConfidence": 0.91, "validationConfidence": 0.88, "changedLines": 12, "sections": 1, "integratedCommit": "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1" },
+    { "command": "enrich", "mode": "review_pending", "runId": "01J9Z8Q0000000000000000001", "note": "project-meridian", "risk": "tier-3", "modelConfidence": 0.72, "validationConfidence": 0.95, "changedLines": 84, "sections": 5 }
+  ],
+  "x-atlas-contract": {
+    "command": "enrich",
+    "phase": 4,
+    "privilege": "shared",
+    "idempotency": "key-accepting",
+    "requestHashScope": ["command", "note", "planHash", "idempotencyKey"],
+    "executionClass": "ledger-writing",
+    "summary": "Synthesis enrichment of a note: non-mutating preview by default; --apply runs tiered integration (Tier-3 ⇒ review-pending, exit 6).",
+    "args": [
+      { "arg": "<note>", "type": "string", "required": true, "description": "The note id/handle to enrich." }
+    ],
+    "flags": [
+      { "flag": "--apply", "type": "boolean", "default": false, "description": "Perform the mutation (tiered integration); without it, emit a non-mutating preview." },
+      { "flag": "--dry-run", "type": "boolean", "default": false, "description": "Explicit preview; combined with --apply ⇒ exit 5." },
+      { "flag": "--idempotency-key <key>", "type": "string", "default": null, "description": "Caller-supplied idempotency key; a repeat --apply with the same key + request-hash (requestHashScope) returns the existing run rather than starting a duplicate (registry idempotency: key-accepting)." }
+    ],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "sideEffects": [
+      "preview: none (no ChangePlan/patch/worktree/commit/ledger/audit-ref write)",
+      "apply Tier-1/2: agent branch + worktree + commit, broker CAS integrate, finalizeLedgerWrite (run.integrated)",
+      "apply Tier-3: durable plan/branch/worktree/commit, stops at review-pending (run.planned)"
+    ],
+    "prohibitedEffects": [
+      "preview writes to no sink",
+      "never auto-integrates a Tier-3 run",
+      "--yes never authorizes; whole-file rewrites impossible (ops-only patch)"
+    ],
+    "locks": [
+      { "scope": "canonical-integration", "mode": "exclusive", "when": "--apply Tier-1/2 integration" },
+      { "scope": "shared", "mode": "shared" }
+    ],
+    "exitCodes": [0, 1, 2, 3, 4, 5, 6],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "unknown flag/argument, missing <note>, or --dry-run combined with --apply" },
+      { "code": "validation-failed", "exit": 1, "when": "the generated plan fails validation (Task 4.4)" },
+      { "code": "config-invalid", "exit": 2, "when": "brain.config.yaml fails schema validation" },
+      { "code": "vault-error", "exit": 2, "when": "the vault repo is missing or unreadable, or the note does not exist" },
+      { "code": "locked:canonical-integration", "exit": 2, "when": "another integration holder is active" },
+      { "code": "backup-unhealthy", "exit": 2, "retryable": true, "when": "the fail-closed backup watermark blocks a ledger-writing run" },
+      { "code": "secret-scan-blocked", "exit": 3, "when": "an egress/persisted artifact fails the fail-closed secret scan" },
+      { "code": "review-pending", "exit": 6, "when": "the run is Tier-3 and stops at the review gate (success-shaped)" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}

@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/validate.schema.json",
+  "title": "brain validate [<note>] — --json success output",
+  "description": "Deterministic validation report over a note or the whole vault — a thin read-only wrapper over the validation owner (Task 4.4): schema/path/identity-namespace/provenance/accessibility checks, dangling id detection, reserved-operation rejection, and the tier2Eligible gate. Read-only: writes no sink and no audit-ref event. Exit 0 when clean; exit 1 when findings are present.",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["command", "ok", "findings", "gates"],
+  "properties": {
+    "command": { "const": "validate" },
+    "ok": { "type": "boolean", "description": "true ⇒ no blocking findings (exit 0); false ⇒ findings present (exit 1)." },
+    "scope": { "type": "string", "description": "The validated note id, or 'vault' for a whole-vault pass." },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["code", "severity", "message"],
+        "properties": {
+          "code": {
+            "description": "Stable validation finding code.",
+            "enum": ["schema-invalid", "path-policy", "identity-collision", "dangling-reference", "duplicate-evidence", "missing-provenance", "accessibility", "reserved-operation"]
+          },
+          "severity": { "enum": ["error", "warning"] },
+          "message": { "type": "string", "minLength": 1 },
+          "location": { "type": "string", "description": "note/section/field the finding anchors to." }
+        }
+      }
+    },
+    "gates": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "required": ["tier2Eligible", "modelConfidence", "validationConfidence"],
+      "description": "The Tier-2 eligibility gate PLUS the two independently-typed confidence inputs the workflow gates on (acceptance-thresholds.md §workflow). Both confidences are always reported so a downstream Tier-2 decision can never be made with either input absent; tier2Eligible is true only when min(modelConfidence, validationConfidence) >= 0.8 AND evidence is valid AND input is trusted.",
+      "properties": {
+        "tier2Eligible": { "type": "boolean", "description": "Whether the validated plan/note is eligible for Tier-2 auto-commit (either confidence < 0.8, non-valid evidence, or untrusted input ⇒ false)." },
+        "modelConfidence": { "type": "number", "minimum": 0, "maximum": 1, "description": "The generation model's self-reported confidence carried on the plan (acceptance-thresholds.md §workflow modelConfidence)." },
+        "validationConfidence": { "type": "number", "minimum": 0, "maximum": 1, "description": "The deterministic validator's own confidence that the plan is grounded, schema-valid, and evidence-anchored (acceptance-thresholds.md §workflow validationConfidence)." }
+      }
+    }
+  },
+  "examples": [
+    { "command": "validate", "ok": true, "scope": "project-meridian", "findings": [], "gates": { "tier2Eligible": true, "modelConfidence": 0.91, "validationConfidence": 0.88 } },
+    { "command": "validate", "ok": false, "scope": "vault", "findings": [ { "code": "dangling-reference", "severity": "error", "message": "sourceId not found", "location": "concept-retrieval#claims" } ], "gates": { "tier2Eligible": false, "modelConfidence": 0.91, "validationConfidence": 0.4 } }
+  ],
+  "x-atlas-contract": {
+    "command": "validate",
+    "phase": 4,
+    "privilege": "shared",
+    "idempotency": "none",
+    "executionClass": "pure",
+    "summary": "Deterministic validation report (thin wrapper over the Task 4.4 owner); exit 1 when findings present.",
+    "args": [
+      { "arg": "[<note>]", "type": "string", "required": false, "description": "Note id to validate; omitted ⇒ whole-vault pass." }
+    ],
+    "flags": [],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "sideEffects": [],
+    "prohibitedEffects": [
+      "no vault/ledger/git/audit-ref mutation (pure read-only)"
+    ],
+    "locks": [{ "scope": "shared", "mode": "shared" }],
+    "exitCodes": [0, 1, 2, 4, 5],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "unknown flag/argument" },
+      { "code": "validation-failed", "exit": 1, "when": "one or more blocking findings are present (ok=false)" },
+      { "code": "config-invalid", "exit": 2, "when": "brain.config.yaml fails schema validation" },
+      { "code": "vault-error", "exit": 2, "when": "the vault repo is missing or unreadable, or the note does not exist" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}

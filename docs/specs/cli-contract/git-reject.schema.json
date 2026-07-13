@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/git-reject.schema.json",
+  "title": "brain git reject <runId> — --json success output",
+  "description": "Terminal rejection of an open run: transitions the run to the terminal rejected state, removes its worktree, and emits exactly one run.rejected ledger event. Per recovery-state-machine.md `rejected`, the agent-branch commit is RETAINED (not deleted) for audit / possible re-plan — only the worktree is torn down; the branch commit survives. Shared, intrinsically idempotent by runId (re-rejecting a rejected run is a no-op success). Never touches canonical history. Exit 0 on rejection; exit 1 when the run does not exist or is not rejectable.",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["command", "runId", "state", "worktreeRemoved", "retainedCommit"],
+  "properties": {
+    "command": { "const": "git reject" },
+    "runId": { "type": "string", "minLength": 1, "description": "ULID run id." },
+    "state": { "const": "rejected", "description": "Terminal rejected state." },
+    "worktreeRemoved": { "const": true, "description": "Mandatory completion postcondition: the run's worktree was removed. The agent branch commit is NOT removed." },
+    "retainedCommit": { "type": "string", "minLength": 1, "description": "40-char hex agent-branch commit retained for audit / re-plan (recovery-state-machine.md `rejected`: the commit is kept, never fast-forwarded onto canonical)." }
+  },
+  "examples": [
+    {
+      "command": "git reject",
+      "runId": "01J9Z8Q0000000000000000000",
+      "state": "rejected",
+      "worktreeRemoved": true,
+      "retainedCommit": "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1"
+    }
+  ],
+  "x-atlas-contract": {
+    "command": "git reject",
+    "phase": 4,
+    "privilege": "shared",
+    "idempotency": "intrinsic",
+    "executionClass": "ledger-writing",
+    "summary": "Terminal reject of an open run + worktree removal; RETAINS the agent-branch commit for audit; emits run.rejected; idempotent by runId.",
+    "args": [
+      { "arg": "<runId>", "type": "string", "required": true, "description": "The open run to reject." }
+    ],
+    "flags": [],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "sideEffects": [
+      "removes the run's worktree",
+      "retains the agent-branch commit (refs/agent/<runId>) for audit / re-plan",
+      "finalizeLedgerWrite (run.rejected)"
+    ],
+    "prohibitedEffects": [
+      "no canonical mutation",
+      "never deletes the agent-branch commit — it is retained for audit / re-plan (recovery-state-machine.md `rejected`)",
+      "never emits more than one run.rejected event per run"
+    ],
+    "locks": [{ "scope": "shared", "mode": "shared" }],
+    "exitCodes": [0, 1, 2, 4, 5],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "unknown flag/argument or missing <runId>" },
+      { "code": "run-not-found", "exit": 1, "when": "<runId> does not exist" },
+      { "code": "not-rejectable", "exit": 1, "when": "the run is in a terminal non-rejectable state" },
+      { "code": "vault-error", "exit": 2, "when": "the vault repo is missing or unreadable" },
+      { "code": "backup-unhealthy", "exit": 2, "retryable": true, "when": "the fail-closed backup watermark blocks a ledger-writing run" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/evidence-retry.schema.json",
+  "title": "brain evidence retry <evidenceId> — --json success output",
+  "description": "Re-enqueue a failed evidence re-verification job. Shared, intrinsically idempotent by the (contentId, newRenditionId, owningNoteId) tuple — a repeat retry of an already-queued or in-flight job returns the existing jobId rather than enqueuing a duplicate. Exit 0 on requeue; exit 1 when the evidence does not exist.",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["command", "evidenceId", "jobId", "requeued"],
+  "properties": {
+    "command": { "const": "evidence retry" },
+    "evidenceId": { "type": "string", "minLength": 1, "description": "The evidence id whose re-verification was re-enqueued." },
+    "jobId": { "type": "string", "minLength": 1, "description": "The re-verification job id (existing one on an idempotent repeat)." },
+    "requeued": { "type": "boolean", "description": "True when a new job was enqueued; false when an existing queued/in-flight job was returned." }
+  },
+  "examples": [
+    {
+      "command": "evidence retry",
+      "evidenceId": "ev-01J9Z8Q0000000000000000000",
+      "jobId": "job-01J9Z8Q0000000000000000000",
+      "requeued": true
+    }
+  ],
+  "x-atlas-contract": {
+    "command": "evidence retry",
+    "phase": 4,
+    "privilege": "shared",
+    "idempotency": "intrinsic",
+    "executionClass": "ledger-writing",
+    "summary": "Re-enqueue a failed re-verification job; idempotent by (contentId, newRenditionId, owningNoteId).",
+    "args": [
+      { "arg": "<evidenceId>", "type": "string", "required": true, "description": "The failed evidence id to retry." }
+    ],
+    "flags": [],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "sideEffects": [
+      "enqueues a re-verification job keyed by (contentId, newRenditionId, owningNoteId)",
+      "finalizeLedgerWrite (evidence.retry_enqueued)"
+    ],
+    "prohibitedEffects": [
+      "never enqueues a duplicate job for the same (contentId, newRenditionId, owningNoteId)",
+      "no vault content mutation"
+    ],
+    "locks": [{ "scope": "shared", "mode": "shared" }],
+    "exitCodes": [0, 1, 2, 4, 5],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "unknown flag/argument or missing <evidenceId>" },
+      { "code": "not-found", "exit": 1, "when": "the evidence does not exist" },
+      { "code": "vault-error", "exit": 2, "when": "the vault repo is missing or unreadable" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}

@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/git-approve.schema.json",
+  "title": "brain git approve <runId> [--export-challenge | --authorization <path>] — --json success output",
+  "description": "Privileged fast-forward-only integration of a review-pending run into canonical. The broker challenge is bound to the exact signed agent commit; on authorization, performs a fast-forward-only compare-and-swap of that commit onto canonical head, then reindexes. If the run's base is stale relative to current canonical head, the CAS refuses with the stable code \"refresh-required\" (exit 6) — the caller must `git refresh` then re-approve. Authorized ONLY by an OS-presence assertion bound to the broker challenge (op git approve) or the non-interactive --export-challenge → sign → --authorization flow (security-broker-contract.md §7); --yes never authorizes. Idempotent: re-approving an already-integrated run returns the existing integrated commit. Without an authorization, exits 6 (action-required) and, with --export-challenge, emits an AuthorizationChallenge (security-broker-contract.md §7.1) instead of this success object.",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["command", "runId", "integratedCommit", "canonicalHead", "reindexed"],
+  "properties": {
+    "command": { "const": "git approve" },
+    "runId": { "type": "string", "minLength": 1, "description": "ULID run id." },
+    "integratedCommit": { "type": "string", "minLength": 1, "description": "40-char hex commit that was fast-forward integrated (the exact signed commit)." },
+    "canonicalHead": { "type": "string", "minLength": 1, "description": "40-char hex canonical head after integration (equals integratedCommit on a clean FF)." },
+    "reindexed": { "const": true, "description": "Mandatory completion postcondition: an exit-0 approve success ALWAYS reflects a completed post-integration reindex. A non-reindexed / in-progress outcome is not this success object." }
+  },
+  "examples": [
+    {
+      "command": "git approve",
+      "runId": "01J9Z8Q0000000000000000000",
+      "integratedCommit": "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1",
+      "canonicalHead": "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1",
+      "reindexed": true
+    }
+  ],
+  "x-atlas-contract": {
+    "command": "git approve",
+    "phase": 4,
+    "privilege": "privileged",
+    "idempotency": "key-accepting",
+    "requestHashScope": ["command", "runId", "targetCommit", "canonicalBaseCommit", "idempotencyKey"],
+    "authz": {
+      "op": "git approve",
+      "mechanism": "broker-signature",
+      "challengeFields": ["op", "runId", "targetCommit", "canonicalBaseCommit", "intendedEffect", "nonce", "expiresAt"],
+      "driftCodes": ["authz.canonical_moved", "authz.target_mismatch", "authz.signature_invalid", "authz.payload_mismatch", "authz.signer_unknown", "authz.signer_revoked", "authz.signer_not_permitted", "authz.nonce_unknown", "authz.nonce_expired", "authz.nonce_replayed"],
+      "universalCodes": ["authz.schema_invalid", "authz.canonicalization_unsupported"]
+    },
+    "executionClass": "ledger-writing",
+    "summary": "Broker-authorized, challenge-bound FF-only CAS of the exact signed commit onto canonical, then reindex; stale base ⇒ refresh-required (exit 6); idempotent.",
+    "args": [
+      { "arg": "<runId>", "type": "string", "required": true, "description": "The review-pending run to approve and integrate." }
+    ],
+    "flags": [
+      { "flag": "--export-challenge", "type": "boolean", "default": false, "description": "Emit the broker AuthorizationChallenge (op git approve, bound to the exact signed agent commit) to stdout and exit 6 instead of integrating; sign it out of band with an enrolled approver key." },
+      { "flag": "--authorization <path>", "type": "string", "default": null, "description": "Path to a signed AuthorizationResponse produced from a prior --export-challenge; presents it to the broker to authorize the integration." },
+      { "flag": "--idempotency-key <key>", "type": "string", "default": null, "description": "Caller-supplied idempotency key; a repeat approve with the same key + request-hash (requestHashScope) returns the existing integrated commit rather than re-integrating (registry idempotency: key-accepting)." }
+    ],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "sideEffects": [
+      "fast-forward-only CAS of the signed commit onto canonical head",
+      "post-integration reindex",
+      "finalizeLedgerWrite (run.integrated)"
+    ],
+    "prohibitedEffects": [
+      "never a non-fast-forward merge or rewrite of canonical history",
+      "never integrates a commit other than the exact challenge-bound signed commit",
+      "never authorized by --yes; never bypasses the broker challenge",
+      "never runs without the canonical-integration exclusive lock"
+    ],
+    "locks": [
+      { "scope": "canonical-integration", "mode": "exclusive" },
+      { "scope": "shared", "mode": "shared" }
+    ],
+    "exitCodes": [0, 1, 2, 4, 5, 6],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "unknown flag/argument, missing <runId>, or --export-challenge combined with --authorization" },
+      { "code": "authorization-required", "exit": 6, "when": "no --authorization supplied (challenge exported with --export-challenge)" },
+      { "code": "refresh-required", "exit": 6, "when": "the run's base is stale relative to current canonical head; refresh then re-approve (stable code; surfaces broker authz.canonical_moved)" },
+      { "code": "authz.canonical_moved", "exit": 6, "when": "broker drift: canonicalBaseCommit is no longer the canonical tip (security-broker-contract.md §7.3)" },
+      { "code": "authz.target_mismatch", "exit": 6, "when": "broker drift: targetCommit/runId differs from the re-derived challenge" },
+      { "code": "authz.nonce_expired", "exit": 6, "when": "broker: the challenge nonce expired (expiresAt passed)" },
+      { "code": "authz.presence_unverified", "exit": 6, "when": "broker: the OS presence assertion is absent or not bound to the challenge" },
+      { "code": "authz.signature_invalid", "exit": 1, "when": "broker: Ed25519 signature verification failed" },
+      { "code": "authz.payload_mismatch", "exit": 1, "when": "broker: signingPayload differs from the broker-recomputed canonical bytes" },
+      { "code": "authz.schema_invalid", "exit": 1, "when": "broker: the challenge/response fails the contracts schema (universal broker validation failure, security-broker-contract.md §7.3)" },
+      { "code": "authz.canonicalization_unsupported", "exit": 1, "when": "broker: the response's payloadCanonicalization id is unknown (universal broker validation failure, security-broker-contract.md §7.3)" },
+      { "code": "authz.signer_unknown", "exit": 1, "when": "broker: signerId is not in the signer registry" },
+      { "code": "authz.signer_revoked", "exit": 1, "when": "broker: the signer is revoked" },
+      { "code": "authz.signer_not_permitted", "exit": 1, "when": "broker: the signer is not permitted for this op" },
+      { "code": "authz.nonce_unknown", "exit": 1, "when": "broker: the nonce was not issued by this broker" },
+      { "code": "authz.nonce_replayed", "exit": 1, "when": "broker: the nonce was already consumed" },
+      { "code": "run-not-found", "exit": 1, "when": "<runId> does not exist or is not approvable" },
+      { "code": "locked:canonical-integration", "exit": 2, "when": "another integration holder is active" },
+      { "code": "backup-unhealthy", "exit": 2, "retryable": true, "when": "the fail-closed backup watermark blocks a ledger-writing run" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure during integration" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}
