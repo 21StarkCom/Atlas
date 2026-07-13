@@ -58,6 +58,39 @@ const IndexingConfig = z
   })
   .strict();
 
+/**
+ * Retrieval / hybrid-search tuning (retrieval-index-contract.md §5/§6). Single owner of the RRF
+ * weights/bounds + the FTS-maturity fallback switch — code reads these, never inlines them.
+ * `retrieval.rrf.weights.vector` is bounded strictly-positive: the §6 fallback fuses over the vector
+ * layer alone, so a zero vector weight would annihilate the only surviving statistical layer.
+ */
+const RetrievalConfig = z
+  .object({
+    rrf: z
+      .object({
+        k: z.number().int().min(1).max(1000).default(60), // §5 RRF k, bounds [1,1000]
+        weights: z
+          .object({
+            fts: z.number().min(0).max(10).default(1.0), // may be 0 (disable FTS by weight)
+            // strictly-positive: `.gt(0)` — the vector-only FTS fallback (§6) must still fuse
+            vector: z.number().gt(0).max(10).default(1.0),
+          })
+          .strict()
+          .default({}),
+      })
+      .strict()
+      .default({}),
+    fts: z
+      .object({
+        // LanceDB FTS participation (§6). false → hybrid degrades to vector + id/alias with RRF.
+        enabled: z.boolean().default(true),
+      })
+      .strict()
+      .default({}),
+  })
+  .strict()
+  .default({});
+
 const GitConfig = z
   .object({
     worktrees_path: z.string().min(1),
@@ -106,6 +139,7 @@ export const AtlasConfigSchema = z
     sqlite: SqliteConfig,
     lancedb: LancedbConfig,
     indexing: IndexingConfig,
+    retrieval: RetrievalConfig,
     git: GitConfig,
     models: ModelsConfig,
     policies: PoliciesConfig,
@@ -122,6 +156,7 @@ export const CONFIG_SECTIONS = [
   "sqlite",
   "lancedb",
   "indexing",
+  "retrieval",
   "git",
   "models",
   "policies",

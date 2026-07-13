@@ -22,6 +22,15 @@ indexing:
   embedding_model: gemini-embedding-001
   dimensions: 768 # D7 — changing this opens a new index generation
 
+retrieval:
+  rrf:
+    k: 60 # retrieval-index-contract.md §5 — RRF k, bounds [1, 1000]
+    weights:
+      fts: 1.0 # bounds [0, 10]; may be 0 to disable FTS by weight
+      vector: 1.0 # bounds (0, 10] — must be > 0 so the §6 vector-only fallback still fuses
+  fts:
+    enabled: true # §6 — false degrades hybrid to vector + id/alias with RRF
+
 git:
   worktrees_path: ./.atlas/worktrees
   auto_commit_risk_levels: [1, 2] # Tier-1/2 auto-integrate; Tier-3 → review

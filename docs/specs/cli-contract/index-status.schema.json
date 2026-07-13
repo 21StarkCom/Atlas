@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/index-status.schema.json",
+  "title": "brain index status — --json success output",
+  "description": "Read-only retrieval-index status. Reports the configured indexing generation identity (chunkerVersion/embeddingModel/embeddingDimensions per D4/D7), per-note active-generation coverage, and staleness — the set of notes whose active generation's generationId differs from the generationId recomputed from the current note + config (retrieval-index-contract.md §4). Reports staleness as data — it writes no ledger row and never mutates the index — but, like every executed index operation (plan Task 3.5), it appends exactly one terminal run.projection git-ref audit event.",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["command", "index", "generation", "notes", "staleness"],
+  "properties": {
+    "command": { "const": "index status" },
+    "index": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "required": ["configured", "chunkCount"],
+      "properties": {
+        "configured": { "type": "boolean", "description": "False when no LanceDB directory is configured/present (index checks report not-configured, not failed)." },
+        "chunkCount": { "type": "integer", "minimum": 0, "description": "Live SearchChunk rows across all generations (0 when unconfigured)." }
+      }
+    },
+    "generation": {
+      "type": "object",
+      "description": "The current indexing generation-identity components (§2) derived from config.",
+      "unevaluatedProperties": false,
+      "required": ["chunkerVersion", "embeddingModel", "embeddingDimensions"],
+      "properties": {
+        "chunkerVersion": { "type": "integer", "minimum": 1, "description": "indexing.chunker_version (D4)." },
+        "embeddingModel": { "type": "string", "minLength": 1, "description": "indexing.embedding_model." },
+        "embeddingDimensions": { "type": "integer", "minimum": 1, "description": "indexing.dimensions (D7)." }
+      }
+    },
+    "notes": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "required": ["total", "indexed", "stale", "missing"],
+      "properties": {
+        "total": { "type": "integer", "minimum": 0, "description": "Projected note count." },
+        "indexed": { "type": "integer", "minimum": 0, "description": "Notes with a current, active generation and live chunks." },
+        "stale": { "type": "integer", "minimum": 0, "description": "Notes whose active generation is stale (§4)." },
+        "missing": { "type": "integer", "minimum": 0, "description": "Notes with no active generation / no live chunks." }
+      }
+    },
+    "staleness": {
+      "type": "array",
+      "description": "Per-note staleness detail; empty when the index is fully current.",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["noteId", "triggers"],
+        "properties": {
+          "noteId": { "type": "string", "minLength": 1 },
+          "triggers": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "enum": ["contentHash", "chunkerVersion", "embeddingModel", "embeddingDimensions", "missing"] },
+            "description": "Which generation-identity drifts (§4) make this note stale."
+          }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "command": "index status",
+      "index": { "configured": true, "chunkCount": 128 },
+      "generation": { "chunkerVersion": 1, "embeddingModel": "gemini-embedding-001", "embeddingDimensions": 768 },
+      "notes": { "total": 20, "indexed": 18, "stale": 1, "missing": 1 },
+      "staleness": [
+        { "noteId": "concept-atlas", "triggers": ["contentHash"] },
+        { "noteId": "person-koral", "triggers": ["missing"] }
+      ]
+    },
+    {
+      "command": "index status",
+      "index": { "configured": false, "chunkCount": 0 },
+      "generation": { "chunkerVersion": 1, "embeddingModel": "gemini-embedding-001", "embeddingDimensions": 768 },
+      "notes": { "total": 3, "indexed": 0, "stale": 0, "missing": 3 },
+      "staleness": []
+    }
+  ],
+  "x-atlas-contract": {
+    "command": "index status",
+    "phase": 3,
+    "privilege": "shared",
+    "idempotency": "none",
+    "executionClass": "read",
+    "summary": "Read-only index status: current generation identity, per-note coverage, and staleness (§4); emits exactly one terminal run.projection audit event.",
+    "args": [],
+    "flags": [],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "terminalAuditEvent": "run.projection",
+    "sideEffects": ["emits exactly one run.projection git-ref audit event (executed index operation, plan Task 3.5)"],
+    "prohibitedEffects": ["no ledger row written", "no index/projection/vault mutation", "no more than one terminal run.projection event per run"],
+    "locks": [{ "scope": "shared", "mode": "shared" }],
+    "exitCodes": [0, 2, 4, 5],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "unknown flag/argument or malformed invocation" },
+      { "code": "config-invalid", "exit": 2, "when": "brain.config.yaml fails schema validation" },
+      { "code": "db-unavailable", "exit": 2, "when": "the SQLite store file is missing or unopenable" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}
