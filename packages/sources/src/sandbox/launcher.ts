@@ -18,7 +18,8 @@
  */
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, rmSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, realpathSync, rmSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -166,13 +167,52 @@ export function detectCodeRoot(start: string): string {
  * a vault/`.private`/`.git`/keys. A caller may override via
  * {@link SpawnSandboxedOpts.codeRoots} (e.g. a test running an isolated probe module).
  *
+ * The worker also loads the pinned **parse5** HTML parser (Task 2.4) + its sole runtime
+ * dep **entities**; their resolved package dirs (in the pnpm store) are added here so the
+ * jail can read exactly those two third-party packages and nothing else in the store.
+ *
  * NB kept in sync with the worker's runtime `import` graph: if the worker ever loads a
- * new `@atlas/*` package at runtime, add its dir here (the fail-closed cost of omission
- * is a boot failure the positive-control test catches, never a silent over-exposure).
+ * new `@atlas/*` package or third-party dep at runtime, add its dir here (the fail-closed
+ * cost of omission is a boot failure the positive-control test catches, never a silent
+ * over-exposure).
  */
 export function importClosureRoots(moduleDir: string): string[] {
   const repo = detectCodeRoot(moduleDir);
-  return [join(repo, "packages", "sources"), join(repo, "packages", "scan")].filter((d) => existsSync(d));
+  const roots = [join(repo, "packages", "sources"), join(repo, "packages", "scan")];
+  return [...roots, ...parserDepRoots(repo)].filter((d) => existsSync(d));
+}
+
+/**
+ * Resolved package dirs of the worker's third-party parser deps (parse5 + entities),
+ * added to the read closure so the confined worker can `import` them. Resolved from the
+ * `@atlas/sources` package (parse5), then entities from parse5's own context, and
+ * realpath'd through the pnpm symlink to the concrete store dir the jail must allow. A
+ * resolution failure returns nothing — the worker then fails to boot (loud), never a
+ * silent over-broad allow.
+ */
+export function parserDepRoots(repo: string): string[] {
+  const out: string[] = [];
+  try {
+    const sourcesReq = createRequire(join(repo, "packages", "sources", "package.json"));
+    const parse5Main = sourcesReq.resolve("parse5");
+    out.push(packageDirOf(parse5Main));
+    const entitiesMain = createRequire(parse5Main).resolve("entities");
+    out.push(packageDirOf(entitiesMain));
+  } catch {
+    /* unresolved — worker boot fails loud rather than over-allowing the store */
+  }
+  return out;
+}
+
+/** The realpath'd package root (dir with `package.json`) containing a resolved entrypoint. */
+function packageDirOf(entryPath: string): string {
+  let dir = dirname(realpathSync(entryPath));
+  for (;;) {
+    if (existsSync(join(dir, "package.json"))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) return dir;
+    dir = parent;
+  }
 }
 
 /**
@@ -437,8 +477,20 @@ export async function runInSandbox(req: RunInSandboxRequest, internal?: RunInSan
     switch (control.kind) {
       case "worker-error":
         throw new SandboxWorkerError(control.message);
-      case "scan-rejection":
-        return { ok: false, kind: "scan-rejection", code: "secret-detected", exit: 3, scannerRulesetVersion: control.scannerRulesetVersion };
+      case "scan-rejection": {
+        // Carry the offending normalized bytes (if the worker attached them) so the
+        // trusted-side guard can quarantine the exact decoded content. NEVER exposed as a
+        // stream — quarantine-only.
+        const quarantineBytes = control.quarantineB64 !== undefined ? new Uint8Array(Buffer.from(control.quarantineB64, "base64")) : undefined;
+        return {
+          ok: false,
+          kind: "scan-rejection",
+          code: "secret-detected",
+          exit: 3,
+          scannerRulesetVersion: control.scannerRulesetVersion,
+          ...(quarantineBytes !== undefined ? { quarantineBytes } : {}),
+        };
+      }
       case "normalization-rejection":
         return { ok: false, kind: "normalization-rejection", rejection: control.rejection };
       case "clean": {
@@ -470,7 +522,7 @@ export async function runInSandbox(req: RunInSandboxRequest, internal?: RunInSan
             controller.close();
           },
         });
-        return { ok: true, stream, attestation: att };
+        return { ok: true, stream, attestation: att, gaps: control.gaps };
       }
     }
   } finally {

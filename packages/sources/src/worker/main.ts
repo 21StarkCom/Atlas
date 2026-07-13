@@ -24,10 +24,16 @@
  */
 import { createHash } from "node:crypto";
 import { openSync, readSync, closeSync, fstatSync, writeSync } from "node:fs";
-import { scanBytes } from "@atlas/scan";
-import { MAX_BYTES, signatureMatches, decodeTextStrict, type SourceFormat } from "../formats.js";
+import type { RepresentedGap } from "@atlas/contracts";
+import { scanBytes, type SecretFinding } from "@atlas/scan";
+import { MAX_BYTES, signatureMatches, type SourceFormat } from "../formats.js";
 import type { NormalizationRejection } from "../types.js";
-import { CONTROL_FD, OUTPUT_FD, type WorkerControl, type WorkerRequest } from "../sandbox/protocol.js";
+import { normalizeMarkdown } from "../normalize/markdown.js";
+import { normalizeText } from "../normalize/text.js";
+import { normalizePdf } from "../normalize/pdf.js";
+import { normalizeHtml } from "../normalize/html.js";
+import type { NormalizeOutcome } from "../normalize/media.js";
+import { CONTROL_FD, MAX_QUARANTINE_CONTROL_BYTES, OUTPUT_FD, type WorkerControl, type WorkerRequest } from "../sandbox/protocol.js";
 
 /** Write an entire buffer to `fd`, looping over partial writes (pipes can short-write). */
 function writeAll(fd: number, data: Uint8Array): void {
@@ -42,38 +48,38 @@ function emitControl(control: WorkerControl): void {
   writeAll(CONTROL_FD, new TextEncoder().encode(JSON.stringify(control)));
 }
 
-/** The in-worker normalization result: normalized bytes, or a typed rejection value. */
-type WorkerNormalize = { ok: true; bytes: Uint8Array } | { ok: false; rejection: NormalizationRejection };
+/** The in-worker normalization result: normalized bytes + gaps, or a typed rejection value. */
+type WorkerNormalize =
+  | { ok: true; bytes: Uint8Array; gaps: readonly RepresentedGap[] }
+  | { ok: false; rejection: NormalizationRejection };
 
 /**
- * Minimal in-worker normalization (the Task 2.4 seam). Text + Markdown are decoded
- * FATALLY under an accepted encoding (UTF-8/UTF-16) — a malformed or unsupported byte
- * sequence yields a typed `unsupported-encoding` rejection rather than a lossy
- * `U+FFFD`-riddled "clean" rendition (wing round-3 finding 8). PDF/HTML return a typed
- * rejection until Task 2.4 lands the per-format extractors (documented assumption —
- * Task 2.3's deliverable is the sandbox + scan-before-persist mechanism, proven
- * end-to-end on the text/markdown path).
+ * In-worker normalization — Task 2.4's per-format normalizers wired into the sandbox
+ * seam. Runs the SAME pure `normalize/{markdown,text,pdf,html}` extractors the
+ * trusted-side `normalize()` uses (one owner of extraction logic), so the confined
+ * parse path and the guard-enforced entry point produce byte-identical output for the
+ * same bytes. A per-format normalizer returns a typed rejection VALUE (never truncated
+ * text as success); the worker forwards it as a `normalization-rejection`. The
+ * normalized text is re-encoded UTF-8 for the in-sandbox scan + attested stream.
  */
 function normalizeInWorker(format: SourceFormat, raw: Uint8Array): WorkerNormalize {
+  let outcome: NormalizeOutcome;
   switch (format) {
     case "markdown":
-    case "text": {
-      const dec = decodeTextStrict(raw);
-      if (!dec.ok) {
-        return {
-          ok: false,
-          rejection: { code: "unsupported-encoding", format, detail: "input is not valid UTF-8 / UTF-16 text" },
-        };
-      }
-      return { ok: true, bytes: new TextEncoder().encode(dec.text) };
-    }
+      outcome = normalizeMarkdown(raw);
+      break;
+    case "text":
+      outcome = normalizeText(raw);
+      break;
     case "pdf":
+      outcome = normalizePdf(raw);
+      break;
     case "html":
-      return {
-        ok: false,
-        rejection: { code: "no-extractable-text", format, detail: "per-format normalizer arrives in Task 2.4" },
-      };
+      outcome = normalizeHtml(raw);
+      break;
   }
+  if (!outcome.ok) return { ok: false, rejection: outcome.rejection };
+  return { ok: true, bytes: new TextEncoder().encode(outcome.text), gaps: outcome.gaps };
 }
 
 /**
@@ -108,6 +114,41 @@ function readInputBounded(inputPath: string, ceiling: number): Uint8Array | null
 /** `sha256:<hex>` over `bytes`. */
 function sha256Hex(bytes: Uint8Array): string {
   return "sha256:" + createHash("sha256").update(bytes).digest("hex");
+}
+
+/** Char-context padded around a matched span so line-anchored rules still re-match trusted-side. */
+const QUARANTINE_WINDOW_PAD = 4096;
+
+/**
+ * Build the offending-bytes payload the trusted-side guard re-scans + quarantines on a
+ * secret hit (wing round-3 finding 5). Small outputs ship WHOLE (full context, matches the
+ * prior behaviour + keeps the quarantined bytes complete). An output larger than the
+ * control-channel bound no longer omits the payload — which left `normalize` throwing WITHOUT
+ * quarantining anything. Instead we ship a BOUNDED WINDOW around the first finding: the
+ * matched span (char offsets into the UTF-8 decode) plus generous context, re-encoded to
+ * UTF-8. The window is verified to still re-scan DIRTY so the trusted guard is guaranteed to
+ * re-detect + quarantine it. Returns `null` only if no dirty window can be built (unreachable
+ * for a real finding — the ±pad window strictly contains the matched token).
+ */
+function buildQuarantineSample(bytes: Uint8Array, findings: readonly SecretFinding[]): Uint8Array | null {
+  // The whole dirty output fits the channel bound → ship it all (complete quarantine bytes).
+  if (bytes.length <= MAX_QUARANTINE_CONTROL_BYTES) return bytes;
+  const first = findings[0];
+  if (first === undefined) return null; // a dirty verdict always has ≥1 finding
+  // Offsets are char offsets into the UTF-8-decoded text (same decode the scanner used).
+  const text = new TextDecoder().decode(bytes);
+  const lo = Math.max(0, first.startOffset - QUARANTINE_WINDOW_PAD);
+  const hi = Math.min(text.length, first.endOffset + QUARANTINE_WINDOW_PAD);
+  let out = new TextEncoder().encode(text.slice(lo, hi));
+  // A pathologically large single span could still exceed the bound; fall back to the bare
+  // matched token (still re-scans dirty for value-shaped / entropy rules).
+  if (out.length > MAX_QUARANTINE_CONTROL_BYTES) {
+    out = new TextEncoder().encode(text.slice(first.startOffset, first.endOffset));
+    if (out.length > MAX_QUARANTINE_CONTROL_BYTES) return null;
+  }
+  // Verify the bounded window still flags — never ship a sample the guard would wave through.
+  const recheck = scanBytes({ bytes: out, context: { origin: "quarantine-window", boundary: "pre-persistence", kind: "normalized" } });
+  return recheck.clean ? null : out;
 }
 
 function main(): void {
@@ -147,8 +188,17 @@ function main(): void {
     // (5) scan the normalized output INSIDE the sandbox.
     const verdict = scanBytes({ bytes: norm.bytes, context: { origin: req.inputPath, boundary: "pre-persistence", kind: "normalized" } });
     if (!verdict.clean) {
-      // (6a) secret detected: emit NO bytes, distinct exit-3 scan rejection.
-      emitControl({ kind: "scan-rejection", code: "secret-detected", scannerRulesetVersion: verdict.rulesetVersion });
+      // (6a) secret detected: emit NO bytes on fd 1 (scan-before-persist), a distinct
+      // exit-3 scan rejection on fd 3. The offending NORMALIZED bytes ride the control
+      // message (base64, bounded) so the trusted-side guard QUARANTINES the exact decoded
+      // content. An output larger than the channel bound ships a bounded WINDOW around the
+      // match (finding 5) rather than omitting the payload — so quarantine still happens.
+      const sample = buildQuarantineSample(norm.bytes, verdict.findings);
+      const control: WorkerControl =
+        sample !== null
+          ? { kind: "scan-rejection", code: "secret-detected", scannerRulesetVersion: verdict.rulesetVersion, quarantineB64: Buffer.from(sample).toString("base64") }
+          : { kind: "scan-rejection", code: "secret-detected", scannerRulesetVersion: verdict.rulesetVersion };
+      emitControl(control);
       return;
     }
     // (6b) clean: release the bytes + a digest-bound attestation.
@@ -163,6 +213,7 @@ function main(): void {
     emitControl({
       kind: "clean",
       attestation: { scannerRulesetVersion: verdict.rulesetVersion, scannedBytes: norm.bytes.length, clean: true, outputDigest },
+      gaps: norm.gaps,
     });
   } catch (e) {
     emitControl({ kind: "worker-error", message: e instanceof Error ? e.message : String(e) });

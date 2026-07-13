@@ -13,6 +13,11 @@ catalog:
   "@types/better-sqlite3": ^7.6.11
   ajv: ^8.17.1
   better-sqlite3: ^12.2.0
+  # EXACT pin (no range): parse5 composes into `extractorVersion` (packages/sources), so a
+  # later 8.x resolution must never change HTML extraction without a conscious version bump.
+  # Kept in sync with normalize/pins.ts PARSE5_VERSION; the conformance test asserts the
+  # RESOLVED package version equals that pin.
+  parse5: 8.0.1
   typescript: ^5.8.3
   vitest: ^3.2.4
   yaml: ^2.4.2

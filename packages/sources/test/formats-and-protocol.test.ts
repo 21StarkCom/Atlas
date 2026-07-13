@@ -104,9 +104,22 @@ describe("decodeTextStrict — FATAL encoding validation (finding 8)", () => {
 describe("parseWorkerControl — strict validation (finding 13)", () => {
   const digest = "sha256:" + "a".repeat(64);
 
-  it("accepts a well-formed clean attestation", () => {
-    const c = parseWorkerControl(JSON.stringify({ kind: "clean", attestation: { scannerRulesetVersion: 1, scannedBytes: 10, clean: true, outputDigest: digest } }));
+  it("accepts a well-formed clean attestation with an explicit gaps array", () => {
+    const c = parseWorkerControl(JSON.stringify({ kind: "clean", attestation: { scannerRulesetVersion: 1, scannedBytes: 10, clean: true, outputDigest: digest }, gaps: [] }));
     expect(c.kind).toBe("clean");
+    if (c.kind === "clean") expect(c.gaps).toEqual([]);
+  });
+
+  it("REJECTS a clean message that OMITS the gaps array (finding 6 — no silent coercion to [])", () => {
+    // A clean message with NO `gaps` field was silently coerced to `gaps: []`, turning
+    // dropped media-gap metadata into a faithful-looking success. It must now be rejected.
+    expect(() => parseWorkerControl(JSON.stringify({ kind: "clean", attestation: { scannerRulesetVersion: 1, scannedBytes: 10, clean: true, outputDigest: digest } }))).toThrow(/gaps must be an explicit array/);
+    // A non-array gaps is likewise rejected.
+    expect(() => parseWorkerControl(JSON.stringify({ kind: "clean", attestation: { scannerRulesetVersion: 1, scannedBytes: 10, clean: true, outputDigest: digest }, gaps: {} }))).toThrow(/gaps must be an explicit array/);
+    // An explicit non-empty, well-formed gaps array is still accepted (order preserved).
+    const c = parseWorkerControl(JSON.stringify({ kind: "clean", attestation: { scannerRulesetVersion: 1, scannedBytes: 10, clean: true, outputDigest: digest }, gaps: [{ kind: "image-no-alt", locator: "dom:/html[1]/body[1]/img[1]" }] }));
+    expect(c.kind).toBe("clean");
+    if (c.kind === "clean") expect(c.gaps).toEqual([{ kind: "image-no-alt", locator: "dom:/html[1]/body[1]/img[1]" }]);
   });
 
   it("rejects a clean message with a missing/short/oddly-typed digest", () => {

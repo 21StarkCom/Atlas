@@ -12,13 +12,30 @@
  *   - the CLEAN normalized bytes leave on **fd 1** (the output pipe) and NOTHING else
  *     is written there;
  *   - a single {@link WorkerControl} JSON message leaves on **fd 3** (the result pipe)
- *     describing the outcome (clean + attestation, scan-rejection, or
+ *     describing the outcome (clean + attestation + represented gaps, scan-rejection, or
  *     normalization-rejection). fd 2 carries only diagnostics.
+ *
+ * Two payloads travel on the control channel besides the outcome discriminator:
+ *   - CLEAN carries the deterministic {@link RepresentedGap} list the normalizer produced
+ *     (e.g. HTML `image-no-alt` / `image-decorative` records) — these are metadata, NOT
+ *     document bytes, so they ride the control message rather than fd 1 (wing round-2
+ *     finding 2: the gap records must survive the sandbox path, not be discarded).
+ *   - SCAN-REJECTION optionally carries the offending NORMALIZED bytes (base64) so the
+ *     trusted-side `PrePersistenceGuard` can QUARANTINE the exact decoded content that
+ *     flagged the refusal. These bytes were scanned (found dirty) INSIDE the sandbox and
+ *     travel ONLY to the trusted quarantine store (AEAD, ciphertext-only) — never to fd 1
+ *     and never to any real sink — so the scan-before-persist invariant holds (fd 1 stays
+ *     empty on a hit; see `scan-before-persist.test`). The payload is bounded by
+ *     {@link MAX_QUARANTINE_CONTROL_BYTES}: an output within the bound ships whole; a
+ *     LARGER dirty output ships a bounded WINDOW around the match (still under the bound)
+ *     rather than omitting the payload — so quarantine always happens and the channel is
+ *     never overflowed (wing round-3 finding 5).
  *
  * The worker NEVER writes normalized bytes to any file — the scan-before-persist
  * invariant (D15) is that output exists only in memory until it has been scanned and
  * then released through the pipe.
  */
+import type { RepresentedGap } from "@atlas/contracts";
 import type { NormalizationRejection, NormalizationRejectionCode, ScanAttestation } from "../types.js";
 import type { SourceFormat } from "../formats.js";
 import { SOURCE_FORMATS } from "../formats.js";
@@ -40,16 +57,30 @@ export interface WorkerRequest {
   readonly maxOutputBytes: number;
 }
 
+/**
+ * Max bytes of offending normalized output the worker may carry (base64) on a
+ * scan-rejection for trusted-side quarantine. Well under the launcher's control-channel
+ * cap (base64 inflates ~4/3, so 1 MiB → ~1.33 MiB, comfortably below CONTROL_BYTE_CAP).
+ * An output within the bound ships whole; a larger dirty output ships a bounded WINDOW
+ * around the match sized to this bound (wing round-3 finding 5) — so the exact decoded
+ * secret still reaches quarantine without overflowing the channel.
+ */
+export const MAX_QUARANTINE_CONTROL_BYTES = 1024 * 1024; // 1 MiB
+
 /** The single control message the worker emits on {@link CONTROL_FD}. */
 export type WorkerControl =
   | {
       readonly kind: "clean";
       readonly attestation: ScanAttestation;
+      /** Deterministic gap records the normalizer produced (metadata, not document bytes). */
+      readonly gaps: readonly RepresentedGap[];
     }
   | {
       readonly kind: "scan-rejection";
       readonly code: "secret-detected";
       readonly scannerRulesetVersion: number;
+      /** Base64 of the offending normalized bytes for trusted-side quarantine (bounded; optional). */
+      readonly quarantineB64?: string;
     }
   | {
       readonly kind: "normalization-rejection";
@@ -73,8 +104,18 @@ const REJECTION_CODES: ReadonlySet<string> = new Set<NormalizationRejectionCode>
 
 const FORMATS: ReadonlySet<string> = new Set<string>(SOURCE_FORMATS);
 
+/**
+ * The exhaustive represented-gap kind set the Phase-2 normalizers produce (`media.ts` /
+ * `normalization-contract.md §4`). Validated here so a compromised worker cannot smuggle
+ * an arbitrary `kind`/`note` blob into the rendition through the control channel.
+ */
+const GAP_KINDS: ReadonlySet<string> = new Set<string>(["image-no-alt", "image-decorative"]);
+
 /** `sha256:` + 64 lowercase hex — the exact attestation digest shape. */
 const DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
+
+/** Standard base64 (with optional `=` padding) — the quarantine payload shape. */
+const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -82,6 +123,34 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 /** A finite, non-negative, safe integer (a byte count or version). */
 function isCount(v: unknown): v is number {
   return typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+}
+
+/**
+ * Strictly validate the `gaps` array of a `clean` control message. Every entry must be a
+ * known-kind record with an optional string `locator`/`note`; anything off-shape throws
+ * so a rendition is never assembled from an untrusted gap blob. Order is preserved (the
+ * normalizer emits gaps deterministically in document order).
+ */
+function parseGaps(v: unknown): RepresentedGap[] {
+  // Finding 6: a clean message MUST carry an explicit `gaps` array — an omitted `gaps` is
+  // rejected, never silently coerced to `[]`. Coercing omission to empty turned MISSING
+  // media-gap metadata (a normalizer that failed to attach its gaps) into a faithful-looking
+  // success; the normalizer always emits an explicit array (empty when there are genuinely no
+  // gaps), so requiring one distinguishes "no gaps" from "gaps dropped".
+  if (!Array.isArray(v)) throw new Error("clean control: gaps must be an explicit array");
+  return v.map((g, i) => {
+    if (!isRecord(g)) throw new Error(`clean control: gap[${i}] is not an object`);
+    if (typeof g.kind !== "string" || !GAP_KINDS.has(g.kind)) {
+      throw new Error(`clean control: gap[${i}] has unknown kind ${JSON.stringify(g.kind)}`);
+    }
+    if (g.locator !== undefined && typeof g.locator !== "string") throw new Error(`clean control: gap[${i}].locator must be a string`);
+    if (g.note !== undefined && typeof g.note !== "string") throw new Error(`clean control: gap[${i}].note must be a string`);
+    return {
+      kind: g.kind,
+      ...(g.locator !== undefined ? { locator: g.locator } : {}),
+      ...(g.note !== undefined ? { note: g.note } : {}),
+    };
+  });
 }
 
 /**
@@ -116,12 +185,20 @@ export function parseWorkerControl(raw: string): WorkerControl {
         clean: true,
         outputDigest: a.outputDigest,
       };
-      return { kind: "clean", attestation };
+      return { kind: "clean", attestation, gaps: parseGaps(v.gaps) };
     }
     case "scan-rejection": {
       if (v.code !== "secret-detected") throw new Error("scan-rejection: code must be `secret-detected`");
       if (!isCount(v.scannerRulesetVersion)) throw new Error("scan-rejection: scannerRulesetVersion is not a count");
-      return { kind: "scan-rejection", code: "secret-detected", scannerRulesetVersion: v.scannerRulesetVersion };
+      if (v.quarantineB64 !== undefined && (typeof v.quarantineB64 !== "string" || !BASE64_RE.test(v.quarantineB64))) {
+        throw new Error("scan-rejection: quarantineB64 must be a base64 string when present");
+      }
+      return {
+        kind: "scan-rejection",
+        code: "secret-detected",
+        scannerRulesetVersion: v.scannerRulesetVersion,
+        ...(v.quarantineB64 !== undefined ? { quarantineB64: v.quarantineB64 } : {}),
+      };
     }
     case "normalization-rejection": {
       const r = v.rejection;
