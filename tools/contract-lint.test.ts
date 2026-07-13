@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { describe, expect, it } from "vitest";
-import { ProviderErrorSchema } from "@atlas/contracts";
+import { ProviderErrorSchema, CHANGE_PLAN_OPS } from "@atlas/contracts";
 import {
   checkAuthzContractCompleteness,
   checkFixtureConsistency,
@@ -17,6 +17,7 @@ import {
   checkStateTableCompleteness,
   checkTableInventory,
   DATA_DICTIONARY_PATH,
+  EXIT_CODES,
   extractJsonBlocks,
   findRepoRoot,
   loadAuthzContract,
@@ -865,6 +866,490 @@ describe("Phase-3 schema discriminants + audit/error catalog (Task 3.0 revision 
     // candidate unit is the note, chunks fold to notes with per-layer provenance
     expect(rc.candidateUnit).toBe("note");
     expect(rc.chunkToNoteAggregation.tieBreaker).toBe("noteId");
+  });
+});
+
+describe("Phase-4 cli-contract schema presence (Task 4.0)", () => {
+  const phase4 = registry.commands.filter((c) => c.phase === 4);
+
+  it("has Phase-4 rows", () => {
+    expect(phase4.length).toBeGreaterThan(0);
+  });
+
+  it("every Phase-4 row has an existing schema file (independent of implementation status)", () => {
+    // Contract-only gate (Task 4.0 acceptance): all Phase-4 registry rows have
+    // schemas BEFORE any Phase-4 feature code merges. Presence is asserted
+    // directly, NOT via the implemented flag (which stays false until a handler
+    // lands in Tasks 4.3–4.11).
+    for (const r of phase4) {
+      expect(existsSync(join(root, r.schemaRef)), `${r.name} schema ${r.schemaRef}`).toBe(true);
+    }
+  });
+
+  // NB: schema presence is asserted independently of the `implemented` flag (above).
+  // We deliberately do NOT require Phase-4 rows to stay implemented:false — Tasks
+  // 4.3–4.11 flip rows to implemented:true as handlers land, and the durable gate is
+  // schema presence, not a temporal implementation-status assertion (which the first
+  // Phase-4 handler would necessarily break). Matches the Phase-3 gate policy.
+
+  it("the Phase-4 command set matches the plan Task 4.0 inventory", () => {
+    expect(phase4.map((c) => c.name).sort()).toEqual(
+      [
+        "enrich",
+        "evidence resolve",
+        "evidence retry",
+        "evidence review",
+        "git approve",
+        "git refresh",
+        "git reject",
+        "git review",
+        "git rollback",
+        "git verify",
+        "maintain",
+        "purge",
+        "reconcile",
+        "source trust promote",
+        "source trust revoke",
+        "validate",
+      ].sort(),
+    );
+  });
+
+  it("every Phase-4 schema is well-formed, compiles, and its x-atlas-contract matches the registry row", () => {
+    const ajv = new Ajv2020({ strict: false, allErrors: true });
+    for (const r of phase4) {
+      const schema = JSON.parse(readFileSync(join(root, r.schemaRef), "utf8"));
+      const c = schema["x-atlas-contract"];
+      expect(c, `${r.name} x-atlas-contract`).toBeTruthy();
+      // The command const, phase, privilege, and idempotency are the SSOT registry
+      // row — the schema must not drift from commands.json.
+      expect(schema.properties.command.const, `${r.name} command const`).toBe(r.name);
+      expect(c.command, `${r.name} x-atlas command`).toBe(r.name);
+      expect(c.phase, `${r.name} phase`).toBe(4);
+      expect(c.privilege, `${r.name} privilege`).toBe(r.privilege);
+      expect(c.idempotency, `${r.name} idempotency`).toBe(r.idempotency);
+      // exit codes are a subset of the §2.5 set and always include usage(5)+internal(4)
+      for (const code of c.exitCodes as number[]) {
+        expect(EXIT_CODES.includes(code as (typeof EXIT_CODES)[number]), `${r.name} exit ${code}`).toBe(true);
+      }
+      expect(c.exitCodes).toContain(4);
+      expect(c.exitCodes).toContain(5);
+      expect(c.errorEnvelopeRef).toBe("docs/specs/cli-contract/error-envelope.schema.json");
+      // the schema compiles and each bundled example validates against it
+      const validate = ajv.compile(schema);
+      for (const ex of schema.examples ?? []) {
+        expect(validate(ex), `${r.name} example: ${JSON.stringify(validate.errors)}`).toBe(true);
+      }
+    }
+  });
+
+  it("every privileged Phase-4 command exposes the challenge/authorization flow and exit 6", () => {
+    for (const r of phase4.filter((c) => c.privilege === "privileged")) {
+      const c = JSON.parse(readFileSync(join(root, r.schemaRef), "utf8"))["x-atlas-contract"];
+      const flagNames = (c.flags as { flag?: string; name?: string }[]).map((f) => f.flag ?? f.name);
+      expect(flagNames.some((f) => f?.startsWith("--export-challenge")), `${r.name} --export-challenge`).toBe(true);
+      expect(flagNames.some((f) => f?.startsWith("--authorization")), `${r.name} --authorization`).toBe(true);
+      // action-required (exit 6) is reachable when no authorization is supplied
+      expect(c.exitCodes, `${r.name} exit 6`).toContain(6);
+      const codes = (c.errorCodes as { code: string; exit: number }[]);
+      expect(codes.some((e) => e.exit === 6), `${r.name} has an exit-6 error code`).toBe(true);
+    }
+  });
+});
+
+describe("Phase-4 workflow-risk-contract (Task 4.0)", () => {
+  const rel = "docs/specs/workflow-risk-contract.md";
+  const raw = readFileSync(join(root, rel), "utf8");
+
+  it("exists and is a text file with no C0 control bytes (byte-stable)", () => {
+    expect(raw.length).toBeGreaterThan(0);
+    // eslint-disable-next-line no-control-regex
+    const bad = /[\x00-\x08\x0B\x0C\x0E-\x1F]/.exec(raw);
+    expect(bad, bad ? `control U+${bad[0].codePointAt(0)!.toString(16)}` : "").toBeNull();
+  });
+
+  it("defines the tier taxonomy (Tier-0..Tier-3), the mutation-policy table, and CAS/refresh semantics", () => {
+    for (const tier of ["Tier-0", "Tier-1", "Tier-2", "Tier-3"]) {
+      expect(raw.includes(tier), `mentions ${tier}`).toBe(true);
+    }
+    expect(raw).toMatch(/§mutation-policy/);
+    expect(raw).toMatch(/§cas/);
+    expect(raw).toMatch(/§refresh/);
+    // sources immutable + decisions append-only are the load-bearing policy invariants
+    expect(raw.toLowerCase()).toMatch(/sources are immutable/);
+    expect(raw.toLowerCase()).toMatch(/decisions are append-only/);
+    // it consumes, not restates, the numeric thresholds
+    expect(raw).toMatch(/acceptance-thresholds\.md/);
+  });
+
+  const mutationPolicy = JSON.parse(
+    /```json\s+mutationPolicy\s*\n([\s\S]*?)\n```/.exec(raw)![1]!,
+  );
+
+  it("the mutation-policy op set is EXACTLY CHANGE_PLAN_OPS (bijection, so 4.3 can generate every op×type)", () => {
+    const declared = [...mutationPolicy.ops.map((o: { op: string }) => o.op)].sort();
+    // no duplicate op rows
+    expect(declared.length).toBe(new Set(declared).size);
+    // equals the @atlas/contracts SSOT of op discriminants (15 active + 2 reserved)
+    expect(declared).toEqual([...CHANGE_PLAN_OPS].sort());
+    // and the invented ops the round-2 finding flagged are absent
+    for (const bogus of ["AddFrontmatterField", "UpdateFrontmatterField", "AddLink", "RemoveLink"]) {
+      expect(declared).not.toContain(bogus);
+    }
+  });
+
+  it("every op maps every target type to a legal policy value", () => {
+    const types = mutationPolicy.targetTypes as string[];
+    const legal = new Set(mutationPolicy.policyValues as string[]);
+    expect([...legal].sort()).toEqual(["append-only", "auto", "immutable", "reserved", "review"]);
+    for (const row of mutationPolicy.ops as { op: string; policy: Record<string, string> }[]) {
+      expect([...Object.keys(row.policy)].sort(), `${row.op} types`).toEqual([...types].sort());
+      for (const ty of types) {
+        expect(legal.has(row.policy[ty]!), `${row.op}.${ty}=${row.policy[ty]}`).toBe(true);
+      }
+    }
+  });
+
+  it("the load-bearing invariants hold: sources immutable (except trust), decisions never in-place-replace, reserved denied", () => {
+    const byOp = new Map(
+      (mutationPolicy.ops as { op: string; policy: Record<string, string> }[]).map((o) => [o.op, o.policy]),
+    );
+    // sources are immutable for every content op
+    for (const op of ["CreateNote", "UpdateSection", "AppendSection", "SetFrontmatterField", "SetLink", "CreateClaim"]) {
+      expect(byOp.get(op)!.source, `${op} on source`).toBe("immutable");
+    }
+    // trust ops are the sole source-touching ops (review), immutable elsewhere
+    for (const op of ["PromoteTrust", "RevokeTrust"]) {
+      expect(byOp.get(op)!.source, `${op} on source`).toBe("review");
+      expect(byOp.get(op)!.concept, `${op} on concept`).toBe("immutable");
+    }
+    // reserved task ops are reserved for every target type
+    for (const op of ["CreateTask", "UpdateTaskState"]) {
+      for (const ty of mutationPolicy.targetTypes as string[]) {
+        expect(byOp.get(op)![ty], `${op}.${ty}`).toBe("reserved");
+      }
+    }
+    // decisions never accept a bare CreateNote as auto (review) and never in-place replace
+    expect(byOp.get("CreateNote")!.decision).toBe("review");
+    expect(byOp.get("UpdateSection")!.decision).toBe("append-only");
+  });
+});
+
+describe("Phase-4 acceptance thresholds — literal comparison to the plan §2.5 constants (Task 4.0)", () => {
+  // The §2.5 Tier-2 auto-commit constants, written as LITERALS here. This is the
+  // anti-drift anchor: acceptance-thresholds.md §workflow AND the plan §2.5 line
+  // must both equal these three values, so a change in any one file is caught.
+  const SECTION_2_5_MIN_CONFIDENCE = 0.8;
+  const SECTION_2_5_MAX_CHANGED_LINES = 50;
+  const SECTION_2_5_MAX_SECTIONS = 3;
+
+  const thresholdsRaw = readFileSync(join(root, "docs/specs/acceptance-thresholds.md"), "utf8");
+  const planRaw = readFileSync(join(root, "docs/plans/atlas-v1-implementation-2026-07-12.md"), "utf8");
+
+  it("acceptance-thresholds.md §workflow declares the machine-readable workflowThresholds block", () => {
+    const block = /```json\s+workflowThresholds\s*\n([\s\S]*?)\n```/.exec(thresholdsRaw);
+    expect(block, "workflowThresholds block").not.toBeNull();
+    const t = JSON.parse(block![1]!);
+    expect(t.tier2AutoCommit.minConfidence).toBe(SECTION_2_5_MIN_CONFIDENCE);
+    expect(t.tier2AutoCommit.maxChangedLines).toBe(SECTION_2_5_MAX_CHANGED_LINES);
+    expect(t.tier2AutoCommit.maxSections).toBe(SECTION_2_5_MAX_SECTIONS);
+    expect(t.tier2AutoCommit.singleNote).toBe(true);
+  });
+
+  it("the §workflow prose states the thresholds verbatim (confidence ≥ 0.8, patch ≤ 50, ≤ 3 sections)", () => {
+    expect(thresholdsRaw).toMatch(/confidence ≥ 0\.8/);
+    expect(thresholdsRaw).toMatch(/patch ≤ 50 changed lines/);
+    expect(thresholdsRaw).toMatch(/≤ 3 sections/);
+  });
+
+  it("the plan §2.5 line carries the SAME three constants (spec ⇄ plan cannot drift)", () => {
+    // Extract from the plan's own §2.5 Tier-2 bullet, then assert equality to the
+    // literals AND to the spec's machine-readable block.
+    const line = /Tier-2 auto-commit thresholds:[\s\S]*?confidence ≥ ([\d.]+)[\s\S]*?patch ≤ (\d+) changed lines across ≤ (\d+) sections/.exec(
+      planRaw,
+    );
+    expect(line, "plan §2.5 Tier-2 threshold line").not.toBeNull();
+    const [planConfidence, planLines, planSections] = [
+      Number(line![1]),
+      Number(line![2]),
+      Number(line![3]),
+    ];
+    expect(planConfidence).toBe(SECTION_2_5_MIN_CONFIDENCE);
+    expect(planLines).toBe(SECTION_2_5_MAX_CHANGED_LINES);
+    expect(planSections).toBe(SECTION_2_5_MAX_SECTIONS);
+
+    // And the spec's block equals the plan's numbers — the actual drift guard.
+    const t = JSON.parse(
+      /```json\s+workflowThresholds\s*\n([\s\S]*?)\n```/.exec(thresholdsRaw)![1]!,
+    ).tier2AutoCommit;
+    expect(t.minConfidence).toBe(planConfidence);
+    expect(t.maxChangedLines).toBe(planLines);
+    expect(t.maxSections).toBe(planSections);
+  });
+
+  it("the configKeys are the ACTUAL policies keys and their config defaults EQUAL the §2.5 constants", () => {
+    // The contract's declared config keys must be the real `policies` schema keys
+    // (round-2 finding: nonexistent nested keys), and the config DEFAULTS must equal
+    // the same three constants — so plan ⇄ spec ⇄ config can never drift.
+    const t = JSON.parse(
+      /```json\s+workflowThresholds\s*\n([\s\S]*?)\n```/.exec(thresholdsRaw)![1]!,
+    );
+    expect(t.configKeys).toEqual({
+      minConfidence: "policies.tier2_min_confidence",
+      maxChangedLines: "policies.tier2_max_changed_lines",
+      maxSections: "policies.tier2_max_sections",
+    });
+    const configSrc = readFileSync(join(root, "apps/cli/src/config/schema.ts"), "utf8");
+    const defaultOf = (key: string) => {
+      const m = new RegExp(`${key}:[^\\n]*\\.default\\(([\\d.]+)\\)`).exec(configSrc);
+      expect(m, `config default for ${key}`).not.toBeNull();
+      return Number(m![1]);
+    };
+    expect(defaultOf("tier2_min_confidence")).toBe(SECTION_2_5_MIN_CONFIDENCE);
+    expect(defaultOf("tier2_max_changed_lines")).toBe(SECTION_2_5_MAX_CHANGED_LINES);
+    expect(defaultOf("tier2_max_sections")).toBe(SECTION_2_5_MAX_SECTIONS);
+  });
+
+  it("models TWO independently-typed confidence inputs, min-reduced, fail-closed", () => {
+    const t = JSON.parse(
+      /```json\s+workflowThresholds\s*\n([\s\S]*?)\n```/.exec(thresholdsRaw)![1]!,
+    ).tier2AutoCommit;
+    const ci = t.confidenceInputs;
+    expect(ci, "confidenceInputs block").toBeTruthy();
+    // both a model and a validation confidence, each gated at the same minConfidence
+    expect(ci.model.min).toBe(SECTION_2_5_MIN_CONFIDENCE);
+    expect(ci.validation.min).toBe(SECTION_2_5_MIN_CONFIDENCE);
+    // reduced by minimum and fail-closed on missing/malformed/conflicting
+    expect(ci.reduction).toBe("min");
+    expect(ci.failClosed).toBe(true);
+    expect([...ci.failClosedOn].sort()).toEqual(["conflicting", "malformed", "missing"]);
+    // prose names both confidences
+    expect(thresholdsRaw).toMatch(/modelConfidence/);
+    expect(thresholdsRaw).toMatch(/validationConfidence/);
+  });
+});
+
+describe("Phase-4 privileged schemas ⇄ broker authzContract (per-command exits, SSOT)", () => {
+  const schemaDir = "docs/specs/cli-contract";
+  const load = (name: string) => JSON.parse(readFileSync(join(root, schemaDir, name), "utf8"));
+  const catalogExit = new Map(authzContract.errorCatalog.map((e) => [e.code, e.exitCode]));
+  const opByName = new Map(authzContract.privilegedOps.map((o) => [o.op, o]));
+  const privileged = registry.commands.filter((c) => c.phase === 4 && c.privilege === "privileged");
+
+  it("has the six privileged Phase-4 commands", () => {
+    expect(privileged.map((c) => c.name).sort()).toEqual(
+      ["git approve", "git refresh", "git rollback", "purge", "source trust promote", "source trust revoke"].sort(),
+    );
+  });
+
+  for (const r of registry.commands.filter((c) => c.phase === 4 && c.privilege === "privileged")) {
+    it(`${r.name}: authz.driftCodes match the §7.5 op verbatim, each surfaced with the broker's catalog exit`, () => {
+      const c = load(r.name.replace(/ /g, "-") + ".schema.json")["x-atlas-contract"];
+      const authz = c.authz as {
+        op: string;
+        mechanism: string;
+        challengeFields: string[];
+        driftCodes: string[];
+        universalCodes: string[];
+      };
+      expect(authz, `${r.name} authz block`).toBeTruthy();
+      // canonical op name with SPACES (not dotted) and present in the §7.5 SSOT
+      expect(authz.op).toBe(r.name);
+      expect(authz.op).not.toMatch(/\./);
+      const ssot = opByName.get(authz.op);
+      expect(ssot, `authzContract op ${authz.op}`).toBeTruthy();
+      // challengeFields equal the broker contract's §7.5 challengeFields for this op (verbatim)
+      expect(authz.challengeFields, `${r.name} authz.challengeFields`).toBeTruthy();
+      expect([...authz.challengeFields].sort()).toEqual([...ssot!.challengeFields].sort());
+      // driftCodes equal the broker contract's driftCodes for this op (verbatim, no drift)
+      expect([...authz.driftCodes].sort()).toEqual([...ssot!.driftCodes].sort());
+      // every driftCode is surfaced in the schema errorCodes with the STABLE catalog exit
+      const errByCode = new Map(
+        (c.errorCodes as { code: string; exit: number }[]).map((e) => [e.code, e.exit]),
+      );
+      for (const code of authz.driftCodes) {
+        expect(errByCode.has(code), `${r.name} errorCodes missing ${code}`).toBe(true);
+        expect(errByCode.get(code), `${r.name} ${code} exit`).toBe(catalogExit.get(code));
+      }
+      // the schema never flattens broker auth into a single authorization-invalid exit-2 code
+      expect(errByCode.has("authorization-invalid"), `${r.name} still flattens to authorization-invalid`).toBe(false);
+      // drift/expiry stay exit 6; signature/signer/replay/payload stay exit 1 (spot-check)
+      expect(errByCode.get("authz.signature_invalid")).toBe(1);
+      // PRIOR-ROUND REQUIREMENT: the complete applicable broker error catalog is surfaced,
+      // not only the op-specific driftCodes. The two UNIVERSAL broker validation failures
+      // (schema_invalid, canonicalization_unsupported) apply to every signed op and are
+      // exit 1 per acceptance-thresholds.md / security-broker-contract.md §7.3.
+      const UNIVERSAL = ["authz.canonicalization_unsupported", "authz.schema_invalid"];
+      expect([...authz.universalCodes].sort(), `${r.name} authz.universalCodes`).toEqual(UNIVERSAL);
+      for (const code of authz.universalCodes) {
+        // each universal code is a real catalog member, mapped to its STABLE catalog exit (1)
+        expect(catalogExit.has(code), `${code} in errorCatalog`).toBe(true);
+        expect(catalogExit.get(code), `${code} catalog exit`).toBe(1);
+        expect(errByCode.has(code), `${r.name} errorCodes missing universal ${code}`).toBe(true);
+        expect(errByCode.get(code), `${r.name} ${code} exit`).toBe(catalogExit.get(code));
+      }
+      // driftCodes and universalCodes are disjoint (universal codes are NOT op-specific drift)
+      for (const code of authz.universalCodes) {
+        expect(authz.driftCodes.includes(code), `${r.name} ${code} must not be a driftCode`).toBe(false);
+      }
+    });
+  }
+
+  it("no privileged schema uses a dotted op name (git.approve / source.trust.promote) anywhere", () => {
+    for (const r of privileged) {
+      const raw = readFileSync(join(root, schemaDir, r.name.replace(/ /g, "-") + ".schema.json"), "utf8");
+      expect(raw, `${r.name} dotted op`).not.toMatch(/op (git|source)\.[a-z.]+/);
+    }
+  });
+});
+
+describe("Phase-4 mandatory completion postconditions (const true, not optional)", () => {
+  const load = (name: string) =>
+    JSON.parse(readFileSync(join(root, "docs/specs/cli-contract", name), "utf8"));
+
+  it("git approve.reindexed, git rollback.reconciled, purge.verified(on applied) are const true", () => {
+    expect(load("git-approve.schema.json").properties.reindexed.const).toBe(true);
+    expect(load("git-rollback.schema.json").properties.reconciled.const).toBe(true);
+    // purge verified is const true under the mode=applied conditional
+    const purge = load("purge.schema.json");
+    const appliedBranch = purge.allOf.find(
+      (a: { if: { properties: { mode: { const: string } } } }) => a.if.properties.mode.const === "applied",
+    );
+    expect(appliedBranch.then.properties.verified.const).toBe(true);
+  });
+});
+
+describe("Phase-4 key-accepting commands expose --idempotency-key + request-hash scope", () => {
+  const load = (name: string) =>
+    JSON.parse(readFileSync(join(root, "docs/specs/cli-contract", name), "utf8"))["x-atlas-contract"];
+  const keyAccepting = registry.commands.filter((c) => c.phase === 4 && c.idempotency === "key-accepting");
+
+  for (const r of registry.commands.filter((c) => c.phase === 4 && c.idempotency === "key-accepting")) {
+    it(`${r.name}: has --idempotency-key and a non-empty requestHashScope`, () => {
+      const c = load(r.name.replace(/ /g, "-") + ".schema.json");
+      const flagNames = (c.flags as { flag?: string; name?: string }[]).map((f) => f.flag ?? f.name);
+      expect(flagNames.some((f) => f?.startsWith("--idempotency-key")), `${r.name} --idempotency-key`).toBe(true);
+      expect(Array.isArray(c.requestHashScope) && c.requestHashScope.length, `${r.name} requestHashScope`).toBeGreaterThan(0);
+      expect(c.requestHashScope).toContain("idempotencyKey");
+    });
+  }
+
+  it("git refresh's request-hash scope is (runId, superseded commit, current canonical base)", () => {
+    const c = load("git-refresh.schema.json");
+    for (const field of ["runId", "superseded", "baseCommit"]) {
+      expect(c.requestHashScope, `git refresh scope ${field}`).toContain(field);
+    }
+  });
+
+  it("covers the nine registry-classified key-accepting Phase-4 commands", () => {
+    expect(keyAccepting.map((c) => c.name).sort()).toEqual(
+      [
+        "enrich",
+        "git approve",
+        "git refresh",
+        "git rollback",
+        "maintain",
+        "purge",
+        "reconcile",
+        "source trust promote",
+        "source trust revoke",
+      ].sort(),
+    );
+  });
+});
+
+describe("Phase-4 recovery-state-machine alignment (reject retains, rollback is a distinct run)", () => {
+  const load = (name: string) =>
+    JSON.parse(readFileSync(join(root, "docs/specs/cli-contract", name), "utf8"));
+
+  it("git reject RETAINS the agent commit for audit (does not delete the branch)", () => {
+    const s = load("git-reject.schema.json");
+    expect(s.required).toContain("retainedCommit");
+    expect(s.required).not.toContain("cleaned");
+    // prose no longer claims it removes the agent branch
+    const c = s["x-atlas-contract"];
+    expect((c.sideEffects as string[]).some((x) => /removes.*agent branch/i.test(x))).toBe(false);
+    expect((c.prohibitedEffects as string[]).some((x) => /never deletes the agent-branch commit/i.test(x))).toBe(true);
+  });
+
+  it("git rollback carries a distinct rollback-run identity + rollbackOf; original stays finalized", () => {
+    const s = load("git-rollback.schema.json");
+    expect(s.required).toEqual(expect.arrayContaining(["rollbackRunId", "rollbackOf"]));
+    expect(s.description).toMatch(/stays `finalized`/);
+  });
+});
+
+describe("Phase-4 confidence inputs are two independently-typed fields (no single `confidence`)", () => {
+  const load = (name: string) =>
+    JSON.parse(readFileSync(join(root, "docs/specs/cli-contract", name), "utf8"));
+  const mutationSchemas = ["enrich.schema.json", "reconcile.schema.json", "maintain.schema.json"];
+
+  for (const file of mutationSchemas) {
+    it(`${file}: exposes modelConfidence + validationConfidence and no single confidence`, () => {
+      const s = load(file);
+      expect(s.properties.modelConfidence?.type).toBe("number");
+      expect(s.properties.validationConfidence?.type).toBe("number");
+      // the collapsed single-field `confidence` is gone
+      expect(s.properties.confidence, `${file} still exposes a single confidence`).toBeUndefined();
+      // a Tier-2 APPLIED result requires BOTH inputs (neither can be absent)
+      const branch = (s.allOf as any[]).find(
+        (a) => a.if?.properties?.mode?.const === "applied" && a.if?.properties?.risk?.const === "tier-2",
+      );
+      expect(branch, `${file} tier-2 applied conditional`).toBeTruthy();
+      expect(branch.then.required).toEqual(expect.arrayContaining(["modelConfidence", "validationConfidence"]));
+    });
+  }
+
+  it("validate.schema.json ValidationReport exposes BOTH typed confidences (not only tier2Eligible)", () => {
+    const gates = load("validate.schema.json").properties.gates;
+    expect(gates.required).toEqual(
+      expect.arrayContaining(["tier2Eligible", "modelConfidence", "validationConfidence"]),
+    );
+    expect(gates.properties.modelConfidence.type).toBe("number");
+    expect(gates.properties.validationConfidence.type).toBe("number");
+  });
+});
+
+describe("Phase-4 discriminated outcomes (evidence resolve, purge)", () => {
+  const load = (name: string) =>
+    JSON.parse(readFileSync(join(root, "docs/specs/cli-contract", name), "utf8"));
+
+  it("evidence resolve: integrated requires integratedCommit; pending/failed forbid it and pending exits 6", () => {
+    const s = load("evidence-resolve.schema.json");
+    expect(s.properties.outcome.enum.sort()).toEqual(["failed", "integrated", "review_pending"]);
+    const branchFor = (outcome: string) =>
+      (s.allOf as any[]).find((a) => a.if?.properties?.outcome?.const === outcome);
+    // integrated ⇒ requires the canonical commit + full superseding head
+    expect(branchFor("integrated").then.required).toEqual(
+      expect.arrayContaining(["evidenceId", "integratedCommit"]),
+    );
+    // pending/failed ⇒ integratedCommit is forbidden (never auto-integrates)
+    expect(branchFor("review_pending").then.properties.integratedCommit).toBe(false);
+    expect(branchFor("failed").then.properties.integratedCommit).toBe(false);
+    // exit 6 surfaced for the pending escalation
+    const exits = s["x-atlas-contract"].exitCodes as number[];
+    expect(exits).toContain(6);
+    const reviewPending = (s["x-atlas-contract"].errorCodes as any[]).find((e) => e.code === "review-pending");
+    expect(reviewPending?.exit).toBe(6);
+  });
+
+  it("purge: erasureClass discriminates ordinary (no ref rewrite) vs history-rewrite (oldHead+replacementHead)", () => {
+    const s = load("purge.schema.json");
+    expect(s.properties.erasureClass.enum.sort()).toEqual(["history-rewrite", "ordinary"]);
+    const branchFor = (cls: string) =>
+      (s.allOf as any[]).find((a) => a.if?.properties?.erasureClass?.const === cls);
+    // ordinary ⇒ refReplaced false, challengeBinding must NOT carry oldHead/replacementHead
+    expect(branchFor("ordinary").then.properties.refReplaced.const).toBe(false);
+    expect(branchFor("ordinary").then.properties.challengeBinding.not).toBeTruthy();
+    // history-rewrite ⇒ refReplaced true, challengeBinding requires oldHead + replacementHead
+    expect(branchFor("history-rewrite").then.properties.refReplaced.const).toBe(true);
+    expect(branchFor("history-rewrite").then.properties.challengeBinding.required).toEqual(
+      expect.arrayContaining(["oldHead", "replacementHead"]),
+    );
+    // the base challengeBinding no longer unconditionally requires oldHead/replacementHead
+    const cb = s.properties.challengeBinding;
+    expect(cb.required).not.toContain("oldHead");
+    expect(cb.required).not.toContain("replacementHead");
   });
 });
 

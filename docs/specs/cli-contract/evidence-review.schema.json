@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/evidence-review.schema.json",
+  "title": "brain evidence review [<note>] — --json success output",
+  "description": "Paginated read-only listing of evidence needing attention (stale, pending, or failed re-verification), optionally scoped to a single note. Non-mutating. Exit 0 with the (possibly empty) page.",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["command", "items", "pagination"],
+  "properties": {
+    "command": { "const": "evidence review" },
+    "items": {
+      "type": "array",
+      "description": "Evidence entries requiring attention.",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["evidenceId", "noteId", "state"],
+        "properties": {
+          "evidenceId": { "type": "string", "minLength": 1 },
+          "noteId": { "type": "string", "minLength": 1, "description": "The owning note." },
+          "state": {
+            "enum": ["stale", "pending", "failed"],
+            "description": "Why the evidence needs attention: stale = rendition moved and re-verification not yet run; pending = re-verification in flight; failed = re-verification failed."
+          },
+          "detail": { "type": "string" },
+          "updatedAt": { "type": "string" }
+        }
+      }
+    },
+    "pagination": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "required": ["limit", "offset", "total", "hasMore"],
+      "properties": {
+        "limit": { "type": "integer", "minimum": 1, "maximum": 500 },
+        "offset": { "type": "integer", "minimum": 0 },
+        "total": { "type": "integer", "minimum": 0, "description": "Live (non-snapshot) total count of evidence needing attention; best-effort under concurrency." },
+        "hasMore": { "type": "boolean" }
+      }
+    }
+  },
+  "examples": [
+    {
+      "command": "evidence review",
+      "items": [
+        { "evidenceId": "ev-01J9Z8Q0000000000000000000", "noteId": "project-meridian", "state": "stale", "detail": "rendition superseded; re-verification pending", "updatedAt": "2026-07-13T10:00:00.000Z" }
+      ],
+      "pagination": { "limit": 50, "offset": 0, "total": 1, "hasMore": false }
+    }
+  ],
+  "x-atlas-contract": {
+    "command": "evidence review",
+    "phase": 4,
+    "privilege": "shared",
+    "idempotency": "none",
+    "executionClass": "read",
+    "summary": "Paginated read-only listing of evidence needing attention (stale/pending/failed), optionally scoped to a note.",
+    "ordering": { "sortKey": "updatedAt", "direction": "desc", "tieBreaker": "evidenceId", "note": "stable total order (updatedAt, evidenceId)." },
+    "args": [
+      { "arg": "<note>", "type": "string", "required": false, "description": "Optional note id/handle to scope the listing to a single note." }
+    ],
+    "flags": [
+      { "name": "--limit <n>", "default": 50, "constraint": "1..500" },
+      { "name": "--offset <n>", "default": 0, "constraint": ">=0" }
+    ],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "sideEffects": [],
+    "prohibitedEffects": ["no vault content mutation", "no ledger or audit-ref write"],
+    "locks": [{ "scope": "shared", "mode": "shared" }],
+    "exitCodes": [0, 2, 4, 5],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "unknown flag or out-of-range pagination" },
+      { "code": "vault-error", "exit": 2, "when": "the vault repo is missing or unreadable" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}
