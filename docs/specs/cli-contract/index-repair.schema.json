@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/index-repair.schema.json",
+  "title": "brain index repair — --json success output",
+  "description": "Converge the retrieval index to consistency without a full rebuild. Drives the reconciliation pipeline (retrieval-index-contract.md §3) only for the notes `index verify` reports as stale or divergent: re-chunk → re-embed → write → verify-complete → CAS activate → retire → mark. Intrinsically idempotent and projection-only: a no-op when the index is already consistent, and each executed run appends exactly one run.projection git-ref audit event. Never touches the ledger tables, the vault, or canonical git refs. The response is a single, unambiguous partial-repair outcome: `outcome` is `converged` when every targeted note was repaired, or `partial` when one or more notes could not converge — in which case `unresolved[]` is required and each entry carries typed failure details (code + retryable + message). Per-note permanent/retryable failures are surfaced ONLY as `unresolved[]` data on this success envelope, never as the command-level error envelope; the error envelope is reserved for whole-command failures that prevent the run from executing at all (bad config, missing store/index, lock contention, internal fault).",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["command", "outcome", "repaired"],
+  "allOf": [
+    {
+      "if": { "properties": { "outcome": { "const": "partial" } } },
+      "then": { "required": ["unresolved"], "properties": { "unresolved": { "minItems": 1 } } }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "converged" } } },
+      "then": { "not": { "required": ["unresolved"] } }
+    }
+  ],
+  "properties": {
+    "command": { "const": "index repair" },
+    "outcome": {
+      "enum": ["converged", "partial"],
+      "description": "`converged`: every targeted note was repaired (or nothing needed repair). `partial`: at least one note could not converge — `unresolved[]` is then required and non-empty. This is the single source of truth for partial repair; it is never also signalled through the command-level error envelope."
+    },
+    "repaired": {
+      "type": "array",
+      "description": "One entry per note converged; empty when nothing needed repair (a clean no-op with outcome=converged).",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["noteId", "action"],
+        "properties": {
+          "noteId": { "type": "string", "minLength": 1 },
+          "action": {
+            "enum": ["re-embedded", "re-activated", "retired-orphan", "chunks-written", "re-embedded-after-failure"],
+            "description": "The convergence action taken for this note (§3)."
+          },
+          "generationId": { "type": "string", "description": "The generation now active for the note after repair (its active_generation_id, §2)." }
+        }
+      }
+    },
+    "unresolved": {
+      "type": "array",
+      "description": "Notes that could not be converged this run. Required and non-empty iff outcome=partial; absent when outcome=converged. Each entry is a typed failure detail, never a silent drop — the aggregate exit code is derived from these entries' `retryable` flags (see x-atlas-contract.exitPrecedence).",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["noteId", "code", "retryable", "message"],
+        "allOf": [
+          {
+            "if": { "properties": { "code": { "const": "embedding-retryable" } } },
+            "then": { "properties": { "retryable": { "const": true } } }
+          },
+          {
+            "if": { "properties": { "code": { "const": "embedding-failed" } } },
+            "then": { "properties": { "retryable": { "const": false } } }
+          }
+        ],
+        "properties": {
+          "noteId": { "type": "string", "minLength": 1 },
+          "code": {
+            "enum": ["embedding-retryable", "embedding-failed"],
+            "description": "`embedding-retryable`: a provider-retryable ProviderError (rate_limit/quota/timeout/transport) — re-running repair may converge it. `embedding-failed`: a non-retryable ProviderError (authentication/model_incompatible/embedding-dimension mismatch) — needs operator action."
+          },
+          "retryable": { "type": "boolean", "description": "True iff re-running the command may converge this note without operator intervention. MUST be true for code=embedding-retryable and false for code=embedding-failed (enforced by the per-item conditionals)." },
+          "message": { "type": "string", "minLength": 1, "description": "Human-readable, key-material-free diagnostic." },
+          "retryAfterMs": { "type": "integer", "minimum": 0, "description": "Provider-directed retry delay in integer milliseconds; present iff the provider supplied timing (a normalized rate_limit/quota retryAfter)." }
+        }
+      }
+    },
+    "durationMs": { "type": "integer", "minimum": 0 }
+  },
+  "examples": [
+    { "command": "index repair", "outcome": "converged", "repaired": [] },
+    {
+      "command": "index repair",
+      "outcome": "converged",
+      "repaired": [
+        { "noteId": "concept-atlas", "action": "re-embedded", "generationId": "gen-9f2a" },
+        { "noteId": "person-koral", "action": "retired-orphan" }
+      ],
+      "durationMs": 214
+    },
+    {
+      "command": "index repair",
+      "outcome": "partial",
+      "repaired": [{ "noteId": "concept-atlas", "action": "re-embedded", "generationId": "gen-9f2a" }],
+      "unresolved": [
+        { "noteId": "source-report-2026", "code": "embedding-retryable", "retryable": true, "message": "provider rate limited the embed batch", "retryAfterMs": 2000 }
+      ],
+      "durationMs": 512
+    }
+  ],
+  "x-atlas-contract": {
+    "command": "index repair",
+    "phase": 3,
+    "privilege": "shared",
+    "idempotency": "intrinsic",
+    "executionClass": "projection-write",
+    "summary": "Converge stale/divergent notes via the reconciliation pipeline (§3); projection-only, idempotent; per-note failures surface as unresolved[] data (one partial-repair outcome).",
+    "args": [],
+    "flags": [],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "sideEffects": [
+      "re-embeds and re-activates stale/divergent notes and retires orphaned generations",
+      "emits exactly one run.projection git-ref audit event (executed projection-only command)"
+    ],
+    "prohibitedEffects": [
+      "never touches ledger tables or db_schema_migrations",
+      "no Markdown/vault write",
+      "no canonical branch change",
+      "a crash mid-repair must converge on rerun with no duplicate chunks or orphaned active generation",
+      "a per-note repair failure is NEVER reported through the command-level error envelope — only as an unresolved[] entry"
+    ],
+    "locks": [{ "scope": "vault-maintenance", "mode": "exclusive" }],
+    "outcomeProtocol": {
+      "field": "outcome",
+      "values": ["converged", "partial"],
+      "unresolvedRequiredWhen": "partial",
+      "note": "Partial repair is signalled exactly once, via outcome=partial + unresolved[]. The command-level error envelope is reserved for whole-command failures (config/db/index/lock/internal) that prevent execution.",
+      "exitPrecedence": [
+        "0 converged (no unresolved entries)",
+        "7 partial with every unresolved entry retryable (provider-retryable; caller may re-run)",
+        "4 partial with any non-retryable unresolved entry (permanent; needs operator action)"
+      ]
+    },
+    "exitCodes": [0, 2, 4, 5, 7],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "unknown flag/argument or malformed invocation", "retryable": false },
+      { "code": "config-invalid", "exit": 2, "when": "brain.config.yaml fails schema validation", "retryable": false },
+      { "code": "db-unavailable", "exit": 2, "when": "the SQLite store file is missing or unopenable", "retryable": false },
+      { "code": "index-unavailable", "exit": 2, "when": "the LanceDB index is not configured/present", "retryable": false },
+      { "code": "locked:vault-maintenance", "exit": 2, "when": "the exclusive vault-maintenance lock is held by a live process", "retryable": true },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure that aborts the whole command before it can report an outcome", "retryable": false }
+    ],
+    "aggregateExitCodes": [
+      { "code": "embedding-retryable", "exit": 7, "when": "outcome=partial and every unresolved entry is retryable (all provider-retryable); mirrored per-note in unresolved[].code", "retryable": true },
+      { "code": "embedding-failed", "exit": 4, "when": "outcome=partial and at least one unresolved entry is non-retryable; mirrored per-note in unresolved[].code", "retryable": false }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}

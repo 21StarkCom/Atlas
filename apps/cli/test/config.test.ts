@@ -87,6 +87,43 @@ describe("loadConfig", () => {
     expect(config.sqlite.raw_payload_store).toBe(true);
   });
 
+  it("loads the retrieval RRF weights/k + FTS switch defaults from the example", () => {
+    writeConfig(EXAMPLE);
+    const { config } = loadConfig(dir, {});
+    expect(config.retrieval.rrf.k).toBe(60);
+    expect(config.retrieval.rrf.weights.fts).toBe(1.0);
+    expect(config.retrieval.rrf.weights.vector).toBe(1.0);
+    expect(config.retrieval.fts.enabled).toBe(true);
+  });
+
+  it("rejects a zero vector weight so the §6 vector-only fallback can still fuse", () => {
+    writeConfig(EXAMPLE.replace("vector: 1.0", "vector: 0"));
+    try {
+      loadConfig(dir, {});
+      throw new Error("expected ConfigError");
+    } catch (e) {
+      expect(e).toBeInstanceOf(ConfigError);
+      expect((e as ConfigError).location.key).toContain("retrieval.rrf.weights.vector");
+    }
+  });
+
+  it("accepts a zero fts weight (FTS may be disabled by weight)", () => {
+    writeConfig(EXAMPLE.replace("fts: 1.0", "fts: 0"));
+    const { config } = loadConfig(dir, {});
+    expect(config.retrieval.rrf.weights.fts).toBe(0);
+  });
+
+  it("rejects an out-of-bounds RRF k", () => {
+    writeConfig(EXAMPLE.replace("k: 60", "k: 5000"));
+    expect(() => loadConfig(dir, {})).toThrow(ConfigError);
+  });
+
+  it("applies a retrieval env override (ATLAS_RETRIEVAL_FTS_ENABLED)", () => {
+    writeConfig(EXAMPLE);
+    const { config } = loadConfig(dir, { ATLAS_RETRIEVAL_FTS_ENABLED: "false" });
+    expect(config.retrieval.fts.enabled).toBe(false);
+  });
+
   it("honors an absolute --config override path", () => {
     const alt = join(dir, "custom.yaml");
     writeFileSync(alt, EXAMPLE, "utf8");

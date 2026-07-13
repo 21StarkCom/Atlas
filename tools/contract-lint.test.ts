@@ -7,6 +7,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { Ajv2020 } from "ajv/dist/2020.js";
 import { describe, expect, it } from "vitest";
 import { ProviderErrorSchema } from "@atlas/contracts";
 import {
@@ -607,6 +608,263 @@ describe("Phase-2 contract docs — fenced examples validate (Task 2.0)", () => 
     for (const e of errors) {
       expect(() => ProviderErrorSchema.parse(e), JSON.stringify(e)).not.toThrow();
     }
+  });
+});
+
+describe("Phase-3 cli-contract schema presence (Task 3.0)", () => {
+  const phase3 = registry.commands.filter((c) => c.phase === 3);
+
+  it("has Phase-3 rows", () => {
+    expect(phase3.length).toBeGreaterThan(0);
+  });
+
+  it("every Phase-3 row has an existing schema file (independent of implementation status)", () => {
+    // Contract-only gate: the schemas ship now (Task 3.0), the handlers land in
+    // later Phase-3 tasks. Schema presence is asserted directly, NOT via the
+    // implemented flag (which stays false until the handler exists).
+    for (const r of phase3) {
+      expect(existsSync(join(root, r.schemaRef)), `${r.name} schema ${r.schemaRef}`).toBe(true);
+    }
+  });
+
+  // NB: schema presence is asserted independently of the `implemented` flag (above).
+  // We deliberately do NOT require Phase-3 rows to stay implemented:false — Tasks 3.4/3.5
+  // flip rows to implemented:true as handlers land, and the contract-only gate must not
+  // block that (Task 3.0 acceptance: "Registry rows flip to implemented as tasks land").
+
+  it("the Phase-3 command set matches the plan Task 3.0 inventory", () => {
+    expect(phase3.map((c) => c.name).sort()).toEqual(
+      ["index rebuild", "index repair", "index status", "index verify", "query"].sort(),
+    );
+  });
+});
+
+describe("Phase-3 retrieval/index contract (Task 3.0)", () => {
+  const rel = "docs/specs/retrieval-index-contract.md";
+  const raw = readFileSync(join(root, rel), "utf8");
+
+  it("exists and is a text file with no C0 control bytes (byte-stable)", () => {
+    expect(raw.length).toBeGreaterThan(0);
+    // eslint-disable-next-line no-control-regex
+    const bad = /[\x00-\x08\x0B\x0C\x0E-\x1F]/.exec(raw);
+    expect(bad, bad ? `control U+${bad[0].codePointAt(0)!.toString(16)}` : "").toBeNull();
+  });
+
+  it("every fenced ```json block is well-formed JSON", () => {
+    const blocks = extractJsonBlocks(raw);
+    expect(blocks.length).toBeGreaterThan(0);
+    for (const b of blocks) {
+      expect(() => JSON.parse(b), b.slice(0, 60)).not.toThrow();
+    }
+  });
+
+  const rc = JSON.parse(/```json\s+retrievalContract\s*\n([\s\S]*?)\n```/.exec(raw)![1]!);
+
+  it("the fenced `json retrievalContract` block parses to a versioned object", () => {
+    expect(rc.version).toBeGreaterThanOrEqual(1);
+  });
+
+  it("chunker consumes D4 (chunker_version=1) with heading hierarchy + title + aliases in chunk text", () => {
+    expect(rc.chunker.version).toBe(1); // D4
+    expect(rc.chunker.unit).toBe("semantic-section");
+    expect(rc.chunker.headingHierarchy).toBe(true);
+    expect(rc.chunker.includeTitle).toBe(true);
+    expect(rc.chunker.includeAliases).toBe(true);
+  });
+
+  it("generation identity is exactly the five-component tuple", () => {
+    expect([...rc.generationIdentity].sort()).toEqual(
+      ["chunkerVersion", "contentHash", "embeddingDimensions", "embeddingModel", "noteId"].sort(),
+    );
+  });
+
+  it("reconciliation covers the full crash-safe pipeline (chunk→embed→write→verify-complete→activate→retire→mark)", () => {
+    for (const step of ["chunk", "embed", "write", "verify-complete", "activate", "retire", "mark-indexed"]) {
+      expect(rc.reconciliationSteps.includes(step), `step ${step}`).toBe(true);
+    }
+    // verify-complete must precede activate so a partial batched write can never be activated (§3)
+    expect(rc.reconciliationSteps.indexOf("verify-complete")).toBeLessThan(
+      rc.reconciliationSteps.indexOf("activate"),
+    );
+  });
+
+  it("chunks carry deterministic ids so the complete expected set is verifiable before activation (§1/§3)", () => {
+    expect(rc.chunker.deterministicChunkId).toBe(true);
+    expect(rc.chunker.chunkIdComponents).toEqual(["generationId", "sectionPath", "ordinal"]);
+    expect(rc.activation.verifyBeforeActivate).toBe(true);
+  });
+
+  it("activation uses the integer fence counter + composite join key columns with atomic CAS (§2)", () => {
+    // active_generation is the integer fence counter; active_generation_id is the LanceDB join key
+    // AND the retrieval filter column — matching the authoritative sqlite-data-dictionary.
+    expect(rc.activation.authority).toBe("sqlite");
+    expect(rc.activation.fenceCounterColumn).toBe("active_generation");
+    expect(rc.activation.fenceCounterType).toBe("integer");
+    expect(rc.activation.generationJoinKeyColumn).toBe("active_generation_id");
+    expect(rc.activation.retrievalFilterColumn).toBe("active_generation_id");
+    expect(rc.activation.casGuards).toEqual(["content_hash-unchanged", "counter-strictly-greater"]);
+  });
+
+  it("staleness triggers cover hash/chunker/model/dimensions drift (§4)", () => {
+    expect([...rc.stalenessTriggers].sort()).toEqual(
+      ["chunkerVersion", "contentHash", "embeddingDimensions", "embeddingModel"].sort(),
+    );
+  });
+
+  it("layer precedence is exactly exact-id → slug → unique-alias → fts/vector fusion (contract-owned order)", () => {
+    expect(rc.layerPrecedence).toEqual(["exact-id", "slug", "unique-alias", "fts-vector-fusion"]);
+  });
+
+  it("RRF weights + k are contract-owned, within declared bounds, and config-keyed (not hardcoded)", () => {
+    expect(rc.rrf.k).toBeGreaterThanOrEqual(rc.rrf.kBounds[0]);
+    expect(rc.rrf.k).toBeLessThanOrEqual(rc.rrf.kBounds[1]);
+    for (const layer of ["fts", "vector"] as const) {
+      const w = rc.rrf.weights[layer];
+      expect(w, `weight ${layer}`).toBeGreaterThanOrEqual(rc.rrf.weightBounds[0]);
+      expect(w, `weight ${layer}`).toBeLessThanOrEqual(rc.rrf.weightBounds[1]);
+    }
+    expect(rc.rrf.configKeyPrefix, "RRF values are consumed from config, not inlined").toBeTruthy();
+  });
+
+  it("records the LanceDB FTS-maturity fallback: hybrid degrades to vector + id/alias with RRF (§6)", () => {
+    expect(rc.ftsFallback.droppedLayer).toBe("fts");
+    expect(rc.ftsFallback.fusionRemains).toBe("rrf");
+    for (const layer of ["vector", "exact-id", "unique-alias"]) {
+      expect(rc.ftsFallback.degradesTo.includes(layer), `degradesTo ${layer}`).toBe(true);
+    }
+    // the fallback must NOT drop the vector layer (that is what it degrades onto)
+    expect(rc.ftsFallback.degradesTo.includes("fts")).toBe(false);
+  });
+});
+
+describe("Phase-3 schema discriminants + audit/error catalog (Task 3.0 revision R3)", () => {
+  const schemaDir = "docs/specs/cli-contract";
+  const load = (name: string) => JSON.parse(readFileSync(join(root, schemaDir, name), "utf8"));
+  // Compile each success schema for instance validation. strictSchema:false so the
+  // x-atlas-contract vendor block + draft-2020 unevaluatedProperties don't trip Ajv's
+  // metaschema strictness; the discriminant conditionals are what we exercise.
+  const ajv = new Ajv2020({ strict: false, allErrors: true });
+  const compile = (name: string) => ajv.compile(load(name));
+
+  it("query: error catalog includes the fail-closed backup-unhealthy exit-2 outcome (both modes write ledger rows)", () => {
+    const q = load("query.schema.json");
+    const codes = q["x-atlas-contract"].errorCodes as { code: string; exit: number; retryable?: boolean }[];
+    const bu = codes.find((c) => c.code === "backup-unhealthy");
+    expect(bu, "backup-unhealthy error").toBeTruthy();
+    expect(bu!.exit).toBe(2);
+    expect(bu!.retryable).toBe(true);
+    // both query modes finalize ledger writes, so the fail-closed watermark applies to each
+    const se = (q["x-atlas-contract"].sideEffects as string[]).join(" ");
+    expect(se).toMatch(/finalizeLedgerWrite/);
+    expect(q["x-atlas-contract"].exitCodes).toContain(2);
+  });
+
+  it("query: items carry per-layer contributions[] (FTS+vector representable), no single-layer field", () => {
+    const validate = compile("query.schema.json");
+    const item = {
+      command: "query",
+      mode: "answered",
+      query: "x",
+      answer: "a",
+      modelCalls: 1,
+      items: [
+        {
+          noteId: "n1",
+          score: 0.033,
+          contributions: [
+            { layer: "fts", rank: 2, weightedContribution: 0.0161 },
+            { layer: "vector", rank: 1, weightedContribution: 0.0164 },
+          ],
+        },
+      ],
+      layersUsed: ["fts", "vector"],
+      retrievalRunId: "rr-1",
+    };
+    expect(validate(item), JSON.stringify(validate.errors)).toBe(true);
+    // an item WITHOUT contributions[] is now invalid (single-layer provenance rejected)
+    const noContrib = structuredClone(item);
+    delete (noContrib.items[0] as Record<string, unknown>).contributions;
+    expect(validate(noContrib)).toBe(false);
+    // and the bundled examples all validate
+    for (const ex of load("query.schema.json").examples) {
+      expect(validate(ex), JSON.stringify(validate.errors)).toBe(true);
+    }
+  });
+
+  for (const name of ["index-status.schema.json", "index-verify.schema.json"]) {
+    it(`${name}: declares the required terminal run.projection event and no longer prohibits a git-ref advance`, () => {
+      const c = load(name)["x-atlas-contract"];
+      expect(c.terminalAuditEvent).toBe("run.projection");
+      expect((c.sideEffects as string[]).some((s) => s.includes("run.projection"))).toBe(true);
+      expect((c.prohibitedEffects as string[]).some((s) => /git ref advanced/.test(s))).toBe(false);
+    });
+  }
+
+  it("index verify: consistent MUST agree with divergences (all four combinations)", () => {
+    const validate = compile("index-verify.schema.json");
+    const mk = (consistent: boolean, divs: unknown[]) => ({
+      command: "index verify",
+      consistent,
+      checked: 1,
+      divergences: divs,
+    });
+    const oneDiv = [{ noteId: "n1", kind: "missing-chunks" }];
+    // valid: true+empty, false+nonempty
+    expect(validate(mk(true, [])), JSON.stringify(validate.errors)).toBe(true);
+    expect(validate(mk(false, oneDiv)), JSON.stringify(validate.errors)).toBe(true);
+    // invalid: true+nonempty, false+empty
+    expect(validate(mk(true, oneDiv))).toBe(false);
+    expect(validate(mk(false, []))).toBe(false);
+  });
+
+  it("index repair: unresolved[].retryable MUST match its code (all combinations)", () => {
+    const validate = compile("index-repair.schema.json");
+    const mk = (code: string, retryable: boolean) => ({
+      command: "index repair",
+      outcome: "partial",
+      repaired: [],
+      unresolved: [{ noteId: "n1", code, retryable, message: "m" }],
+    });
+    // valid discriminant pairings
+    expect(validate(mk("embedding-retryable", true)), JSON.stringify(validate.errors)).toBe(true);
+    expect(validate(mk("embedding-failed", false)), JSON.stringify(validate.errors)).toBe(true);
+    // invalid: retryable flag contradicts the code
+    expect(validate(mk("embedding-retryable", false))).toBe(false);
+    expect(validate(mk("embedding-failed", true))).toBe(false);
+    // outcome=partial still requires a non-empty unresolved[]
+    expect(validate({ command: "index repair", outcome: "partial", repaired: [] })).toBe(false);
+    // outcome=converged must NOT carry unresolved[]
+    expect(
+      validate({
+        command: "index repair",
+        outcome: "converged",
+        repaired: [],
+        unresolved: [{ noteId: "n1", code: "embedding-failed", retryable: false, message: "m" }],
+      }),
+    ).toBe(false);
+    // the bundled examples all validate
+    for (const ex of load("index-repair.schema.json").examples) {
+      expect(validate(ex), JSON.stringify(validate.errors)).toBe(true);
+    }
+  });
+
+  it("retrieval contract: RRF weights/k + FTS fallback switch are config-owned (retrieval section)", () => {
+    const rel = "docs/specs/retrieval-index-contract.md";
+    const raw = readFileSync(join(root, rel), "utf8");
+    const rc = JSON.parse(/```json\s+retrievalContract\s*\n([\s\S]*?)\n```/.exec(raw)![1]!);
+    expect(rc.config.section).toBe("retrieval");
+    expect(rc.config.keys["retrieval.rrf.k"]).toBeTruthy();
+    expect(rc.config.keys["retrieval.fts.enabled"]).toBeTruthy();
+    // the vector-only fallback requires a strictly-positive vector weight
+    expect(rc.config.keys["retrieval.rrf.weights.vector"].boundsExclusiveMin).toBe(0);
+    expect(rc.ftsFallback.switchKey).toBe("retrieval.fts.enabled");
+    expect(rc.ftsFallback.vectorWeightMustBePositive).toBe(true);
+    // activation aligns with the authoritative 3-arg Task 3.2 signature (no caller counter)
+    expect(rc.activation.callerSuppliesCounter).toBe(false);
+    expect(rc.activation.correctnessFence).toBe("content_hash-unchanged");
+    // candidate unit is the note, chunks fold to notes with per-layer provenance
+    expect(rc.candidateUnit).toBe("note");
+    expect(rc.chunkToNoteAggregation.tieBreaker).toBe("noteId");
   });
 });
 

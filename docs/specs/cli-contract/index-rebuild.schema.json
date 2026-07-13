@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/index-rebuild.schema.json",
+  "title": "brain index rebuild — --json success output",
+  "description": "Full regeneration of the retrieval index from Markdown. Re-chunks and re-embeds every projected note, writes fresh generations, and activates them via the SQLite CAS (retrieval-index-contract.md §2/§3), reconstructing the LanceDB index even when it was deleted wholesale (the directory is disposable derived state). Intrinsically idempotent and projection-only: each executed run appends exactly one run.projection git-ref audit event and never touches the ledger tables, the vault, or canonical git refs. This is the step registered into the post-restore hook, so db restore ends with a consistent rebuilt index (completes R1-F1's restore contract).",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["command", "notesIndexed", "chunksWritten"],
+  "properties": {
+    "command": { "const": "index rebuild" },
+    "notesIndexed": { "type": "integer", "minimum": 0, "description": "Notes re-chunked, embedded, and activated." },
+    "chunksWritten": { "type": "integer", "minimum": 0, "description": "Total SearchChunk rows written for the new generations." },
+    "generationsRetired": { "type": "integer", "minimum": 0, "description": "Prior-generation chunk sets retired after activation." },
+    "durationMs": { "type": "integer", "minimum": 0 }
+  },
+  "examples": [
+    { "command": "index rebuild", "notesIndexed": 20, "chunksWritten": 128 },
+    { "command": "index rebuild", "notesIndexed": 20, "chunksWritten": 128, "generationsRetired": 3, "durationMs": 5120 }
+  ],
+  "x-atlas-contract": {
+    "command": "index rebuild",
+    "phase": 3,
+    "privilege": "shared",
+    "idempotency": "intrinsic",
+    "executionClass": "projection-write",
+    "summary": "Full index regeneration from Markdown (§3); reconstructs a deleted LanceDB index; projection-only, idempotent; registered into the post-restore hook.",
+    "args": [],
+    "flags": [],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "sideEffects": [
+      "re-chunks, re-embeds, and activates every projected note; retires prior generations",
+      "emits exactly one run.projection git-ref audit event (executed projection-only command)"
+    ],
+    "prohibitedEffects": [
+      "never touches ledger tables or db_schema_migrations",
+      "no Markdown/vault write",
+      "no canonical branch change",
+      "a crash mid-rebuild must leave the prior active generation readable and converge on rerun"
+    ],
+    "locks": [{ "scope": "vault-maintenance", "mode": "exclusive" }],
+    "exitCodes": [0, 2, 4, 5, 7],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "unknown flag/argument or malformed invocation", "retryable": false },
+      { "code": "config-invalid", "exit": 2, "when": "brain.config.yaml fails schema validation", "retryable": false },
+      { "code": "vault-error", "exit": 2, "when": "the vault is missing/unreadable so chunks cannot be re-derived", "retryable": false },
+      { "code": "db-unavailable", "exit": 2, "when": "the SQLite store file is missing or unopenable", "retryable": false },
+      { "code": "locked:vault-maintenance", "exit": 2, "when": "the exclusive vault-maintenance lock is held by a live process", "retryable": true },
+      { "code": "embedding-retryable", "exit": 7, "when": "a batch embed hit a provider-retryable ProviderError (rate_limit/quota/timeout/transport); envelope carries retryable:true and retryAfterMs when the provider supplied timing — the caller may re-run rebuild to converge", "retryable": true },
+      { "code": "embedding-failed", "exit": 4, "when": "a batch embed failed with a non-retryable ProviderError (authentication/model_incompatible/embedding-dimension mismatch)", "retryable": false },
+      { "code": "rebuild-failed", "exit": 4, "when": "the rebuild could not complete and was rolled back", "retryable": false },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure", "retryable": false }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}

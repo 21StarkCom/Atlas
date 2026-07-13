@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/index-verify.schema.json",
+  "title": "brain index verify — --json success output",
+  "description": "Read-only SQLite ↔ LanceDB consistency check. Confirms that every note's SQLite-active generation (the notes.active_generation_id join key, fenced by the notes.active_generation counter) has matching live LanceDB chunks and that no note is served by a non-active or orphaned generation (retrieval-index-contract.md §2/§4). Reports divergences as data — it never repairs (that is `index repair`) and writes no ledger row — but, like every executed index operation (plan Task 3.5), it appends exactly one terminal run.projection git-ref audit event. Exit 0 when consistent, 1 on any divergence.",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["command", "consistent", "divergences"],
+  "allOf": [
+    {
+      "if": { "properties": { "consistent": { "const": true } } },
+      "then": { "properties": { "divergences": { "maxItems": 0 } } }
+    },
+    {
+      "if": { "properties": { "consistent": { "const": false } } },
+      "then": { "properties": { "divergences": { "minItems": 1 } } }
+    }
+  ],
+  "properties": {
+    "command": { "const": "index verify" },
+    "consistent": { "type": "boolean", "description": "True when SQLite and LanceDB agree for every note (no divergence). MUST be true iff `divergences` is empty (enforced by the top-level conditionals)." },
+    "checked": { "type": "integer", "minimum": 0, "description": "Number of notes cross-checked." },
+    "divergences": {
+      "type": "array",
+      "description": "One entry per inconsistent note; empty when consistent.",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["noteId", "kind"],
+        "properties": {
+          "noteId": { "type": "string", "minLength": 1 },
+          "kind": {
+            "enum": ["missing-chunks", "orphaned-generation", "stale-active", "generation-mismatch", "permanent-embedding-failure"],
+            "description": "The class of SQLite↔LanceDB inconsistency detected."
+          },
+          "detail": { "type": "string" }
+        }
+      }
+    }
+  },
+  "examples": [
+    { "command": "index verify", "consistent": true, "checked": 20, "divergences": [] },
+    {
+      "command": "index verify",
+      "consistent": false,
+      "checked": 20,
+      "divergences": [
+        { "noteId": "concept-atlas", "kind": "missing-chunks", "detail": "active_generation_id has no live LanceDB chunks" },
+        { "noteId": "person-koral", "kind": "orphaned-generation", "detail": "live chunks tagged with a non-active generation" }
+      ]
+    }
+  ],
+  "x-atlas-contract": {
+    "command": "index verify",
+    "phase": 3,
+    "privilege": "shared",
+    "idempotency": "none",
+    "executionClass": "read",
+    "summary": "Read-only SQLite ↔ LanceDB consistency report; reports divergences, never repairs; emits exactly one terminal run.projection audit event.",
+    "args": [],
+    "flags": [],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "terminalAuditEvent": "run.projection",
+    "sideEffects": ["emits exactly one run.projection git-ref audit event (executed index operation, plan Task 3.5)"],
+    "prohibitedEffects": ["no ledger row written", "no index/projection/vault mutation", "no more than one terminal run.projection event per run"],
+    "locks": [{ "scope": "shared", "mode": "shared" }],
+    "exitCodes": [0, 1, 2, 4, 5],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "unknown flag/argument or malformed invocation" },
+      { "code": "config-invalid", "exit": 2, "when": "brain.config.yaml fails schema validation" },
+      { "code": "db-unavailable", "exit": 2, "when": "the SQLite store file is missing or unopenable" },
+      { "code": "index-unavailable", "exit": 2, "when": "the LanceDB index is not configured/present" },
+      { "code": "verify-failed", "exit": 1, "when": "one or more SQLite↔LanceDB divergences were found" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure during verification" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}
