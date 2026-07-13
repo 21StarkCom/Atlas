@@ -147,6 +147,17 @@ export function rebuildProjections(
   const schemaVersionCounts = new Map<number, number>();
 
   const run = db.transaction(() => {
+    // Pre-clear steps run BEFORE the core projection clear. A retained-PR fold
+    // whose projection cascades from `notes` must drop its rows here: the claims
+    // fold (0004) owns `claim_evidence`, which carries a self-`ON DELETE RESTRICT`
+    // supersession FK (`supersedes_evidence_id`) AND a `RESTRICT` FK onto
+    // `source_renditions`. If those rows survived, `repo.clearAll()` deleting
+    // `notes` (cascade → `claims` → `claim_evidence`) or the provenance fold
+    // deleting `source_renditions` would trip a RESTRICT and abort a valid
+    // rebuild of a claim carrying a supersession chain. Clearing successors before
+    // predecessors here makes the subsequent core/provenance cleanup FK-safe.
+    for (const step of preClearSteps) step(db);
+
     repo.clearAll();
     options.failpoint?.("after-clear");
 
@@ -234,11 +245,89 @@ export function rebuildProjections(
       report.schemaVersions++;
     }
 
+    // Run every registered projection fold INSIDE the same transaction, after
+    // the core `notes` projection exists (folds resolve their citations against
+    // `notes`). `foldProvenanceManifests` (0003 PR-A) registers here; the claims
+    // fold (0004 PR-A) will too. A fold whose tables are absent (migration not
+    // yet applied) is a self-guarded no-op, so a Phase-1 DB still rebuilds. A
+    // fold that throws rolls the whole rebuild back — the old projection stays
+    // readable (dictionary §8).
+    for (const fold of projectionFolds) fold(snapshot, db);
+
     options.failpoint?.("after-insert");
   });
 
   run();
   return report;
+}
+
+// ---------------------------------------------------------------------------
+// Projection fold registry (§2.7 / §8): retained-PR provenance & claims folds.
+// ---------------------------------------------------------------------------
+
+/**
+ * A projection fold reconstructs additional retained-PR projection tables from a
+ * `VaultSnapshot` (its canonical Markdown manifests) inside the rebuild
+ * transaction. `db` is the transaction-scoped connection (the "`tx`" of the
+ * task's `foldProvenanceManifests(snapshot, tx)` signature).
+ */
+export type ProjectionFold = (snapshot: VaultSnapshot, db: SqliteDatabase) => void;
+
+const projectionFolds: ProjectionFold[] = [];
+
+/**
+ * Register a projection fold to run inside every {@link rebuildProjections}
+ * transaction (Task 2.1 registers {@link foldProvenanceManifests}). Idempotent
+ * per fold reference — registering the same function twice is a no-op, so
+ * importing the provenance module more than once cannot double-apply it.
+ */
+export function registerProjectionFold(fold: ProjectionFold): void {
+  if (!projectionFolds.includes(fold)) projectionFolds.push(fold);
+}
+
+/** Test-only: number of registered projection folds. */
+export function projectionFoldCount(): number {
+  return projectionFolds.length;
+}
+
+/** Test-only: clear the registry so tests do not leak into one another. */
+export function _resetProjectionFolds(): void {
+  projectionFolds.length = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Pre-clear registry (§2.7 / §8): retained-PR cleanups that must run BEFORE the
+// core projection clear so restrictive/self FKs do not abort the rebuild.
+// ---------------------------------------------------------------------------
+
+/**
+ * A pre-clear step drops a retained-PR projection's rows at the very start of the
+ * rebuild transaction, before `ProjectionRepo.clearAll()` deletes `notes` and
+ * before any projection fold clears its own tables. The claims fold registers one
+ * here because `claim_evidence` cascades from `notes` and would otherwise trip a
+ * self-`RESTRICT` supersession FK (or the `RESTRICT` FK onto `source_renditions`)
+ * mid-rebuild. `db` is the transaction-scoped connection.
+ */
+export type PreClearStep = (db: SqliteDatabase) => void;
+
+const preClearSteps: PreClearStep[] = [];
+
+/**
+ * Register a pre-clear step to run at the start of every {@link rebuildProjections}
+ * transaction, before the core projection clear. Idempotent per step reference.
+ */
+export function registerPreClear(step: PreClearStep): void {
+  if (!preClearSteps.includes(step)) preClearSteps.push(step);
+}
+
+/** Test-only: number of registered pre-clear steps. */
+export function preClearStepCount(): number {
+  return preClearSteps.length;
+}
+
+/** Test-only: clear the registry so tests do not leak into one another. */
+export function _resetPreClears(): void {
+  preClearSteps.length = 0;
 }
 
 // ---------------------------------------------------------------------------
