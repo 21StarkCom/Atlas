@@ -7,6 +7,11 @@ created: 2026-07-11
 updated: 2026-07-11
 declaredSensitivity: internal
 sources: []
+claims:
+  - claim_id: claim-meridian-launch-2025
+    text: "Project Meridian launched in 2025."
+    status: active
+    created_at: 2026-07-11T00:00:00Z
 ---
 
 # Meridian Launch Date

@@ -33,14 +33,17 @@ const CONTENT_B = `sha256:${HEX_B}:text/plain`;
 
 /**
  * Open a store and apply the retained PR-A migrations via the PUBLIC path —
- * `openStore` pre-registers `0001_core` + `0003_provenance`, so `migrate()`
- * creates the provenance tables with NO manual `registerMigration` (fixes wing
- * R2-F1: the fold must not silently no-op on the normal store path).
+ * `openStore` pre-registers `0001_core` + `0003_provenance` + `0004_claims`, so
+ * `migrate()` creates the provenance (and claims) tables with NO manual
+ * `registerMigration` (fixes wing R2-F1: the fold must not silently no-op on the
+ * normal store path).
  */
 function provenanceStore(): Store {
   const store = openStore({ path: ":memory:" });
   const report = store.migrate();
-  expect(new Set(report.newlyApplied)).toEqual(new Set(["0001_core", "0003_provenance"]));
+  expect(new Set(report.newlyApplied)).toEqual(
+    new Set(["0001_core", "0003_provenance", "0004_claims"]),
+  );
   return store;
 }
 

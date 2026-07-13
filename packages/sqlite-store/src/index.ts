@@ -26,6 +26,9 @@ export {
   registerProjectionFold,
   projectionFoldCount,
   _resetProjectionFolds,
+  registerPreClear,
+  preClearStepCount,
+  _resetPreClears,
   IDENTITY_NORMALIZER_VERSION,
   DEFAULT_LINK_PREDICATE,
   SCHEMA_PROJECTION_EPOCH,
@@ -38,6 +41,7 @@ export type {
   RebuildCtx,
   PostRestoreRebuildStep,
   ProjectionFold,
+  PreClearStep,
 } from "./rebuild.js";
 
 export {
@@ -45,6 +49,13 @@ export {
   MalformedManifestError,
   DanglingSourceError,
 } from "./provenance/fold.js";
+
+export {
+  foldClaimManifests,
+  clearClaimsProjection,
+  MalformedClaimError,
+  DanglingEvidenceError,
+} from "./claims/fold.js";
 
 export { verify, checkQueryPlans } from "./verify.js";
 export type { VerifyReport, InvariantViolation, QueryPlanViolation } from "./verify.js";
@@ -64,6 +75,7 @@ export type { AgentRunRow, AuditEventRow } from "./repos/ledger.js";
 
 export { migration0001Core, CORE_DDL } from "../migrations/0001_core.js";
 export { migration0003Provenance, PROVENANCE_DDL } from "../migrations/0003_provenance.js";
+export { migration0004Claims, CLAIMS_DDL } from "../migrations/0004_claims.js";
 
 export { ProvenanceRepo, captureId } from "./repos/provenance.js";
 export type {
@@ -73,3 +85,11 @@ export type {
   NoteSourceRow,
   RenditionComponents,
 } from "./repos/provenance.js";
+
+export { ClaimsRepo, payloadHash, evidenceIdFor, SENTINEL_NONE } from "./repos/claims.js";
+export type {
+  ClaimRow,
+  ClaimEvidenceRow,
+  AttachEvidenceInput,
+  EvidenceVerification,
+} from "./repos/claims.js";
