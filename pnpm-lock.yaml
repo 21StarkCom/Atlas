@@ -81,7 +81,14 @@ importers:
         version: 3.2.7(@types/node@24.13.3)(yaml@2.9.0)
 
   packages/git:
+    dependencies:
+      '@atlas/contracts':
+        specifier: workspace:*
+        version: link:../contracts
     devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.13.3
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
