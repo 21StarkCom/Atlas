@@ -21,6 +21,7 @@
     "zod": "catalog:"
   },
   "devDependencies": {
+    "@atlas/testing": "workspace:*",
     "@types/node": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"

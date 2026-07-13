@@ -27,6 +27,14 @@ export {
 // Canonical serialization (§8.2 `atlas-jcs-v1`)
 export { canonicalSerialize, canonicalStringify, CANONICALIZATION_ID } from "./canonical.js";
 
+// Identity-key canonicalization (§2.7 `atlas-identity-key-v1`) + conformance vectors
+export {
+  type IdentityKeyVector,
+  normalizeIdentityKey,
+  IDENTITY_KEY_ALGORITHM_ID,
+  IDENTITY_KEY_VECTORS,
+} from "./identity.js";
+
 // Shared primitive schemas
 export {
   Ulid,
