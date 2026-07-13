@@ -234,11 +234,54 @@ export function rebuildProjections(
       report.schemaVersions++;
     }
 
+    // Run every registered projection fold INSIDE the same transaction, after
+    // the core `notes` projection exists (folds resolve their citations against
+    // `notes`). `foldProvenanceManifests` (0003 PR-A) registers here; the claims
+    // fold (0004 PR-A) will too. A fold whose tables are absent (migration not
+    // yet applied) is a self-guarded no-op, so a Phase-1 DB still rebuilds. A
+    // fold that throws rolls the whole rebuild back — the old projection stays
+    // readable (dictionary §8).
+    for (const fold of projectionFolds) fold(snapshot, db);
+
     options.failpoint?.("after-insert");
   });
 
   run();
   return report;
+}
+
+// ---------------------------------------------------------------------------
+// Projection fold registry (§2.7 / §8): retained-PR provenance & claims folds.
+// ---------------------------------------------------------------------------
+
+/**
+ * A projection fold reconstructs additional retained-PR projection tables from a
+ * `VaultSnapshot` (its canonical Markdown manifests) inside the rebuild
+ * transaction. `db` is the transaction-scoped connection (the "`tx`" of the
+ * task's `foldProvenanceManifests(snapshot, tx)` signature).
+ */
+export type ProjectionFold = (snapshot: VaultSnapshot, db: SqliteDatabase) => void;
+
+const projectionFolds: ProjectionFold[] = [];
+
+/**
+ * Register a projection fold to run inside every {@link rebuildProjections}
+ * transaction (Task 2.1 registers {@link foldProvenanceManifests}). Idempotent
+ * per fold reference — registering the same function twice is a no-op, so
+ * importing the provenance module more than once cannot double-apply it.
+ */
+export function registerProjectionFold(fold: ProjectionFold): void {
+  if (!projectionFolds.includes(fold)) projectionFolds.push(fold);
+}
+
+/** Test-only: number of registered projection folds. */
+export function projectionFoldCount(): number {
+  return projectionFolds.length;
+}
+
+/** Test-only: clear the registry so tests do not leak into one another. */
+export function _resetProjectionFolds(): void {
+  projectionFolds.length = 0;
 }
 
 // ---------------------------------------------------------------------------

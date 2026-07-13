@@ -1,25 +1,30 @@
 /**
  * `db.migrate-ownership` — every §2.7 table is created by *exactly* its declared
- * migration. Applying only `0001_core` against a fresh DB must produce exactly
- * the dictionary's `0001_core` table set plus the runner-bootstrap
- * `db_schema_migrations` — no missing, extra, or duplicate table.
+ * migration. `openStore` pre-registers the retained-PR-A migrations `0001_core`
+ * + `0003_provenance`, so applying them against a fresh DB must produce exactly
+ * the dictionary's `0001_core` ∪ `0003_provenance` table sets plus the
+ * runner-bootstrap `db_schema_migrations` — no missing, extra, or duplicate table.
  */
 import { describe, expect, it } from "vitest";
 import { openStore } from "../src/index.js";
 import { dictionaryTablesFor, userTables } from "./helpers.js";
 
 describe("db.migrate-ownership", () => {
-  it("0001_core creates exactly its declared §2.7 tables (fresh-DB diff vs dictionary)", () => {
+  it("0001_core + 0003_provenance create exactly their declared §2.7 tables (fresh-DB diff vs dictionary)", () => {
     const store = openStore({ path: ":memory:" });
     try {
       const report = store.migrate();
-      expect(report.newlyApplied).toEqual(["0001_core"]);
+      expect(new Set(report.newlyApplied)).toEqual(new Set(["0001_core", "0003_provenance"]));
 
       const expected = dictionaryTablesFor("0001_core");
+      for (const t of dictionaryTablesFor("0003_provenance")) expected.add(t);
       expected.add("db_schema_migrations"); // runner bootstrap
-      // Sanity: the dictionary really did attribute the core tables to 0001_core.
+      // Sanity: the dictionary really did attribute the core tables to 0001_core…
       expect(expected.has("notes")).toBe(true);
       expect(expected.has("audit_events")).toBe(true);
+      // …and the provenance tables to 0003_provenance.
+      expect(expected.has("content_blobs")).toBe(true);
+      expect(expected.has("note_sources")).toBe(true);
       // And it must NOT include tables owned by later migrations.
       expect(expected.has("jobs")).toBe(false);
       expect(expected.has("claims")).toBe(false);

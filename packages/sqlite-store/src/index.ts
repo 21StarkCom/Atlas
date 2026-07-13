@@ -23,6 +23,9 @@ export {
   runPostRestoreRebuild,
   postRestoreRebuildStepCount,
   _resetPostRestoreRebuild,
+  registerProjectionFold,
+  projectionFoldCount,
+  _resetProjectionFolds,
   IDENTITY_NORMALIZER_VERSION,
   DEFAULT_LINK_PREDICATE,
   SCHEMA_PROJECTION_EPOCH,
@@ -34,7 +37,14 @@ export type {
   RebuildOptions,
   RebuildCtx,
   PostRestoreRebuildStep,
+  ProjectionFold,
 } from "./rebuild.js";
+
+export {
+  foldProvenanceManifests,
+  MalformedManifestError,
+  DanglingSourceError,
+} from "./provenance/fold.js";
 
 export { verify, checkQueryPlans } from "./verify.js";
 export type { VerifyReport, InvariantViolation, QueryPlanViolation } from "./verify.js";
@@ -53,3 +63,13 @@ export { LedgerRepo, AuditEventConflictError } from "./repos/ledger.js";
 export type { AgentRunRow, AuditEventRow } from "./repos/ledger.js";
 
 export { migration0001Core, CORE_DDL } from "../migrations/0001_core.js";
+export { migration0003Provenance, PROVENANCE_DDL } from "../migrations/0003_provenance.js";
+
+export { ProvenanceRepo, captureId } from "./repos/provenance.js";
+export type {
+  ContentBlobRow,
+  SourceCaptureRow,
+  SourceRenditionRow,
+  NoteSourceRow,
+  RenditionComponents,
+} from "./repos/provenance.js";

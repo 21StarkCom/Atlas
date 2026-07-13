@@ -24,8 +24,8 @@ describe("db.migrate-gap-tolerant", () => {
   it("applies 0002 after 0003 is already applied (no skip)", () => {
     const store = openStore({ path: ":memory:" });
     try {
-      // Retained PR-A lands first: register + apply 0001_core (pre-registered) + 0003.
-      store.registerMigration(ddlMigration("0003_provenance", "gap_0003"));
+      // Retained PR-A is pre-registered by `openStore` (0001_core + 0003_provenance);
+      // applying them lands 0003 while 0002 is still absent.
       const first = store.migrate();
       expect(first.newlyApplied).toEqual(["0001_core", "0003_provenance"]);
 
