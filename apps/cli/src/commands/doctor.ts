@@ -26,6 +26,7 @@ import { platform } from "node:os";
 import { openStore } from "@atlas/sqlite-store";
 import { watermarkHealth } from "@atlas/sqlite-store";
 import { BrokerClient } from "@atlas/broker";
+import { probeSandbox } from "@atlas/sources";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { lockManager, LOCK_SCOPES } from "../locks/manager.js";
@@ -571,6 +572,47 @@ function checkQuarantineSecurity(ctx: RunContext): Check {
   return { id, title, status: "ok" };
 }
 
+/**
+ * Sandbox capability probe (Task 2.3 / #29). Surfaces `@atlas/sources`'
+ * {@link probeSandbox} — the per-host isolation matrix of `sandbox-contract.md`. On a
+ * supported host every REQUIRED guarantee's primitive is available and this is `ok`;
+ * if ANY required guarantee is unavailable (an unsupported host, or Seatbelt/bwrap/
+ * seccomp churn removed a primitive) the parser worker would `runInSandbox`-refuse to
+ * launch, so this is `action-required` and NAMES the missing guarantee(s) — the "fail
+ * loud at startup" the contract requires. Never fatal by itself beyond the aggregate
+ * action-required exit.
+ */
+async function checkSandboxCapability(ctx: RunContext): Promise<Check> {
+  const id = "sandbox-capability";
+  const title = "Sandbox capability probe";
+  // An unsupported sandbox means untrusted input cannot be parsed safely — a true signal.
+  // It is BLOCKING (action-required) on a host required to sandbox, and a visible-but-non-
+  // blocking DEGRADED warning otherwise, because Linux sandbox hardening (cgroup delegation
+  // etc.) is an explicitly-deferred gap (#5 / PR #72). Set `ATLAS_SANDBOX_REQUIRE=1` to
+  // enforce (production / any host that must isolate before parsing untrusted sources).
+  const strict = ctx.env.ATLAS_SANDBOX_REQUIRE === "1";
+  const unsupportedStatus = strict ? "action-required" : "degraded";
+  try {
+    const r = await probeSandbox();
+    if (r.supported) {
+      return { id, title, status: "ok", detail: `host ${r.host}: all isolation guarantees available` };
+    }
+    const missing = r.checks
+      .filter((c) => !c.available)
+      .map((c) => `${c.guarantee} [${c.primitive}]${c.detail ? `: ${c.detail}` : ""}`);
+    return {
+      id,
+      title,
+      status: unsupportedStatus,
+      detail:
+        `host ${r.host} cannot parse untrusted input safely — the sandbox refuses to launch. Missing: ${missing.join("; ")}` +
+        (strict ? "" : " (non-blocking: set ATLAS_SANDBOX_REQUIRE=1 to enforce)"),
+    };
+  } catch (e) {
+    return { id, title, status: unsupportedStatus, detail: `sandbox probe failed: ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
 async function doctor(ctx: RunContext): Promise<number> {
   const args = parseArgs(ctx.argv);
 
@@ -580,6 +622,7 @@ async function doctor(ctx: RunContext): Promise<number> {
   const anchor = await checkAuditAnchor(ctx);
   const provisioning = checkProvisioning(ctx);
   const quarantine = checkQuarantineSecurity(ctx);
+  const sandbox = await checkSandboxCapability(ctx);
   const encrypted = checkEncryptedVolume(ctx);
 
   let reclaimedLocks: { scope: string; holderPid: number }[] | undefined;
@@ -594,7 +637,7 @@ async function doctor(ctx: RunContext): Promise<number> {
     }
   }
 
-  const checks: Check[] = [modes, livenessCheck, watermark, anchor, provisioning, quarantine, encrypted];
+  const checks: Check[] = [modes, livenessCheck, watermark, anchor, provisioning, quarantine, sandbox, encrypted];
 
   const anyActionRequired = checks.some((c) => c.status === "action-required");
   const anyDegraded = checks.some((c) => c.status === "degraded" || c.status === "warning");

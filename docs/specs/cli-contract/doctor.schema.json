@@ -121,6 +121,12 @@
         "title": "Quarantine store security",
         "description": "Validate the encrypted-quarantine store's at-rest posture (Task 2.2 / #28): the resolved dir is outside the repo+vault and (when present) mode 0700 with no symlink or stray non-bundle files, and the `quarantine-aead` key ACL posture (readableBy ['trusted-cli'], parserModelDenied, identity 'agent', file 'quarantine-aead.key', mode 0600) plus the atlas-egress group exclusion (D18) match the security contract. action-required on any drift, invalid/unreadable dir, or (on a provisioned host) a missing ACL matrix; degraded on crash-leftover temps.",
         "phase": 2
+      },
+      {
+        "id": "sandbox-capability",
+        "title": "Sandbox capability probe",
+        "description": "Surface @atlas/sources' probeSandbox() — the per-host isolation matrix of sandbox-contract.md (Task 2.3 / #29): no-network, empty-environment, isolated-filesystem, no-credential-access, no-inherited-fds, no-subprocess, syscall-restriction, resource-caps, scan-before-persist. ok when every REQUIRED guarantee's primitive is available on this host; action-required (fail loud) when any is missing — the parser worker then refuses to launch (fail closed) so no untrusted input is parsed. Guards against macOS Seatbelt / Linux bwrap+seccomp version churn removing a primitive.",
+        "phase": 2
       }
     ]
   }

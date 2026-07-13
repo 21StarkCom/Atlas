@@ -72,7 +72,53 @@ ensure_dir "$ATLAS_RUN_DIR" "root" "$ATLAS_GROUP" 2770
 # 6) install dir for the hash-verified privileged binaries (D16), root-owned
 ensure_dir "$ATLAS_INSTALL_BIN" "root" "$ATLAS_ROOT_GROUP" 0755
 
-# 7) OS-specific agent network confinement (D17) — best-effort, flagged if unavailable
+# 7) sandbox parser prerequisites (Task 2.3 / #29): the untrusted-input parser worker
+#    runs under a per-host jail. macOS uses the built-in Seatbelt (`sandbox-exec` —
+#    always present). Linux needs bubblewrap (`bwrap`) + util-linux (`prlimit`) AND
+#    unprivileged user namespaces enabled — Ubuntu 24.04+ gates those behind AppArmor
+#    by default, which bwrap requires. Without these `probeSandbox()` fails closed and
+#    `doctor` reports action-required, so provision them here (idempotent).
+if [ "$ATLAS_OS" = "Linux" ]; then
+  step "sandbox parser prerequisites (bubblewrap + unprivileged userns)"
+  if ! command -v bwrap >/dev/null 2>&1; then
+    if command -v apt-get >/dev/null 2>&1; then
+      run "apt-get update -qq"
+      run "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bubblewrap util-linux"
+    else
+      log "WARN: bwrap absent and apt-get unavailable — install bubblewrap manually (sandbox fails closed otherwise)"
+    fi
+  fi
+  # Ubuntu 24.04+ blocks unprivileged user namespaces via AppArmor; bwrap needs them.
+  if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+    run "sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true"
+  fi
+
+  # cgroup v2 per-worker resource caps (Task 2.3 / #29, finding 1): the parser worker is
+  # placed in a fresh leaf cgroup that caps memory/pids/cpu and that it cannot leave. The
+  # launcher needs a WRITABLE cgroup-v2 base whose subtree delegates memory/pids/cpu. We
+  # provision a dedicated delegated slice so the (possibly non-root) runtime user can
+  # create per-worker leaves + migrate the worker into them. Without this `probeSandbox()`
+  # reports resource-caps unavailable and the sandbox fails closed.
+  step "sandbox cgroup v2 delegation (per-worker memory/pids/cpu caps)"
+  if [ -e /sys/fs/cgroup/cgroup.controllers ]; then
+    ATLAS_CGROUP_SLICE="/sys/fs/cgroup/atlas.slice"
+    # Delegate the controllers from the root, create the slice, delegate again into it,
+    # and hand ownership to the runtime user so it can create+populate leaves. The user's
+    # OWN shell should run inside this slice (or run the sandbox suites as root) so that
+    # moving a worker into a leaf shares the slice as the (owned) common ancestor.
+    run "sh -c 'echo +memory +pids +cpu > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null || true'"
+    run "mkdir -p $ATLAS_CGROUP_SLICE"
+    run "sh -c 'echo +memory +pids +cpu > $ATLAS_CGROUP_SLICE/cgroup.subtree_control 2>/dev/null || true'"
+    run "chown -R \"${SUDO_USER:-$(id -un)}\" $ATLAS_CGROUP_SLICE 2>/dev/null || true"
+    log "Export ATLAS_SANDBOX_CGROUP_ROOT=$ATLAS_CGROUP_SLICE (and run the sandbox suites"
+    log "with your shell inside that slice, or as root) so resource-caps probes green."
+  else
+    log "WARN: cgroup v2 not mounted (/sys/fs/cgroup/cgroup.controllers absent) — the"
+    log "sandbox resource-caps guarantee fails closed until cgroup v2 is available."
+  fi
+fi
+
+# 8) OS-specific agent network confinement (D17) — best-effort, flagged if unavailable
 if [ "$ATLAS_OS" = "Darwin" ]; then
   log "macOS: install the pf anchor + Seatbelt profile via provisioning/macos (see README §network-denial)"
 else
