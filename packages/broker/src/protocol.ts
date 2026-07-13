@@ -7,6 +7,7 @@
  */
 import { z } from "zod";
 import {
+  AuditEventSchema,
   AuthorizationChallengeSchema,
   AuthorizationResponseSchema,
   IntendedEffectSchema,
@@ -16,6 +17,7 @@ import {
 /** The methods the broker exposes over IPC. */
 export type BrokerMethod =
   | "appendAuditEvent"
+  | "signAndAppendAuditEvent"
   | "advanceProtectedRef"
   | "integrateSourceCapture"
   | "mintChallenge"
@@ -24,11 +26,20 @@ export type BrokerMethod =
 /** The closed set of methods (runtime-checkable, matches {@link BrokerMethod}). */
 export const BROKER_METHODS = [
   "appendAuditEvent",
+  "signAndAppendAuditEvent",
   "advanceProtectedRef",
   "integrateSourceCapture",
   "mintChallenge",
   "execAuthorized",
 ] as const;
+
+/**
+ * The wire form of an UNSIGNED audit event (F4): the caller submits everything a
+ * signed event carries EXCEPT `prevAuditHead` (broker-filled) and the signature
+ * (broker-owned attestation key). The broker deep-validates the completed event
+ * again inside `signAndAppend`; this schema is the transit contract.
+ */
+export const UnsignedAuditEventSchema = AuditEventSchema.omit({ prevAuditHead: true });
 
 /** A framed request. `id` correlates the response; `params` is method-specific. */
 export interface BrokerRequest {
@@ -104,6 +115,7 @@ const PrivilegedOpDescriptorSchema = z.object({
 /** Per-method parameter schemas (the discriminated request contract). */
 const METHOD_PARAM_SCHEMAS: Record<BrokerMethod, z.ZodTypeAny> = {
   appendAuditEvent: WireSignedAuditEventSchema,
+  signAndAppendAuditEvent: UnsignedAuditEventSchema,
   advanceProtectedRef: z.object({
     ref: z.string().min(1),
     expectedOld: z.string().min(1),
@@ -204,6 +216,7 @@ const PrivilegedOpResultSchema = z.object({
 /** Per-method success-result schemas (mirrors the client's typed return shapes). */
 const METHOD_RESULT_SCHEMAS: Record<BrokerMethod, z.ZodTypeAny> = {
   appendAuditEvent: AppendResultSchema,
+  signAndAppendAuditEvent: AppendResultSchema,
   advanceProtectedRef: RefAdvanceResultSchema,
   integrateSourceCapture: RefAdvanceResultSchema,
   mintChallenge: AuthorizationChallengeSchema,

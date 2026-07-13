@@ -2,54 +2,397 @@
   "$comment": "SINGLE canonical command registry (D-registry SSOT). Command membership, phase, privilege class, and idempotency class have exactly one owner: this file. Consumed by contract-lint, gen-cli-contract.ts, policies, and the broker (which READ the privilege field, never re-classify). Row shape: { name, schemaRef, phase, idempotency, privilege, implemented }. `implemented` flips false->true per delivering task once its schemaRef schema exists. Keep rows sorted by name; renames are one-row diffs gated by contract-lint.",
   "version": 1,
   "commands": [
-    { "name": "db backup", "schemaRef": "docs/specs/cli-contract/db-backup.schema.json", "phase": 1, "idempotency": "key-accepting", "privilege": "shared", "implemented": false },
-    { "name": "db migrate", "schemaRef": "docs/specs/cli-contract/db-migrate.schema.json", "phase": 1, "idempotency": "intrinsic", "privilege": "shared", "implemented": false },
-    { "name": "db rebuild", "schemaRef": "docs/specs/cli-contract/db-rebuild.schema.json", "phase": 1, "idempotency": "intrinsic", "privilege": "shared", "implemented": false },
-    { "name": "db restore", "schemaRef": "docs/specs/cli-contract/db-restore.schema.json", "phase": 1, "idempotency": "key-accepting", "privilege": "privileged", "implemented": false },
-    { "name": "db status", "schemaRef": "docs/specs/cli-contract/db-status.schema.json", "phase": 1, "idempotency": "none", "privilege": "shared", "implemented": false },
-    { "name": "db verify", "schemaRef": "docs/specs/cli-contract/db-verify.schema.json", "phase": 1, "idempotency": "none", "privilege": "shared", "implemented": false },
-    { "name": "doctor", "schemaRef": "docs/specs/cli-contract/doctor.schema.json", "phase": 1, "idempotency": "none", "privilege": "shared", "implemented": false },
-    { "name": "enrich", "schemaRef": "docs/specs/cli-contract/enrich.schema.json", "phase": 4, "idempotency": "key-accepting", "privilege": "shared", "implemented": false },
-    { "name": "evidence resolve", "schemaRef": "docs/specs/cli-contract/evidence-resolve.schema.json", "phase": 4, "idempotency": "intrinsic", "privilege": "shared", "implemented": false },
-    { "name": "evidence retry", "schemaRef": "docs/specs/cli-contract/evidence-retry.schema.json", "phase": 4, "idempotency": "intrinsic", "privilege": "shared", "implemented": false },
-    { "name": "evidence review", "schemaRef": "docs/specs/cli-contract/evidence-review.schema.json", "phase": 4, "idempotency": "none", "privilege": "shared", "implemented": false },
-    { "name": "git approve", "schemaRef": "docs/specs/cli-contract/git-approve.schema.json", "phase": 4, "idempotency": "key-accepting", "privilege": "privileged", "implemented": false },
-    { "name": "git cleanup", "schemaRef": "docs/specs/cli-contract/git-cleanup.schema.json", "phase": 2, "idempotency": "intrinsic", "privilege": "shared", "implemented": false },
-    { "name": "git refresh", "schemaRef": "docs/specs/cli-contract/git-refresh.schema.json", "phase": 4, "idempotency": "key-accepting", "privilege": "privileged", "implemented": false },
-    { "name": "git reject", "schemaRef": "docs/specs/cli-contract/git-reject.schema.json", "phase": 4, "idempotency": "intrinsic", "privilege": "shared", "implemented": false },
-    { "name": "git review", "schemaRef": "docs/specs/cli-contract/git-review.schema.json", "phase": 4, "idempotency": "none", "privilege": "shared", "implemented": false },
-    { "name": "git rollback", "schemaRef": "docs/specs/cli-contract/git-rollback.schema.json", "phase": 4, "idempotency": "key-accepting", "privilege": "privileged", "implemented": false },
-    { "name": "git status", "schemaRef": "docs/specs/cli-contract/git-status.schema.json", "phase": 2, "idempotency": "none", "privilege": "shared", "implemented": false },
-    { "name": "git verify", "schemaRef": "docs/specs/cli-contract/git-verify.schema.json", "phase": 4, "idempotency": "intrinsic", "privilege": "shared", "implemented": false },
-    { "name": "graduation audit", "schemaRef": "docs/specs/cli-contract/graduation-audit.schema.json", "phase": 5, "idempotency": "none", "privilege": "shared", "implemented": false },
-    { "name": "graduation migrate", "schemaRef": "docs/specs/cli-contract/graduation-migrate.schema.json", "phase": 5, "idempotency": "key-accepting", "privilege": "privileged", "implemented": false },
-    { "name": "graduation scan", "schemaRef": "docs/specs/cli-contract/graduation-scan.schema.json", "phase": 5, "idempotency": "none", "privilege": "shared", "implemented": false },
-    { "name": "index rebuild", "schemaRef": "docs/specs/cli-contract/index-rebuild.schema.json", "phase": 3, "idempotency": "intrinsic", "privilege": "shared", "implemented": false },
-    { "name": "index repair", "schemaRef": "docs/specs/cli-contract/index-repair.schema.json", "phase": 3, "idempotency": "intrinsic", "privilege": "shared", "implemented": false },
-    { "name": "index status", "schemaRef": "docs/specs/cli-contract/index-status.schema.json", "phase": 3, "idempotency": "none", "privilege": "shared", "implemented": false },
-    { "name": "index verify", "schemaRef": "docs/specs/cli-contract/index-verify.schema.json", "phase": 3, "idempotency": "none", "privilege": "shared", "implemented": false },
-    { "name": "ingest", "schemaRef": "docs/specs/cli-contract/ingest.schema.json", "phase": 2, "idempotency": "key-accepting", "privilege": "shared", "implemented": false },
-    { "name": "inspect", "schemaRef": "docs/specs/cli-contract/inspect.schema.json", "phase": 1, "idempotency": "none", "privilege": "shared", "implemented": false },
-    { "name": "jobs cancel", "schemaRef": "docs/specs/cli-contract/jobs-cancel.schema.json", "phase": 2, "idempotency": "key-accepting", "privilege": "shared", "implemented": false },
-    { "name": "jobs list", "schemaRef": "docs/specs/cli-contract/jobs-list.schema.json", "phase": 2, "idempotency": "none", "privilege": "shared", "implemented": false },
-    { "name": "jobs retry", "schemaRef": "docs/specs/cli-contract/jobs-retry.schema.json", "phase": 2, "idempotency": "key-accepting", "privilege": "shared", "implemented": false },
-    { "name": "jobs run", "schemaRef": "docs/specs/cli-contract/jobs-run.schema.json", "phase": 2, "idempotency": "key-accepting", "privilege": "shared", "implemented": false },
-    { "name": "maintain", "schemaRef": "docs/specs/cli-contract/maintain.schema.json", "phase": 4, "idempotency": "key-accepting", "privilege": "shared", "implemented": false },
-    { "name": "note history", "schemaRef": "docs/specs/cli-contract/note-history.schema.json", "phase": 2, "idempotency": "none", "privilege": "shared", "implemented": false },
-    { "name": "note related", "schemaRef": "docs/specs/cli-contract/note-related.schema.json", "phase": 2, "idempotency": "none", "privilege": "shared", "implemented": false },
-    { "name": "note show", "schemaRef": "docs/specs/cli-contract/note-show.schema.json", "phase": 2, "idempotency": "none", "privilege": "shared", "implemented": false },
-    { "name": "purge", "schemaRef": "docs/specs/cli-contract/purge.schema.json", "phase": 4, "idempotency": "key-accepting", "privilege": "privileged", "implemented": false },
-    { "name": "quarantine inspect", "schemaRef": "docs/specs/cli-contract/quarantine-inspect.schema.json", "phase": 5, "idempotency": "none", "privilege": "privileged", "implemented": false },
-    { "name": "quarantine resolve", "schemaRef": "docs/specs/cli-contract/quarantine-resolve.schema.json", "phase": 5, "idempotency": "key-accepting", "privilege": "privileged", "implemented": false },
-    { "name": "query", "schemaRef": "docs/specs/cli-contract/query.schema.json", "phase": 3, "idempotency": "none", "privilege": "shared", "implemented": false },
-    { "name": "reconcile", "schemaRef": "docs/specs/cli-contract/reconcile.schema.json", "phase": 4, "idempotency": "key-accepting", "privilege": "shared", "implemented": false },
-    { "name": "source add", "schemaRef": "docs/specs/cli-contract/source-add.schema.json", "phase": 2, "idempotency": "key-accepting", "privilege": "shared", "implemented": false },
-    { "name": "source list", "schemaRef": "docs/specs/cli-contract/source-list.schema.json", "phase": 2, "idempotency": "none", "privilege": "shared", "implemented": false },
-    { "name": "source show", "schemaRef": "docs/specs/cli-contract/source-show.schema.json", "phase": 2, "idempotency": "none", "privilege": "shared", "implemented": false },
-    { "name": "source trust promote", "schemaRef": "docs/specs/cli-contract/source-trust-promote.schema.json", "phase": 4, "idempotency": "key-accepting", "privilege": "privileged", "implemented": false },
-    { "name": "source trust revoke", "schemaRef": "docs/specs/cli-contract/source-trust-revoke.schema.json", "phase": 4, "idempotency": "key-accepting", "privilege": "privileged", "implemented": false },
-    { "name": "source trust show", "schemaRef": "docs/specs/cli-contract/source-trust-show.schema.json", "phase": 2, "idempotency": "none", "privilege": "shared", "implemented": false },
-    { "name": "status", "schemaRef": "docs/specs/cli-contract/status.schema.json", "phase": 1, "idempotency": "none", "privilege": "shared", "implemented": false },
-    { "name": "validate", "schemaRef": "docs/specs/cli-contract/validate.schema.json", "phase": 4, "idempotency": "none", "privilege": "shared", "implemented": false }
+    {
+      "name": "db backup",
+      "schemaRef": "docs/specs/cli-contract/db-backup.schema.json",
+      "phase": 1,
+      "idempotency": "key-accepting",
+      "privilege": "shared",
+      "implemented": true
+    },
+    {
+      "name": "db migrate",
+      "schemaRef": "docs/specs/cli-contract/db-migrate.schema.json",
+      "phase": 1,
+      "idempotency": "intrinsic",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "db rebuild",
+      "schemaRef": "docs/specs/cli-contract/db-rebuild.schema.json",
+      "phase": 1,
+      "idempotency": "intrinsic",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "db restore",
+      "schemaRef": "docs/specs/cli-contract/db-restore.schema.json",
+      "phase": 1,
+      "idempotency": "key-accepting",
+      "privilege": "privileged",
+      "implemented": true
+    },
+    {
+      "name": "db status",
+      "schemaRef": "docs/specs/cli-contract/db-status.schema.json",
+      "phase": 1,
+      "idempotency": "none",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "db verify",
+      "schemaRef": "docs/specs/cli-contract/db-verify.schema.json",
+      "phase": 1,
+      "idempotency": "none",
+      "privilege": "shared",
+      "implemented": true
+    },
+    {
+      "name": "doctor",
+      "schemaRef": "docs/specs/cli-contract/doctor.schema.json",
+      "phase": 1,
+      "idempotency": "none",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "enrich",
+      "schemaRef": "docs/specs/cli-contract/enrich.schema.json",
+      "phase": 4,
+      "idempotency": "key-accepting",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "evidence resolve",
+      "schemaRef": "docs/specs/cli-contract/evidence-resolve.schema.json",
+      "phase": 4,
+      "idempotency": "intrinsic",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "evidence retry",
+      "schemaRef": "docs/specs/cli-contract/evidence-retry.schema.json",
+      "phase": 4,
+      "idempotency": "intrinsic",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "evidence review",
+      "schemaRef": "docs/specs/cli-contract/evidence-review.schema.json",
+      "phase": 4,
+      "idempotency": "none",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "git approve",
+      "schemaRef": "docs/specs/cli-contract/git-approve.schema.json",
+      "phase": 4,
+      "idempotency": "key-accepting",
+      "privilege": "privileged",
+      "implemented": false
+    },
+    {
+      "name": "git cleanup",
+      "schemaRef": "docs/specs/cli-contract/git-cleanup.schema.json",
+      "phase": 2,
+      "idempotency": "intrinsic",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "git refresh",
+      "schemaRef": "docs/specs/cli-contract/git-refresh.schema.json",
+      "phase": 4,
+      "idempotency": "key-accepting",
+      "privilege": "privileged",
+      "implemented": false
+    },
+    {
+      "name": "git reject",
+      "schemaRef": "docs/specs/cli-contract/git-reject.schema.json",
+      "phase": 4,
+      "idempotency": "intrinsic",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "git review",
+      "schemaRef": "docs/specs/cli-contract/git-review.schema.json",
+      "phase": 4,
+      "idempotency": "none",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "git rollback",
+      "schemaRef": "docs/specs/cli-contract/git-rollback.schema.json",
+      "phase": 4,
+      "idempotency": "key-accepting",
+      "privilege": "privileged",
+      "implemented": false
+    },
+    {
+      "name": "git status",
+      "schemaRef": "docs/specs/cli-contract/git-status.schema.json",
+      "phase": 2,
+      "idempotency": "none",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "git verify",
+      "schemaRef": "docs/specs/cli-contract/git-verify.schema.json",
+      "phase": 4,
+      "idempotency": "intrinsic",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "graduation audit",
+      "schemaRef": "docs/specs/cli-contract/graduation-audit.schema.json",
+      "phase": 5,
+      "idempotency": "none",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "graduation migrate",
+      "schemaRef": "docs/specs/cli-contract/graduation-migrate.schema.json",
+      "phase": 5,
+      "idempotency": "key-accepting",
+      "privilege": "privileged",
+      "implemented": false
+    },
+    {
+      "name": "graduation scan",
+      "schemaRef": "docs/specs/cli-contract/graduation-scan.schema.json",
+      "phase": 5,
+      "idempotency": "none",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "index rebuild",
+      "schemaRef": "docs/specs/cli-contract/index-rebuild.schema.json",
+      "phase": 3,
+      "idempotency": "intrinsic",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "index repair",
+      "schemaRef": "docs/specs/cli-contract/index-repair.schema.json",
+      "phase": 3,
+      "idempotency": "intrinsic",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "index status",
+      "schemaRef": "docs/specs/cli-contract/index-status.schema.json",
+      "phase": 3,
+      "idempotency": "none",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "index verify",
+      "schemaRef": "docs/specs/cli-contract/index-verify.schema.json",
+      "phase": 3,
+      "idempotency": "none",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "ingest",
+      "schemaRef": "docs/specs/cli-contract/ingest.schema.json",
+      "phase": 2,
+      "idempotency": "key-accepting",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "inspect",
+      "schemaRef": "docs/specs/cli-contract/inspect.schema.json",
+      "phase": 1,
+      "idempotency": "none",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "jobs cancel",
+      "schemaRef": "docs/specs/cli-contract/jobs-cancel.schema.json",
+      "phase": 2,
+      "idempotency": "key-accepting",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "jobs list",
+      "schemaRef": "docs/specs/cli-contract/jobs-list.schema.json",
+      "phase": 2,
+      "idempotency": "none",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "jobs retry",
+      "schemaRef": "docs/specs/cli-contract/jobs-retry.schema.json",
+      "phase": 2,
+      "idempotency": "key-accepting",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "jobs run",
+      "schemaRef": "docs/specs/cli-contract/jobs-run.schema.json",
+      "phase": 2,
+      "idempotency": "key-accepting",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "maintain",
+      "schemaRef": "docs/specs/cli-contract/maintain.schema.json",
+      "phase": 4,
+      "idempotency": "key-accepting",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "note history",
+      "schemaRef": "docs/specs/cli-contract/note-history.schema.json",
+      "phase": 2,
+      "idempotency": "none",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "note related",
+      "schemaRef": "docs/specs/cli-contract/note-related.schema.json",
+      "phase": 2,
+      "idempotency": "none",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "note show",
+      "schemaRef": "docs/specs/cli-contract/note-show.schema.json",
+      "phase": 2,
+      "idempotency": "none",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "purge",
+      "schemaRef": "docs/specs/cli-contract/purge.schema.json",
+      "phase": 4,
+      "idempotency": "key-accepting",
+      "privilege": "privileged",
+      "implemented": false
+    },
+    {
+      "name": "quarantine inspect",
+      "schemaRef": "docs/specs/cli-contract/quarantine-inspect.schema.json",
+      "phase": 5,
+      "idempotency": "none",
+      "privilege": "privileged",
+      "implemented": false
+    },
+    {
+      "name": "quarantine resolve",
+      "schemaRef": "docs/specs/cli-contract/quarantine-resolve.schema.json",
+      "phase": 5,
+      "idempotency": "key-accepting",
+      "privilege": "privileged",
+      "implemented": false
+    },
+    {
+      "name": "query",
+      "schemaRef": "docs/specs/cli-contract/query.schema.json",
+      "phase": 3,
+      "idempotency": "none",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "reconcile",
+      "schemaRef": "docs/specs/cli-contract/reconcile.schema.json",
+      "phase": 4,
+      "idempotency": "key-accepting",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "source add",
+      "schemaRef": "docs/specs/cli-contract/source-add.schema.json",
+      "phase": 2,
+      "idempotency": "key-accepting",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "source list",
+      "schemaRef": "docs/specs/cli-contract/source-list.schema.json",
+      "phase": 2,
+      "idempotency": "none",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "source show",
+      "schemaRef": "docs/specs/cli-contract/source-show.schema.json",
+      "phase": 2,
+      "idempotency": "none",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "source trust promote",
+      "schemaRef": "docs/specs/cli-contract/source-trust-promote.schema.json",
+      "phase": 4,
+      "idempotency": "key-accepting",
+      "privilege": "privileged",
+      "implemented": false
+    },
+    {
+      "name": "source trust revoke",
+      "schemaRef": "docs/specs/cli-contract/source-trust-revoke.schema.json",
+      "phase": 4,
+      "idempotency": "key-accepting",
+      "privilege": "privileged",
+      "implemented": false
+    },
+    {
+      "name": "source trust show",
+      "schemaRef": "docs/specs/cli-contract/source-trust-show.schema.json",
+      "phase": 2,
+      "idempotency": "none",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "status",
+      "schemaRef": "docs/specs/cli-contract/status.schema.json",
+      "phase": 1,
+      "idempotency": "none",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
+      "name": "validate",
+      "schemaRef": "docs/specs/cli-contract/validate.schema.json",
+      "phase": 4,
+      "idempotency": "none",
+      "privilege": "shared",
+      "implemented": false
+    }
   ]
 }

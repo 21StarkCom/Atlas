@@ -23,7 +23,7 @@ import {
 import { BrokerRefusal } from "./errors.js";
 import { BrokerGit, ZERO_OID } from "./git.js";
 import { Authorizer, type ExpectedAuthorization } from "./authorize.js";
-import { AuditLog } from "./audit-append.js";
+import { AuditLog, CANONICAL_INSTALLING_KINDS } from "./audit-append.js";
 
 /**
  * The audit-event kinds that legitimately INSTALL a new canonical commit — the
@@ -31,7 +31,7 @@ import { AuditLog } from "./audit-append.js";
  * Binding the kind stops an unrelated event (e.g. `run.rejected`) from being
  * laundered onto a real canonical move (round-3 finding 2).
  */
-const CANONICAL_INSTALLING_KINDS = new Set(["run.integrated", "run.rolled_back"]);
+// (imported from ./audit-append.js — single source of truth for this set)
 
 /**
  * The op + effect a privileged ref mutation represents. The broker binds the

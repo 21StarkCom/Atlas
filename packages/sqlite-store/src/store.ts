@@ -23,6 +23,7 @@ import { ClaimsRepo } from "./repos/claims.js";
 import { migration0001Core } from "../migrations/0001_core.js";
 import { migration0003Provenance } from "../migrations/0003_provenance.js";
 import { migration0004Claims } from "../migrations/0004_claims.js";
+import { migration0005LedgerFinalize } from "../migrations/0005_ledger_finalize.js";
 // Side-effect imports: register the retained-PR-A projection folds into the
 // rebuild pipeline (§2.7 / §4.1) so `rebuildProjections`/`db rebuild` reproduce
 // the provenance + claims projections from canonical Markdown. Provenance is
@@ -72,6 +73,7 @@ export function openStore(cfg: SqliteConfig, clock: Clock = rfc3339Now): Store {
   migrations.set(migration0001Core.id, migration0001Core);
   migrations.set(migration0003Provenance.id, migration0003Provenance);
   migrations.set(migration0004Claims.id, migration0004Claims);
+  migrations.set(migration0005LedgerFinalize.id, migration0005LedgerFinalize);
 
   return {
     db,

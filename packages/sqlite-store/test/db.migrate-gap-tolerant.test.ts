@@ -27,7 +27,7 @@ describe("db.migrate-gap-tolerant", () => {
       // Retained PR-A is pre-registered by `openStore` (0001_core + 0003_provenance
       // + 0004_claims); applying them lands 0003/0004 while 0002 is still absent.
       const first = store.migrate();
-      expect(first.newlyApplied).toEqual(["0001_core", "0003_provenance", "0004_claims"]);
+      expect(first.newlyApplied).toEqual(["0001_core", "0003_provenance", "0004_claims", "0005_ledger_finalize"]);
 
       const appliedIds = () =>
         new Set(
@@ -35,7 +35,7 @@ describe("db.migrate-gap-tolerant", () => {
             (r) => r.id,
           ),
         );
-      expect(appliedIds()).toEqual(new Set(["0001_core", "0003_provenance", "0004_claims"]));
+      expect(appliedIds()).toEqual(new Set(["0001_core", "0003_provenance", "0004_claims", "0005_ledger_finalize"]));
       // 0002's table must not exist yet.
       expect(store.db.prepare(`SELECT 1 FROM sqlite_master WHERE name='gap_0002'`).get()).toBeUndefined();
 
@@ -44,7 +44,7 @@ describe("db.migrate-gap-tolerant", () => {
       const second = store.migrate();
       expect(second.newlyApplied).toEqual(["0002_jobs"]);
       expect(appliedIds()).toEqual(
-        new Set(["0001_core", "0002_jobs", "0003_provenance", "0004_claims"]),
+        new Set(["0001_core", "0002_jobs", "0003_provenance", "0004_claims", "0005_ledger_finalize"]),
       );
       expect(store.db.prepare(`SELECT 1 FROM sqlite_master WHERE name='gap_0002'`).get()).toEqual({
         1: 1,

@@ -9,6 +9,7 @@
  */
 import { connect, type Socket } from "node:net";
 import {
+  type AuditEvent,
   type AuthorizationChallenge,
   type AuthorizationResponse,
   type SignedAuditEvent,
@@ -109,6 +110,16 @@ export class BrokerClient {
   /** Append a signed audit event; returns its seq + the new audit head. */
   appendAuditEvent(e: SignedAuditEvent): Promise<AppendResult> {
     return this.call("appendAuditEvent", encodeAuditEvent(e));
+  }
+
+  /**
+   * F4 — submit a VALIDATED UNSIGNED audit event; the broker fills `prevAuditHead`,
+   * signs it with the broker-only attestation key, and appends it. This is the
+   * production IPC path `finalizeLedgerWrite` (§2.8 step 2) uses so the attestation
+   * private key never leaves the broker. Idempotent on `(runId, seq)`.
+   */
+  signAndAppendAuditEvent(unsigned: Omit<AuditEvent, "prevAuditHead">): Promise<AppendResult> {
+    return this.call("signAndAppendAuditEvent", unsigned);
   }
 
   /** Advance a protected ref under CAS + ancestry (+ optional authorization). */

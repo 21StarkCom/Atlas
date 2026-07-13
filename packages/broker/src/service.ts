@@ -8,6 +8,7 @@
  */
 import { type KeyObject } from "node:crypto";
 import {
+  type AuditEvent,
   type AuthorizationChallenge,
   type AuthorizationResponse,
   type SignedAuditEvent,
@@ -16,7 +17,7 @@ import {
 import { Authorizer, type PrivilegedOpDescriptor } from "./authorize.js";
 import { AuditLog, type AppendResult } from "./audit-append.js";
 import { WormAnchor } from "./anchor.js";
-import { BrokerGit } from "./git.js";
+import { BrokerGit, ZERO_OID } from "./git.js";
 import {
   ProtectedRefWriter,
   type ProtectedRefs,
@@ -63,9 +64,30 @@ export class BrokerService {
   private readonly anchor: WormAnchor;
   private readonly audit: AuditLog;
   private readonly writer: ProtectedRefWriter;
+  /** The audit-attestation private key — BROKER-ONLY (F4); never leaves this process. */
+  private readonly attestationPrivateKey: KeyObject;
+  /** The protected-ref names (canonical/audit/trust). */
+  private readonly refs: ProtectedRefs;
+  /**
+   * The broker-observed canonical tip (round-3 finding 6). The broker is the SOLE
+   * mutator of the protected refs, so a cache refreshed at `start()` and after every
+   * canonical-moving mutation is authoritative broker state — it lets the SYNC
+   * `mintChallenge`/`execAuthorized` bind privileged ledger authorizations to the
+   * canonical tip the broker actually observes (not a value the calling CLI supplies)
+   * and reject a stale challenge whose base no longer matches (`authz.canonical_moved`).
+   */
+  private canonicalTip: string | null = null;
+
+  /** The privileged LEDGER ops whose authorization the broker binds to broker-observed canonical state. */
+  private static readonly CANONICAL_BOUND_OPS: ReadonlySet<string> = new Set([
+    "db restore",
+    "db backup --force-unblock",
+  ]);
 
   constructor(cfg: BrokerServiceConfig) {
     const now = cfg.now ?? (() => Date.now());
+    this.attestationPrivateKey = cfg.attestation.privateKey;
+    this.refs = cfg.refs;
     this.git = new BrokerGit(cfg.repoDir);
     this.authorizer = new Authorizer(cfg.signers, cfg.testMode, now);
     this.anchor = new WormAnchor(
@@ -107,7 +129,15 @@ export class BrokerService {
 
   /** Reconcile primary state + run the fail-closed anti-truncation check (§6). */
   async start(): Promise<void> {
-    await this.runExclusive(() => this.audit.init());
+    await this.runExclusive(async () => {
+      await this.audit.init();
+      this.canonicalTip = await this.git.readRef(this.refs.canonical);
+    });
+  }
+
+  /** Refresh the broker-observed canonical tip after a mutation that may move it. */
+  private async refreshCanonicalTip(): Promise<void> {
+    this.canonicalTip = await this.git.readRef(this.refs.canonical);
   }
 
   /** Append a signed audit event (gapless seq, signed only, chained, anchored). */
@@ -115,19 +145,47 @@ export class BrokerService {
     return this.runExclusive(() => this.audit.append(e));
   }
 
+  /**
+   * F4 — sign a VALIDATED UNSIGNED audit event with the broker-only attestation
+   * key and append it. `finalizeLedgerWrite` (sqlite-store, §2.8 step 2) calls
+   * this instead of pre-signing client-side, so the attestation private key never
+   * leaves the broker and "only the attestation identity ever signs the audit
+   * stream" holds. The event omits `prevAuditHead` (the broker fills the live
+   * head under the mutation lock, then signs). Idempotent on `(runId, seq)`.
+   */
+  signAndAppendAuditEvent(unsigned: Omit<AuditEvent, "prevAuditHead">): Promise<AppendResult> {
+    return this.runExclusive(() => this.audit.signAndAppend(unsigned, this.attestationPrivateKey));
+  }
+
   /** Advance a protected ref under CAS + ancestry (+ optional authorization). */
   advanceProtectedRef(r: RefAdvanceRequest): Promise<RefAdvanceResult> {
-    return this.runExclusive(() => this.writer.advanceProtectedRef(r));
+    return this.runExclusive(async () => {
+      const res = await this.writer.advanceProtectedRef(r);
+      await this.refreshCanonicalTip();
+      return res;
+    });
   }
 
   /** Integrate a Tier-1 source capture (sources/** + manifest only). */
   integrateSourceCapture(r: SourceCaptureRequest): Promise<RefAdvanceResult> {
-    return this.runExclusive(() => this.writer.integrateSourceCapture(r));
+    return this.runExclusive(async () => {
+      const res = await this.writer.integrateSourceCapture(r);
+      await this.refreshCanonicalTip();
+      return res;
+    });
   }
 
-  /** Mint an authorization challenge for a privileged op. */
+  /**
+   * Mint an authorization challenge for a privileged op. For the canonical-bound
+   * LEDGER ops (round-3 finding 6) the broker OVERWRITES `canonicalBaseCommit` with
+   * its own observed canonical tip, so the signed challenge commits to broker state
+   * — a caller cannot pick the base the authorization is bound to.
+   */
   mintChallenge(op: PrivilegedOpDescriptor): AuthorizationChallenge {
-    return this.authorizer.mintChallenge(op);
+    const bound = BrokerService.CANONICAL_BOUND_OPS.has(op.op)
+      ? { ...op, canonicalBaseCommit: this.canonicalTip ?? ZERO_OID }
+      : op;
+    return this.authorizer.mintChallenge(bound);
   }
 
   /**
@@ -136,16 +194,26 @@ export class BrokerService {
    * phases; here the load-bearing behavior is the drift/signature/D20 gate.
    */
   execAuthorized(op: PrivilegedOpDescriptor, auth: AuthorizationResponse): PrivilegedOpResult {
+    // For the canonical-bound LEDGER ops (round-3 finding 6) the broker RE-DERIVES
+    // the canonical base from its own observed tip rather than trusting the value
+    // the calling CLI supplies, and passes it as `currentCanonicalTip` so a stale
+    // challenge (minted before the canonical tip moved) is refused
+    // `authz.canonical_moved`. The CLI can no longer smuggle an all-zero base past
+    // the drift gate — the broker independently binds to broker-observed state.
+    const canonicalBound = BrokerService.CANONICAL_BOUND_OPS.has(op.op);
+    const brokerBase = this.canonicalTip ?? ZERO_OID;
     // Bind the authorization to the CONCRETE operation the broker is asked to
     // perform: the challenge's op, run, target, base, and effect must all match
     // the re-derived descriptor. An authorization minted for operation A can
     // therefore never authorize a different operation B (drift is refused).
     this.authorizer.verify(auth, {
+      ...(canonicalBound ? { currentCanonicalTip: brokerBase } : {}),
       expected: {
         op: op.op,
         ...(op.runId !== undefined ? { runId: op.runId } : {}),
         ...(op.targetCommit !== undefined ? { targetCommit: op.targetCommit } : {}),
-        canonicalBaseCommit: op.canonicalBaseCommit,
+        // Re-derived from broker state for canonical-bound ops; caller-supplied otherwise.
+        canonicalBaseCommit: canonicalBound ? brokerBase : op.canonicalBaseCommit,
         intendedEffect: op.intendedEffect,
       },
     });

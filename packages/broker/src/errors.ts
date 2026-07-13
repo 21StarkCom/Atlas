@@ -55,6 +55,9 @@ export const BROKER_ERROR_CATALOG = {
   "broker.audit_signature_invalid": 1,
   "broker.audit_signer_unknown": 1,
   "broker.audit_signer_untrusted": 1,
+  // The broker signing entry point refused to attest a canonical-installing event
+  // (it asserts a ref move the broker did not observe) — see `AuditLog.signAndAppend`.
+  "broker.audit_kind_not_signable": 1,
   "broker.event_binding_mismatch": 1,
   "broker.capture_scope_violation": 1,
   "broker.anchor_truncation": 4,

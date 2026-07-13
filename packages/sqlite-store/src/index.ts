@@ -73,9 +73,64 @@ export type {
 export { LedgerRepo, AuditEventConflictError } from "./repos/ledger.js";
 export type { AgentRunRow, AuditEventRow } from "./repos/ledger.js";
 
+// Ledger finalization + §2.8 cross-store orchestration (Task 1.7).
+export { finalizeLedgerWrite, runBackupStep } from "./ledger/finalize.js";
+export type { AuditBroker, FinalizeStep, FinalizeResult, RunContext } from "./ledger/finalize.js";
+export {
+  IntentsRepo,
+  applyLedgerWrite,
+  payloadHashOf,
+  nextDbEventSeq,
+  latestRunSeq,
+  DB_EVENT_SEQ_BASE,
+} from "./ledger/intents.js";
+export type {
+  AuditEventDraft,
+  UnsignedAuditEvent,
+  AuditIntentRow,
+  AllocatedIntent,
+  LedgerStatement,
+} from "./ledger/intents.js";
+export { reconcileInterruptedRuns } from "./ledger/reconcile.js";
+export type { ReconcileOptions, ReconcileReport } from "./ledger/reconcile.js";
+
+// Encrypted backup / verify / restore (Task 1.7).
+export {
+  takeBackup,
+  verifyBackup,
+  decryptBackup,
+  readBundleHeader,
+  listBackups,
+  pruneRetention,
+  resolveBackupRef,
+} from "./backup/backup.js";
+export type { LedgerBackupConfig, BackupResult, CatalogEntry } from "./backup/backup.js";
+export { restoreBackup, forceUnblock, recoverInterruptedRestore } from "./backup/restore.js";
+export type { RestoreOptions, RestoreResult, RestoreStep, RestoreRecovery } from "./backup/restore.js";
+export {
+  WatermarkRepo,
+  watermarkHealth,
+  assertBackupHealthy,
+  BackupUnhealthyError,
+  BACKUP_UNHEALTHY_CODE,
+  BACKUP_UNHEALTHY_EXIT,
+} from "./backup/watermark.js";
+export type { WatermarkHealth, BackupWatermarkRow } from "./backup/watermark.js";
+export {
+  seal,
+  open as openBackupBundle,
+  contentHashOf,
+  BackupIntegrityError,
+  BUNDLE_MAGIC,
+  BUNDLE_VERSION,
+  AEAD_KEY_BYTES,
+} from "./backup/aead.js";
+export type { Bundle, BundleHeader } from "./backup/aead.js";
+
 export { migration0001Core, CORE_DDL } from "../migrations/0001_core.js";
 export { migration0003Provenance, PROVENANCE_DDL } from "../migrations/0003_provenance.js";
 export { migration0004Claims, CLAIMS_DDL } from "../migrations/0004_claims.js";
+export { migration0005LedgerFinalize, LEDGER_FINALIZE_DDL } from "../migrations/0005_ledger_finalize.js";
 
 export { ProvenanceRepo, captureId } from "./repos/provenance.js";
 export type {

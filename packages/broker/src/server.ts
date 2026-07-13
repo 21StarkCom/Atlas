@@ -21,7 +21,7 @@ import {
   type BrokerResponse,
   type WireSignedAuditEvent,
 } from "./protocol.js";
-import type { SignedAuditEvent, AuthorizationResponse } from "@atlas/contracts";
+import type { AuditEvent, SignedAuditEvent, AuthorizationResponse } from "@atlas/contracts";
 import type { RefAdvanceRequest, SourceCaptureRequest } from "./refs.js";
 import type { PrivilegedOpDescriptor } from "./authorize.js";
 
@@ -36,6 +36,10 @@ async function dispatch(service: BrokerService, method: BrokerMethod, params: un
   switch (method) {
     case "appendAuditEvent":
       return service.appendAuditEvent(decodeAuditEvent(params as WireSignedAuditEvent) as SignedAuditEvent);
+    case "signAndAppendAuditEvent":
+      // The unsigned event is passed as-is; `signAndAppend` deep-validates it,
+      // fills prevAuditHead, and signs with the broker-only attestation key (F4).
+      return service.signAndAppendAuditEvent(params as Omit<AuditEvent, "prevAuditHead">);
     case "advanceProtectedRef": {
       const p = params as RefAdvanceRequest & { auditEvent: WireSignedAuditEvent };
       return service.advanceProtectedRef({ ...p, auditEvent: decodeAuditEvent(p.auditEvent) as SignedAuditEvent });

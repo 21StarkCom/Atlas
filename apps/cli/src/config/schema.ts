@@ -25,6 +25,13 @@ const LedgerBackupConfig = z
   .object({
     dir: z.string().min(1),
     keep: z.number().int().positive().default(10), // keep-N + keep-forever-latest (ledger-backup-contract.md)
+    // D9 custody: the identity-scoped key DIRECTORY holding per-keyId AEAD key
+    // files (`<keyId>.key`, base64 32 bytes). Defaults to the per-OS location.
+    // The key is NEVER read from an environment variable (round-2 finding).
+    key_dir: z.string().min(1).optional(),
+    // The CURRENT AEAD key id (§7 rotation). Backups are stamped with it; prior
+    // ids remain readable from `key_dir` so rotated-out backups still decrypt.
+    key_id: z.string().min(1).default("cli-custody-v1"),
   })
   .strict();
 

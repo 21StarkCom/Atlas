@@ -30,7 +30,7 @@ import {
   type SignedAuditEvent,
   type SignedEnvelope,
 } from "@atlas/contracts";
-import { verifyBytes, verifyRaw } from "./crypto.js";
+import { signRaw, verifyBytes, verifyRaw } from "./crypto.js";
 import { BrokerRefusal } from "./errors.js";
 import { BrokerGit, ZERO_OID } from "./git.js";
 import { WormAnchor } from "./anchor.js";
@@ -57,14 +57,49 @@ export interface AttestationTrustRoot {
 /** The canonicalization every audit envelope must declare (§8.2). */
 const AUDIT_CANONICALIZATION = "atlas-jcs-v1";
 
+/**
+ * The audit-event kinds that ASSERT a canonical ref move ("the canonical ref now
+ * points at this commit"). Such an assertion is only truthful when the broker
+ * itself performed the move, so these kinds may be produced ONLY by the
+ * protected-ref path (which binds the event to the observed move) — never by the
+ * broker's generic signing entry point. `refs.ts` imports this set to enforce the
+ * same boundary from the other direction (a canonical install must carry one of
+ * these kinds), so the enumeration lives in exactly one place.
+ */
+export const CANONICAL_INSTALLING_KINDS: ReadonlySet<string> = new Set([
+  "run.integrated",
+  "run.rolled_back",
+]);
+
 /** An idempotency record: the prior result + a content fingerprint. */
 interface IdemRecord {
   readonly result: AppendResult;
   readonly fingerprint: string;
+  /**
+   * A fingerprint over ONLY the caller-authored content — every audit-event
+   * field EXCEPT `prevAuditHead` (the broker fills that from the live head) and
+   * the signature. This is what the F4 internal-signing entry point compares a
+   * re-submitted `(runId, seq)` against: a crash-recovery re-drive is byte-stable
+   * on this key (same content, only the head/signature shift), whereas a genuinely
+   * DIFFERENT event reusing the same key is caught (`audit_idempotency_conflict`).
+   */
+  readonly contentKey: string;
 }
 
 function idemKey(runId: string, seq: number): string {
   return `${runId} ${seq}`;
+}
+
+/**
+ * The content fingerprint an `(runId, seq)` commits to, EXCLUDING `prevAuditHead`
+ * (broker-filled) so a recovery re-drive — which re-derives `prevAuditHead` from a
+ * since-advanced head — still matches, while any other field differing is a
+ * conflict. Independent of JSON key order via {@link canonicalSerialize}.
+ */
+function contentKeyOf(event: Omit<AuditEvent, "prevAuditHead"> | AuditEvent): string {
+  const rest = { ...(event as Record<string, unknown>) };
+  delete rest.prevAuditHead;
+  return Buffer.from(canonicalSerialize(rest as unknown as AuditEvent)).toString("base64");
 }
 
 /** Convert a raw signature to its `ed25519:` envelope string form (§8.1). */
@@ -174,6 +209,7 @@ export class AuditLog {
       this.byRunSeq.set(idemKey(event.runId, event.seq), {
         result: { seq: event.seq, head: commit },
         fingerprint: fingerprintOf(env.signerId, env.signature, event),
+        contentKey: contentKeyOf(event),
       });
       this.lastSeq = event.seq;
       prevCommit = commit;
@@ -190,6 +226,109 @@ export class AuditLog {
   /** The highest seq appended so far (−1 if the chain is empty). */
   get highestSeq(): number {
     return this.lastSeq;
+  }
+
+  /**
+   * The already-anchored result for `(runId, seq)`, or `undefined` if that key
+   * has never been appended. Used by the F4 internal-signing entry point to make
+   * a §2.8 crash-recovery re-drive idempotent WITHOUT reproducing the original
+   * `prevAuditHead` bytes: once an event is on the chain, replaying its
+   * `(runId, seq)` returns the anchored `{seq, head}` before any re-sign, so the
+   * reconciler never trips the fingerprint conflict that a shifted `prevAuditHead`
+   * would otherwise cause.
+   */
+  existingResult(runId: string, seq: number): AppendResult | undefined {
+    return this.byRunSeq.get(idemKey(runId, seq))?.result;
+  }
+
+  /**
+   * F4 — the BROKER-OWNED signing entry point. The caller submits a VALIDATED,
+   * UNSIGNED audit event WITHOUT `prevAuditHead`; the broker fills the current
+   * head, signs the canonical bytes with the dedicated audit-attestation key
+   * (the sole identity permitted to sign the audit stream), and appends. This
+   * keeps the attestation private key broker-only — `finalizeLedgerWrite` never
+   * pre-signs client-side (#22 carry-forward F4).
+   *
+   * Idempotent on `(runId, seq)`: an already-anchored key returns its prior
+   * `{seq, head}` untouched (see {@link existingResult}).
+   */
+  async signAndAppend(
+    unsigned: Omit<AuditEvent, "prevAuditHead">,
+    privateKey: KeyObject,
+  ): Promise<AppendResult> {
+    await this.init();
+
+    // Fast idempotency: an already-anchored (runId, seq) replays its result
+    // without re-signing (the live head has since advanced, so a fresh sign
+    // would embed a different prevAuditHead — the anchored result is authoritative).
+    // But ONLY when the re-submitted content matches what was anchored: a crash
+    // re-drive is byte-stable on the content key (prevAuditHead excluded), whereas
+    // a DIFFERENT event reusing the same (runId, seq) must be refused — otherwise
+    // it would receive the prior head and be committed locally against content that
+    // was never anchored (round-2 finding).
+    const prior = this.byRunSeq.get(idemKey(unsigned.runId, unsigned.seq));
+    if (prior !== undefined) {
+      if (prior.contentKey !== contentKeyOf(unsigned)) {
+        throw new BrokerRefusal(
+          "broker.audit_idempotency_conflict",
+          `(runId ${unsigned.runId}, seq ${unsigned.seq}) already anchored with different content`,
+        );
+      }
+      return prior.result;
+    }
+
+    // PURPOSE-BOUND signing gate #1 — KIND (fixes the signing-oracle finding).
+    //
+    // This entry point signs an event whose CONTENT (kind, subjects,
+    // canonicalCommit, detail) is supplied by the caller — and the broker socket is
+    // reachable by the agent identity (the run dir is `2770` setgid `atlas-git`).
+    // Without this gate, any socket peer could obtain a broker attestation for a
+    // FABRICATED `run.integrated` naming a canonicalCommit that was never installed,
+    // which would defeat the entire point of the audit stream.
+    //
+    // A CANONICAL-INSTALLING event (`run.integrated` / `run.rolled_back`) asserts
+    // "the canonical ref now points at this commit". That assertion is only
+    // truthful if the broker ITSELF performed the move, so it may ONLY be produced
+    // by the protected-ref path (`advanceProtectedRef` / `integrateSourceCapture`),
+    // which binds the event to broker-OBSERVED state (runId + the exact commit being
+    // installed + an installing kind) before it is ever appended. Signing such an
+    // event here — where no ref move is observed — is therefore refused outright.
+    //
+    // The ledger orchestrator (`finalizeLedgerWrite`) legitimately needs only the
+    // NON-installing kinds (`run.started`/`planned`/`rejected`/`failed`/`cancelled`/
+    // `readonly`/`projection`), which assert nothing about the canonical ref.
+    if (CANONICAL_INSTALLING_KINDS.has(unsigned.kind)) {
+      throw new BrokerRefusal(
+        "broker.audit_kind_not_signable",
+        `refusing to sign a canonical-installing event ("${unsigned.kind}"): it asserts a canonical ref move, ` +
+          `so it may only be produced by the protected-ref path that observes the move`,
+      );
+    }
+
+    // PURPOSE-BOUND signing gate #2 — SEQ. The broker reconstructs the gapless
+    // `seq` from its own observed state and refuses to sign anything other than the
+    // exact next sequence, so a peer cannot obtain an attestation for an event at an
+    // arbitrary position in the chain (far-ahead, backdated, or a hole): the only
+    // signable new event is the immediate successor of the anchored head.
+    // (`prevAuditHead` is broker-filled below; idempotent replays handled above.)
+    const expectedSeq = this.lastSeq + 1;
+    if (unsigned.seq !== expectedSeq) {
+      throw new BrokerRefusal(
+        "broker.audit_seq_nonmonotonic",
+        `refusing to sign audit event: seq ${unsigned.seq} is not the next sequence ${expectedSeq}`,
+      );
+    }
+
+    // Fill prevAuditHead from the live head, then validate the completed event.
+    const prevHead = await this.git.readRef(this.auditRef);
+    const candidate = { ...unsigned, prevAuditHead: prevHead ?? ZERO_OID };
+    const parsed = AuditEventSchema.safeParse(candidate);
+    if (!parsed.success) {
+      throw new BrokerRefusal("broker.bad_request", `invalid audit event: ${parsed.error.message}`);
+    }
+    const event = parsed.data;
+    const signature = signRaw(canonicalSerialize(event), privateKey);
+    return this.append({ event, signature, signerId: this.attestation.signerId });
   }
 
   /**
@@ -278,7 +417,11 @@ export class AuditLog {
     this.anchor.append(commit, eventCount);
 
     const result: AppendResult = { seq: event.seq, head: commit };
-    this.byRunSeq.set(idemKey(event.runId, event.seq), { result, fingerprint });
+    this.byRunSeq.set(idemKey(event.runId, event.seq), {
+      result,
+      fingerprint,
+      contentKey: contentKeyOf(event),
+    });
     this.lastSeq = event.seq;
     return result;
   }

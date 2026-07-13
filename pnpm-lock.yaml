@@ -41,9 +41,15 @@ importers:
 
   apps/cli:
     dependencies:
+      '@atlas/broker':
+        specifier: workspace:*
+        version: link:../../packages/broker
       '@atlas/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@atlas/sqlite-store':
+        specifier: workspace:*
+        version: link:../../packages/sqlite-store
       yaml:
         specifier: 'catalog:'
         version: 2.9.0
@@ -172,6 +178,9 @@ importers:
         specifier: 'catalog:'
         version: 2.9.0
     devDependencies:
+      '@atlas/broker':
+        specifier: workspace:*
+        version: link:../broker
       '@types/better-sqlite3':
         specifier: 'catalog:'
         version: 7.6.13
