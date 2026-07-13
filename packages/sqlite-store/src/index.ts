@@ -74,7 +74,7 @@ export { LedgerRepo, AuditEventConflictError } from "./repos/ledger.js";
 export type { AgentRunRow, AuditEventRow } from "./repos/ledger.js";
 
 // Ledger finalization + §2.8 cross-store orchestration (Task 1.7).
-export { finalizeLedgerWrite, runBackupStep } from "./ledger/finalize.js";
+export { finalizeLedgerWrite, runBackupStep, readCoalesceCovers, READ_COALESCE_THRESHOLD } from "./ledger/finalize.js";
 export type { AuditBroker, FinalizeStep, FinalizeResult, RunContext } from "./ledger/finalize.js";
 export {
   IntentsRepo,

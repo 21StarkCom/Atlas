@@ -22,11 +22,12 @@ import type { Store } from "../store.js";
 import {
   IntentsRepo,
   applyLedgerWrite,
+  latestRunSeq,
   type AuditEventDraft,
   type LedgerStatement,
   type UnsignedAuditEvent,
 } from "./intents.js";
-import { WatermarkRepo, assertBackupHealthy } from "../backup/watermark.js";
+import { WatermarkRepo, assertBackupHealthy, watermarkHealth, BackupUnhealthyError } from "../backup/watermark.js";
 import { takeBackup, type LedgerBackupConfig } from "../backup/backup.js";
 
 /** The broker surface `finalizeLedgerWrite` consumes (§2.8 step 2). Structural,
@@ -67,6 +68,53 @@ export interface RunContext {
   readonly backup: LedgerBackupConfig;
   /** Bounded durable backup retries before entering the blocked state (default 2). */
   readonly backupRetries?: number;
+  /**
+   * Read-run backup COALESCING (Task 1.9). When `true`, step 4's post-commit full
+   * backup MAY be skipped (coalesced) for this run — but ONLY when the event kind
+   * is `run.readonly` and the coalesce policy ({@link readCoalesceCovers}) still
+   * holds. The run always commits its ledger row + audit event (steps 1–3); a
+   * cheap, high-frequency Tier-0 read simply does not each force a fresh encrypted
+   * backup. The watermark then lags the newly committed seq (still `healthy`); the
+   * next covering backup — an explicit `db backup`, a projection/mutation run, or a
+   * read whose accumulated gap crosses {@link READ_COALESCE_THRESHOLD} — advances
+   * coverage up to the latest seq. This bounds the read-amplification storage-DoS
+   * finding (plan §2.6.1).
+   *
+   * The decision is made INTERNALLY here (round-2 finding): the flag is not an
+   * arbitrary callback, so no ledger-writing caller can coalesce a real state
+   * change or bypass its mandatory backup. Coalescing is restricted to
+   * `run.readonly` and gated by the shared {@link readCoalesceCovers} predicate,
+   * which {@link reconcileInterruptedRuns} also consults so a coalesced read is
+   * never mistaken for an interrupted write and force-backed-up on the next pass.
+   * Absent/`false` (the default) ⇒ every run takes its mandatory backup (Task
+   * 1.7's original fail-closed behavior).
+   */
+  readonly coalesceReadonly?: boolean;
+  /**
+   * An additional step-3 mutation committed ATOMICALLY with the audit row inside
+   * the SAME §2.8 transaction (Task 1.9 finding 2). `db rebuild` passes the
+   * projection replacement here so the projection tables and the `run.projection`
+   * audit event land (or roll back) together — closing the TOCTOU where
+   * projections were committed BEFORE the intent/append/ledger transaction and
+   * could be left changed after an audit failure. Runs BEFORE the `audit_events`
+   * insert. It executes inside the outer transaction (better-sqlite3 nests it as a
+   * SAVEPOINT), so a throw here rolls the whole run back and leaves the prior
+   * projection intact. The mutation must be idempotently RE-DERIVABLE from source
+   * (a projection rebuild is), since a crash after step 2 is converged by re-running
+   * the command, not by {@link reconcileInterruptedRuns} (which replays only the
+   * serializable `ledgerWrite`, never this closure).
+   */
+  readonly extraCommit?: (db: Store["db"]) => void;
+  /**
+   * STRICT backup (Task 1.9 finding 2): when `true`, exhausting the bounded backup
+   * retries in step 4 THROWS {@link BackupUnhealthyError} rather than silently
+   * marking the watermark blocked and returning success. A real state change (a
+   * projection rebuild) must never report exit 0 without a covering backup, so its
+   * caller propagates the failure; the run's rows are already committed, so the
+   * next run is additionally gated by the blocked watermark. Never set for a
+   * coalescible `run.readonly` (its backup is legitimately skipped).
+   */
+  readonly strictBackup?: boolean;
   /** Injectable clock. */
   readonly now?: () => string;
   /** Crash-injection failpoint (tests). Throwing simulates a crash after that step. */
@@ -74,6 +122,46 @@ export interface RunContext {
 }
 
 const DEFAULT_BACKUP_RETRIES = 2;
+
+/**
+ * The debounce window for read-run backup coalescing (Task 1.9): a `run.readonly`
+ * run skips its own full backup while the number of committed `run.*` seqs not yet
+ * covered by a verified backup stays below this many. Chosen well above 1 so a
+ * single interactive read never forces a backup, yet bounded so coverage still
+ * advances under sustained read load. Backups also advance on any `db backup`,
+ * projection, or mutation run. Owned here (not the CLI) so
+ * {@link readCoalesceCovers} — consulted by BOTH finalize's step-4 skip and
+ * reconcile's step-4 re-drive — shares one source of truth.
+ */
+export const READ_COALESCE_THRESHOLD = 64;
+
+/**
+ * The read-run coalescing policy, shared by {@link finalizeLedgerWrite} (deciding
+ * to SKIP a read's backup) and {@link reconcileInterruptedRuns} (deciding NOT to
+ * force-backup a coalesced gap). Returns `true` when the uncovered tail above
+ * `coveredSeq` is an INTENTIONAL coalesced-read lag — i.e. every committed `run.*`
+ * event above the watermark is a `run.readonly` AND the accumulated gap is still
+ * within `threshold`. Any non-readonly uncovered event (a real state change that
+ * committed but was not yet backed up — e.g. an interrupted write) OR a gap that
+ * has crossed the debounce window makes this `false`, so that tail is backed up.
+ *
+ * The persisted state this reads — `audit_events.event_type` per seq and the
+ * watermark `seq` — is exactly what lets reconciliation honor the threshold across
+ * a restart instead of eagerly backing up every coalesced read (round-2 finding).
+ */
+export function readCoalesceCovers(
+  db: Store["db"],
+  coveredSeq: number,
+  threshold: number = READ_COALESCE_THRESHOLD,
+): boolean {
+  const latest = latestRunSeq(db);
+  if (latest <= coveredSeq) return true; // nothing uncovered
+  if (latest - coveredSeq >= threshold) return false; // gap crossed the debounce window
+  const rows = db
+    .prepare(`SELECT event_type FROM audit_events WHERE seq > ? AND event_type NOT LIKE 'db.%' ORDER BY seq`)
+    .all(coveredSeq) as { event_type: string }[];
+  return rows.length > 0 && rows.every((r) => r.event_type === "run.readonly");
+}
 
 function rfc3339(): string {
   return new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -109,9 +197,12 @@ export async function finalizeLedgerWrite(
   const { head } = await broker.signAndAppendAuditEvent(allocated.event);
   await run.failpoint?.("after-append");
 
-  // ── Step 3: ledger commit — business rows + audit_events + intent→done, atomically
+  // ── Step 3: ledger commit — business rows + optional extra mutation +
+  //    audit_events + intent→done, ALL atomically (Task 1.9 finding 2: the
+  //    projection replacement lands in the SAME transaction as its audit event).
   const commit = db.transaction(() => {
     applyLedgerWrite(db, run.ledgerWrite);
+    run.extraCommit?.(db);
     store.ledger.insertAuditEvent({
       seq: allocated.seq,
       run_id: run.runId,
@@ -125,8 +216,33 @@ export async function finalizeLedgerWrite(
   commit();
   await run.failpoint?.("after-commit");
 
-  // ── Step 4 (MANDATORY): post-commit backup + watermark (fail-closed) ───────
-  await runBackupStep(store, run.backup, run.backupRetries ?? DEFAULT_BACKUP_RETRIES, now);
+  // ── Step 4: post-commit backup + watermark (fail-closed) ───────────────────
+  // MANDATORY by default. A read-run coalescing policy (Task 1.9) may SKIP this
+  // run's full backup when the watermark is healthy and the accumulated coverage
+  // gap is within the debounce window — the run's rows are already durable in the
+  // committed DB; the next covering backup advances the watermark up to this seq.
+  // Coalescing is decided INTERNALLY and restricted to `run.readonly` (round-2
+  // finding): only a Tier-0 read whose kind is `run.readonly` may skip its backup,
+  // and only while the shared policy holds (healthy watermark + the uncovered tail
+  // is coalescible reads within the debounce window). A real state change can never
+  // reach this skip.
+  const wm = new WatermarkRepo(db).get();
+  const coalesce =
+    run.coalesceReadonly === true &&
+    run.event.kind === "run.readonly" &&
+    wm.healthy === 1 &&
+    readCoalesceCovers(db, wm.seq);
+  if (!coalesce) {
+    const backedUp = await runBackupStep(store, run.backup, run.backupRetries ?? DEFAULT_BACKUP_RETRIES, now);
+    // STRICT backup (finding 2): a real state change must not report success with
+    // no covering backup. The watermark is already blocked; surface it so the
+    // caller exits non-zero (the committed rows are recovered by the next run's
+    // step-4 re-drive once the fault clears).
+    if (!backedUp && run.strictBackup === true) {
+      const h = watermarkHealth(db);
+      throw new BackupUnhealthyError(h.coveredSeq, h.seq);
+    }
+  }
   await run.failpoint?.("after-backup");
 
   return { seq: allocated.seq, head };
@@ -156,14 +272,14 @@ export async function runBackupStep(
   cfg: LedgerBackupConfig,
   retries: number,
   now: () => string,
-): Promise<void> {
+): Promise<boolean> {
   const wm = new WatermarkRepo(store.db);
   const attempts = Math.max(1, retries + 1);
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
       await takeBackup(store, cfg, { now });
-      return; // takeBackup advanced the watermark to the verified cut + reset retry state
+      return true; // takeBackup advanced the watermark to the verified cut + reset retry state
     } catch (e) {
       lastErr = e;
       // Persist the degraded retry progress BEFORE the next attempt, so a crash
@@ -177,4 +293,5 @@ export async function runBackupStep(
   // Bounded retries exhausted → blocked (fail closed). Record why for diagnostics.
   wm.markBlocked(now());
   void lastErr;
+  return false;
 }

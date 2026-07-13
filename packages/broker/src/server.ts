@@ -40,6 +40,8 @@ async function dispatch(service: BrokerService, method: BrokerMethod, params: un
       // The unsigned event is passed as-is; `signAndAppend` deep-validates it,
       // fills prevAuditHead, and signs with the broker-only attestation key (F4).
       return service.signAndAppendAuditEvent(params as Omit<AuditEvent, "prevAuditHead">);
+    case "getAuditChainStatus":
+      return service.getAuditChainStatus();
     case "advanceProtectedRef": {
       const p = params as RefAdvanceRequest & { auditEvent: WireSignedAuditEvent };
       return service.advanceProtectedRef({ ...p, auditEvent: decodeAuditEvent(p.auditEvent) as SignedAuditEvent });

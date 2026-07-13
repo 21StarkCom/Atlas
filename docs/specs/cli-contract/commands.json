@@ -24,7 +24,7 @@
       "phase": 1,
       "idempotency": "intrinsic",
       "privilege": "shared",
-      "implemented": false
+      "implemented": true
     },
     {
       "name": "db restore",
@@ -56,7 +56,7 @@
       "phase": 1,
       "idempotency": "none",
       "privilege": "shared",
-      "implemented": false
+      "implemented": true
     },
     {
       "name": "enrich",
@@ -224,7 +224,7 @@
       "phase": 1,
       "idempotency": "none",
       "privilege": "shared",
-      "implemented": false
+      "implemented": true
     },
     {
       "name": "jobs cancel",
@@ -384,7 +384,7 @@
       "phase": 1,
       "idempotency": "none",
       "privilege": "shared",
-      "implemented": false
+      "implemented": true
     },
     {
       "name": "validate",

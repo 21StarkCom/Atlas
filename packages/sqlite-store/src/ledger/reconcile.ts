@@ -29,7 +29,7 @@
 import type { Store } from "../store.js";
 import { IntentsRepo, applyLedgerWrite, latestRunSeq } from "./intents.js";
 import type { AuditBroker } from "./finalize.js";
-import { runBackupStep } from "./finalize.js";
+import { runBackupStep, readCoalesceCovers } from "./finalize.js";
 import { WatermarkRepo, type WatermarkHealth, watermarkHealth } from "../backup/watermark.js";
 import type { LedgerBackupConfig } from "../backup/backup.js";
 
@@ -113,15 +113,22 @@ export async function reconcileInterruptedRuns(
     reconciled++;
   }
 
-  // Step 4 re-drive: a committed cut not yet covered by a verified backup.
+  // Step 4 re-drive: a committed cut not yet covered by a verified backup. A gap
+  // that is ENTIRELY coalesced Tier-0 reads within the debounce window is
+  // INTENTIONAL (Task 1.9 read-run coalescing), not an interrupted write, so it
+  // must NOT be force-backed-up here — doing so would defeat the debounce on every
+  // reconciliation pass (round-2 finding). `readCoalesceCovers` reads the SAME
+  // persisted policy state finalize used (audit_events kinds + watermark seq), so
+  // reconciliation honors the threshold; a non-readonly uncovered event or a gap
+  // past the window still re-drives the backup as before.
   const covered = new WatermarkRepo(db).get().seq;
   const latest = latestRunSeq(db);
-  let backupGap = latest > covered;
+  let backupGap = latest > covered && !readCoalesceCovers(db, covered);
   let backupReDriven = false;
   if (backupGap && opts.backup) {
     await runBackupStep(store, opts.backup, opts.backupRetries ?? 2, now);
     backupReDriven = true;
-    backupGap = latestRunSeq(db) > new WatermarkRepo(db).get().seq;
+    backupGap = latestRunSeq(db) > new WatermarkRepo(db).get().seq && !readCoalesceCovers(db, new WatermarkRepo(db).get().seq);
   }
 
   return { reconciled, appended, backupGap, backupReDriven, health: watermarkHealth(db) };

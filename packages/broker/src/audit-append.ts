@@ -155,57 +155,7 @@ export class AuditLog {
     let prevCommit: string | null = null;
     let expectedSeq: number | null = null;
     for (const commit of commits) {
-      const msg = await this.git.commitMessage(commit);
-      let env: SignedEnvelope;
-      try {
-        env = JSON.parse(msg) as SignedEnvelope;
-      } catch {
-        throw new BrokerRefusal("broker.audit_chain_invalid", `audit commit ${commit}: message is not a JSON envelope`);
-      }
-      if (env.canonicalization !== AUDIT_CANONICALIZATION) {
-        throw new BrokerRefusal(
-          "broker.audit_chain_invalid",
-          `audit commit ${commit}: unsupported canonicalization "${env.canonicalization}"`,
-        );
-      }
-      const parsed = AuditEventSchema.safeParse(env.payload);
-      if (!parsed.success) {
-        throw new BrokerRefusal("broker.audit_chain_invalid", `audit commit ${commit}: ${parsed.error.message}`);
-      }
-      const event = parsed.data;
-
-      // Signer eligibility + signature: ONLY the attestation identity is trusted
-      // to have signed the audit stream (round-3 finding 2). Any other signer —
-      // even a valid approval signer — breaks the chain fail-closed.
-      const pub = this.trustedKeyFor(env.signerId);
-      if (pub === null) {
-        throw new BrokerRefusal(
-          "broker.audit_chain_invalid",
-          `audit commit ${commit}: signer "${env.signerId}" is not the audit-attestation identity`,
-        );
-      }
-      if (!verifyBytes(canonicalSerialize(event), env.signature, pub)) {
-        throw new BrokerRefusal("broker.audit_chain_invalid", `audit commit ${commit}: signature verification failed`);
-      }
-
-      // Exact sequence continuity: the first event sets the baseline; each
-      // subsequent event must be exactly its predecessor + 1 (no gaps).
-      if (expectedSeq !== null && event.seq !== expectedSeq) {
-        throw new BrokerRefusal(
-          "broker.audit_chain_invalid",
-          `audit commit ${commit}: seq ${event.seq} breaks continuity (expected ${expectedSeq})`,
-        );
-      }
-
-      // prevAuditHead back-link: ZERO for the first event, else the prior commit.
-      const expectedPrev = prevCommit ?? ZERO_OID;
-      if (event.prevAuditHead !== expectedPrev) {
-        throw new BrokerRefusal(
-          "broker.audit_chain_invalid",
-          `audit commit ${commit}: prevAuditHead ${event.prevAuditHead} ≠ ${expectedPrev}`,
-        );
-      }
-
+      const { event, env } = await this.verifyCommit(commit, prevCommit, expectedSeq);
       this.byRunSeq.set(idemKey(event.runId, event.seq), {
         result: { seq: event.seq, head: commit },
         fingerprint: fingerprintOf(env.signerId, env.signature, event),
@@ -221,6 +171,120 @@ export class AuditLog {
     // the anchor (a rewrite-then-append can no longer evade detection).
     this.anchor.verifyChain(commits);
     this.initialized = true;
+  }
+
+  /**
+   * Fully verify ONE audit commit against its expected position: JSON envelope,
+   * canonicalization, schema, attestation-only signer + signature, exact seq
+   * continuity, and the `prevAuditHead` back-link. Throws a fail-closed
+   * `broker.audit_chain_invalid` on any break. Shared by {@link init} and the
+   * read-only {@link verifyLiveChain} so both apply IDENTICAL chain semantics.
+   */
+  private async verifyCommit(
+    commit: string,
+    prevCommit: string | null,
+    expectedSeq: number | null,
+  ): Promise<{ event: AuditEvent; env: SignedEnvelope }> {
+    const msg = await this.git.commitMessage(commit);
+    let env: SignedEnvelope;
+    try {
+      env = JSON.parse(msg) as SignedEnvelope;
+    } catch {
+      throw new BrokerRefusal("broker.audit_chain_invalid", `audit commit ${commit}: message is not a JSON envelope`);
+    }
+    if (env.canonicalization !== AUDIT_CANONICALIZATION) {
+      throw new BrokerRefusal(
+        "broker.audit_chain_invalid",
+        `audit commit ${commit}: unsupported canonicalization "${env.canonicalization}"`,
+      );
+    }
+    const parsed = AuditEventSchema.safeParse(env.payload);
+    if (!parsed.success) {
+      throw new BrokerRefusal("broker.audit_chain_invalid", `audit commit ${commit}: ${parsed.error.message}`);
+    }
+    const event = parsed.data;
+
+    // Signer eligibility + signature: ONLY the attestation identity is trusted
+    // to have signed the audit stream (round-3 finding 2). Any other signer —
+    // even a valid approval signer — breaks the chain fail-closed.
+    const pub = this.trustedKeyFor(env.signerId);
+    if (pub === null) {
+      throw new BrokerRefusal(
+        "broker.audit_chain_invalid",
+        `audit commit ${commit}: signer "${env.signerId}" is not the audit-attestation identity`,
+      );
+    }
+    if (!verifyBytes(canonicalSerialize(event), env.signature, pub)) {
+      throw new BrokerRefusal("broker.audit_chain_invalid", `audit commit ${commit}: signature verification failed`);
+    }
+
+    // Exact sequence continuity: the first event sets the baseline; each
+    // subsequent event must be exactly its predecessor + 1 (no gaps).
+    if (expectedSeq !== null && event.seq !== expectedSeq) {
+      throw new BrokerRefusal(
+        "broker.audit_chain_invalid",
+        `audit commit ${commit}: seq ${event.seq} breaks continuity (expected ${expectedSeq})`,
+      );
+    }
+
+    // prevAuditHead back-link: ZERO for the first event, else the prior commit.
+    const expectedPrev = prevCommit ?? ZERO_OID;
+    if (event.prevAuditHead !== expectedPrev) {
+      throw new BrokerRefusal(
+        "broker.audit_chain_invalid",
+        `audit commit ${commit}: prevAuditHead ${event.prevAuditHead} ≠ ${expectedPrev}`,
+      );
+    }
+    return { event, env };
+  }
+
+  /**
+   * A READ-ONLY health verdict over the LIVE `refs/audit/runs` chain (Task 1.9
+   * finding 1). Re-reads the ref from git on EVERY call (no cached trust) and
+   * re-verifies the full chain + the WORM anchor exactly as {@link init} does,
+   * but REPORTS a break as `{ ok:false, detail }` instead of throwing — so a
+   * health surface (`doctor`/`status`) can name the fault without crashing. This
+   * is the authoritative anti-truncation/anti-rewrite check: it binds to the
+   * actual protected-ref commits (and the broker-owned anchor), NOT to any
+   * unprivileged SQLite projection.
+   */
+  async verifyLiveChain(): Promise<{ ok: boolean; head: string; count: number; detail?: string }> {
+    let commits: string[];
+    try {
+      commits = (await this.git.revList(this.auditRef)).reverse(); // oldest → newest
+    } catch (e) {
+      return { ok: false, head: "", count: 0, detail: `audit ref unreadable: ${e instanceof Error ? e.message : String(e)}` };
+    }
+    const head = commits.length > 0 ? commits[commits.length - 1]! : "";
+    let prevCommit: string | null = null;
+    let expectedSeq: number | null = null;
+    try {
+      for (const commit of commits) {
+        const { event } = await this.verifyCommit(commit, prevCommit, expectedSeq);
+        prevCommit = commit;
+        expectedSeq = event.seq + 1;
+      }
+      // A missing/empty WORM anchor is HEALTHY only when there are no live events
+      // to anchor. If the audit ref carries events but no anchor covers them, the
+      // anchor was deleted/truncated away — exactly the anti-truncation evasion the
+      // anchor exists to catch — so the health probe must report it (`verifyChain`
+      // itself treats a null anchor as a no-op, which is correct for first-boot
+      // bootstrapping in `init` but NOT for a health verdict over a live chain).
+      if (commits.length > 0 && this.anchor.latest() === null) {
+        return {
+          ok: false,
+          head,
+          count: commits.length,
+          detail: `WORM anchor is missing/empty while ${commits.length} audit event(s) exist — anchor truncation`,
+        };
+      }
+      // Bind the anchored head to its exact position in the live chain (§6).
+      this.anchor.verifyChain(commits);
+    } catch (e) {
+      const detail = e instanceof BrokerRefusal ? e.message : e instanceof Error ? e.message : String(e);
+      return { ok: false, head, count: commits.length, detail };
+    }
+    return { ok: true, head, count: commits.length };
   }
 
   /** The highest seq appended so far (−1 if the chain is empty). */

@@ -28,6 +28,18 @@ import type { PrivilegedOpDescriptor } from "./authorize.js";
 import type { RefAdvanceRequest, RefAdvanceResult, SourceCaptureRequest } from "./refs.js";
 import type { PrivilegedOpResult } from "./service.js";
 
+/** The read-only audit-chain health verdict returned by {@link BrokerClient.getAuditChainStatus}. */
+export interface AuditChainStatus {
+  /** `false` on any truncation / rewrite / signature / anchor break. */
+  readonly ok: boolean;
+  /** The git head of the live `refs/audit/runs` (empty when the ref has no commits). */
+  readonly head: string;
+  /** The live audit-ref commit count (the git-anchored chain length). */
+  readonly count: number;
+  /** A human-readable reason when `!ok`. */
+  readonly detail?: string;
+}
+
 interface Pending {
   readonly method: BrokerMethod;
   resolve(value: unknown): void;
@@ -120,6 +132,16 @@ export class BrokerClient {
    */
   signAndAppendAuditEvent(unsigned: Omit<AuditEvent, "prevAuditHead">): Promise<AppendResult> {
     return this.call("signAndAppendAuditEvent", unsigned);
+  }
+
+  /**
+   * READ-ONLY audit-chain health verdict (Task 1.9 finding 1): the broker
+   * re-reads the live `refs/audit/runs` chain + WORM anchor and reports whether
+   * it is intact, its head, and its event count. Used by `doctor`/`status` to
+   * verify the ACTUAL protected ref rather than an unprivileged SQLite projection.
+   */
+  getAuditChainStatus(): Promise<AuditChainStatus> {
+    return this.call("getAuditChainStatus", {});
   }
 
   /** Advance a protected ref under CAS + ancestry (+ optional authorization). */

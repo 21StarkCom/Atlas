@@ -2,13 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "atlas://cli-contract/db-rebuild.schema.json",
   "title": "brain db rebuild — --json success output",
-  "description": "Rebuild the vault-projection tables from Markdown (and the git-audit fold with --from-git) inside a single transaction, replacing only the projection set that exists at that point. Intrinsically idempotent and crash-safe: a crash mid-rebuild leaves the prior projection readable. NEVER touches the ledger tables or db_schema_migrations. Acquires the exclusive vault-maintenance lock; db migrate must have completed first.",
+  "description": "Rebuild the vault-projection tables from Markdown inside a single transaction, replacing only the projection set that exists at that point. Intrinsically idempotent and crash-safe: a crash mid-rebuild leaves the prior projection readable. NEVER touches the ledger tables or db_schema_migrations. Acquires the exclusive vault-maintenance lock; db migrate must have completed first. (The --from-git audit-ref fold / ledger reconstruction is a later-phase disaster-recovery capability and is deliberately NOT part of the Phase-1 contract.)",
   "type": "object",
   "unevaluatedProperties": false,
   "required": ["command", "rebuilt"],
   "properties": {
     "command": { "const": "db rebuild" },
-    "fromGit": { "type": "boolean", "description": "True when --from-git was used (folds refs/audit/runs for the partial git-audit fallback)." },
     "rebuilt": {
       "type": "array",
       "items": {
@@ -22,7 +21,7 @@
   },
   "examples": [
     { "command": "db rebuild", "rebuilt": [ { "table": "notes", "rows": 3 }, { "table": "note_links", "rows": 5 }, { "table": "note_identity_keys", "rows": 4 } ] },
-    { "command": "db rebuild", "fromGit": true, "rebuilt": [ { "table": "notes", "rows": 3 } ], "durationMs": 42 }
+    { "command": "db rebuild", "rebuilt": [ { "table": "notes", "rows": 3 } ], "durationMs": 42 }
   ],
   "x-atlas-contract": {
     "command": "db rebuild",
@@ -32,9 +31,7 @@
     "executionClass": "projection-write",
     "summary": "Transactionally rebuild vault-projection tables from Markdown; never touches ledger tables.",
     "args": [],
-    "flags": [
-      { "flag": "--from-git", "type": "boolean", "default": false, "description": "Fold refs/audit/runs to reconstruct mutating-run ledger rows (partial git-audit fallback) in addition to the Markdown projection rebuild." }
-    ],
+    "flags": [],
     "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
     "sideEffects": [
       "replaces the vault-projection tables inside one transaction",

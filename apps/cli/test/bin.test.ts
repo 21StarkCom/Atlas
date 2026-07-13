@@ -44,7 +44,8 @@ describe.skipIf(!existsSync(BIN))("brain bin launcher", () => {
     const cwd = mkdtempSync(join(tmpdir(), "atlas-bin-"));
     writeFileSync(join(cwd, "brain.config.yaml"), EXAMPLE, "utf8");
     try {
-      const r = run(["inspect", "--json"], cwd);
+      // `db migrate` is a real registry command with no handler in this build.
+      const r = run(["db", "migrate", "--json"], cwd);
       expect(r.status).toBe(5);
       expect(JSON.parse(r.stdout).code).toBe("not-implemented");
     } finally {

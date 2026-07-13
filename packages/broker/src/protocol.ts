@@ -18,6 +18,7 @@ import {
 export type BrokerMethod =
   | "appendAuditEvent"
   | "signAndAppendAuditEvent"
+  | "getAuditChainStatus"
   | "advanceProtectedRef"
   | "integrateSourceCapture"
   | "mintChallenge"
@@ -27,6 +28,7 @@ export type BrokerMethod =
 export const BROKER_METHODS = [
   "appendAuditEvent",
   "signAndAppendAuditEvent",
+  "getAuditChainStatus",
   "advanceProtectedRef",
   "integrateSourceCapture",
   "mintChallenge",
@@ -116,6 +118,9 @@ const PrivilegedOpDescriptorSchema = z.object({
 const METHOD_PARAM_SCHEMAS: Record<BrokerMethod, z.ZodTypeAny> = {
   appendAuditEvent: WireSignedAuditEventSchema,
   signAndAppendAuditEvent: UnsignedAuditEventSchema,
+  // Read-only: no params (the broker reads its own ref + anchor). Accept an
+  // absent or empty-object params bag.
+  getAuditChainStatus: z.union([z.undefined(), z.object({}).passthrough()]),
   advanceProtectedRef: z.object({
     ref: z.string().min(1),
     expectedOld: z.string().min(1),
@@ -213,10 +218,19 @@ const PrivilegedOpResultSchema = z.object({
   op: z.string().min(1),
 });
 
+/** `{ ok, head, count, detail? }` — the read-only audit-chain health verdict. */
+const AuditChainStatusSchema = z.object({
+  ok: z.boolean(),
+  head: z.string(),
+  count: z.number().int().nonnegative(),
+  detail: z.string().optional(),
+});
+
 /** Per-method success-result schemas (mirrors the client's typed return shapes). */
 const METHOD_RESULT_SCHEMAS: Record<BrokerMethod, z.ZodTypeAny> = {
   appendAuditEvent: AppendResultSchema,
   signAndAppendAuditEvent: AppendResultSchema,
+  getAuditChainStatus: AuditChainStatusSchema,
   advanceProtectedRef: RefAdvanceResultSchema,
   integrateSourceCapture: RefAdvanceResultSchema,
   mintChallenge: AuthorizationChallengeSchema,

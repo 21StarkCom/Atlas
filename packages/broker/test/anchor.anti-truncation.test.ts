@@ -7,7 +7,7 @@
  * anchored count and fail closed (`broker.anchor_truncation`).
  */
 import { afterEach, describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { BrokerRefusal } from "../src/index.js";
 import { createHarness, type Harness } from "./harness.js";
 
@@ -51,5 +51,26 @@ describe("WORM anchor truncation detection", () => {
     await h.service.appendAuditEvent(h.signedAuditEvent(1));
     const restarted = h.newService();
     await expect(restarted.start()).resolves.toBeUndefined();
+  });
+
+  it("getAuditChainStatus reports UN-healthy when the anchor is deleted but events remain", async () => {
+    h = createHarness();
+    await h.service.appendAuditEvent(h.signedAuditEvent(0));
+    await h.service.appendAuditEvent(h.signedAuditEvent(1));
+
+    // A clean chain is healthy via the read-only probe.
+    const before = await h.service.getAuditChainStatus();
+    expect(before.ok).toBe(true);
+    expect(before.count).toBe(2);
+
+    // Delete the WORM anchor while live events remain. `WormAnchor.verifyChain`
+    // treats a null anchor as a no-op (correct for first-boot), so without the
+    // probe's explicit guard this would wrongly still read healthy — the exact
+    // truncation-evasion the anchor exists to catch. A fresh service (no cached
+    // trust) must report ok:false so doctor/status can name the fault.
+    rmSync(h.anchorPath, { force: true });
+    const after = await h.newService().getAuditChainStatus();
+    expect(after.ok).toBe(false);
+    expect(after.detail ?? "").toMatch(/anchor.*(missing|truncation)/i);
   });
 });

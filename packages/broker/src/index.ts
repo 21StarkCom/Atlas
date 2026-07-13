@@ -9,7 +9,7 @@
  */
 
 // Client library (the CLI/ledger side consumes this).
-export { BrokerClient } from "./client.js";
+export { BrokerClient, type AuditChainStatus } from "./client.js";
 
 // In-process service + config (the daemon + tests wire this).
 export {

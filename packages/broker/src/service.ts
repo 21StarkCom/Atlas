@@ -157,6 +157,18 @@ export class BrokerService {
     return this.runExclusive(() => this.audit.signAndAppend(unsigned, this.attestationPrivateKey));
   }
 
+  /**
+   * READ-ONLY audit-chain health verdict (Task 1.9 finding 1). Re-reads the live
+   * `refs/audit/runs` chain from git + the WORM anchor and reports whether it is
+   * intact, its head, and its event count — WITHOUT mutating anything. Runs under
+   * the same mutation lock so it observes a consistent chain even while an append
+   * is in flight. This is the authoritative interface the CLI health surfaces use
+   * to verify the actual protected ref (not an unprivileged SQLite projection).
+   */
+  getAuditChainStatus(): Promise<{ ok: boolean; head: string; count: number; detail?: string }> {
+    return this.runExclusive(() => this.audit.verifyLiveChain());
+  }
+
   /** Advance a protected ref under CAS + ancestry (+ optional authorization). */
   advanceProtectedRef(r: RefAdvanceRequest): Promise<RefAdvanceResult> {
     return this.runExclusive(async () => {

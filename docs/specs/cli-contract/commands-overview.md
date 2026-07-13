@@ -10,13 +10,13 @@ Registry version: **1** · Commands: **49**
 |---|---|---|---|---|---|
 | 1 | `db backup` | key-accepting | shared | yes | `docs/specs/cli-contract/db-backup.schema.json` |
 | 1 | `db migrate` | intrinsic | shared | no | `docs/specs/cli-contract/db-migrate.schema.json` |
-| 1 | `db rebuild` | intrinsic | shared | no | `docs/specs/cli-contract/db-rebuild.schema.json` |
+| 1 | `db rebuild` | intrinsic | shared | yes | `docs/specs/cli-contract/db-rebuild.schema.json` |
 | 1 | `db restore` | key-accepting | privileged | yes | `docs/specs/cli-contract/db-restore.schema.json` |
 | 1 | `db status` | none | shared | no | `docs/specs/cli-contract/db-status.schema.json` |
 | 1 | `db verify` | none | shared | yes | `docs/specs/cli-contract/db-verify.schema.json` |
-| 1 | `doctor` | none | shared | no | `docs/specs/cli-contract/doctor.schema.json` |
-| 1 | `inspect` | none | shared | no | `docs/specs/cli-contract/inspect.schema.json` |
-| 1 | `status` | none | shared | no | `docs/specs/cli-contract/status.schema.json` |
+| 1 | `doctor` | none | shared | yes | `docs/specs/cli-contract/doctor.schema.json` |
+| 1 | `inspect` | none | shared | yes | `docs/specs/cli-contract/inspect.schema.json` |
+| 1 | `status` | none | shared | yes | `docs/specs/cli-contract/status.schema.json` |
 | 2 | `git cleanup` | intrinsic | shared | no | `docs/specs/cli-contract/git-cleanup.schema.json` |
 | 2 | `git status` | none | shared | no | `docs/specs/cli-contract/git-status.schema.json` |
 | 2 | `ingest` | key-accepting | shared | no | `docs/specs/cli-contract/ingest.schema.json` |
