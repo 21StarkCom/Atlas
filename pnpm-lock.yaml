@@ -50,6 +50,9 @@ importers:
       '@atlas/scan':
         specifier: workspace:*
         version: link:../../packages/scan
+      '@atlas/sources':
+        specifier: workspace:*
+        version: link:../../packages/sources
       '@atlas/sqlite-store':
         specifier: workspace:*
         version: link:../../packages/sqlite-store
@@ -177,7 +180,17 @@ importers:
         version: 3.2.7(@types/node@24.13.3)(yaml@2.9.0)
 
   packages/sources:
+    dependencies:
+      '@atlas/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@atlas/scan':
+        specifier: workspace:*
+        version: link:../scan
     devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.13.3
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
