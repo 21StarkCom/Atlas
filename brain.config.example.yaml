@@ -47,6 +47,12 @@ policies:
   default_sensitivity: internal
   require_sources_for_synthesis: true
 
+jobs:
+  max_attempts: 5 # jobs-contract.md §2 — attempt budget, bounds [1, 20]
+  backoff_base_ms: 1000 # §3 — exponential full-jitter base
+  backoff_factor: 2 # §3
+  backoff_max_ms: 300000 # §3 — 5 min ceiling
+
 logs:
   dir: ./.atlas/logs
   max_files: 10

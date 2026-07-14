@@ -53,6 +53,9 @@ importers:
       '@atlas/git':
         specifier: workspace:*
         version: link:../../packages/git
+      '@atlas/jobs':
+        specifier: workspace:*
+        version: link:../../packages/jobs
       '@atlas/scan':
         specifier: workspace:*
         version: link:../../packages/scan
@@ -143,7 +146,23 @@ importers:
         version: 3.2.7(@types/node@24.13.3)(yaml@2.9.0)
 
   packages/jobs:
+    dependencies:
+      '@atlas/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@atlas/sqlite-store':
+        specifier: workspace:*
+        version: link:../sqlite-store
+      better-sqlite3:
+        specifier: 'catalog:'
+        version: 12.11.1
     devDependencies:
+      '@types/better-sqlite3':
+        specifier: 'catalog:'
+        version: 7.6.13
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.13.3
       typescript:
         specifier: 'catalog:'
         version: 5.9.3

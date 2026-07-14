@@ -4,6 +4,7 @@
  * `registerCommand(...)` side effect). `main.ts` imports it before dispatch so the
  * handlers are available; unimplemented commands stay unhandled (→ not-implemented).
  */
+import "./db-migrate.js";
 import "./db-backup.js";
 import "./db-rebuild.js";
 import "./db-restore.js";
@@ -11,3 +12,4 @@ import "./db-verify.js";
 import "./inspect.js";
 import "./doctor.js";
 import "./status.js";
+import "./jobs.js";

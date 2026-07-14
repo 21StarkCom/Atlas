@@ -53,7 +53,7 @@ import { migration0006WorkflowIdempotency } from "../../migrations/0006_workflow
  * is incompatible and rejected by {@link verifyBackup}; `"(none)"` (pre-migration
  * empty schema) is always compatible.
  */
-const KNOWN_SCHEMA_HEADS: ReadonlySet<string> = new Set([
+const KNOWN_SCHEMA_HEADS: Set<string> = new Set([
   "(none)",
   migration0001Core.id,
   migration0003Provenance.id,
@@ -64,6 +64,21 @@ const KNOWN_SCHEMA_HEADS: ReadonlySet<string> = new Set([
   // recognized as a KNOWN (not future/unknown) schema.
   migration0006WorkflowIdempotency.id,
 ]);
+
+/**
+ * Declare a migration id this binary understands as a schema head (§8.3 compatibility).
+ *
+ * A migration owned by a DOWNSTREAM package (one that depends on `@atlas/sqlite-store`,
+ * e.g. `@atlas/jobs`'s `0002_jobs` / `0007_job_cancellations`) cannot be imported here —
+ * that would be a dependency cycle. Once such a migration is applied it becomes the schema
+ * head, so a backup stamped with it MUST be recognized or `verifyBackup` would reject this
+ * binary's OWN backups as "future/unknown schema". The owning package therefore registers
+ * its heads alongside its migrations at the composition root (see `registerJobsMigration`),
+ * mirroring the `Store.registerMigration` seam.
+ */
+export function registerKnownSchemaHead(id: string): void {
+  KNOWN_SCHEMA_HEADS.add(id);
+}
 
 /**
  * Backups pinned by an in-flight `db restore` (contract §9): retention never

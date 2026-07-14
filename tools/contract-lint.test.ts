@@ -471,9 +471,18 @@ describe("Phase-2 cli-contract schema presence (Task 2.0)", () => {
     }
   });
 
-  it("every Phase-2 row is still implemented:false at this contract-only gate", () => {
-    for (const r of phase2) {
-      expect(r.implemented, `${r.name} implemented`).toBe(false);
+  // NB: schema presence is asserted independently of the `implemented` flag (above).
+  // We deliberately do NOT require Phase-2 rows to stay implemented:false — delivering
+  // tasks flip rows to implemented:true as handlers land (Task 2.7 delivered the four
+  // `jobs *` commands), and the durable gate is schema presence, not a temporal
+  // implementation-status assertion (which the first Phase-2 handler necessarily
+  // breaks). Matches the Phase-3/Phase-4 gate policy below.
+  it("the delivered `jobs *` commands are implemented:true with their schemas present", () => {
+    const jobs = phase2.filter((r) => r.name.startsWith("jobs "));
+    expect(jobs.map((r) => r.name).sort()).toEqual(["jobs cancel", "jobs list", "jobs retry", "jobs run"]);
+    for (const r of jobs) {
+      expect(r.implemented, `${r.name} implemented`).toBe(true);
+      expect(existsSync(join(root, r.schemaRef)), `${r.name} schema ${r.schemaRef}`).toBe(true);
     }
   });
 

@@ -227,8 +227,10 @@ describe("runCli", () => {
   });
 
   it("reports a not-implemented command from the registry (exit 5)", async () => {
-    // `db migrate` is a real registry command with no handler wired in this build.
-    const { code, out } = await run(["db", "migrate", "--json"], {}, {});
+    // `ingest` is a real registry command (Phase 2) with no handler wired in this
+    // build. (`db migrate` used to serve this case but is now wired as the shared
+    // migration composition root — see commands/db-migrate.ts.)
+    const { code, out } = await run(["ingest", "--json"], {}, {});
     expect(code).toBe(EXIT.USAGE);
     expect(JSON.parse(out).code).toBe("not-implemented");
   });

@@ -13,10 +13,30 @@
  */
 import { existsSync } from "node:fs";
 import { openStore, type Store } from "@atlas/sqlite-store";
+import { registerJobsMigration } from "@atlas/jobs";
 import { CliError, EXIT } from "../errors/envelope.js";
 import { ledgerDbPath } from "./backup-config.js";
-import { openWorkflowStore } from "../workflows/index.js";
+import { openWorkflowStore, registerWorkflowMigrations } from "../workflows/index.js";
 import type { RunContext } from "../handlers.js";
+
+/**
+ * Register EVERY feature-owned migration on a `Store`, BEFORE `Store.migrate()` —
+ * the shared migration composition root (plan §2.7, Review-Hint). `@atlas/sqlite-store`
+ * owns `0001_core`/`0003`/`0004` and pre-registers them in `openStore`; the two
+ * feature migrations it deliberately does NOT know about are registered here:
+ *   - `0002_jobs` (owned by `@atlas/jobs`, {@link registerJobsMigration});
+ *   - `0006_workflow_idempotency` (owned by the workflows layer, {@link registerWorkflowMigrations}).
+ *
+ * `db migrate` calls this before `store.migrate()`, so ALL feature migrations are
+ * discovered through the one checksum-guarded runner — there is no undiscoverable
+ * migration and jobs/read commands never apply DDL ad-hoc. Registering an
+ * already-applied migration is a checksum-verified no-op, so calling this on a
+ * partially-migrated ledger is safe.
+ */
+export function registerFeatureMigrations(store: Store): void {
+  registerJobsMigration(store);
+  registerWorkflowMigrations(store);
+}
 
 /** The core migration whose presence proves the ledger has been migrated. */
 const CORE_MIGRATION_ID = "0001_core";
@@ -78,4 +98,19 @@ export function openMigratedStore(ctx: RunContext): Store {
  */
 export function openWorkflowCommandStore(ctx: RunContext): Store {
   return openWorkflowStore({ path: ledgerDbPath(ctx) });
+}
+
+/**
+ * Open an already-migrated ledger for the `jobs` commands (plan §2.7 / Review-Hint,
+ * round-2 finding). A jobs command is NOT the schema owner — `0002_jobs` is applied
+ * by the shared migration composition root (`db migrate` → {@link registerFeatureMigrations}
+ * before `store.migrate()`), so jobs commands MUST NOT migrate on their own: a
+ * read-only `jobs list` that auto-migrated could create/modify the database, and an
+ * ad-hoc per-command migration would defeat the single, discoverable composition
+ * root. This delegates to {@link openMigratedStore}, which fails fast with
+ * `db-unavailable` (exit 2) when the ledger is absent or unmigrated. The caller owns
+ * closing the returned store.
+ */
+export function openJobsCommandStore(ctx: RunContext): Store {
+  return openMigratedStore(ctx);
 }
