@@ -71,7 +71,7 @@ run "chown atlas-egress:$ATLAS_GROUP '$ATLAS_KEYS_DIR/shared/egress-capability.k
 run "chmod 0640 '$ATLAS_KEYS_DIR/shared/egress-capability.key'"
 #     quarantine recipient PUBLIC key: egress seals refused payloads to the CLI (public ⇒ 0644).
 run "touch '$ATLAS_KEYS_DIR/shared/quarantine-recipient.pub'"
-run "chown agent:$ATLAS_GROUP '$ATLAS_KEYS_DIR/shared/quarantine-recipient.pub'"
+run "chown $ATLAS_AGENT_USER:$ATLAS_GROUP '$ATLAS_KEYS_DIR/shared/quarantine-recipient.pub'"
 run "chmod 0644 '$ATLAS_KEYS_DIR/shared/quarantine-recipient.pub'"
 #     egress state dir: budget file (egress-WRITABLE — the old default sat in a root-owned dir)
 #     and the sealed-quarantine spool the CLI drains (2770 setgid so drained files keep the group).
