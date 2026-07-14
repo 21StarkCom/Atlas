@@ -27,7 +27,7 @@
  * step 4 when a backup config is supplied.
  */
 import type { Store } from "../store.js";
-import { IntentsRepo, applyLedgerWrite, latestRunSeq } from "./intents.js";
+import { IntentsRepo, applyLedgerWrite, latestRunSeq, LedgerAssertionError } from "./intents.js";
 import type { AuditBroker } from "./finalize.js";
 import { runBackupStep, readCoalesceCovers } from "./finalize.js";
 import { WatermarkRepo, type WatermarkHealth, watermarkHealth } from "../backup/watermark.js";
@@ -40,6 +40,15 @@ export interface ReconcileOptions {
   /** Bounded backup retries for the step-4 re-drive (default 2). */
   readonly backupRetries?: number;
   readonly now?: () => string;
+  /**
+   * A GLOBAL ordering barrier (round-3 finding on reconciler.ts:700-756 +
+   * reconcile.ts:94-102): the lowest `seq` the workflows layer-0 pass left
+   * UNRESOLVED (an anchored-but-uninstalled or preserved `run.integrated` intent).
+   * The audit chain is gapless and driven oldest-first, so NO later intent may be
+   * completed past an unresolved predecessor. The drain HALTS before this seq. `null`
+   * (or absent) means layer 0 left no unresolved predecessor.
+   */
+  readonly stopAtSeq?: number | null;
 }
 
 /** What {@link reconcileInterruptedRuns} converged. */
@@ -48,6 +57,23 @@ export interface ReconcileReport {
   readonly reconciled: number;
   /** Of those, how many had to (re-)append the git event (step 2 re-driven). */
   readonly appended: number;
+  /**
+   * Pending intents whose step-3 replay FAILED its serialized affected-row /
+   * artifact CAS ({@link LedgerAssertionError}) — a stale/concurrent advance moved
+   * the run past this checkpoint. Such an intent is LEFT pending (its audit event
+   * is never falsely completed against a non-advanced row, round finding #2) and
+   * the pass continues rather than aborting.
+   */
+  readonly conflicted: number;
+  /**
+   * The seq the drain HALTED at (round-2 finding W8): a `pending` intent whose
+   * step-3 replay failed its serialized CAS ({@link LedgerAssertionError}) is
+   * DETERMINISTICALLY irreconcilable by replay (the run advanced past it), and the
+   * git audit chain is gapless + driven oldest-first — so the drain STOPS there
+   * rather than completing LATER intents past an unresolved earlier sequence (which
+   * would report false progress). `null` when the drain ran to completion.
+   */
+  readonly haltedAtSeq: number | null;
   /** Whether a backup cut remained uncovered after reconciliation. */
   readonly backupGap: boolean;
   /** Whether a step-4 backup was re-driven (only when `opts.backup` was supplied). */
@@ -71,8 +97,32 @@ export async function reconcileInterruptedRuns(
 
   let reconciled = 0;
   let appended = 0;
+  let conflicted = 0;
+  let haltedAtSeq: number | null = null;
 
+  const stopAt = opts.stopAtSeq ?? null;
   for (const row of intents.listPending()) {
+    // GLOBAL ordered barrier (round-3 finding on reconcile.ts:94-102): the chain is
+    // gapless and driven oldest-first, so an intent at or beyond the layer-0 barrier
+    // (an unresolved earlier `run.integrated`) must NEVER be completed — doing so would
+    // advance a sequence past an unresolved predecessor. HALT here.
+    if (stopAt !== null && row.seq >= stopAt) {
+      haltedAtSeq = row.seq;
+      break;
+    }
+    // Canonical-INSTALLING `run.integrated` intents are owned exclusively by the
+    // workflows reconciler's layer-0 pass (round-2 finding W6): they cannot be
+    // generically re-signed, and landing their step-3 here would record a canonical
+    // install this generic drain cannot AUTHORITATIVELY verify. A run.integrated intent
+    // still PENDING when the drain reaches it is an UNRESOLVED predecessor that layer 0
+    // could not land — so the drain must HALT (round-3 finding on reconcile.ts:94-102),
+    // NOT skip it and complete LATER intents past it (the prior `continue` advanced the
+    // chain past an unresolved earlier sequence). Layer 0 lands the contained ones and
+    // preserves the anchored-but-uninstalled ones; whatever remains pending is a barrier.
+    if (row.event_json && row.event_json.length > 0 && IntentsRepo.parseEvent(row).kind === "run.integrated") {
+      haltedAtSeq = row.seq;
+      break;
+    }
     // Legacy-pending-intent handling (round-3 finding 5): a `pending` intent
     // written under `0001` (before `0005_ledger_finalize` added `event_json`) has
     // no re-drivable event. We NEVER fabricate one; such a pre-migration intent is
@@ -109,8 +159,29 @@ export async function reconcileInterruptedRuns(
       });
       intents.markDone(row.run_id, row.seq, now());
     });
-    commit();
-    reconciled++;
+    try {
+      commit();
+      reconciled++;
+    } catch (err) {
+      // A serialized affected-row / artifact CAS failed (round finding #2): a
+      // stale/concurrent advance moved the run past this checkpoint, so the
+      // persisted step-3 cannot be applied. Roll THIS intent back (better-sqlite3
+      // already did on the throw), leave it `pending`, and continue — the audit
+      // event is never falsely completed against a non-advanced row, and the pass
+      // does not abort on one conflicting intent. Any OTHER error is a real fault
+      // and propagates.
+      if (!(err instanceof LedgerAssertionError)) throw err;
+      conflicted++;
+      // Round-2 finding W8: this intent's audit event is ALREADY anchored on the git
+      // chain, but its step-3 business rows cannot be replayed (the run advanced past
+      // this checkpoint) — a DETERMINISTIC conflict that a repeated startup will hit
+      // identically. Because the chain is gapless and driven oldest-first, we must
+      // NOT continue to complete LATER intents past this irreconcilable earlier
+      // sequence (doing so reports completion the chain has not actually reached).
+      // HALT here; a later reconcile after the operator resolves the conflict resumes.
+      haltedAtSeq = row.seq;
+      break;
+    }
   }
 
   // Step 4 re-drive: a committed cut not yet covered by a verified backup. A gap
@@ -131,5 +202,5 @@ export async function reconcileInterruptedRuns(
     backupGap = latestRunSeq(db) > new WatermarkRepo(db).get().seq && !readCoalesceCovers(db, new WatermarkRepo(db).get().seq);
   }
 
-  return { reconciled, appended, backupGap, backupReDriven, health: watermarkHealth(db) };
+  return { reconciled, appended, conflicted, haltedAtSeq, backupGap, backupReDriven, health: watermarkHealth(db) };
 }

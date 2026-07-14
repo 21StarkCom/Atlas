@@ -50,6 +50,9 @@ importers:
       '@atlas/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@atlas/git':
+        specifier: workspace:*
+        version: link:../../packages/git
       '@atlas/scan':
         specifier: workspace:*
         version: link:../../packages/scan

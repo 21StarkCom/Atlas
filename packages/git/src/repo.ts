@@ -6,7 +6,7 @@
  * (see `refs.ts`) — those belong to the broker.
  */
 import { resolve } from "node:path";
-import { runGit } from "./exec.js";
+import { runGit, GitError } from "./exec.js";
 import { agentRef, assertAgentRef, attachHeadToAgentRef, readRef, updateAgentRef } from "./refs.js";
 import { makeWorktree, type Worktree } from "./worktree.js";
 
@@ -31,6 +31,21 @@ export interface Repo {
   addWorktree(ref: string, dir: string): Promise<Worktree>;
   /** Remove the worktree at `dir` (also pruning its administrative metadata). */
   removeWorktree(dir: string): Promise<void>;
+  /**
+   * Resolve the TREE object a commit-ish points at (`<commitish>^{tree}`), or
+   * `null` if it does not resolve. Read-only; used by recovery to prove a recorded
+   * commit's tree matches the tree hash captured at `worktree-applied`.
+   */
+  commitTree(commitish: string): Promise<string | null>;
+  /**
+   * `true` iff `ancestor` is an ancestor of `descendant` (or the same commit) —
+   * `git merge-base --is-ancestor`. Read-only. Used by recovery to prove a recorded
+   * commit is CONTAINED in a ref whose tip may have advanced beyond it: ref-tip
+   * EQUALITY wrongly rejects a valid commit once a later commit is layered on top,
+   * so containment must be tested by ancestry, not equality (round-2 finding W4).
+   * Returns `false` if either commit-ish does not resolve.
+   */
+  isAncestor(ancestor: string, descendant: string): Promise<boolean>;
 }
 
 class RepoImpl implements Repo {
@@ -38,6 +53,33 @@ class RepoImpl implements Repo {
 
   readRef(name: string): Promise<string | null> {
     return readRef(this.dir, name);
+  }
+
+  async commitTree(commitish: string): Promise<string | null> {
+    try {
+      return await runGit(this.dir, ["rev-parse", "--verify", "--quiet", `${commitish}^{tree}`]);
+    } catch (err) {
+      // Mirror readRef: only "does not resolve" (exit 1, empty stderr) becomes
+      // `null`; every operational failure propagates rather than masquerading.
+      if (err instanceof GitError && err.exitCode === 1 && err.stderr.trim() === "") return null;
+      throw err;
+    }
+  }
+
+  async isAncestor(ancestor: string, descendant: string): Promise<boolean> {
+    // Resolve both first so an unresolvable commit-ish is a clean `false` (per the
+    // contract) rather than a `fatal: Not a valid commit name` (exit 128).
+    if ((await readRef(this.dir, ancestor)) === null) return false;
+    if ((await readRef(this.dir, descendant)) === null) return false;
+    try {
+      await runGit(this.dir, ["merge-base", "--is-ancestor", ancestor, descendant]);
+      return true; // exit 0 ⇒ ancestor (or identical)
+    } catch (err) {
+      // exit 1 ⇒ NOT an ancestor (the documented negative). Anything else is an
+      // operational failure and propagates rather than masquerading as `false`.
+      if (err instanceof GitError && err.exitCode === 1) return false;
+      throw err;
+    }
   }
 
   async createAgentBranch(runId: string, base: string): Promise<string> {
