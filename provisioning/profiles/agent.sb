@@ -13,7 +13,15 @@
 
 ;; --- process basics ---
 (allow process-fork)
-(allow process-exec (with no-sandbox))            ;; child re-enters via its own profile
+;; SECURITY (D17): process-exec MUST NOT carry `(with no-sandbox)`. In SBPL that modifier
+;; runs the exec'd child with NO profile at all — it does not "re-enter via its own
+;; profile" — so ANY child (node, curl, a shell) escaped this profile entirely and the
+;; `(deny network*)` below became a no-op for every subprocess. Verified: with the
+;; modifier, `sandbox-exec -f agent.sb curl https://…` returned HTTP 200/404 (network
+;; reached); without it, curl is killed (exit 134) and the network is genuinely denied.
+;; A child of a network-denied agent inherits this sandbox, which is exactly the
+;; "backstop that does not depend on the agent choosing a launcher" this profile promises.
+(allow process-exec)
 (allow signal (target self))
 (allow sysctl-read)
 (allow mach-lookup)

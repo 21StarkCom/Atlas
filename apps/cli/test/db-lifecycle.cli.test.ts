@@ -199,7 +199,7 @@ async function setup(): Promise<Ctx> {
     "  auto_commit_risk_levels: [1, 2]",
     `  audit_anchor_path: ${anchorPath}`,
     "models:",
-    "  generation_model: gemini-3-5-flash",
+    "  generation_model: gemini-3.5-flash",
     "  embedding_model: gemini-embedding-001",
     "policies:",
     "  tier2_min_confidence: 0.8",

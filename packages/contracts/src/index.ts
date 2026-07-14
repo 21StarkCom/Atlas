@@ -78,6 +78,14 @@ export {
 // Per-operation payload schemas, error-code tuples, and result types (ops/*)
 export * from "./ops/index.js";
 
+// Shared generateObject schema registry (provider-interface §1) — the SSOT both
+// the @atlas/models client and the in-broker Gemini adapter resolve schemaId against.
+export {
+  SCHEMA_REGISTRY,
+  resolveRegisteredSchema,
+  type SchemaRegistry,
+} from "./schema-registry.js";
+
 // Run manifest
 export {
   type RunManifest,

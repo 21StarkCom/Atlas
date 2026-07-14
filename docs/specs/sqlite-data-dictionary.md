@@ -234,7 +234,7 @@ CREATE TABLE model_calls (
   call_id        TEXT    NOT NULL PRIMARY KEY,
   run_id         TEXT    NOT NULL,
   provider       TEXT    NOT NULL,                        -- e.g. 'gemini'
-  model          TEXT    NOT NULL,                        -- gemini-3-5-flash | gemini-embedding-001
+  model          TEXT    NOT NULL,                        -- gemini-3.5-flash | gemini-embedding-001
   operation      TEXT    NOT NULL,                        -- generate|extract|classify|synthesize|embed
   input_tokens   INTEGER NOT NULL DEFAULT 0,
   output_tokens  INTEGER NOT NULL DEFAULT 0,
