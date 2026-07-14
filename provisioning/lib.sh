@@ -10,12 +10,14 @@ if [ "$ATLAS_OS" = "Darwin" ]; then
   ATLAS_KEYS_DIR="/usr/local/etc/atlas/keys"
   ATLAS_ANCHOR="/usr/local/var/atlas/audit-anchor"
   ATLAS_RUN_DIR="/usr/local/var/run/atlas"
+  ATLAS_EGRESS_STATE="/usr/local/var/atlas/egress"
   ATLAS_INSTALL_BIN="/usr/local/lib/atlas/bin"
   ATLAS_ROOT_GROUP="wheel"
 else
   ATLAS_KEYS_DIR="/etc/atlas/keys"
   ATLAS_ANCHOR="/var/lib/atlas/audit-anchor"
   ATLAS_RUN_DIR="/var/run/atlas"
+  ATLAS_EGRESS_STATE="/var/lib/atlas/egress"
   ATLAS_INSTALL_BIN="/opt/atlas/bin"
   ATLAS_ROOT_GROUP="root"
 fi

@@ -101,7 +101,7 @@ const GitConfig = z
 
 const ModelsConfig = z
   .object({
-    generation_model: z.string().min(1).default("gemini-3-5-flash"),
+    generation_model: z.string().min(1).default("gemini-3.5-flash"),
     embedding_model: z.string().min(1).default("gemini-embedding-001"),
   })
   .strict();

@@ -28,7 +28,8 @@
     "runDir":     { "darwin": "/usr/local/var/run/atlas",       "linux": "/var/run/atlas" },
     "brokerSocket":{ "darwin": "/usr/local/var/run/atlas/broker.sock", "linux": "/var/run/atlas/broker.sock" },
     "egressSocket":{ "darwin": "/usr/local/var/run/atlas/egress.sock", "linux": "/var/run/atlas/egress.sock" },
-    "installBin": { "darwin": "/usr/local/lib/atlas/bin",       "linux": "/opt/atlas/bin" }
+    "installBin": { "darwin": "/usr/local/lib/atlas/bin",       "linux": "/opt/atlas/bin" },
+    "egressState": { "darwin": "/usr/local/var/atlas/egress",   "linux": "/var/lib/atlas/egress", "note": "Cross-identity egress state (Task 2.8/#34): the sealed-quarantine spool the CLI drains + the egress-writable D19 budget file. Owner atlas-egress, group atlas-git, 2770 setgid — egress reaches it as OWNER, the CLI as GROUP; atlas-egress is still NOT an atlas-git member, so D18 holds." }
   },
   "socketModes": {
     "broker.sock": { "owner": "atlas-broker", "group": "atlas-git", "mode": "0660" },

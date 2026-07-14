@@ -59,6 +59,28 @@ run "touch '$ATLAS_KEYS_DIR/atlas-egress/atlas.gemini.key'"
 run "chown atlas-egress:atlas-egress '$ATLAS_KEYS_DIR/atlas-egress/atlas.gemini.key'"
 run "chmod 0600 '$ATLAS_KEYS_DIR/atlas-egress/atlas.gemini.key'"
 
+# 3b) CROSS-IDENTITY egress artifacts (Task 2.8 / #34). The daemon requires these and exits 4
+#     without them. They must NOT live in the egress-only 0700 keys dir: the CLI identity mints
+#     capabilities and drains the quarantine spool. Same trick as the socket run dir — owner
+#     atlas-egress, GROUP atlas-git, group-accessible; atlas-egress is NOT a group member, so
+#     D18 (no vault/object read) still holds. Egress reaches these as OWNER, the CLI as GROUP.
+#
+#     capability MAC secret: CLI MINTS (group read), egress VERIFIES (owner read).
+run "touch '$ATLAS_KEYS_DIR/shared/egress-capability.key'"
+run "chown atlas-egress:$ATLAS_GROUP '$ATLAS_KEYS_DIR/shared/egress-capability.key'"
+run "chmod 0640 '$ATLAS_KEYS_DIR/shared/egress-capability.key'"
+#     quarantine recipient PUBLIC key: egress seals refused payloads to the CLI (public ⇒ 0644).
+run "touch '$ATLAS_KEYS_DIR/shared/quarantine-recipient.pub'"
+run "chown $ATLAS_AGENT_USER:$ATLAS_GROUP '$ATLAS_KEYS_DIR/shared/quarantine-recipient.pub'"
+run "chmod 0644 '$ATLAS_KEYS_DIR/shared/quarantine-recipient.pub'"
+#     egress state dir: budget file (egress-WRITABLE — the old default sat in a root-owned dir)
+#     and the sealed-quarantine spool the CLI drains (2770 setgid so drained files keep the group).
+ensure_dir "$ATLAS_EGRESS_STATE" "atlas-egress" "$ATLAS_GROUP" 2770
+ensure_dir "$ATLAS_EGRESS_STATE/quarantine-spool" "atlas-egress" "$ATLAS_GROUP" 2770
+run "touch '$ATLAS_EGRESS_STATE/budget-state.json'"
+run "chown atlas-egress:$ATLAS_GROUP '$ATLAS_EGRESS_STATE/budget-state.json'"
+run "chmod 0660 '$ATLAS_EGRESS_STATE/budget-state.json'"
+
 # 4) WORM audit anchor (D8): broker-owned 0600, parent 0700, OUTSIDE vault+repo
 ensure_dir "$(dirname "$ATLAS_ANCHOR")" "atlas-broker" "atlas-broker" 0700
 run "touch '$ATLAS_ANCHOR'"

@@ -6,7 +6,8 @@
   "main": "./dist/src/index.js",
   "types": "./dist/src/index.d.ts",
   "bin": {
-    "atlas-broker": "./dist/bin/atlas-broker.js"
+    "atlas-broker": "./dist/bin/atlas-broker.js",
+    "atlas-egress": "./dist/bin/atlas-egress.js"
   },
   "exports": {
     ".": {
@@ -21,6 +22,7 @@
   "dependencies": {
     "@atlas/contracts": "workspace:*",
     "@atlas/git": "workspace:*",
+    "@atlas/scan": "workspace:*",
     "zod": "catalog:"
   },
   "devDependencies": {

@@ -111,3 +111,121 @@ export {
   type BrokerResponse,
   type RequestParse,
 } from "./protocol.js";
+
+// ---------------------------------------------------------------------------
+// Egress broker (D13(c)/D17/D18/D19): sole credential + sole outbound-network
+// process. Scans the exact serialized payload both directions, enforces the
+// run-bound capability + per-run budget, and returns a receipt (no SQLite here).
+// ---------------------------------------------------------------------------
+
+export {
+  mintEgressCapability,
+  verifyCapability,
+  sensitivityRank,
+  SENSITIVITY_ORDER,
+  EGRESS_OPERATIONS,
+  DEFAULT_CAPABILITY_KEY_ID,
+  DEFAULT_CAPABILITY_TTL_SECONDS,
+  EgressCapabilitySchema,
+  EgressCapabilityClaimsSchema,
+  type EgressCapability,
+  type EgressCapabilityClaims,
+  type EgressLimits,
+  type EgressOperation,
+  type CapabilitySensitivity,
+  type RunBinding,
+  type CapabilityVerdict,
+} from "./egress/capability.js";
+
+export {
+  EgressService,
+  startEgressServer,
+  type EgressServer,
+  type EgressServiceConfig,
+  type InvokeOutcome,
+} from "./egress/server.js";
+
+export { EgressClient, type EgressInvokeResult } from "./egress/client.js";
+
+export {
+  GeminiAdapter,
+  type ProviderAdapter,
+  type Transport,
+  type GeminiAdapterConfig,
+  type SerializedRequest,
+  type TransmittedResponse,
+  type ParsedResult,
+  type AttemptMeta,
+  type ResponseScanHook,
+} from "./egress/gemini.js";
+
+export { RunBudget, type BudgetVerdict, type BudgetRefusalCode, type BudgetReservation } from "./egress/budget.js";
+
+export { FileBudgetStore, type BudgetStore, type PersistedTally } from "./egress/budget-store.js";
+
+export { scanEgressPayload, type ScanDirection } from "./egress/scan.js";
+
+export {
+  SealedSpoolQuarantineSink,
+  sealSpoolEnvelope,
+  openSpoolEnvelope,
+  SPOOL_MAGIC,
+  SPOOL_VERSION,
+  type SealedSpoolQuarantineOptions,
+  type SealedSpoolEnvelope,
+  type OpenedSpoolItem,
+} from "./egress/spool-quarantine.js";
+
+export {
+  ProviderCallError,
+  providerError,
+  providerCallErrorFromBody,
+} from "./egress/provider-error.js";
+
+export { DEFAULT_SCHEMA_REGISTRY, resolveSchema } from "./egress/schema-registry.js";
+
+export {
+  DEFAULT_PROMPT_REGISTRY,
+  MapPromptRegistry,
+  resolvePromptOrThrow,
+  type PromptRegistry,
+  type ResolvedPrompt,
+} from "./egress/prompt-registry.js";
+
+export {
+  validateEgressRequest,
+  validateEgressResponse,
+  EgressInvokeParamsSchema,
+  EgressRequestBodySchema,
+  type EgressInvokeParams,
+  type EgressRequestBody,
+  type EgressResponse,
+} from "./egress/protocol.js";
+
+export {
+  PromptRefSchema,
+  UsageSchema,
+  GenerateTextRequestSchema,
+  GenerateObjectRequestSchema,
+  EmbedRequestSchema,
+  GenerateTextResultSchema,
+  EmbedResultSchema,
+  ModelCallReceiptSchema,
+  TRANSMISSION_OUTCOMES,
+  type PromptRef,
+  type Usage,
+  type GenerateTextRequest,
+  type GenerateObjectRequest,
+  type EmbedRequest,
+  type GenerateTextResult,
+  type EmbedResult,
+  type ModelCallReceipt,
+  type TransmissionOutcome,
+} from "./egress/types.js";
+
+export {
+  EgressRefusal,
+  EGRESS_ERROR_CATALOG,
+  egressExitCodeFor,
+  type EgressCode,
+} from "./egress/errors.js";

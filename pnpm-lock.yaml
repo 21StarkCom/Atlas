@@ -96,6 +96,9 @@ importers:
       '@atlas/git':
         specifier: workspace:*
         version: link:../git
+      '@atlas/scan':
+        specifier: workspace:*
+        version: link:../scan
       zod:
         specifier: 'catalog:'
         version: 3.25.76
@@ -180,7 +183,32 @@ importers:
         version: 3.2.7(@types/node@24.13.3)(yaml@2.9.0)
 
   packages/models:
+    dependencies:
+      '@atlas/broker':
+        specifier: workspace:*
+        version: link:../broker
+      '@atlas/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@atlas/sqlite-store':
+        specifier: workspace:*
+        version: link:../sqlite-store
+      zod:
+        specifier: 'catalog:'
+        version: 3.25.76
     devDependencies:
+      '@atlas/scan':
+        specifier: workspace:*
+        version: link:../scan
+      '@atlas/testing':
+        specifier: workspace:*
+        version: link:../testing
+      '@types/better-sqlite3':
+        specifier: 'catalog:'
+        version: 7.6.13
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.13.3
       typescript:
         specifier: 'catalog:'
         version: 5.9.3

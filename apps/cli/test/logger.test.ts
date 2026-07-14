@@ -52,7 +52,7 @@ describe("diag logger", () => {
     const f = createLoggerFactory({ dir, maxBytes: 1_000_000, maxFiles: 5, now: () => "T" });
     const log = f.diag("r1");
     log.info("provider.call", {
-      model: "gemini-3-5-flash",
+      model: "gemini-3.5-flash",
       prompt: "SECRET PROMPT TEXT",
       quote: "verbatim source quote",
       apiKey: "sk-live-abc",
@@ -63,7 +63,7 @@ describe("diag logger", () => {
     expect(raw).not.toContain("verbatim source quote");
     expect(raw).not.toContain("sk-live-abc");
     const row = lines()[0]!;
-    expect(row.model).toBe("gemini-3-5-flash"); // allowlisted metadata survives
+    expect(row.model).toBe("gemini-3.5-flash"); // allowlisted metadata survives
     expect(row.prompt).toBe("[redacted]");
     expect(row.quote).toBe("[redacted]");
     expect(row.apiKey).toBe("[redacted]");
