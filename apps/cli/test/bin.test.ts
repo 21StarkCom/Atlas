@@ -44,8 +44,10 @@ describe.skipIf(!existsSync(BIN))("brain bin launcher", () => {
     const cwd = mkdtempSync(join(tmpdir(), "atlas-bin-"));
     writeFileSync(join(cwd, "brain.config.yaml"), EXAMPLE, "utf8");
     try {
-      // `db migrate` is a real registry command with no handler in this build.
-      const r = run(["db", "migrate", "--json"], cwd);
+      // `query` is a real registry command (Phase-3 retrieval) with no handler in
+      // this build — the stable not-implemented example (`db migrate` is now the
+      // implemented migration composition root, Task 2.7).
+      const r = run(["query", "--json"], cwd);
       expect(r.status).toBe(5);
       expect(JSON.parse(r.stdout).code).toBe("not-implemented");
     } finally {

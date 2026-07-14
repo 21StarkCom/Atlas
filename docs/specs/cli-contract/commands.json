@@ -16,7 +16,7 @@
       "phase": 1,
       "idempotency": "intrinsic",
       "privilege": "shared",
-      "implemented": false
+      "implemented": true
     },
     {
       "name": "db rebuild",
@@ -232,7 +232,7 @@
       "phase": 2,
       "idempotency": "key-accepting",
       "privilege": "shared",
-      "implemented": false
+      "implemented": true
     },
     {
       "name": "jobs list",
@@ -240,7 +240,7 @@
       "phase": 2,
       "idempotency": "none",
       "privilege": "shared",
-      "implemented": false
+      "implemented": true
     },
     {
       "name": "jobs retry",
@@ -248,7 +248,7 @@
       "phase": 2,
       "idempotency": "key-accepting",
       "privilege": "shared",
-      "implemented": false
+      "implemented": true
     },
     {
       "name": "jobs run",
@@ -256,7 +256,7 @@
       "phase": 2,
       "idempotency": "key-accepting",
       "privilege": "shared",
-      "implemented": false
+      "implemented": true
     },
     {
       "name": "maintain",

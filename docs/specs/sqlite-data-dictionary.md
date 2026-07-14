@@ -500,7 +500,8 @@ CREATE TABLE jobs (
   max_attempts     INTEGER NOT NULL DEFAULT 1,
   lease_epoch      INTEGER NOT NULL DEFAULT 0 CHECK (lease_epoch >= 0),  -- reserved fencing token (design; multi-worker leases deferred post-V1)
   next_run_at      TEXT,                                  -- eligibility time; null => not scheduled
-  payload_hash     TEXT    NOT NULL,
+  payload          TEXT    NOT NULL,                      -- durable canonical-JSON work payload (Task 2.7 decision 2)
+  payload_hash     TEXT    NOT NULL,                      -- sha256(canonicalSerialize(payload)); verified against `payload` on read
   created_at       TEXT    NOT NULL,
   updated_at       TEXT    NOT NULL,
   UNIQUE (workflow, idempotency_key)
@@ -518,17 +519,26 @@ CREATE INDEX idx_jobs_eligibility ON jobs(state, next_run_at);
   reserved-written"). V1 is a synchronous single-runner, so it is written `0` and never advanced;
   the column exists now so the deferred multi-worker lease/fencing migration copies complete DDL
   verbatim rather than adding a column later.
+- **`payload`:** the durable canonical-JSON work payload (Task 2.7 decision 2). `raw_payloads`
+  (§3) is deferred out of V1, default **off**, and retention-windowed, so startup dead-runner
+  recovery (jobs-contract §6) MUST reconstruct a job's work from the `jobs` row itself — the
+  payload therefore lives on the row, not only in the opt-in raw store. It is **allowlisted
+  operational metadata** (the enqueued job spec, e.g. a `renditionId` + protocol key), never
+  free-form document content. `payload_hash = sha256(canonicalSerialize(payload))` is stored
+  alongside and **re-verified on every read** (recovery/execution): a mismatch is a hard
+  corruption/tamper error, never a silent execute.
 
 ### `job_attempts` — `0002_jobs`
 
 ```sql
 CREATE TABLE job_attempts (
-  job_id       TEXT    NOT NULL,
-  attempt_no   INTEGER NOT NULL,
-  outcome      TEXT    NOT NULL CHECK (outcome IN ('running', 'succeeded', 'failed', 'cancelled')),
-  error_code   TEXT,
-  started_at   TEXT    NOT NULL,
-  finished_at  TEXT,
+  job_id          TEXT    NOT NULL,
+  attempt_no      INTEGER NOT NULL,
+  outcome         TEXT    NOT NULL CHECK (outcome IN ('running', 'succeeded', 'failed', 'cancelled')),
+  error_code      TEXT,
+  side_effect_id  TEXT,                                   -- transactional side-effect id (Task 2.7 decision 1); NULL for content-addressed effects
+  started_at      TEXT    NOT NULL,
+  finished_at     TEXT,
   PRIMARY KEY (job_id, attempt_no),
   FOREIGN KEY (job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
 ) STRICT;
@@ -537,7 +547,15 @@ CREATE TABLE job_attempts (
 - **FK:** `job_id → jobs(job_id)` **`ON DELETE CASCADE`** (attempts are structural detail of a job, same
   ledger class).
 - **Upsert:** conflict target **`(job_id, attempt_no)`** — `ON CONFLICT(job_id, attempt_no) DO UPDATE`
-  (an attempt row is finalized in place: `outcome`/`finished_at`).
+  (an attempt row is finalized in place: `outcome`/`finished_at`/`side_effect_id`).
+- **`side_effect_id`:** the durable, transactionally-recorded side-effect id (Task 2.7 decision 1,
+  resolving the jobs-contract §7 OPEN block). Written **in the SAME transaction as the attempt's
+  finalization** so a crash cannot land the effect without its id (or vice-versa). Phase-2 capture
+  effects are all content-addressed (broker capture keyed by `captureId`, notes by identity hash),
+  so those attempts leave it **NULL** and rely on content-addressing for crash-idempotency. It is
+  populated for **mutable** Phase-4 effects (evidence re-verification status, backup pruning,
+  quarantine expiry) where re-deriving a content id cannot prove whether a mutation committed
+  before a crash — such an effect needs this durable id to be crash-idempotent.
 
 ---
 

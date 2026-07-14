@@ -137,6 +137,8 @@
       { "code": "usage", "exit": 5, "when": "<jobId> and --all both given, or unknown flag/argument" },
       { "code": "locked:jobs-runner", "exit": 2, "when": "another jobs-runner holds the exclusive lock", "retryable": true },
       { "code": "backup-unhealthy", "exit": 2, "when": "ledger-writing is blocked pending a verified backup" },
+      { "code": "idempotency-key-conflict", "exit": 1, "when": "--idempotency-key reused with a different request (same key, changed selector)" },
+      { "code": "idempotency-in-progress", "exit": 6, "retryable": true, "when": "a concurrent duplicate with the same --idempotency-key is still in progress (never re-drains)" },
       { "code": "internal", "exit": 4, "when": "unexpected internal failure while draining" }
     ],
     "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"

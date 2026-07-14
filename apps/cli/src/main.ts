@@ -32,6 +32,14 @@ import { configureLocks, withLock } from "./locks/manager.js";
 import { configureDiag, diag, type Logger } from "./diag/logger.js";
 import { loadRegistry, parseArgv, findCommand, sniffOutputFlags, type Registry } from "./router.js";
 import { HANDLERS, registerCommand, type CommandHandler, type RunContext } from "./handlers.js";
+// Composition root (plan §2.7 / Task 2.7): the shared migration composition root is
+// the `db migrate` command (commands/db-migrate.ts, registered via commands/index
+// below). It imports `@atlas/jobs` + the workflows layer and calls
+// `registerFeatureMigrations(store)` — which registers the feature-owned `0002_jobs`
+// and `0006_workflow_idempotency` — BEFORE `store.migrate()`, so every migration is
+// discovered through the normal checksum-guarded runner with no undiscoverable
+// migration. Every OTHER ledger command (including read-only `jobs list`) opens an
+// ALREADY-migrated store and never applies DDL on its own.
 // Side-effect import: register the implemented command handlers (Task 1.7+). Must
 // come AFTER the handler-registry import so `HANDLERS` is initialized before a
 // command module's import-time `registerCommand(...)` runs.

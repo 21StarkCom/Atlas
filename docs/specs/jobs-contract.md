@@ -73,6 +73,14 @@ Bounded defaults (config `jobs.*`, overridable per `JobSpec.maxAttempts`):
 - `jobs.max_attempts` default **5** (min 1, max 20). A job's own `maxAttempts` wins when set.
 - A `permanent` failure ends the job at whatever attempt it occurred, regardless of remaining budget.
 
+**Budget enforcement (single point).** The claim itself is the one enforcement point: a job is
+claimable only while `attempts < max_attempts`. A job that has consumed its budget is never
+re-claimed, so no path — neither manual retry nor dead-runner recovery — can execute an attempt
+numbered beyond the current budget. `jobs retry` (§1) is the only way to grant more budget: it
+preserves `attempts` (keeping the retained `job_attempts` history's `attempt_no`s monotonic and
+collision-free) and raises `max_attempts` to `attempts + 1` when the budget is exhausted, granting
+exactly one further attempt (a job that failed with budget remaining keeps its larger budget).
+
 ## 3. Backoff schedule
 
 Retry delay is exponential with full jitter, bounded, deterministic given the attempt number and the
@@ -107,9 +115,11 @@ delay is a jittered value in `[0, ceilingMs]`. Config keys: `jobs.backoff_base_m
   classification (allowlisted metadata only — never raw payloads).
 - `job_attempts` retains one row per attempt with exactly the DDL columns — `attempt_no`,
   `outcome ∈ (running, succeeded, failed, cancelled)`, `error_code` (stable classification, nullable),
-  `started_at`, `finished_at`. There is **no `interrupted` outcome and no side-effect-id column**:
-  an interrupted attempt is finalized in place as `outcome = 'failed'` with `error_code =
-  'interrupted'` (see §6), and idempotency is carried by `jobs.idempotency_key`, not a per-attempt id.
+  `side_effect_id` (transactional side-effect id, nullable — see §7), `started_at`, `finished_at`.
+  There is **no `interrupted` outcome**: an interrupted attempt is finalized in place as
+  `outcome = 'failed'` with `error_code = 'interrupted'` (see §6). Enqueue idempotency is carried by
+  `jobs.idempotency_key`; per-attempt side-effect idempotency (for a mutable effect) is carried by
+  `side_effect_id`.
 
 ## 5. `jobs-runner` process lock (D5)
 
@@ -128,11 +138,14 @@ reconciles jobs the previous (now-dead) runner left mid-flight. Because the lock
 single-runner, holding it means no live runner owns any `running` row, so recovery is
 unconditional over `running` jobs:
 
-- Any `running` job → reset to `pending` (`dead-runner-recovery`), backoff untouched, attempt count
-  preserved. The interrupted `job_attempts` row (the one still `outcome = 'running'`,
-  `finished_at IS NULL`) is finalized in place as `outcome = 'failed'`, `error_code = 'interrupted'`,
-  `finished_at = now` — it is NOT counted as a fresh attempt (the `jobs.attempts` counter is left
-  unchanged), so the reset attempt budget is identical to before the crash.
+- The interrupted `job_attempts` row (the one still `outcome = 'running'`, `finished_at IS NULL`) is
+  finalized in place as `outcome = 'failed'`, `error_code = 'interrupted'`, `finished_at = now` — it
+  is NOT counted as a fresh attempt (the `jobs.attempts` counter is left unchanged). The job is then
+  reconciled by its remaining budget: while `attempts < max_attempts` it resets to `pending`
+  (`dead-runner-recovery`, backoff untouched) and re-runs; when the crash struck the FINAL attempt
+  (`attempts >= max_attempts`) it is driven terminal `failed` (`attempts-exhausted`), NOT re-queued —
+  re-queuing an at-budget job would either run an attempt beyond the budget or, under the claim
+  guard (§2), wedge it `pending` forever.
 - Idempotency: recovery re-derives the same target state from the persisted rows, so running it
   twice converges (the second pass sees no `running` row). The reserved `lease_epoch` (§1) is `0`
   in V1; when multi-worker leasing lands, recovery keys on `(jobId, lease_epoch)` and leaves a job
@@ -153,17 +166,16 @@ unconditional over `running` jobs:
   - Idempotency of a *content-addressed side effect* is carried by that effect's own content hash in
     the effecting subsystem's row.
 
-  > **OPEN (reconcile in Task 2.7 — do NOT resolve by editing the plan).** The authoritative plan
-  > (Task 2.7) calls for *transactional side-effect-id recording*, and the current `0002_jobs`
-  > `job_attempts` DDL (sqlite-data-dictionary.md §4) has no such column. Content-addressing covers
-  > content-addressed effects, but it does **not** cover a **mutable** side effect (e.g. an
-  > incrementing capture-observation counter): re-deriving a content id cannot prove whether the
-  > increment committed before a crash, so such an effect needs a durable, transactionally-recorded
-  > side-effect id to be crash-idempotent. Task 2.7 must either (a) confirm every Phase-2 job effect
-  > is content-addressed (and record that as the reason the column is absent), or (b) add the
-  > transactional side-effect-id the plan specifies. This contract does **not** override the plan;
-  > the decision is deferred to the implementation task that exercises it. Tracked on the Phase-2
-  > gate issue.
+  > **RESOLVED (Task 2.7, orchestrator decision 1 — chose option (b)).** The authoritative plan
+  > calls for *transactional side-effect-id recording*. Content-addressing covers content-addressed
+  > effects, but it does **not** cover a **mutable** side effect (e.g. an incrementing
+  > capture-observation counter, evidence re-verification status, backup pruning, quarantine
+  > expiry): re-deriving a content id cannot prove whether the mutation committed before a crash,
+  > so such an effect needs a durable, transactionally-recorded side-effect id to be
+  > crash-idempotent. Task 2.7 therefore **adds a nullable `job_attempts.side_effect_id`
+  > (sqlite-data-dictionary.md §4)**, written in the SAME transaction as the effect. Phase-2
+  > capture effects are all content-addressed and leave it **NULL** (relying on content-addressing);
+  > Phase-4 mutable effects populate it. This follows the plan; it does not override it.
 
 ## 8. CLI mapping (registry rows, Phase 2)
 

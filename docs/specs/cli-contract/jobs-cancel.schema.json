@@ -111,10 +111,12 @@
     "sideEffects": ["transitions selected jobs to cancelled (or requests cooperative cancel for running jobs)"],
     "prohibitedEffects": ["bare invocation (no selector) ⇒ exit 5 (never silently cancels all)"],
     "locks": [{ "scope": "shared", "mode": "shared" }],
-    "exitCodes": [0, 2, 4, 5],
+    "exitCodes": [0, 1, 2, 4, 5, 6],
     "errorCodes": [
       { "code": "usage", "exit": 5, "when": "no selector given, or <jobId> and --all both given" },
       { "code": "config-invalid", "exit": 2, "when": "brain.config.yaml fails schema validation" },
+      { "code": "idempotency-key-conflict", "exit": 1, "when": "--idempotency-key reused with a different request (same key, changed selector)" },
+      { "code": "idempotency-in-progress", "exit": 6, "retryable": true, "when": "a concurrent duplicate with the same --idempotency-key is still in progress" },
       { "code": "internal", "exit": 4, "when": "unexpected internal failure" }
     ],
     "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"

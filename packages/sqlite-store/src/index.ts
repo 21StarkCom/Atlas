@@ -105,6 +105,7 @@ export {
   listBackups,
   pruneRetention,
   resolveBackupRef,
+  registerKnownSchemaHead,
 } from "./backup/backup.js";
 export type { LedgerBackupConfig, BackupResult, CatalogEntry } from "./backup/backup.js";
 export { restoreBackup, forceUnblock, recoverInterruptedRestore } from "./backup/restore.js";

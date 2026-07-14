@@ -117,6 +117,21 @@ const PoliciesConfig = z
   })
   .strict();
 
+/**
+ * Jobs queue tuning (jobs-contract.md §2/§3). Single owner of the attempt budget
+ * + backoff constants — the runner reads these, never inlines them. Defaults per
+ * the contract; the whole section defaults so an existing config loads unchanged.
+ */
+const JobsConfig = z
+  .object({
+    max_attempts: z.number().int().min(1).max(20).default(5), // §2 default 5, bounds [1,20]
+    backoff_base_ms: z.number().int().positive().default(1000), // §3
+    backoff_factor: z.number().min(1).default(2), // §3
+    backoff_max_ms: z.number().int().positive().default(300_000), // §3
+  })
+  .strict()
+  .default({});
+
 const LogsConfig = z
   .object({
     dir: z.string().min(1),
@@ -208,6 +223,7 @@ export const AtlasConfigSchema = z
     git: GitConfig,
     models: ModelsConfig,
     policies: PoliciesConfig,
+    jobs: JobsConfig,
     logs: LogsConfig,
     broker: BrokerConfig,
     quarantine: QuarantineConfig,
@@ -226,6 +242,7 @@ export const CONFIG_SECTIONS = [
   "git",
   "models",
   "policies",
+  "jobs",
   "logs",
   "broker",
   "quarantine",
