@@ -43,15 +43,96 @@ export type UnsignedAuditEvent = Omit<AuditEvent, "prevAuditHead">;
 export interface LedgerStatement {
   readonly sql: string;
   readonly params?: readonly unknown[] | Record<string, unknown>;
+  /**
+   * An optional post-execution guard, enforced by {@link applyLedgerWrite}
+   * transactionally in BOTH the live §2.8 step-3 AND the crash-recovery drain
+   * ({@link reconcileInterruptedRuns} replays this via `write_json`). `assert.sql`
+   * is a `SELECT` that MUST return at least one row after `sql` runs; if it returns
+   * NONE, {@link LedgerAssertionError} is thrown and the whole step-3 transaction
+   * rolls back. Because the assertion is serialized with the statement, a replay
+   * enforces the exact same affected-row / immutable-artifact CAS the live path did
+   * — closing the round finding #2 gap where the post-write CAS lived only in a
+   * non-serialized `extraCommit` closure and was skipped on startup replay.
+   */
+  readonly assert?: LedgerAssertion;
+  /**
+   * An optional AFFECTED-ROW assertion (round-2 finding W1): the number of rows
+   * `sql` must change when it runs. Enforced by {@link applyLedgerWrite} in BOTH
+   * the live step-3 AND the crash-recovery replay. Unlike {@link assert} (a
+   * post-state SELECT), this proves THIS statement's DML actually mutated the
+   * expected number of rows — so a guarded `ON CONFLICT DO UPDATE … WHERE` whose
+   * predicate blocked the update (0 rows changed) is rejected EVEN WHEN the row is
+   * already at the target status because a DIFFERENT handle wrote it (a no-op
+   * UPDATE must never masquerade as a successful advance, e.g. a duplicate
+   * terminal). Typically `1` for a single-row guarded upsert.
+   */
+  readonly expectChanges?: number;
+}
+
+/** A serializable post-write guard for a {@link LedgerStatement} (round finding #2). */
+export interface LedgerAssertion {
+  /** A `SELECT` that MUST return ≥1 row after the statement ran; else the write is rejected. */
+  readonly sql: string;
+  readonly params?: readonly unknown[] | Record<string, unknown>;
+  /** The human-readable reason surfaced on failure. */
+  readonly message: string;
+}
+
+/**
+ * Raised when a {@link LedgerStatement}'s serialized {@link LedgerAssertion} guard
+ * finds its required row absent — the transactional affected-row / immutable-artifact
+ * CAS failed (a stale/concurrent advance, or a divergent replay). Thrown inside the
+ * step-3 transaction so the whole write rolls back; the crash-recovery drain treats
+ * it as a non-fatal per-intent conflict (leaves the intent pending, never falsely
+ * completes the audit event) rather than a corrupt-store abort.
+ */
+export class LedgerAssertionError extends Error {
+  constructor(readonly detail: string) {
+    super(`ledger-write assertion failed: ${detail}`);
+    this.name = "LedgerAssertionError";
+  }
+}
+
+function runStatement(
+  db: SqliteDatabase,
+  sql: string,
+  params?: readonly unknown[] | Record<string, unknown>,
+): { changes: number } {
+  const stmt = db.prepare(sql);
+  if (params === undefined) return stmt.run();
+  if (Array.isArray(params)) return stmt.run(...(params as unknown[]));
+  return stmt.run(params as Record<string, unknown>);
+}
+
+function checkAssertion(db: SqliteDatabase, a: LedgerAssertion): void {
+  const stmt = db.prepare(a.sql);
+  const row = a.params === undefined
+    ? stmt.get()
+    : Array.isArray(a.params)
+      ? stmt.get(...(a.params as unknown[]))
+      : stmt.get(a.params as Record<string, unknown>);
+  if (row === undefined) throw new LedgerAssertionError(a.message);
 }
 
 /** Execute a run's serializable step-3 writes on `db` (inside the step-3 txn). */
 export function applyLedgerWrite(db: SqliteDatabase, statements: readonly LedgerStatement[]): void {
   for (const st of statements) {
-    const stmt = db.prepare(st.sql);
-    if (st.params === undefined) stmt.run();
-    else if (Array.isArray(st.params)) stmt.run(...(st.params as unknown[]));
-    else stmt.run(st.params as Record<string, unknown>);
+    const info = runStatement(db, st.sql, st.params);
+    // Serialized affected-row assertion (round-2 finding W1): a guarded upsert whose
+    // ON CONFLICT WHERE-predicate blocked the update changes ZERO rows even when the
+    // row already sits at the target status (written by another handle) — the
+    // post-state SELECT below cannot tell the two apart, so a duplicate terminal
+    // could falsely complete. Rejecting on the mutated-row COUNT closes that gap, on
+    // the live path AND on crash-recovery replay (this travels in `write_json`).
+    if (st.expectChanges !== undefined && info.changes !== st.expectChanges) {
+      throw new LedgerAssertionError(
+        `expected ${st.expectChanges} affected row(s) but ${info.changes} changed (guarded write blocked — stale or concurrent handle)`,
+      );
+    }
+    // Serialized post-write guard (round finding #2): enforced identically on the
+    // live path and on crash-recovery replay, so an audit event is never completed
+    // against a row the CAS could not advance.
+    if (st.assert) checkAssertion(db, st.assert);
   }
 }
 

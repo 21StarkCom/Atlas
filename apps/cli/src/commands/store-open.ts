@@ -15,6 +15,7 @@ import { existsSync } from "node:fs";
 import { openStore, type Store } from "@atlas/sqlite-store";
 import { CliError, EXIT } from "../errors/envelope.js";
 import { ledgerDbPath } from "./backup-config.js";
+import { openWorkflowStore } from "../workflows/index.js";
 import type { RunContext } from "../handlers.js";
 
 /** The core migration whose presence proves the ledger has been migrated. */
@@ -59,4 +60,22 @@ export function openMigratedStore(ctx: RunContext): Store {
     throw dbUnavailable(dbPath, "the ledger has not been migrated (0001_core absent)");
   }
   return store;
+}
+
+/**
+ * The shared composition root for key-accepting WORKFLOW commands (round-3 finding
+ * on idempotency.ts:70-87). A key-accepting command persists its `(command,
+ * idempotency_key)` slot in `workflow_idempotency`, which is owned by the feature
+ * migration `0006_workflow_idempotency` — NOT part of `openStore`'s default retained
+ * set (so a bare store's fresh-DB diff stays exactly the §2.7 core/provenance/claims
+ * set, per finding #3). This helper is the ONE production path that opens the ledger,
+ * registers the workflows-owned migration(s), and applies them through the normal
+ * checksum-guarded runner (`openWorkflowStore` → `registerWorkflowMigrations` +
+ * `Store.migrate`). Every key-accepting workflow command (e.g. `reconcile`) opens
+ * through THIS root, so the idempotency table is guaranteed present at store-open in
+ * production — not merely when a test harness registers it by hand. The caller owns
+ * closing the returned store.
+ */
+export function openWorkflowCommandStore(ctx: RunContext): Store {
+  return openWorkflowStore({ path: ledgerDbPath(ctx) });
 }

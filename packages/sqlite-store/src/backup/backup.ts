@@ -45,6 +45,7 @@ import { migration0001Core } from "../../migrations/0001_core.js";
 import { migration0003Provenance } from "../../migrations/0003_provenance.js";
 import { migration0004Claims } from "../../migrations/0004_claims.js";
 import { migration0005LedgerFinalize } from "../../migrations/0005_ledger_finalize.js";
+import { migration0006WorkflowIdempotency } from "../../migrations/0006_workflow_idempotency.js";
 
 /**
  * The schema-migration heads THIS binary understands (§8 compatibility check). A
@@ -58,6 +59,10 @@ const KNOWN_SCHEMA_HEADS: ReadonlySet<string> = new Set([
   migration0003Provenance.id,
   migration0004Claims.id,
   migration0005LedgerFinalize.id,
+  // The Task 2.5 feature migration (registered by the workflows layer at store-open):
+  // once applied, it becomes the schema head, so a backup stamped with it must be
+  // recognized as a KNOWN (not future/unknown) schema.
+  migration0006WorkflowIdempotency.id,
 ]);
 
 /**

@@ -82,6 +82,7 @@ export {
   payloadHashOf,
   nextDbEventSeq,
   latestRunSeq,
+  LedgerAssertionError,
   DB_EVENT_SEQ_BASE,
 } from "./ledger/intents.js";
 export type {
@@ -90,6 +91,7 @@ export type {
   AuditIntentRow,
   AllocatedIntent,
   LedgerStatement,
+  LedgerAssertion,
 } from "./ledger/intents.js";
 export { reconcileInterruptedRuns } from "./ledger/reconcile.js";
 export type { ReconcileOptions, ReconcileReport } from "./ledger/reconcile.js";
@@ -131,6 +133,9 @@ export { migration0001Core, CORE_DDL } from "../migrations/0001_core.js";
 export { migration0003Provenance, PROVENANCE_DDL } from "../migrations/0003_provenance.js";
 export { migration0004Claims, CLAIMS_DDL } from "../migrations/0004_claims.js";
 export { migration0005LedgerFinalize, LEDGER_FINALIZE_DDL } from "../migrations/0005_ledger_finalize.js";
+// Feature migration (Task 2.5) — NOT in openStore's default retained set; the
+// workflows layer registers it at store-open (see 0006's header / round finding #3).
+export { migration0006WorkflowIdempotency, WORKFLOW_IDEMPOTENCY_DDL } from "../migrations/0006_workflow_idempotency.js";
 
 export { ProvenanceRepo, captureId } from "./repos/provenance.js";
 export type {

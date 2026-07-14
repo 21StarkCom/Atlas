@@ -21,6 +21,7 @@
   "dependencies": {
     "@atlas/broker": "workspace:*",
     "@atlas/contracts": "workspace:*",
+    "@atlas/git": "workspace:*",
     "@atlas/scan": "workspace:*",
     "@atlas/sources": "workspace:*",
     "@atlas/sqlite-store": "workspace:*",
