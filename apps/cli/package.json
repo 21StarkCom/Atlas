@@ -23,6 +23,7 @@
     "@atlas/contracts": "workspace:*",
     "@atlas/git": "workspace:*",
     "@atlas/jobs": "workspace:*",
+    "@atlas/lancedb-index": "workspace:*",
     "@atlas/models": "workspace:*",
     "@atlas/scan": "workspace:*",
     "@atlas/sources": "workspace:*",
@@ -32,6 +33,7 @@
   },
   "devDependencies": {
     "@atlas/testing": "workspace:*",
+    "@lancedb/lancedb": "catalog:",
     "@types/node": "catalog:",
     "ajv": "catalog:",
     "typescript": "catalog:",

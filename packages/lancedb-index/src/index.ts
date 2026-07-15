@@ -68,6 +68,16 @@ export {
   retrieveActiveChunks,
 } from "./retrieval-filter.js";
 
+// Hybrid search — the statistical (FTS + vector) layers with the FTS-maturity
+// fallback isolated here (Task 3.3, retrieval-index-contract §5/§6).
+export {
+  type StatLayer,
+  type ChunkHit,
+  type SearchLayersInput,
+  type SearchLayersResult,
+  searchLayers,
+} from "./search.js";
+
 export {
   type ActivationStore,
   type Embedder,
