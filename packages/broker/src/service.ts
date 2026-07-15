@@ -24,6 +24,7 @@ import {
   type RefAdvanceRequest,
   type RefAdvanceResult,
   type SourceCaptureRequest,
+  type SignAndSourceCaptureRequest,
 } from "./refs.js";
 
 /** The audit-attestation keypair the broker uses to sign the WORM anchor (§4). */
@@ -182,6 +183,32 @@ export class BrokerService {
   integrateSourceCapture(r: SourceCaptureRequest): Promise<RefAdvanceResult> {
     return this.runExclusive(async () => {
       const res = await this.writer.integrateSourceCapture(r);
+      await this.refreshCanonicalTip();
+      return res;
+    });
+  }
+
+  /**
+   * Sign a capture's `run.integrated` event with the broker-only attestation key
+   * and integrate it (Tier-1 CAS) — the unprivileged-CLI capture path (D-review
+   * defect #2). The CLI submits the VALIDATED UNSIGNED event; the broker fills
+   * `prevAuditHead`, signs, and runs the same scope-checked fast-forward as
+   * {@link integrateSourceCapture}, all under the single mutation lock so the
+   * signed `prevAuditHead` is the head the append observes. The attestation
+   * private key never leaves this process. Idempotent on `(runId, seq)` when the
+   * capture already integrated (the audit append replays), and a genuine re-drive
+   * whose canonical already advanced surfaces `broker.cas_failed` (the caller's
+   * reconciler owns forward completion, never a re-integration).
+   */
+  signAndIntegrateSourceCapture(r: SignAndSourceCaptureRequest): Promise<RefAdvanceResult> {
+    return this.runExclusive(async () => {
+      const signed = await this.audit.signCanonicalInstalling(r.event, this.attestationPrivateKey);
+      const res = await this.writer.integrateSourceCapture({
+        captureCommit: r.captureCommit,
+        expectedBase: r.expectedBase,
+        manifest: r.manifest,
+        auditEvent: signed,
+      });
       await this.refreshCanonicalTip();
       return res;
     });

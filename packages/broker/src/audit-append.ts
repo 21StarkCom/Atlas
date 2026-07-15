@@ -396,6 +396,45 @@ export class AuditLog {
   }
 
   /**
+   * BROKER-OWNED signing for a CANONICAL-INSTALLING event, WITHOUT appending.
+   *
+   * The protected-ref path (`integrateSourceCapture` / a canonical
+   * `advanceProtectedRef`) is the ONLY place a `run.integrated`/`run.rolled_back`
+   * event may originate (see {@link CANONICAL_INSTALLING_KINDS}), because only it
+   * observes the ref move it asserts. That path re-verifies + appends the event
+   * itself under CAS, so this helper only fills `prevAuditHead` from the live head
+   * and signs with the broker-only attestation key — it deliberately does NOT run
+   * the {@link signAndAppend} kind-gate (which forbids installing kinds outside a
+   * ref move) and does NOT append. Callers MUST invoke it under the service
+   * mutation lock so the `prevAuditHead` it reads is the same head the subsequent
+   * `append` observes. Keeps the attestation private key broker-only (F4 / D-review
+   * defect #2 — the unprivileged CLI never signs a canonical-installing event).
+   */
+  async signCanonicalInstalling(
+    unsigned: Omit<AuditEvent, "prevAuditHead">,
+    privateKey: KeyObject,
+  ): Promise<SignedAuditEvent> {
+    await this.init();
+    if (!CANONICAL_INSTALLING_KINDS.has(unsigned.kind)) {
+      // This entry point exists ONLY for the installing kinds; a non-installing
+      // kind must go through `signAndAppend` (which appends), never here.
+      throw new BrokerRefusal(
+        "broker.bad_request",
+        `signCanonicalInstalling refuses non-installing kind "${unsigned.kind}"`,
+      );
+    }
+    const prevHead = await this.git.readRef(this.auditRef);
+    const candidate = { ...unsigned, prevAuditHead: prevHead ?? ZERO_OID };
+    const parsed = AuditEventSchema.safeParse(candidate);
+    if (!parsed.success) {
+      throw new BrokerRefusal("broker.bad_request", `invalid audit event: ${parsed.error.message}`);
+    }
+    const event = parsed.data;
+    const signature = signRaw(canonicalSerialize(event), privateKey);
+    return { event, signature, signerId: this.attestation.signerId };
+  }
+
+  /**
    * Append a signed audit event. Idempotent on (runId, seq) ONLY when the resub
    * carries byte-identical content; a same-key collision with different content is
    * refused. Requires the exact next sequence and a `prevAuditHead` matching the
