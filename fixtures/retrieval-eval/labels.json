@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "description": "Expected canonical note ids per query (Task 3.6). `runRetrievalEval` scores the retriever's ranked note ids against these: recall@10 (fraction of a query's relevant notes in the top-10) and MRR (reciprocal rank of the first relevant note). Gates graduation only (acceptance-thresholds.md §retrieval: recall@10 ≥ 0.85, MRR ≥ 0.7).",
+  "labels": {
+    "q-synthesis": ["research-synthesis-accessibility"],
+    "q-wcag": ["source-2026-07-11-wcag-notes"],
+    "q-interview": ["source-2026-07-11-interview"],
+    "q-analyst": ["person-analyst"]
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "description": "Labeled retrieval-eval query set over the `source-heavy` fixture vault (Task 3.6). Versioned so the eval is reproducible; grows on the graduation copy, never mutated in phase code (retrieval-index-contract §config). Each query pairs with fixtures/retrieval-eval/labels.json by `id`.",
+  "queries": [
+    { "id": "q-synthesis", "text": "accessibility automation research synthesis findings" },
+    { "id": "q-wcag", "text": "WCAG success criteria raw notes" },
+    { "id": "q-interview", "text": "analyst interview transcript raw capture" },
+    { "id": "q-analyst", "text": "who is the analyst persona" }
+  ]
+}
