@@ -19,3 +19,4 @@ import "./source.js";
 import "./note.js";
 import "./git-status.js";
 import "./git-cleanup.js";
+import "./query.js";

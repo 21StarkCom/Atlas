@@ -102,11 +102,21 @@ const INVARIANTS: readonly InvariantSpec[] = [
         AND e.verification = 'valid';`,
   },
   {
+    // The closed set of terminal audit-event types (plan §2.5 audit SSOT): the
+    // workflow terminals PLUS the read-class terminals `run.readonly` (an executed
+    // Tier-0 read — `inspect`/`status`/`query`, Task 1.9/3.4) and `run.projection`
+    // (an executed projection rebuild, Task 1.9/3.5). Cardinality is "each terminal
+    // event type exactly once per run". A `finalized` agent_run is therefore covered
+    // by ANY terminal event — including `run.readonly` (the audited-read shape
+    // `brain query` uses: a `finalized` retrieve run whose sole terminal is one
+    // `run.readonly`, no workflow install event). Real workflow runs still carry
+    // their own install/reject terminal, so recognizing the read-class kinds never
+    // weakens them.
     name: "audit-terminal-event-cardinality",
     tables: ["audit_events", "agent_runs"],
     sql: `SELECT run_id, 'duplicate:' || event_type AS issue
       FROM audit_events
-      WHERE event_type IN ('run.integrated','run.rejected','run.rolled_back','run.failed','run.cancelled')
+      WHERE event_type IN ('run.integrated','run.rejected','run.rolled_back','run.failed','run.cancelled','run.readonly','run.projection')
       GROUP BY run_id, event_type HAVING COUNT(*) > 1
       UNION ALL
       SELECT r.run_id, 'missing-terminal-event' AS issue
@@ -115,7 +125,7 @@ const INVARIANTS: readonly InvariantSpec[] = [
         AND NOT EXISTS (
           SELECT 1 FROM audit_events e
           WHERE e.run_id = r.run_id
-            AND e.event_type IN ('run.integrated','run.rejected','run.rolled_back','run.failed','run.cancelled'));`,
+            AND e.event_type IN ('run.integrated','run.rejected','run.rolled_back','run.failed','run.cancelled','run.readonly','run.projection'));`,
   },
 ];
 
