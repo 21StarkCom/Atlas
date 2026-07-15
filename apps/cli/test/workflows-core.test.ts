@@ -44,6 +44,8 @@ import {
   reconcileIdempotency,
   openWorkflowStore,
   sha256Canonical,
+  buildTerminalDetail,
+  parseTerminalAuditDetail,
   IllegalTransitionError,
   CheckpointCasError,
   IdempotencyKeyConflictError,
@@ -54,6 +56,8 @@ import {
   type IntegrationContext,
   type BrokerIntegration,
   type PlannedArtifacts,
+  type TerminalExtras,
+  type TerminalAuditDetail,
 } from "../src/workflows/index.js";
 import { runCli } from "../src/main.js";
 
@@ -1616,6 +1620,133 @@ describe("workflows-core: terminal audit payload field", () => {
         store.close();
       }
     }
+  });
+});
+
+// ── 3b2. terminal audit detail is a narrow, validated allowlist (findings #3/#4) ─
+
+describe("workflows-core: terminal audit detail is allowlisted + terminal-owned fields win", () => {
+  /**
+   * A single VALID allowlisted model-call audit record (the only permitted extra) —
+   * shaped to the SHARED SSOT `ModelCallAuditRecordSchema` (`@atlas/models`): a
+   * derived `mc_`+32-hex callId, a `sha256:` requestHash, an in-set operation/outcome,
+   * and non-negative INTEGER metrics. (A bogus hash/enum/metric is rejected — asserted
+   * in the strict-schema test below.)
+   */
+  const validRecord = {
+    callId: `mc_${"0".repeat(32)}`,
+    requestHash: `sha256:${"a".repeat(64)}`,
+    destination: "generativelanguage.googleapis.com",
+    provider: "gemini",
+    model: "gemini-3.5-flash",
+    operation: "generateText" as const,
+    inputTokens: 10,
+    outputTokens: 5,
+    costMicros: 15,
+    latencyMs: 42,
+    retries: 0,
+    outcome: "success" as const,
+  };
+
+  it("REJECTS arbitrary/raw fields (no prompts/responses/secrets reach the signed audit)", async () => {
+    const store = h.openStore();
+    try {
+      const handle = await startRun(depsWith(store), { operation: "ingest" });
+      await handle.checkpoint("planned", plannedArtifacts(handle.runId, h.mainSha()));
+      // A caller tries to smuggle raw payload into the signed audit + WORM anchor.
+      const rawExtras = { detail: { prompt: "leak me", response: "and me", apiKey: "sk-secret" } } as unknown as TerminalExtras;
+      await expect(handle.fail("planned", "boom", undefined, rawExtras)).rejects.toThrow(/terminal audit detail rejected/);
+      // Fail-closed BEFORE any write: no run.failed terminal, run still at planned.
+      expect(storedEventDetail(store, handle.runId, "run.failed")).toBeUndefined();
+      const status = (store.db.prepare(`SELECT status FROM agent_runs WHERE run_id = ?`).get(handle.runId) as { status: string }).status;
+      expect(status).toBe("planned");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("REJECTS a caller trying to set terminal-owned fields via detail (no falsification)", async () => {
+    const store = h.openStore();
+    try {
+      const handle = await startRun(depsWith(store), { operation: "ingest" });
+      await handle.checkpoint("planned", plannedArtifacts(handle.runId, h.mainSha()));
+      // The COLLISION attempt: a caller tries to falsify the terminal-owned fields
+      // (failedAt/reason) through detail — they are NOT in the allowlist, so it is
+      // rejected outright (belt) and, even if it weren't, terminal fields win (braces).
+      const collide = { detail: { modelCalls: [validRecord], failedAt: "integrated", reason: "FALSIFIED" } } as unknown as TerminalExtras;
+      await expect(handle.fail("planned", "real reason", undefined, collide)).rejects.toThrow(/terminal audit detail rejected/);
+      expect(storedEventDetail(store, handle.runId, "run.failed")).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
+
+  it("ACCEPTS the allowlisted modelCalls detail; terminal-owned fields stay authoritative", async () => {
+    const store = h.openStore();
+    try {
+      const handle = await startRun(depsWith(store), { operation: "ingest" });
+      await handle.checkpoint("planned", plannedArtifacts(handle.runId, h.mainSha()));
+      const extras: TerminalExtras = { detail: { modelCalls: [validRecord] } };
+      await handle.fail("planned", "plan-stale", undefined, extras);
+      const detail = storedEventDetail(store, handle.runId, "run.failed")!;
+      // The terminal-owned fields the ENGINE writes are authoritative + present…
+      expect(detail.failedAt).toBe("planned");
+      expect(detail.reason).toBe("plan-stale");
+      // …alongside the allowlisted extras (the merge preserves both).
+      expect(Array.isArray(detail.modelCalls)).toBe(true);
+      expect((detail.modelCalls as unknown[]).length).toBe(1);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("parseTerminalAuditDetail is strict (unknown key rejected; valid allowlist passes)", () => {
+    expect(() => parseTerminalAuditDetail({ modelCalls: [validRecord] })).not.toThrow();
+    expect(() => parseTerminalAuditDetail({})).not.toThrow();
+    expect(() => parseTerminalAuditDetail({ modelCalls: [{ ...validRecord, extra: "raw" }] })).toThrow(/terminal audit detail rejected/);
+    expect(() => parseTerminalAuditDetail({ prompt: "raw" })).toThrow(/terminal audit detail rejected/);
+  });
+
+  it("parseTerminalAuditDetail enforces the SHARED receipt contract (bad hashes/enums/metrics rejected)", () => {
+    // The schema is DERIVED from the @atlas/models / @atlas/broker receipt SSOT, so the
+    // engine independently enforces the FULL contract — not arbitrary strings/numbers
+    // (round-2 wing finding 3). Each mutation below must be rejected fail-closed.
+    const bad = (over: Record<string, unknown>): unknown => ({ modelCalls: [{ ...validRecord, ...over }] });
+    // Hashes: requestHash MUST be a `sha256:` digest; responseHash the same when present.
+    expect(() => parseTerminalAuditDetail(bad({ requestHash: "req-hash" }))).toThrow(/terminal audit detail rejected/);
+    expect(() => parseTerminalAuditDetail(bad({ responseHash: "not-a-digest" }))).toThrow(/terminal audit detail rejected/);
+    // callId MUST be the derived `mc_`+32-hex id, not an arbitrary string.
+    expect(() => parseTerminalAuditDetail(bad({ callId: "mc_test" }))).toThrow(/terminal audit detail rejected/);
+    // Enums: operation ∈ EGRESS_OPERATIONS, outcome ∈ TRANSMISSION_OUTCOMES,
+    // effectiveSensitivity ∈ SENSITIVITY_ORDER.
+    expect(() => parseTerminalAuditDetail(bad({ operation: "exfiltrate" }))).toThrow(/terminal audit detail rejected/);
+    expect(() => parseTerminalAuditDetail(bad({ outcome: "ok" }))).toThrow(/terminal audit detail rejected/);
+    expect(() => parseTerminalAuditDetail(bad({ effectiveSensitivity: "top-secret" }))).toThrow(/terminal audit detail rejected/);
+    // Metrics: non-negative INTEGERS only — a negative or fractional value is rejected.
+    expect(() => parseTerminalAuditDetail(bad({ inputTokens: -1 }))).toThrow(/terminal audit detail rejected/);
+    expect(() => parseTerminalAuditDetail(bad({ costMicros: 1.5 }))).toThrow(/terminal audit detail rejected/);
+    expect(() => parseTerminalAuditDetail(bad({ retries: 2.7 }))).toThrow(/terminal audit detail rejected/);
+    // Non-empty strings: destination/provider/model may not be blank.
+    expect(() => parseTerminalAuditDetail(bad({ destination: "" }))).toThrow(/terminal audit detail rejected/);
+    // The genuine allowlisted record (with the optional enum fields set validly) passes.
+    expect(() => parseTerminalAuditDetail(bad({ responseHash: `sha256:${"b".repeat(64)}`, outcome: "refused", reasonCode: "policy", effectiveSensitivity: "restricted" }))).not.toThrow();
+  });
+
+  it("buildTerminalDetail merges extras FIRST + terminal-owned fields LAST (finding #4 merge order)", () => {
+    // Directly guard the Object.assign ordering bug: even if a colliding key reached
+    // extraDetail (bypassing the schema), the terminal-owned fields MUST win.
+    const smuggled = { modelCalls: [], failedAt: "integrated", reason: "FALSIFIED" } as unknown as TerminalAuditDetail;
+    const failed = buildTerminalDetail("failed", "planned", "real reason", smuggled);
+    expect(failed.failedAt).toBe("planned"); // terminal wins, not "integrated"
+    expect(failed.reason).toBe("real reason"); // terminal wins, not "FALSIFIED"
+    const cancelled = buildTerminalDetail("cancelled", "patched", undefined, {});
+    expect(cancelled.cancelledAt).toBe("patched");
+    expect(cancelled.failedAt).toBeUndefined();
+    // rejected records only the reason (no failedAt/cancelledAt).
+    const rejected = buildTerminalDetail("rejected", "review-pending", "nope", {});
+    expect(rejected.reason).toBe("nope");
+    expect(rejected.failedAt).toBeUndefined();
+    expect(rejected.cancelledAt).toBeUndefined();
   });
 });
 

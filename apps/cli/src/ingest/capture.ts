@@ -36,10 +36,10 @@ import {
   newRunId,
   serializeContentId,
   serializeRenditionId,
+  type AuditEvent,
   type ContentId,
   type RenditionId,
   type RunManifest,
-  type SignedAuditEvent,
 } from "@atlas/contracts";
 import { captureId as deriveCaptureId, type Store, type LedgerBackupConfig } from "@atlas/sqlite-store";
 import type { AuditBroker } from "@atlas/sqlite-store";
@@ -307,20 +307,31 @@ function requestHash(command: string, path: string, contentId: ContentId): strin
   return sha256Canonical({ command, path, contentId: serializeContentId(contentId) });
 }
 
-/** A stable capture-run integrator built from a broker signer + the capture RPC. */
-export function makeCaptureIntegrator(opts: {
-  /** Broker-side signing of the unsigned `run.integrated` event (never CLI-held). */
-  sign: (event: IntegrationContext["event"]) => SignedAuditEvent | Promise<SignedAuditEvent>;
+/**
+ * A stable capture-run integrator for the BROKER-SIGNED `run.integrated` path. The
+ * `run.integrated` event is a canonical-installing kind ONLY the broker's
+ * protected-ref path may attest, so the CLI submits the UNSIGNED event and the broker
+ * fills `prevAuditHead` + signs it internally (DEFECT #2 — the CLI never holds the
+ * attestation key). The unsigned event is threaded through with its NATURAL type —
+ * {@link IntegrationContext.event} is already `Omit<AuditEvent, "prevAuditHead">`, the
+ * exact type the capture RPC expects — so there is NO `SignedAuditEvent` masquerade
+ * (round-3 finding #6: no `as unknown as SignedAuditEvent`/back cast around the RPC).
+ */
+export function makeBrokerSignedCaptureIntegrator(opts: {
+  /**
+   * The broker RPC that fills `prevAuditHead`, signs the unsigned event with the
+   * attestation key, scope-checks the capture, and fast-forwards canonical — all in
+   * one lock-held step. It carries the UNSIGNED event directly.
+   */
   integrateSourceCapture: (r: {
     captureCommit: string;
     expectedBase: string;
     manifest: RunManifest;
-    auditEvent: SignedAuditEvent;
+    event: Omit<AuditEvent, "prevAuditHead">;
   }) => Promise<{ newCommit: string; seq: number; auditHead: string; ref: string }>;
   now?: () => string;
 }): RunIntegrator {
   return async (ctx: IntegrationContext): Promise<BrokerIntegration> => {
-    const signed = await opts.sign(ctx.event);
     const manifest: RunManifest = {
       schemaVersion: 1,
       runId: ctx.runId,
@@ -333,7 +344,9 @@ export function makeCaptureIntegrator(opts: {
       captureCommit: ctx.commitSha,
       expectedBase: ctx.baseRef,
       manifest,
-      auditEvent: signed,
+      // `ctx.event` is `UnsignedAuditEvent` === `Omit<AuditEvent, "prevAuditHead">` —
+      // passed through with its real type; the broker signs it internally.
+      event: ctx.event,
     });
     return { canonicalRef: res.ref, canonicalSha: res.newCommit, seq: res.seq, auditHead: res.auditHead };
   };

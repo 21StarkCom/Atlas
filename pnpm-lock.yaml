@@ -56,6 +56,9 @@ importers:
       '@atlas/jobs':
         specifier: workspace:*
         version: link:../../packages/jobs
+      '@atlas/models':
+        specifier: workspace:*
+        version: link:../../packages/models
       '@atlas/scan':
         specifier: workspace:*
         version: link:../../packages/scan

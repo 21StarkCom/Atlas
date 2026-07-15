@@ -15,6 +15,7 @@
  * a re-drive writes it exactly once.
  */
 import { createHash } from "node:crypto";
+import { z } from "zod";
 import {
   finalizeLedgerWrite,
   type Store,
@@ -23,7 +24,7 @@ import {
   type RunContext,
   type FinalizeResult,
 } from "@atlas/sqlite-store";
-import type { ModelCallReceipt } from "@atlas/broker";
+import { ModelCallReceiptSchema, type ModelCallReceipt } from "@atlas/broker";
 
 /**
  * Map the IPC operation to the `model_calls.operation` domain (data dictionary:
@@ -123,24 +124,24 @@ export async function persistModelCalls(
   return finalizeLedgerWrite(store, broker, run);
 }
 
+/**
+ * The allowlisted per-call audit record schema — DERIVED from the SSOT
+ * {@link ModelCallReceiptSchema} (`@atlas/broker`) so it can never drift from the
+ * receipt contract. The audit record drops the receipt's `runId` (folded into the
+ * deterministic `callId`) and adds `callId`; EVERY carried field keeps the receipt's
+ * strict validation — `sha256:` request/response hashes, the operation/outcome/
+ * sensitivity ENUMS, non-empty destination/provider/model, and NON-NEGATIVE INTEGER
+ * metrics (tokens/cost/latency/retries). `.strict()` rejects any non-allowlisted key.
+ * This is the SSOT any consumer (e.g. the workflow terminal-audit-detail allowlist)
+ * MUST share rather than hand-copy, so hashes/enums/metrics stay validated everywhere.
+ */
+export const ModelCallAuditRecordSchema = ModelCallReceiptSchema
+  .omit({ runId: true })
+  .extend({ callId: z.string().regex(/^mc_[0-9a-f]{32}$/, 'must be a derived "mc_" model-call id') })
+  .strict();
+
 /** The allowlisted per-call audit record folded into the run's terminal event detail. */
-export interface ModelCallAuditRecord {
-  readonly callId: string;
-  readonly requestHash: string;
-  readonly responseHash?: string;
-  readonly destination: string;
-  readonly provider: string;
-  readonly model: string;
-  readonly operation: string;
-  readonly inputTokens: number;
-  readonly outputTokens: number;
-  readonly costMicros: number;
-  readonly latencyMs: number;
-  readonly retries: number;
-  readonly outcome: string;
-  readonly reasonCode?: string;
-  readonly effectiveSensitivity?: string;
-}
+export type ModelCallAuditRecord = z.infer<typeof ModelCallAuditRecordSchema>;
 
 /** Map a receipt to its allowlisted audit record (never a raw payload). */
 export function modelCallAuditRecord(receipt: ModelCallReceipt): ModelCallAuditRecord {

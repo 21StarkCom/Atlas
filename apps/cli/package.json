@@ -23,6 +23,7 @@
     "@atlas/contracts": "workspace:*",
     "@atlas/git": "workspace:*",
     "@atlas/jobs": "workspace:*",
+    "@atlas/models": "workspace:*",
     "@atlas/scan": "workspace:*",
     "@atlas/sources": "workspace:*",
     "@atlas/sqlite-store": "workspace:*",
