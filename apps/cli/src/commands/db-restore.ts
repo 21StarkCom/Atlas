@@ -30,6 +30,7 @@ import { readVault } from "../vault/reader.js";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { backupConfig, backupConfigForKeyId, ledgerDbPath } from "./backup-config.js";
+import { rebuildIndexFromVault } from "./index-ops.js";
 
 /** Map a bundle-integrity failure to the committed db-restore error class (exit 1). */
 function backupIntegrityCliError(backupRef: string, e: unknown): CliError {
@@ -178,6 +179,20 @@ async function dbRestore(ctx: RunContext): Promise<number> {
         const snapshot = await readVault(ctx.config.config);
         rebuildProjections(hookCtx.db, snapshot);
         hooksRun.push({ hook: "projection-rebuild", ok: true });
+      });
+      // Phase 3 (R1-F1): rebuild the LanceDB retrieval index after the projections
+      // re-land, so `db restore` ends with a consistent index. BEST-EFFORT — a restore
+      // is data recovery and must NOT be rolled back because the egress broker is down
+      // or the index is unconfigured; the index is disposable derived state and can be
+      // rebuilt later via `brain index rebuild`. Runs AFTER the projection rebuild.
+      registerPostRestoreRebuild(async (hookCtx) => {
+        try {
+          const report = await rebuildIndexFromVault(ctx, hookCtx.db, ctx.runId);
+          hooksRun.push({ hook: "index-rebuild", ok: report.unresolved.length === 0 });
+        } catch (e) {
+          ctx.log.info("db.restore.index-rebuild-skipped", { reason: e instanceof Error ? e.message : String(e) });
+          hooksRun.push({ hook: "index-rebuild", ok: false });
+        }
       });
 
       const store = openStore({ path: ledgerDbPath(ctx) });

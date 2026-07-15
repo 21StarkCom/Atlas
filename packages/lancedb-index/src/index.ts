@@ -95,3 +95,32 @@ export {
   indexNote,
   reconcileIndex,
 } from "./activate.js";
+
+export { type GenerationPair, distinctGenerationPairs } from "./writer.js";
+
+// Index maintenance ops (Task 3.5): staleness detection, SQLite↔LanceDB verify, and
+// the reconcile-backed repair/rebuild convergence (retrieval-index-contract §3/§4).
+export {
+  type StalenessTrigger,
+  type NoteStaleness,
+  type NoteFenceInput,
+  computeStaleness,
+} from "./staleness.js";
+
+export {
+  type DivergenceKind,
+  type Divergence,
+  type IndexVerifyReport,
+  type IndexVerifyInput,
+  indexVerify,
+} from "./verify.js";
+
+export {
+  type RepairAction,
+  type RepairedNote,
+  type UnresolvedNote,
+  type IndexRepairReport,
+  type IndexRebuildReport,
+  indexRepair,
+  indexRebuild,
+} from "./repair.js";
