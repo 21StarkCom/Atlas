@@ -23,13 +23,29 @@ interface MutableSection {
 }
 
 /**
+ * Reserved path segment for a heading with empty text (`#`, `## `, `### ###`).
+ * An empty heading would otherwise encode to `""`, which (a) collides with the
+ * note preamble/root path `""` and (b) collapses a chain of nested empty
+ * headings onto a single `""` path (a truthy-parent-path join skips the empty
+ * segment). A real heading can never encode to `%00`: any literal `%` in its
+ * text becomes `%25`, so the NUL escape is unreachable from non-empty input.
+ * This keeps every emitted section path unique AND non-empty — leaving `""`
+ * as the preamble's sole, unambiguous path (retrieval-index-contract §1.6:
+ * `chunkId = f(generationId, sectionPath, ordinal)` relies on path uniqueness,
+ * with `ordinal` section-local, not a note-wide disambiguator).
+ */
+const EMPTY_HEADING_SEGMENT = "%00";
+
+/**
  * Encode a heading into a path segment that cannot be confused with the `/`
  * separator. A heading containing a literal slash (e.g. `A/B`) would otherwise
  * produce the same selector as nested headings `A` then `B`, making section
  * selectors ambiguous. We percent-encode `%` then `/` so the mapping is
- * reversible and every segment is unambiguous.
+ * reversible and every segment is unambiguous. Empty headings map to the
+ * reserved {@link EMPTY_HEADING_SEGMENT} so no section path is ever empty.
  */
 function encodeSegment(heading: string): string {
+  if (heading.length === 0) return EMPTY_HEADING_SEGMENT;
   return heading.replace(/%/g, "%25").replace(/\//g, "%2F");
 }
 

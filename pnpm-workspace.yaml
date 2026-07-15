@@ -6,12 +6,23 @@ packages:
 allowBuilds:
   better-sqlite3: true
   esbuild: true
+  # @lancedb/lancedb's optional embedding-function natives (onnxruntime/sharp/protobufjs)
+  # are never invoked here — this package only builds the Arrow table schema and uses the
+  # core lancedb prebuilt binary — so their post-install build scripts stay disabled.
+  onnxruntime-node: false
+  protobufjs: false
+  sharp: false
 
 # Single source of dependency versions across the monorepo (referenced as `catalog:`).
 catalog:
   "@types/node": ^24.0.0
   "@types/better-sqlite3": ^7.6.11
   ajv: ^8.17.1
+  # LanceDB retrieval index (packages/lancedb-index). apache-arrow is pinned to the
+  # top of @lancedb/lancedb 0.31's peer range (>=15 <=18.1) so the Arrow Schema this
+  # package builds is the exact type LanceDB's node binding consumes.
+  "@lancedb/lancedb": ^0.31.0
+  apache-arrow: 18.1.0
   better-sqlite3: ^12.2.0
   # EXACT pin (no range): parse5 composes into `extractorVersion` (packages/sources), so a
   # later 8.x resolution must never change HTML extraction without a conscious version bump.

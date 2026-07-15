@@ -192,6 +192,24 @@ describe("ATX heading selectors (CommonMark §4.2)", () => {
     expect(lvl2[0]!.children.map((c) => c.heading)).toEqual([""]);
   });
 
+  it("gives empty headings unique, non-empty paths (never colliding with the root/preamble \"\")", () => {
+    // Empty headings encode to the reserved `%00` segment, so a chain of nested
+    // empties yields distinct, non-empty paths instead of collapsing onto "".
+    // This is what lets the retrieval chunk-id (f(gen, sectionPath, ordinal),
+    // ordinal section-local) stay collision-free — the preamble is the sole "".
+    const tree = buildSectionTree("#\n## \n### ###\n");
+    expect(tree.path).toBe(""); // the root/preamble keeps the empty path…
+    const lvl1 = tree.children[0]!;
+    const lvl2 = lvl1.children[0]!;
+    const lvl3 = lvl2.children[0]!;
+    expect([lvl1.path, lvl2.path, lvl3.path]).toEqual(["%00", "%00/%00", "%00/%00/%00"]);
+    // Two sibling empty top-level headings disambiguate like any other collision.
+    const sibs = buildSectionTree("#\n#\n");
+    expect(sibs.children.map((c) => c.path)).toEqual(["%00", "%00-2"]);
+    // A real heading can never encode to the reserved segment (its `%` escapes).
+    expect(buildSectionTree("# %00\n").children[0]!.path).toBe("%2500");
+  });
+
   it("strips a whitespace-preceded closing hash run but keeps attached hashes", () => {
     // Closing sequence must be preceded by whitespace.
     expect(buildSectionTree("# foo ###\n").children[0]!.heading).toBe("foo");
