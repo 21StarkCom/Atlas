@@ -82,6 +82,21 @@ export {
 } from "./refresh.js";
 
 export {
+  decideApprove,
+  canReject,
+  type ApproveDecision,
+  type ApproveInput,
+} from "./approve.js";
+
+export {
+  approveRun,
+  rejectRun,
+  ApproveError,
+  type ApproveDeps,
+  type ApproveOutcome,
+} from "./approve-run.js";
+
+export {
   enqueueReverification,
   classifyReanchor,
   reverifyKey,
