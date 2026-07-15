@@ -15,7 +15,13 @@
     "build": "tsc -p tsconfig.json",
     "test": "vitest run --passWithNoTests"
   },
+  "dependencies": {
+    "@atlas/contracts": "workspace:*",
+    "apache-arrow": "catalog:"
+  },
   "devDependencies": {
+    "@lancedb/lancedb": "catalog:",
+    "@types/node": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
   }
