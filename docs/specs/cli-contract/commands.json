@@ -216,7 +216,7 @@
       "phase": 2,
       "idempotency": "key-accepting",
       "privilege": "shared",
-      "implemented": false
+      "implemented": true
     },
     {
       "name": "inspect",
@@ -336,7 +336,7 @@
       "phase": 2,
       "idempotency": "key-accepting",
       "privilege": "shared",
-      "implemented": false
+      "implemented": true
     },
     {
       "name": "source list",

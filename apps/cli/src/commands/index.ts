@@ -13,3 +13,5 @@ import "./inspect.js";
 import "./doctor.js";
 import "./status.js";
 import "./jobs.js";
+import "./ingest.js";
+import "./source-add.js";

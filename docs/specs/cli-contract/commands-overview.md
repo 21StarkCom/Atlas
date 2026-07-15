@@ -19,7 +19,7 @@ Registry version: **1** · Commands: **49**
 | 1 | `status` | none | shared | yes | `docs/specs/cli-contract/status.schema.json` |
 | 2 | `git cleanup` | intrinsic | shared | no | `docs/specs/cli-contract/git-cleanup.schema.json` |
 | 2 | `git status` | none | shared | no | `docs/specs/cli-contract/git-status.schema.json` |
-| 2 | `ingest` | key-accepting | shared | no | `docs/specs/cli-contract/ingest.schema.json` |
+| 2 | `ingest` | key-accepting | shared | yes | `docs/specs/cli-contract/ingest.schema.json` |
 | 2 | `jobs cancel` | key-accepting | shared | yes | `docs/specs/cli-contract/jobs-cancel.schema.json` |
 | 2 | `jobs list` | none | shared | yes | `docs/specs/cli-contract/jobs-list.schema.json` |
 | 2 | `jobs retry` | key-accepting | shared | yes | `docs/specs/cli-contract/jobs-retry.schema.json` |
@@ -27,7 +27,7 @@ Registry version: **1** · Commands: **49**
 | 2 | `note history` | none | shared | no | `docs/specs/cli-contract/note-history.schema.json` |
 | 2 | `note related` | none | shared | no | `docs/specs/cli-contract/note-related.schema.json` |
 | 2 | `note show` | none | shared | no | `docs/specs/cli-contract/note-show.schema.json` |
-| 2 | `source add` | key-accepting | shared | no | `docs/specs/cli-contract/source-add.schema.json` |
+| 2 | `source add` | key-accepting | shared | yes | `docs/specs/cli-contract/source-add.schema.json` |
 | 2 | `source list` | none | shared | no | `docs/specs/cli-contract/source-list.schema.json` |
 | 2 | `source show` | none | shared | no | `docs/specs/cli-contract/source-show.schema.json` |
 | 2 | `source trust show` | none | shared | no | `docs/specs/cli-contract/source-trust-show.schema.json` |

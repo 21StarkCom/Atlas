@@ -25,7 +25,7 @@ import {
 } from "./protocol.js";
 import type { AppendResult } from "./audit-append.js";
 import type { PrivilegedOpDescriptor } from "./authorize.js";
-import type { RefAdvanceRequest, RefAdvanceResult, SourceCaptureRequest } from "./refs.js";
+import type { RefAdvanceRequest, RefAdvanceResult, SourceCaptureRequest, SignAndSourceCaptureRequest } from "./refs.js";
 import type { PrivilegedOpResult } from "./service.js";
 
 /** The read-only audit-chain health verdict returned by {@link BrokerClient.getAuditChainStatus}. */
@@ -152,6 +152,16 @@ export class BrokerClient {
   /** Integrate a Tier-1 source capture (sources/** + manifest only). */
   integrateSourceCapture(r: SourceCaptureRequest): Promise<RefAdvanceResult> {
     return this.call("integrateSourceCapture", { ...r, auditEvent: encodeAuditEvent(r.auditEvent) });
+  }
+
+  /**
+   * Integrate a Tier-1 source capture whose `run.integrated` event the BROKER
+   * signs (D-review defect #2). The CLI submits the unsigned event (no attestation
+   * key held); the broker fills `prevAuditHead`, signs with the attestation key,
+   * scope-checks the capture commit, and fast-forwards canonical under CAS.
+   */
+  signAndIntegrateSourceCapture(r: SignAndSourceCaptureRequest): Promise<RefAdvanceResult> {
+    return this.call("signAndIntegrateSourceCapture", r);
   }
 
   /** Mint an authorization challenge for a privileged op. */

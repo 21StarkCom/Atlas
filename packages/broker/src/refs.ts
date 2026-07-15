@@ -17,6 +17,7 @@
 import {
   type RunManifest,
   type SignedAuditEvent,
+  type AuditEvent,
   type AuthorizationResponse,
   type IntendedEffect,
 } from "@atlas/contracts";
@@ -74,6 +75,21 @@ export interface SourceCaptureRequest {
   readonly expectedBase: string;
   readonly manifest: RunManifest;
   readonly auditEvent: SignedAuditEvent;
+}
+
+/**
+ * A request to integrate a Tier-1 source capture whose `run.integrated` event the
+ * broker signs INTERNALLY (D-review defect #2). The unprivileged CLI cannot hold
+ * the audit-attestation key and `signAndAppendAuditEvent` refuses canonical-
+ * installing kinds, so an applied capture submits the UNSIGNED event here and the
+ * broker's protected-ref path fills `prevAuditHead`, signs, and integrates in one
+ * lock-held step.
+ */
+export interface SignAndSourceCaptureRequest {
+  readonly captureCommit: string;
+  readonly expectedBase: string;
+  readonly manifest: RunManifest;
+  readonly event: Omit<AuditEvent, "prevAuditHead">;
 }
 
 /** The result of a successful protected-ref advance. */
