@@ -15,3 +15,7 @@ import "./status.js";
 import "./jobs.js";
 import "./ingest.js";
 import "./source-add.js";
+import "./source.js";
+import "./note.js";
+import "./git-status.js";
+import "./git-cleanup.js";

@@ -7,7 +7,7 @@
  * impossible here — see `refs.ts` for the guarded write surface.
  */
 
-export { openRepo, type Repo } from "./repo.js";
+export { openRepo, type Repo, type WorktreeEntry } from "./repo.js";
 export { type Worktree } from "./worktree.js";
 export {
   AGENT_REF_PREFIX,
@@ -17,6 +17,7 @@ export {
   assertAgentRef,
   readRef,
   updateAgentRef,
+  deleteAgentRef,
   attachHeadToAgentRef,
 } from "./refs.js";
 export {

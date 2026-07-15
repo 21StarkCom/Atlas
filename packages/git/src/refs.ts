@@ -85,6 +85,19 @@ export async function updateAgentRef(dir: string, ref: string, targetSha: string
 }
 
 /**
+ * Delete an agent ref via `git update-ref -d`. GUARDED: throws for any ref
+ * outside `refs/agent/`, so `git cleanup` (Task 2.9) can prune a terminal run's
+ * abandoned branch without ever being able to delete a protected ref. A ref that
+ * does not exist is a no-op success (`update-ref -d` is convergent), which keeps
+ * cleanup intrinsically idempotent. This is a guarded write call site — it MUST
+ * stay co-located with {@link assertAgentRef} for the no-protected-write audit.
+ */
+export async function deleteAgentRef(dir: string, ref: string): Promise<void> {
+  assertAgentRef(ref);
+  await runGit(dir, ["update-ref", "-d", ref]);
+}
+
+/**
  * Attach a worktree's `HEAD` to an agent ref via `git symbolic-ref`, so commits
  * made in that worktree advance `refs/agent/<runId>` (a ref checked out into a
  * worktree is otherwise detached, since it lives outside `refs/heads/`).
