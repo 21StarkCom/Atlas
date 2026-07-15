@@ -24,6 +24,7 @@ export const AUDIT_EVENT_KINDS = [
   "run.started",
   "run.planned",
   "run.integrated",
+  "run.refreshed",
   "run.rejected",
   "run.rolled_back",
   "run.failed",

@@ -173,7 +173,7 @@ CREATE TABLE audit_events (
   seq           INTEGER NOT NULL PRIMARY KEY,             -- global monotonic allocation
   run_id        TEXT    NOT NULL,                         -- scalar run id; NO FK (survives rebuild)
   event_type    TEXT    NOT NULL CHECK (event_type IN (
-                  'run.started', 'run.planned', 'run.integrated', 'run.rejected',
+                  'run.started', 'run.planned', 'run.integrated', 'run.refreshed', 'run.rejected',
                   'run.rolled_back', 'run.failed', 'run.cancelled', 'run.readonly', 'run.projection',
                   'db.backup', 'db.restore', 'db.force_unblock')),
   payload_hash  TEXT    NOT NULL,                         -- hash of the canonical allowlisted-metadata payload

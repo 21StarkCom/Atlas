@@ -75,6 +75,13 @@ export {
 } from "./checkpoints.js";
 
 export {
+  refreshRun,
+  RefreshError,
+  type SynthesisRefreshDeps,
+  type RefreshResult,
+} from "./refresh.js";
+
+export {
   beginIdempotent,
   completeIdempotent,
   completeIdempotentStatement,
