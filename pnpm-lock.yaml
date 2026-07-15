@@ -187,13 +187,19 @@ importers:
       '@atlas/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@lancedb/lancedb':
+        specifier: 'catalog:'
+        version: 0.31.0(apache-arrow@18.1.0)
       apache-arrow:
         specifier: 'catalog:'
         version: 18.1.0
     devDependencies:
-      '@lancedb/lancedb':
-        specifier: 'catalog:'
-        version: 0.31.0(apache-arrow@18.1.0)
+      '@atlas/models':
+        specifier: workspace:*
+        version: link:../models
+      '@atlas/sqlite-store':
+        specifier: workspace:*
+        version: link:../sqlite-store
       '@types/node':
         specifier: 'catalog:'
         version: 24.13.3

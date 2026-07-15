@@ -15,6 +15,7 @@ export {
   type IndexingConfig,
   generationId,
   generationIdFor,
+  indexingConfigKey,
   chunkId,
 } from "./generation.js";
 
@@ -29,3 +30,58 @@ export {
   searchChunkArrowSchema,
   toSearchChunk,
 } from "./schema.js";
+
+// Fenced write path (Task 3.2): LanceDB writer + verify-complete, retirement +
+// orphan compaction, and the `indexNote`/`reconcileIndex` orchestrators.
+export {
+  type LanceConnection,
+  type SearchTable,
+  openSearchTable,
+  assembleRows,
+  writeGeneration,
+  readGenerationChunkIds,
+  readGenerationRows,
+  verifyComplete,
+  countGenerationChunks,
+  sqlQuote,
+} from "./writer.js";
+
+export { retireSupersededGenerations, compactOrphans } from "./retire.js";
+
+export {
+  type IndexMaintenanceLock,
+  createIndexMaintenanceLock,
+  tableMaintenanceLock,
+  indexMaintenanceLockPath,
+  INDEX_MAINTENANCE_LOCKFILE,
+  NOOP_INDEX_LOCK,
+} from "./lock.js";
+
+export {
+  type EmbedClient,
+  embedderFromClient,
+  asProviderFault,
+} from "./embedder.js";
+
+export {
+  type ActiveGenerationSource,
+  retrieveActiveChunks,
+} from "./retrieval-filter.js";
+
+export {
+  type ActivationStore,
+  type Embedder,
+  type EmbedOutcome,
+  type IndexDeps,
+  type IndexHooks,
+  type IndexOutcome,
+  type IndexedOutcome,
+  type UnchangedOutcome,
+  type EmptyOutcome,
+  type SupersededOutcome,
+  type EmbeddingFailedOutcome,
+  type WriteIncompleteOutcome,
+  type IndexReconcileReport,
+  indexNote,
+  reconcileIndex,
+} from "./activate.js";

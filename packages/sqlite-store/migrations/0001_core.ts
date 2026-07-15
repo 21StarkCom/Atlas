@@ -26,7 +26,7 @@ export const CORE_DDL = `CREATE TABLE notes (
   file_path          TEXT    NOT NULL,                    -- vault-relative path
   content_hash       TEXT    NOT NULL,                    -- sha256 of canonical note bytes
   active_generation  INTEGER NOT NULL DEFAULT 0,          -- monotonic fence counter for the needs-index scan (§6)
-  active_generation_id TEXT,                              -- composite LanceDB SearchChunk.generationId this note's retrieval is fenced to; NULL until first indexed; set by Store.activateGeneration (Task 3.2). Provisioned here in 0001_core because Phase 3 registers no migration.
+  active_generation_id TEXT,                              -- composite LanceDB SearchChunk.generationId this note's retrieval is fenced to; NULL until first indexed; set by Store.activateGeneration (Task 3.2). Provisioned here in 0001_core (the retained notes projection); Phase 3's only migration, 0008_index_config_revision, adds the separate config-adoption log, not this column.
   created            TEXT    NOT NULL,
   updated            TEXT    NOT NULL,
   quarantined        INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1)),

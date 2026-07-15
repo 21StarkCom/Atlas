@@ -184,6 +184,7 @@ no-op and **never drops tables on downgrade**.
 | `0002_jobs` | `jobs` (registered into sqlite-store's runner) | 2 PR-B | `jobs`, `job_attempts` |
 | `0003_provenance` | `sqlite-store` | 2 **PR-A (retained)** | `content_blobs`, `source_captures`, `source_renditions`, `note_sources` |
 | `0004_claims` | `sqlite-store` | 4 **PR-A (retained)** | `claims`, `claim_evidence` |
+| `0008_index_config_revision` | `sqlite-store` (feature migration, registered via `registerGenerationMigration`) | 3 (Task 3.2) | `index_config_revisions` |
 | (runner bootstrap) | `sqlite-store` | 1 | `db_schema_migrations` (created by the runner itself, not a migration) |
 
 `db rebuild` replaces **only** the vault-projection tables that exist at that point
@@ -1036,14 +1037,24 @@ answers with packed context; index maintenance commands exist.
 2. **Task 3.2 — Embedding + index write path (fenced)**
    - What: embed chunks via `models.embed` (through the egress broker; batch; D7 dimensions from
      config), write chunks tagged with their generation, then the SQLite CAS activation
-     (`notes.active_generation` flips iff `contentHash` unchanged), then independently-retryable
-     retirement + `indexed` marker — the spec's reconciliation pipeline, each step crash-safe.
-   - Files: `packages/lancedb-index/src/{writer,activate,retire}.ts`,
-     `packages/sqlite-store/src/repos/generation.ts` (adds the `activateGeneration` CAS repo method
-     to sqlite-store — SQLite is the activation authority),
+     (`notes.active_generation_id` flips iff `contentHash` unchanged **and** the worker's config
+     revision is not superseded — carry-forward #1), then independently-retryable retirement +
+     `indexed` marker — the spec's reconciliation pipeline, each step crash-safe. Retirement +
+     orphan compaction run under an index-maintenance exclusion lock so they cannot race activation.
+   - Files: `packages/lancedb-index/src/{writer,activate,retire,lock,embedder,retrieval-filter}.ts`,
+     `packages/sqlite-store/src/repos/generation.ts` (adds the `activateGeneration` + `tombstoneGeneration`
+     CAS + the durable `adoptConfig` adoption log to sqlite-store — SQLite is the activation authority),
+     `packages/sqlite-store/migrations/0008_index_config_revision.ts` (the durable config-adoption-log
+     table — a feature migration, registered via `registerGenerationMigration`),
      `packages/lancedb-index/test/generation-fencing.test.ts`.
    - Interfaces — **Consumes:** 2.8 (`embed`), 1.4 (activation CAS lives in sqlite-store repo API:
-     `Store.activateGeneration(noteId: string, gen: GenerationId, expectedContentHash: string): boolean`),
+     `Store.activateGeneration(noteId: string, gen: GenerationId, expectedContentHash: string, configKey: string): boolean`
+     — the fourth arg is the generation/config fence, carry-forward #1; a `content_hash`-only CAS
+     cannot fence a stale-config/same-content worker. Activation consumes the config **identity**
+     (`configKey`), never a caller-supplied integer: SQLite resolves + owns the fence epoch via an
+     append-only **adoption log** (`Store.adoptConfig(configKey)`, `0008_index_config_revision`), so it
+     can neither be inflated nor under-shot, and re-adoption/rollback mints a fresh higher epoch (adoption
+     recency drives the fence). `Store.tombstoneGeneration(...)` clears a note that lost all prose),
      3.1. **Produces:**
      `indexNote(note: ParsedNote, deps: IndexDeps): Promise<IndexOutcome>` ·
      `reconcileIndex(deps: IndexDeps): Promise<IndexReconcileReport>` (retirement + markers).

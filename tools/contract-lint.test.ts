@@ -709,15 +709,19 @@ describe("Phase-3 retrieval/index contract (Task 3.0)", () => {
     expect(rc.activation.verifyBeforeActivate).toBe(true);
   });
 
-  it("activation uses the integer fence counter + composite join key columns with atomic CAS (§2)", () => {
-    // active_generation is the integer fence counter; active_generation_id is the LanceDB join key
-    // AND the retrieval filter column — matching the authoritative sqlite-data-dictionary.
+  it("activation uses the integer config-revision fence + composite join key columns with atomic CAS (§2)", () => {
+    // active_generation carries the monotonic config-revision fence; active_generation_id is the
+    // LanceDB join key AND the retrieval filter column — matching the authoritative sqlite-data-dictionary.
     expect(rc.activation.authority).toBe("sqlite");
     expect(rc.activation.fenceCounterColumn).toBe("active_generation");
     expect(rc.activation.fenceCounterType).toBe("integer");
     expect(rc.activation.generationJoinKeyColumn).toBe("active_generation_id");
     expect(rc.activation.retrievalFilterColumn).toBe("active_generation_id");
-    expect(rc.activation.casGuards).toEqual(["content_hash-unchanged", "counter-strictly-greater"]);
+    // The generation/config fence (Task issue #39, carry-forward #1): content-hash
+    // alone does not fence different-config/same-content workers, so the CAS also
+    // fences on the config revision. Both guards move both columns in one txn.
+    expect(rc.activation.casGuards).toEqual(["content_hash-unchanged", "config-revision-not-superseded"]);
+    expect(rc.activation.configRevisionColumn).toBe("active_generation");
   });
 
   it("staleness triggers cover hash/chunker/model/dimensions drift (§4)", () => {
@@ -874,9 +878,15 @@ describe("Phase-3 schema discriminants + audit/error catalog (Task 3.0 revision 
     expect(rc.config.keys["retrieval.rrf.weights.vector"].boundsExclusiveMin).toBe(0);
     expect(rc.ftsFallback.switchKey).toBe("retrieval.fts.enabled");
     expect(rc.ftsFallback.vectorWeightMustBePositive).toBe(true);
-    // activation aligns with the authoritative 3-arg Task 3.2 signature (no caller counter)
-    expect(rc.activation.callerSuppliesCounter).toBe(false);
-    expect(rc.activation.correctnessFence).toBe("content_hash-unchanged");
+    // activation carries the 4-arg Task 3.2 signature: the caller supplies the config
+    // IDENTITY (configKey), and the STORE resolves + owns the fence epoch — never a
+    // caller integer (round-3 findings 3 & 4). The correctness fence is content-hash
+    // AND config-revision (both orders), and the epoch supports rollback.
+    expect(rc.activation.callerSuppliesConfigIdentity).toBe(true);
+    expect(rc.activation.callerSuppliesConfigRevision).toBe(false);
+    expect(rc.activation.configRevisionOwner).toBe("sqlite-adoption-log");
+    expect(rc.activation.supportsRollback).toBe(true);
+    expect(rc.activation.correctnessFence).toBe("content_hash-unchanged AND config-revision-not-superseded");
     // candidate unit is the note, chunks fold to notes with per-layer provenance
     expect(rc.candidateUnit).toBe("note");
     expect(rc.chunkToNoteAggregation.tieBreaker).toBe("noteId");

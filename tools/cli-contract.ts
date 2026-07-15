@@ -175,6 +175,9 @@ export const MIGRATION_OWNERSHIP: Readonly<Record<string, readonly string[]>> = 
   "0002_jobs": ["jobs", "job_attempts"],
   "0003_provenance": ["content_blobs", "source_captures", "source_renditions", "note_sources"],
   "0004_claims": ["claims", "claim_evidence"],
+  // Feature migration (Task 3.2), registered via registerGenerationMigration — the
+  // durable indexing-config adoption log the generation/config fence rests on.
+  "0008_index_config_revision": ["index_config_revisions"],
   "(runner bootstrap)": ["db_schema_migrations"],
 } as const;
 

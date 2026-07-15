@@ -56,6 +56,29 @@ export type GenerationId = string & { readonly __brand: "atlas.GenerationId" };
 export type ChunkId = string & { readonly __brand: "atlas.ChunkId" };
 
 /**
+ * Compute the **indexing-config identity** — a deterministic hash of ONLY the
+ * fence-relevant config components (`chunker_version`, `embedding_model`,
+ * `dimensions`); it is INDEPENDENT of any note. This is the config IDENTITY the
+ * SQLite adoption log (`GenerationRepo.adoptConfig` / `activateGeneration`, Task 3.2)
+ * consumes: the SAME config always yields the SAME key (so it resolves to the SAME
+ * epoch), and a bumped chunker/model/dimensions yields a DIFFERENT key (a new epoch
+ * by adoption order). Same canonicalization as
+ * {@link generationIdFor} (`atlas-jcs-v1`), so the key is byte-identical across
+ * hosts.
+ */
+export function indexingConfigKey(cfg: IndexingConfig): string {
+  return createHash("sha256")
+    .update(
+      canonicalSerialize({
+        chunkerVersion: cfg.chunker_version,
+        embeddingModel: cfg.embedding_model,
+        embeddingDimensions: cfg.dimensions,
+      }),
+    )
+    .digest("hex");
+}
+
+/**
  * Compute the immutable generation id directly from the §2 tuple components:
  *
  *   generationId = f(noteId, contentHash, chunkerVersion, embeddingModel, embeddingDimensions)
