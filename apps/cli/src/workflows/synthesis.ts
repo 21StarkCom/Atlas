@@ -31,6 +31,7 @@ import { applyPatch } from "../markdown/apply.js";
 import { effectiveRisk, type PolicyContext, type RiskConfig } from "../policies/risk.js";
 import { validatePlan, type ValidationReport, type ValidationVault } from "../validation/index.js";
 import { startRun, sha256Canonical, type IntegratedResult, type RunIntegrator, type WorkflowDeps } from "./index.js";
+import { executeOp, isExecutableOp, OpExecutionError, type OpContext } from "./ops/index.js";
 import { CliError, EXIT } from "../errors/envelope.js";
 
 /** The three model-authored synthesis workflows (plan §D11 / §2.5). */
@@ -227,6 +228,14 @@ export interface SynthesisApplyDeps extends SynthesisPlanDeps {
   readonly guard: GeneratedArtifactGuard;
   /** Re-derive projections from the immutable canonical commit (post-integration). */
   foldProjections(canonicalRef: string): Promise<void>;
+  /**
+   * Op-execution seams (Task 4.6) — consulted for the projection-serializing ops
+   * (claims/evidence) the 4.2 patch generator cannot express. Optional: a run whose
+   * op IS patch-expressible never reads them.
+   */
+  resolveRendition?(handle: string): string | null;
+  hasClaim?(claimKey: string): boolean;
+  hasNote?(noteId: string): boolean;
   /** `git.worktrees_path` — where the ephemeral agent worktree is created. */
   readonly worktreesPath: string;
   /** The canonical protected ref (default {@link DEFAULT_CANONICAL_REF}). */
@@ -317,17 +326,18 @@ export async function applySynthesis(
         exitCode: EXIT.VALIDATION,
       });
     }
-    // Slice-B scope: patchable single-note edits. Non-patchable ops (CreateNote,
-    // ProposeMerge, claims, trust) land in Tasks 4.6+ — reject them explicitly here.
-    if (plan.patch === null) {
+    // The op must have EITHER a materialized patch (section/frontmatter edits, Task 4.2)
+    // OR a projection-serializing executor (claims/evidence, Task 4.6). Anything else
+    // (CreateNote, ProposeMerge, trust) is not yet applicable.
+    const op = plan.changePlan.operation;
+    if (plan.patch === null && !isExecutableOp(op.op)) {
       throw new SynthesisApplyError({
         code: "synthesis-op-not-applicable",
-        message: `operation "${plan.changePlan.operation.op}" has no patchable single-note apply path yet`,
-        hint: "This slice applies UpdateSection/AppendSection/SetFrontmatterField/AddAlias; other ops are pending.",
+        message: `operation "${op.op}" has no single-note apply path yet`,
+        hint: "Supported: UpdateSection/AppendSection/SetFrontmatterField/AddAlias (patch) and CreateClaim/AttachEvidence/UpdateEvidenceVerification (executor).",
         exitCode: EXIT.VALIDATION,
       });
     }
-    const patch = plan.patch;
 
     const runId = newRunId();
     const tierNum: 2 | 3 = plan.tier === "tier-2" ? 2 : 3;
@@ -359,36 +369,74 @@ export async function applySynthesis(
 
       const notePath = join(worktreeDir, note.path);
       const currentText = readFileSync(notePath, "utf8");
-      const applied = applyPatch(currentText, patch);
-      if (!applied.ok) {
-        // Stale context (a concurrent edit changed the note since the plan was read).
-        await handle.fail("planned", `synthesis-stale-context: ${applied.error.code}`);
-        await cleanupWorktree(deps.repo, worktreeDir);
-        worktreeDir = null;
-        throw new SynthesisApplyError({
-          code: "synthesis-stale-context",
-          message: `patch preconditions no longer hold for "${note.id}": ${applied.error.code}`,
-          hint: "The note changed since the plan was generated; re-run synthesis to re-ground the plan.",
-          exitCode: EXIT.VALIDATION,
-          retryable: true,
-        });
+
+      // Produce the note's new text via the patch path (4.2) or the op executor (4.6).
+      let nextText: string;
+      let changedLines: number;
+      let changedSections: number;
+      let patchHash: string;
+      if (plan.patch !== null) {
+        const applied = applyPatch(currentText, plan.patch);
+        if (!applied.ok) {
+          // Stale context (a concurrent edit changed the note since the plan was read).
+          await handle.fail("planned", `synthesis-stale-context: ${applied.error.code}`);
+          await cleanupWorktree(deps.repo, worktreeDir);
+          worktreeDir = null;
+          throw new SynthesisApplyError({
+            code: "synthesis-stale-context",
+            message: `patch preconditions no longer hold for "${note.id}": ${applied.error.code}`,
+            hint: "The note changed since the plan was generated; re-run synthesis to re-ground the plan.",
+            exitCode: EXIT.VALIDATION,
+            retryable: true,
+          });
+        }
+        nextText = applied.next;
+        changedLines = changedLinesOf(plan.patch);
+        changedSections = sectionsOf(plan.patch);
+        patchHash = sha256Canonical(plan.patch);
+      } else {
+        // Projection-serializing op (claims/evidence). A business-rule violation is a
+        // typed OpExecutionError — fail the run cleanly, mirroring the stale-context path.
+        const opCtx: OpContext = {
+          note,
+          resolveRendition: deps.resolveRendition ?? (() => null),
+          hasClaim: deps.hasClaim ?? (() => false),
+          hasNote: deps.hasNote ?? (() => false),
+          now: now(),
+        };
+        let outcome;
+        try {
+          outcome = executeOp(op, opCtx);
+        } catch (e) {
+          if (e instanceof OpExecutionError) {
+            await handle.fail("planned", `op-execution-failed: ${e.code}`);
+            await cleanupWorktree(deps.repo, worktreeDir);
+            worktreeDir = null;
+          }
+          throw e;
+        }
+        nextText = outcome.nextText;
+        changedLines = Math.max(1, nextText.split("\n").length - currentText.split("\n").length);
+        changedSections = 1;
+        patchHash = sha256Canonical({ op });
       }
-      // GUARD the applied note text BEFORE it is written to the worktree.
-      await deps.guard.assertClean({ text: applied.next, sink: "worktree", runId });
-      writeFileSync(notePath, applied.next, "utf8");
+
+      // GUARD the new note text BEFORE it is written to the worktree.
+      await deps.guard.assertClean({ text: nextText, sink: "worktree", runId });
+      writeFileSync(notePath, nextText, "utf8");
 
       await handle.checkpoint("patched", {
         patchId: `${runId}-patch`,
         planId: `${runId}-plan`,
         noteId: note.id,
-        changedLines: changedLinesOf(patch),
-        changedSections: sectionsOf(patch),
-        patchHash: sha256Canonical(patch),
+        changedLines,
+        changedSections,
+        patchHash,
         planHash,
       });
 
       // The applied-tree evidence is persisted BEFORE the commit (crash-recoverable).
-      const treeHash = sha256Canonical({ path: note.path, text: applied.next });
+      const treeHash = sha256Canonical({ path: note.path, text: nextText });
       await handle.checkpoint("worktree-applied", { worktreePath: worktreeDir, treeHash, agentRef });
 
       // 4. Agent commit carrying the run manifest (ChangePlan digest + proposed risk).
