@@ -62,6 +62,9 @@ importers:
       '@atlas/jobs':
         specifier: workspace:*
         version: link:../../packages/jobs
+      '@atlas/lancedb-index':
+        specifier: workspace:*
+        version: link:../../packages/lancedb-index
       '@atlas/models':
         specifier: workspace:*
         version: link:../../packages/models
@@ -84,6 +87,9 @@ importers:
       '@atlas/testing':
         specifier: workspace:*
         version: link:../../packages/testing
+      '@lancedb/lancedb':
+        specifier: 'catalog:'
+        version: 0.31.0(apache-arrow@18.1.0)
       '@types/node':
         specifier: 'catalog:'
         version: 24.13.3
