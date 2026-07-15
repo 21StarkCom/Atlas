@@ -60,7 +60,7 @@ export {
 export { verify, checkQueryPlans } from "./verify.js";
 export type { VerifyReport, InvariantViolation, QueryPlanViolation } from "./verify.js";
 
-export { openStore } from "./store.js";
+export { openStore, registerGenerationMigration } from "./store.js";
 export type { Store, Clock } from "./store.js";
 
 export { ProjectionRepo } from "./repos/projections.js";
@@ -72,6 +72,8 @@ export type {
 } from "./repos/projections.js";
 export { LedgerRepo, AuditEventConflictError } from "./repos/ledger.js";
 export type { AgentRunRow, AuditEventRow } from "./repos/ledger.js";
+export { GenerationRepo } from "./repos/generation.js";
+export type { NoteFenceRow, GenerationClock } from "./repos/generation.js";
 
 // Ledger finalization + §2.8 cross-store orchestration (Task 1.7).
 export { finalizeLedgerWrite, runBackupStep, readCoalesceCovers, READ_COALESCE_THRESHOLD } from "./ledger/finalize.js";
@@ -137,6 +139,7 @@ export { migration0005LedgerFinalize, LEDGER_FINALIZE_DDL } from "../migrations/
 // Feature migration (Task 2.5) — NOT in openStore's default retained set; the
 // workflows layer registers it at store-open (see 0006's header / round finding #3).
 export { migration0006WorkflowIdempotency, WORKFLOW_IDEMPOTENCY_DDL } from "../migrations/0006_workflow_idempotency.js";
+export { migration0008IndexConfigRevision, INDEX_CONFIG_REVISION_DDL } from "../migrations/0008_index_config_revision.js";
 
 export { ProvenanceRepo, captureId } from "./repos/provenance.js";
 export type {

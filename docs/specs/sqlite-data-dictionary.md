@@ -61,6 +61,7 @@ Migration ownership (verbatim from §2.7):
 | `0002_jobs` | `jobs` | 2 PR-B | `jobs`, `job_attempts` |
 | `0003_provenance` | `sqlite-store` | 2 PR-A (retained) | `content_blobs`, `source_captures`, `source_renditions`, `note_sources` |
 | `0004_claims` | `sqlite-store` | 4 PR-A (retained) | `claims`, `claim_evidence` |
+| `0008_index_config_revision` | `sqlite-store` (feature migration) | 3 (Task 3.2) | `index_config_revisions` |
 | (runner bootstrap) | `sqlite-store` | 1 | `db_schema_migrations` |
 
 ---
@@ -105,8 +106,8 @@ CREATE TABLE notes (
   status             TEXT    NOT NULL,
   file_path          TEXT    NOT NULL,                    -- vault-relative path
   content_hash       TEXT    NOT NULL,                    -- sha256 of canonical note bytes
-  active_generation  INTEGER NOT NULL DEFAULT 0,          -- monotonic fence counter for the needs-index scan (§6)
-  active_generation_id TEXT,                              -- composite LanceDB SearchChunk.generationId this note's retrieval is fenced to; NULL until first indexed; set by Store.activateGeneration (Task 3.2). Provisioned here in 0001_core because Phase 3 registers no migration.
+  active_generation  INTEGER NOT NULL DEFAULT 0,          -- monotonic config-revision epoch (the generation/config fence, Task 3.2); server-issued + durably owned via the 0008_index_config_revision allocator; drives the needs-index scan (§6). 0 = never indexed.
+  active_generation_id TEXT,                              -- composite LanceDB SearchChunk.generationId this note's retrieval is fenced to; NULL until first indexed; set by Store.activateGeneration (Task 3.2). Provisioned here in 0001_core (the retained notes projection); Phase 3's only migration, 0008_index_config_revision, adds the separate config-adoption log, not this column.
   created            TEXT    NOT NULL,
   updated            TEXT    NOT NULL,
   quarantined        INTEGER NOT NULL DEFAULT 0 CHECK (quarantined IN (0, 1)),
@@ -793,6 +794,50 @@ CREATE UNIQUE INDEX idx_claim_evidence_current_head ON claim_evidence(lineage_id
 - **Upsert:** conflict target **`payload_hash`** (via `idx_claim_evidence_payload`) —
   `ON CONFLICT(payload_hash) DO NOTHING`; a retry recreating an existing (or tombstoned) payload resolves
   to the existing row rather than colliding, making `AttachEvidence` idempotent.
+
+---
+
+## 5.5 Retrieval index generation fence — `0008_index_config_revision`
+
+### `index_config_revisions` — `0008_index_config_revision` (ledger, adoption log)
+
+The durable **indexing-config adoption log** the generation/config fence rests on (Task 3.2;
+retrieval-index-contract §2, carry-forward #1). **Ledger class** — operational state with no Markdown
+form; `atlas db rebuild` never touches it. A FEATURE migration (registered via
+`registerGenerationMigration`, like `0002_jobs`/`0006_workflow_idempotency`), NOT in `openStore`'s
+default retained set.
+
+`active_generation` on `notes` carries the **config epoch** the active generation was produced under;
+that epoch must be **server-owned**, not a caller-invented integer (an inflated value would fence out
+every future worker; an under-shot one would permanently reject a legitimate config). So activation
+consumes a **config identity** (`config_key`, a deterministic hash of `chunker_version` /
+`embedding_model` / `dimensions`) and the store resolves + issues the epoch. This table records an
+append-only **adoption event** per `MAX(revision) + 1`, with exactly one `is_current` row (the durable
+"current configuration"). Re-adopting the current config is idempotent; adopting a different one — an
+upgrade OR a rollback/re-adoption — mints a NEW, strictly-higher epoch, so a rolled-back-to config can
+supersede whatever is live. A config's live epoch is `MAX(revision) WHERE config_key = ?` — its
+most-recent adoption — so **adoption recency** (operator order), not first-seen order, drives the fence.
+
+```sql
+CREATE TABLE index_config_revisions (
+  revision    INTEGER NOT NULL PRIMARY KEY,   -- monotonic adoption epoch (>= 1); each adoption event gets MAX(revision)+1
+  config_key  TEXT    NOT NULL,               -- deterministic hash of the fence-relevant indexing config (chunker_version, embedding_model, dimensions)
+  is_current  INTEGER NOT NULL DEFAULT 0 CHECK (is_current IN (0, 1)),  -- 1 on exactly one row: the durable "current configuration"
+  adopted_at  TEXT    NOT NULL,               -- RFC3339 time this adoption event was recorded
+  CHECK (revision >= 1)
+) STRICT;
+
+CREATE UNIQUE INDEX idx_index_config_revisions_current ON index_config_revisions(is_current) WHERE is_current = 1;
+CREATE INDEX idx_index_config_revisions_key ON index_config_revisions(config_key);
+```
+
+- **FK:** none (a self-contained adoption log; `notes.active_generation` references an epoch by value,
+  never a SQL FK — the cross-class ledger→projection rule).
+- **Invariant:** `idx_index_config_revisions_current` (partial UNIQUE on `is_current WHERE is_current = 1`)
+  enforces **at most one current configuration**; `GenerationRepo.adoptConfig` clears the prior current
+  in the same transaction it inserts the new event, so switching is atomic.
+- **Upsert:** none — `adoptConfig` is an explicit append (`INSERT`) of a new adoption event; the CAS
+  reads the config's live epoch (`MAX(revision) WHERE config_key = ?`) and never writes this table.
 
 ---
 

@@ -17,10 +17,12 @@
   },
   "dependencies": {
     "@atlas/contracts": "workspace:*",
+    "@lancedb/lancedb": "catalog:",
     "apache-arrow": "catalog:"
   },
   "devDependencies": {
-    "@lancedb/lancedb": "catalog:",
+    "@atlas/models": "workspace:*",
+    "@atlas/sqlite-store": "workspace:*",
     "@types/node": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"

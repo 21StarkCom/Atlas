@@ -68,51 +68,78 @@ updated **atomically together in one SQLite transaction** — never independentl
 authoritative Task 3.2 repo method:
 
 ```
-Store.activateGeneration(noteId: string, gen: GenerationId, expectedContentHash: string): boolean
+Store.activateGeneration(noteId: string, gen: GenerationId, expectedContentHash: string, configKey: string): boolean
 ```
 
-Exactly three arguments (matching the plan's Task 3.2 interface). **The caller never supplies a fence
-counter** — the counter is issued *inside* the transaction (below), so a stale worker cannot present
-an inflated counter to jump the queue.
+The `configKey` (fourth argument) is the **config identity** that drives the generation/config fence
+(Task issue #39, carry-forward #1): a deterministic hash of the fence-relevant indexing config
+(`chunker_version` / `embedding_model` / `dimensions`). The CAS resolves that identity to the config's
+monotonic **epoch** and stamps it into `active_generation`. The fence is **required** — a
+`content_hash`-only CAS does **not** fence workers running DIFFERENT indexing configs over the **same**
+content, and would let a stale-config worker overwrite a newer index (see the fence below).
 
-- **`active_generation`** — an `INTEGER NOT NULL DEFAULT 0` **monotonic fence counter**. It *orders*
-  activations and drives the needs-index scan (`idx_notes_needs_index(active_generation,
-  content_hash)`); it is **not** the generation identity, it only sequences generations.
+**Server-owned epoch, consumed by identity (round-3 findings 3 & 4).** The epoch is **owned by SQLite,
+never a caller-invented integer** (an inflated value would fence out every future worker; an under-shot
+one would permanently reject a legitimate config). Activation therefore takes the config *identity*, not
+a number: the store resolves the epoch internally, so a caller can neither inflate it nor bind it to the
+wrong config. The epoch lives in the `index_config_revisions` table (migration
+`0008_index_config_revision`, a feature migration registered via `registerGenerationMigration`) as an
+append-only **adoption log**, NOT a permanent first-seen mapping (which cannot roll back and confuses
+first-seen with recency):
+
+- `Store.adoptConfig(configKey)` records a durable **adoption event**. Re-adopting the already-current
+  config is idempotent; adopting a different config — an upgrade OR a rollback / re-adoption — appends a
+  NEW event with a strictly-higher `MAX(revision) + 1` epoch and marks it the current configuration.
+- a config's LIVE epoch is `MAX(revision) WHERE config_key = ?` — its most-recent adoption. So a
+  rolled-back-to config gets a fresh epoch that OUT-RANKS whatever is live and CAN supersede it, and
+  **adoption recency** (operator order), not first-seen order, drives the fence.
+
+The orchestrator adopts the current config ONCE per pass; every `activateGeneration` /
+`tombstoneGeneration` in the pass resolves the same live epoch by identity. Activation under a config
+that was never adopted (epoch `0`) is rejected — the caller must declare the current configuration
+first. When a note loses all its prose, `Store.tombstoneGeneration(noteId, expectedContentHash,
+configKey)` clears its `active_generation_id` under the SAME fence, so retrieval stops serving it.
+
+- **`active_generation`** — an `INTEGER NOT NULL DEFAULT 0` carrying the **config revision** the active
+  generation was produced under. It *orders* activations by config epoch and drives the needs-index scan
+  (`idx_notes_needs_index(active_generation, content_hash)`, `… WHERE active_generation < ?` — a note
+  produced under an older epoch is exactly one needing re-index); it is **not** the generation identity.
 - **`active_generation_id`** — the `TEXT` **composite `generationId`** (the §2 tuple hash) this note's
   retrieval is fenced to; it is the **LanceDB join key**, NULL until the note is first indexed.
   **Retrieval filters LanceDB chunks by `active_generation_id`**: only chunks whose `generationId`
   equals it are served.
 
-**Counter issuance (server-side, monotonic).** The new counter is **allocated by SQLite within the
-same CAS transaction** as `stored active_generation + 1`, never read from or supplied by the caller.
-By construction it is strictly greater than the stored value — so the ordering invariant holds without
-trusting any client-provided number. The counter only *sequences* activations for the needs-index
-scan; it is **not** part of the correctness fence (that is `content_hash`, below).
-
-**The correctness fence is `content_hash`, and it is sufficient for both completion orders.** Because
+**Why `content_hash` alone is insufficient (the carry-forward #1 gap).** Because
 `generationId = f(noteId, contentHash, chunkerVersion, embeddingModel, embeddingDimensions)` (§2), two
-workers computing a generation for the **same** `content_hash` (and fixed config) compute the
-**identical** `generationId`; activating the same `generationId` twice is idempotent, so there is no
-"older vs newer" hazard among same-content workers. The only way two workers differ is a **content
-change** between them — and then their `expectedContentHash` values differ. Activation is a
-transactional compare-and-set that, in one SQLite transaction, sets `active_generation_id = gen` and
-`active_generation = stored + 1` **iff**:
+workers running DIFFERENT configs (a bumped `chunker_version` / `embedding_model` / `dimensions`) over
+the SAME `content_hash` compute DIFFERENT `generationId`s yet share the same `content_hash`. A
+`content_hash`-only CAS (with a server-issued `stored + 1` counter that always passes) would let a
+stale-config worker that finishes AFTER a newer-config generation activated overwrite it. So activation
+fences on **both** the content hash **and** the config revision.
+
+**The CAS.** Activation is a transactional compare-and-set that, in one SQLite statement, sets
+`active_generation_id = gen` and `active_generation = <the config's live epoch>` **iff**:
 
 - **(a) `content_hash-unchanged`** — the note's current `content_hash` equals `expectedContentHash`
   (the hash the worker embedded against). A note edited after a worker started embedding fails here.
-- **(b) `counter-strictly-greater`** — the issued counter (`stored + 1`) exceeds the stored counter;
-  trivially true given server-side issuance, it encodes the monotonicity invariant explicitly.
+- **(b) `config-revision-not-superseded`** — the worker's config's live epoch (resolved from
+  `configKey`) is `>=` the stored `active_generation`, so a strictly-older config epoch that finishes
+  after a newer activation is rejected (and a same-or-newer epoch supersedes).
 
-Guard (a) makes stale attempts **lose in both completion orders**: whether the newer-content worker
-commits before or after the older-content worker, only the worker whose `expectedContentHash` matches
-the note's live `content_hash` passes the CAS. An older worker that finishes *after* a content change
-finds `content_hash ≠ expectedContentHash` and its CAS aborts with no write; an older worker that
-finishes *before* the change activates its (then-current) generation, which the newer worker's edit
-supersedes on its own activation. Either guard failing aborts the CAS with no write — generations are
-fenced, never blindly overwritten. Because both columns move in the same transaction, retrieval never
-observes an `active_generation_id` that disagrees with its counter. Chunks whose `generationId` ≠ the
-note's `active_generation_id` are **filtered out of retrieval** and compacted later; they are never
-served.
+**Both fences make stale attempts lose in both completion orders.** Guard (a) fences a mid-flight
+content change (whoever's `expectedContentHash` matches the live `content_hash` wins). Guard (b) fences
+a stale config:
+
+- **new-then-old** — the newer-config worker (`configRevision = revNew`) activates first, setting
+  `active_generation = revNew`; the older worker (`revOld < revNew`) then fails guard (b) → no write.
+- **old-then-new** — the older worker activates first (`active_generation = revOld`); the newer worker
+  (`revNew >= revOld`) passes and supersedes it. A subsequent stale old worker again fails guard (b).
+
+Either way the newer config wins and the stale one never overwrites it. Either guard failing aborts the
+CAS with no write — generations are fenced, never blindly overwritten. Because both columns move in the
+same statement (one implicit transaction), retrieval never observes an `active_generation_id` that
+disagrees with its `active_generation`. Chunks whose `generationId` ≠ the note's `active_generation_id`
+are **filtered out of retrieval** and compacted later; they are never served.
 
 ## 3. Reconciliation steps
 
@@ -162,6 +189,15 @@ Because all four are generation-identity components (§2), "stale" is exactly "t
 `generationId` ≠ the `generationId` recomputed from current note + config." Missing chunks (LanceDB
 directory deleted) and a note whose active generation has zero live chunks are also divergences that
 `verify` reports and `repair`/`rebuild` converge.
+
+**Empty-note policy.** A note that produces **zero chunks** (no prose-bearing section — e.g. a
+title-only stub) has nothing to embed, write, or activate. The write path (Task 3.2) does **NOT**
+activate it: `active_generation_id` stays `NULL` (never-indexed) and the pass reports a benign `empty`
+outcome. This is deliberate — activating a zero-chunk generation would create precisely the
+"active generation with zero live chunks" divergence above. So "zero live chunks is divergent" applies
+only to a note that HAS an active generation (`active_generation_id` non-NULL) whose expected chunk set
+is non-empty but whose rows are missing; a never-activated empty note is not divergent. A rerun
+re-derives `empty` idempotently, and if the note later gains prose it indexes normally.
 
 ## 5. Hybrid search — layer precedence and RRF fusion
 
@@ -300,15 +336,26 @@ drift. **Do not edit the values here without updating the prose above (and vice 
   "reconciliationSteps": ["chunk", "embed", "write", "verify-complete", "activate", "retire", "mark-indexed"],
   "activation": {
     "authority": "sqlite",
-    "method": "Store.activateGeneration(noteId, generationId, expectedContentHash) -> boolean",
-    "callerSuppliesCounter": false,
-    "counterIssuance": "sqlite-server-side: stored active_generation + 1, inside the CAS transaction",
+    "method": "Store.activateGeneration(noteId, generationId, expectedContentHash, configKey) -> boolean",
+    "callerSuppliesConfigIdentity": true,
+    "callerSuppliesConfigRevision": false,
+    "configRevisionColumn": "active_generation",
+    "configRevisionSemantics": "monotonic indexing-config adoption epoch (>=1; 0 = never indexed); a new epoch is minted per adoption EVENT (upgrade or rollback), reflecting adoption recency",
+    "configRevisionOwner": "sqlite-adoption-log",
+    "configIdentityInput": "configKey (deterministic hash of chunker_version/embedding_model/dimensions)",
+    "configEpochResolution": "MAX(revision) WHERE config_key = ? — the config's most-recent adoption (server-resolved; never a caller integer)",
+    "configAdoption": "Store.adoptConfig(configKey)",
+    "configRevisionAllocatorTable": "index_config_revisions",
+    "configRevisionAllocatorMigration": "0008_index_config_revision",
+    "supportsRollback": true,
+    "tombstoneMethod": "Store.tombstoneGeneration(noteId, expectedContentHash, configKey) -> boolean",
     "fenceCounterColumn": "active_generation",
     "fenceCounterType": "integer",
     "generationJoinKeyColumn": "active_generation_id",
     "retrievalFilterColumn": "active_generation_id",
-    "correctnessFence": "content_hash-unchanged",
-    "casGuards": ["content_hash-unchanged", "counter-strictly-greater"],
+    "correctnessFence": "content_hash-unchanged AND config-revision-not-superseded",
+    "casGuards": ["content_hash-unchanged", "config-revision-not-superseded"],
+    "bothCompletionOrders": "a stale-config worker's activation fails after a newer activation in both old-then-new and new-then-old",
     "atomic": "both columns updated in one SQLite transaction",
     "verifyBeforeActivate": true
   },
