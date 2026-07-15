@@ -77,6 +77,11 @@ import {
   type IdempotencyRequest,
   type IdempotencyOutcome,
 } from "./idempotency.js";
+import {
+  buildTerminalDetail,
+  parseTerminalAuditDetail,
+  type TerminalAuditDetail,
+} from "./terminal-audit-detail.js";
 
 /** RFC-3339 UTC millisecond timestamp (matches `@atlas/contracts` `Rfc3339Ms`). */
 function rfc3339Ms(): string {
@@ -160,6 +165,28 @@ export interface TerminalRun {
   readonly reason?: string;
   /** The allocated audit `seq` for the terminal event. */
   readonly seq: number;
+}
+
+/**
+ * Extra rows + audit detail folded into a run's SINGLE terminal event/transaction
+ * (D6). A model-transmitting run that terminates passes its `model_calls` INSERTs as
+ * {@link TerminalExtras.ledgerWrite} and the allowlisted per-call audit records as
+ * `detail.modelCalls`, so the N transmissions attach to the run's one `run.*`
+ * terminal — never a per-call `run.*` event and never a second `finalizeLedgerWrite`.
+ * The statements MUST be idempotent (they are replayed with the terminal on crash
+ * recovery); the terminal-specific detail fields (`failedAt`/`cancelledAt`/`reason`)
+ * always win over a same-named `detail` key.
+ */
+export interface TerminalExtras {
+  /** Idempotent step-3 business rows committed atomically with the terminal. */
+  readonly ledgerWrite?: readonly LedgerStatement[];
+  /**
+   * Run-level audit detail merged into the terminal event. NARROW + allowlisted
+   * ({@link TerminalAuditDetail}) — only the model-call audit records; any unknown/raw
+   * field is REJECTED (round-3 findings #3/#4), so a caller cannot persist prompts/
+   * responses/secrets into the signed audit ref, SQLite, or the WORM anchor.
+   */
+  readonly detail?: TerminalAuditDetail;
 }
 
 /** The canonical-ref-advance context handed to a {@link RunIntegrator}. */
@@ -611,22 +638,30 @@ export class RunHandle {
    * `beginIdempotentCommand` claim — is committed ATOMICALLY inside the terminal
    * transaction (round finding #4): the terminal state + the idempotency publish
    * land or roll back together, and a stale claim rolls the whole terminal back.
+   *
+   * `extras` folds a run's additional business rows + audit detail into the SAME
+   * terminal transaction + SINGLE terminal event. A model-transmitting run that
+   * FAILS uses this to record its `model_calls` rows (`extras.ledgerWrite`) and the
+   * allowlisted per-call audit records (`extras.detail.modelCalls`) atomically with
+   * `run.failed` — so the D6 "one `run.*` per run, N `model_calls` rows, no per-call
+   * event" invariant holds without a second `finalizeLedgerWrite` (which would emit a
+   * second audit event).
    */
-  fail(at: WorkflowState, reason: string, completion?: LedgerStatement): Promise<TerminalRun> {
-    return this.terminate("failed", "run.failed", at, reason, completion);
+  fail(at: WorkflowState, reason: string, completion?: LedgerStatement, extras?: TerminalExtras): Promise<TerminalRun> {
+    return this.terminate("failed", "run.failed", at, reason, completion, extras);
   }
 
   /** Cancel the run cooperatively from its current checkpoint (`cancelled@<checkpoint>`). */
-  cancel(at: WorkflowState, completion?: LedgerStatement): Promise<TerminalRun> {
-    return this.terminate("cancelled", "run.cancelled", at, undefined, completion);
+  cancel(at: WorkflowState, completion?: LedgerStatement, extras?: TerminalExtras): Promise<TerminalRun> {
+    return this.terminate("cancelled", "run.cancelled", at, undefined, completion, extras);
   }
 
   /** Reject a `review-pending` run at review (`rejected`, `run.rejected`). */
-  async reject(reason: string, completion?: LedgerStatement): Promise<TerminalRun> {
+  async reject(reason: string, completion?: LedgerStatement, extras?: TerminalExtras): Promise<TerminalRun> {
     if (this.#state !== "review-pending") {
       throw new IllegalTransitionError(this.#state, "rejected", "rejected is only reachable from review-pending");
     }
-    return this.terminate("rejected", "run.rejected", "review-pending", reason, completion);
+    return this.terminate("rejected", "run.rejected", "review-pending", reason, completion, extras);
   }
 
   /**
@@ -722,6 +757,7 @@ export class RunHandle {
     at: WorkflowState,
     reason?: string,
     completion?: LedgerStatement,
+    extras?: TerminalExtras,
   ): Promise<TerminalRun> {
     if (status === "rejected") {
       if (at !== "review-pending") throw new IllegalTransitionError(this.#state, "rejected", "rejected is only reachable from review-pending");
@@ -737,13 +773,17 @@ export class RunHandle {
     }
 
     const now = this.now();
-    // Terminal-specific detail field (round finding #8): the contract requires
-    // `run.failed` → `failedAt`, `run.cancelled` → `cancelledAt`. `run.rejected`
-    // records only the reason (its from-checkpoint is always `review-pending`).
-    const detail: Record<string, unknown> = {};
-    if (status === "failed") detail.failedAt = at;
-    else if (status === "cancelled") detail.cancelledAt = at;
-    if (reason !== undefined) detail.reason = reason;
+    // Validate caller-supplied audit detail against the allowlist FAIL-CLOSED BEFORE
+    // any append (round-3 findings #3/#4): only the model-call audit records are
+    // permitted — any unknown/raw field (prompt/response/secret, or a terminal-owned
+    // field) is REJECTED, so nothing arbitrary reaches the signed audit event, SQLite,
+    // or the WORM anchor.
+    const extraDetail: TerminalAuditDetail = extras?.detail !== undefined ? parseTerminalAuditDetail(extras.detail) : {};
+    // Build the SINGLE terminal event's detail: the contract requires `run.failed` →
+    // `failedAt`, `run.cancelled` → `cancelledAt`; `run.rejected` records only the
+    // reason (its from-checkpoint is always `review-pending`). Caller extras are merged
+    // FIRST and the terminal-owned fields LAST, so extras can never FALSIFY them.
+    const detail: Record<string, unknown> = buildTerminalDetail(status, at, reason, extraDetail);
     const db = this.deps.store.db;
     // Persisted-state CAS for the terminal (round-3 finding #2). A terminal is only
     // reachable from the checkpoint it terminates FROM, so the durable state must be
@@ -778,6 +818,9 @@ export class RunHandle {
         // SAME terminal transaction, so the terminal state + the publish land or roll
         // back together, and a stale claim rolls the whole terminal back.
         ...(completion ? [completion] : []),
+        // Additional idempotent business rows (e.g. a model-transmitting run's
+        // `model_calls`) committed atomically with the terminal (D6: N rows, one event).
+        ...(extras?.ledgerWrite ?? []),
       ],
       backup: this.deps.backup,
       now: this.now.bind(this),

@@ -13,12 +13,20 @@ export {
   type RunKind,
   type RunInput,
   type TerminalRun,
+  type TerminalExtras,
   type IdempotentStart,
   type RunIntegrator,
   type IntegrationContext,
   type BrokerIntegration,
   type IntegratedResult,
 } from "./engine.js";
+
+export {
+  TerminalAuditDetailSchema,
+  parseTerminalAuditDetail,
+  buildTerminalDetail,
+  type TerminalAuditDetail,
+} from "./terminal-audit-detail.js";
 
 export {
   reconcileRunsOnStartup,

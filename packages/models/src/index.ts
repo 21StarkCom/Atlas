@@ -36,6 +36,7 @@ export {
   persistModelCalls,
   modelCallId,
   modelCallAuditRecord,
+  ModelCallAuditRecordSchema,
   type PersistModelCallsOptions,
   type ModelCallAuditRecord,
 } from "./ledger.js";
