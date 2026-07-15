@@ -57,6 +57,7 @@ import {
   type AuditBroker,
   type AuditEventDraft,
   type LedgerBackupConfig,
+  type LedgerStatement,
   type SqliteDatabase,
   type Store,
 } from "@atlas/sqlite-store";
@@ -110,6 +111,19 @@ export interface RecordReadonlyOptions {
    * cannot report exit 0 without a covering backup.
    */
   readonly strictBackup?: boolean;
+  /**
+   * The run's serializable step-3 business ledger rows, threaded to
+   * `finalizeLedgerWrite` (Task 3.4). Task 1.9's read runs (`inspect`/`status`)
+   * write ONLY their audit event (`[]`, the default). `brain query` (the first
+   * Tier-0 read that ALSO records business rows) passes its
+   * `retrieval_runs`/`retrieval_results`/`model_calls` INSERTs here so they land
+   * ATOMICALLY with the single `run.readonly` event — and, crucially, are persisted
+   * in the durable intent (finalize step 1), so a broker/ledger outage does not lose
+   * them: the `pending` intent preserves the rows and `reconcileInterruptedRuns`
+   * replays the COMPLETE step-3 operation. Statements must be idempotent (each
+   * INSERT is `OR IGNORE`/`ON CONFLICT DO NOTHING`).
+   */
+  readonly ledgerWrite?: readonly LedgerStatement[];
 }
 
 /** RFC-3339 UTC millisecond timestamp (matches `@atlas/contracts` `Rfc3339Ms`). */
@@ -149,8 +163,11 @@ export async function recordReadonlyRun(
     finalizeLedgerWrite(store, broker, {
       runId,
       event,
-      // A read/projection run writes ONLY its audit event — no `agent_runs` row.
-      ledgerWrite: [],
+      // A pure read/projection run writes ONLY its audit event (`[]`, the default).
+      // `brain query` (Task 3.4) supplies retrieval_runs/retrieval_results/model_calls
+      // INSERTs here so they land atomically with the single `run.readonly` event and
+      // are preserved in the durable intent for reconcile on a broker/ledger outage.
+      ledgerWrite: opts.ledgerWrite ?? [],
       backup: opts.backup,
       now,
       ...(opts.extraCommit ? { extraCommit: opts.extraCommit } : {}),
@@ -258,12 +275,26 @@ export async function assertReadAuditReady(ctx: RunContext, store: Store): Promi
   probe.close();
 }
 
-/** Extra wiring a `run.projection` run threads through {@link runReadAudit}. */
+/** Extra wiring a `run.projection` / audited-read run threads through {@link runReadAudit}. */
 export interface RunReadAuditOptions {
   /** Step-3 mutation committed atomically with the audit event (finding 2). */
   readonly extraCommit?: (db: SqliteDatabase) => void;
   /** Throw (not silently block) if the covering backup exhausts its retries (finding 2). */
   readonly strictBackup?: boolean;
+  /**
+   * Serializable step-3 business ledger rows persisted atomically with the single
+   * terminal audit event (Task 3.4 — `brain query`'s retrieval/model_calls INSERTs).
+   * Preserved in the durable intent, so a degraded read defers (never loses) them.
+   */
+  readonly ledgerWrite?: readonly LedgerStatement[];
+  /**
+   * Correlate the terminal audit event with a caller-owned run id (Task 3.4). When
+   * set, this exact id anchors the `run.readonly` event AND the correlated ledger
+   * rows (`agent_runs`/`retrieval_runs`/`model_calls`), so the whole run shares one
+   * id — e.g. `query` passes `ctx.runId`, the invocation ULID also bound into every
+   * `model_calls` receipt. Omit to mint a fresh id (`inspect`/`status`).
+   */
+  readonly runId?: string;
 }
 
 export async function runReadAudit(
@@ -273,8 +304,13 @@ export async function runReadAudit(
   store?: Store,
   opts: RunReadAuditOptions = {},
 ): Promise<ReadonlyRunResult> {
-  const runId = newRunId();
-  const strict = kind === "run.projection";
+  const runId = opts.runId ?? newRunId();
+  // A read that WRITES business rows (Task 3.4 `brain query`'s `ledgerWrite`) is STRICT,
+  // like a projection (round-2 finding F1): its `run.readonly` + correlated rows are
+  // load-bearing, so a setup/reconcile/finalize fault FAILS the command rather than
+  // degrading to a silent best-effort skip. A PURE diagnostic read (`inspect`/`status`,
+  // empty `ledgerWrite`) stays best-effort — its summary is never gated on the audit.
+  const strict = kind === "run.projection" || (opts.ledgerWrite?.length ?? 0) > 0;
 
   const degradeOrThrow = (
     reason: NonNullable<ReadonlyRunResult["degraded"]>,
@@ -337,6 +373,7 @@ export async function runReadAudit(
     runId,
     ...(opts.extraCommit ? { extraCommit: opts.extraCommit } : {}),
     ...(opts.strictBackup ? { strictBackup: opts.strictBackup } : {}),
+    ...(opts.ledgerWrite ? { ledgerWrite: opts.ledgerWrite } : {}),
   };
 
   try {
