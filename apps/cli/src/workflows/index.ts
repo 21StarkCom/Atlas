@@ -82,6 +82,17 @@ export {
 } from "./refresh.js";
 
 export {
+  enqueueReverification,
+  classifyReanchor,
+  reverifyKey,
+  REVERIFY_WORKFLOW,
+  type RenditionBump,
+  type ReverifyJobPayload,
+  type ReanchorMatch,
+  type ReanchorOutcome,
+} from "./reverify.js";
+
+export {
   beginIdempotent,
   completeIdempotent,
   completeIdempotentStatement,
