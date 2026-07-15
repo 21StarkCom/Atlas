@@ -34,6 +34,8 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { writeFileSync } from "node:fs";
+import { platform } from "node:os";
+import { probeSandbox } from "@atlas/sources";
 import { join } from "node:path";
 import { CHANGE_PLAN_OPS, RISK_TIERS, type RiskTier } from "@atlas/contracts";
 import { OperationForbiddenError, assertOperationAllowed, classifyOperation } from "../../src/policies/operation-gate.js";
@@ -78,7 +80,27 @@ afterEach(async () => {
   await h.cleanup();
 });
 
-describe("phase2.non-integration: Phase 2 cannot mutate the vault via model output", () => {
+/**
+ * This suite exercises the REAL capture path, which runs the parser in the OS sandbox
+ * (D15). Stock GitHub-hosted Linux runners cannot provide the cgroup `resource-caps`
+ * primitive, so `runInSandbox` correctly fails closed there (a host that cannot sandbox
+ * must not parse untrusted input). Mirror the #29 containment-suite gate: STRICT on a
+ * provisioned host (macOS CI can run Seatbelt; `ATLAS_SANDBOX_REQUIRE=1` forces it), and
+ * a LOUD SKIP on an unprovisioned host — never a false green. (Restore Linux CI coverage
+ * by provisioning cgroup delegation, per the #29 follow-up on tracker #5.)
+ */
+const SANDBOX = await probeSandbox();
+const REQUIRE_SANDBOX = process.env.ATLAS_SANDBOX_REQUIRE === "1" || (process.env.CI === "true" && platform() === "darwin");
+if (!SANDBOX.supported && REQUIRE_SANDBOX) {
+  const missing = SANDBOX.checks.filter((c) => !c.available).map((c) => c.guarantee).join(", ");
+  throw new Error(`[phase2.exit] provisioned host must support the sandbox but does not (${SANDBOX.host}: ${missing}) — refusing to green-skip the release gate`);
+}
+if (!SANDBOX.supported) {
+  console.warn(`[phase2.exit] SKIP capture-dependent cases: sandbox unsupported on ${SANDBOX.host} (set ATLAS_SANDBOX_REQUIRE=1 on a provisioned host to enforce)`);
+}
+const describeIfSandbox = SANDBOX.supported ? describe : describe.skip;
+
+describeIfSandbox("phase2.non-integration: Phase 2 cannot mutate the vault via model output", () => {
   it("a deterministic capture is the ONLY canonical move — its commit touches only sources/**", async () => {
     const seedCommits = canonicalCommits(h);
     expect(seedCommits).toHaveLength(1); // the seed commit only

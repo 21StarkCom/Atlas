@@ -20,6 +20,8 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { join } from "node:path";
+import { platform } from "node:os";
+import { probeSandbox } from "@atlas/sources";
 import { newRunId } from "@atlas/contracts";
 import { buildModelCallStatement } from "@atlas/models";
 import { applyLedgerWrite } from "@atlas/sqlite-store";
@@ -84,7 +86,23 @@ function deps(store: Store, now?: () => string): WorkflowDeps {
   return { store, broker: h.service, backup: h.backup, repo: h.repo(), ...(now !== undefined ? { now } : {}) };
 }
 
-describe("observability-matrix (Phase-2 classes): ledger completeness + audit cardinality", () => {
+
+/**
+ * Capture rows run the parser in the OS sandbox (D15); stock hosted Linux lacks the
+ * cgroup resource-caps primitive so `runInSandbox` fails closed. Same #29 gate as the
+ * exit test: STRICT on a provisioned host, LOUD SKIP otherwise (never a false green).
+ * Restore Linux CI coverage via cgroup delegation (#29 follow-up, tracker #5).
+ */
+const OBS_SANDBOX = await probeSandbox();
+const OBS_REQUIRE = process.env.ATLAS_SANDBOX_REQUIRE === "1" || (process.env.CI === "true" && platform() === "darwin");
+if (!OBS_SANDBOX.supported && OBS_REQUIRE) {
+  const missing = OBS_SANDBOX.checks.filter((c) => !c.available).map((c) => c.guarantee).join(", ");
+  throw new Error(`[observability-matrix] provisioned host must support the sandbox but does not (${OBS_SANDBOX.host}: ${missing})`);
+}
+if (!OBS_SANDBOX.supported) console.warn(`[observability-matrix] SKIP capture-dependent rows: sandbox unsupported on ${OBS_SANDBOX.host}`);
+const describeIfSandbox = OBS_SANDBOX.supported ? describe : describe.skip;
+
+describeIfSandbox("observability-matrix (Phase-2 classes): ledger completeness + audit cardinality", () => {
   it("capture Tier-1: agent_runs finalized@tier-1, audit chain [started, planned, integrated], one terminal, no model_calls", async () => {
     const result = await captureViaBroker(h, join(REPO_ROOT, "fixtures/inputs/sample.md"));
     const store = h.openStore();
