@@ -47,6 +47,7 @@ import { migration0004Claims } from "../../migrations/0004_claims.js";
 import { migration0005LedgerFinalize } from "../../migrations/0005_ledger_finalize.js";
 import { migration0006WorkflowIdempotency } from "../../migrations/0006_workflow_idempotency.js";
 import { migration0008IndexConfigRevision } from "../../migrations/0008_index_config_revision.js";
+import { migration0009RunSupersessions } from "../../migrations/0009_run_supersessions.js";
 
 /**
  * The schema-migration heads THIS binary understands (§8 compatibility check). A
@@ -67,6 +68,10 @@ const KNOWN_SCHEMA_HEADS: Set<string> = new Set([
   // The Task 3.2 durable config-revision allocator (registered by the generation
   // layer at store-open via `registerGenerationMigration`): same rationale.
   migration0008IndexConfigRevision.id,
+  // The Task 4.5 §refresh supersession ledger (registered by the workflows layer at
+  // store-open alongside 0006): once applied it becomes the schema head, so a backup
+  // stamped with it must be recognized as a KNOWN (not future/unknown) schema.
+  migration0009RunSupersessions.id,
 ]);
 
 /**

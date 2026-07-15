@@ -140,6 +140,9 @@ export { migration0005LedgerFinalize, LEDGER_FINALIZE_DDL } from "../migrations/
 // workflows layer registers it at store-open (see 0006's header / round finding #3).
 export { migration0006WorkflowIdempotency, WORKFLOW_IDEMPOTENCY_DDL } from "../migrations/0006_workflow_idempotency.js";
 export { migration0008IndexConfigRevision, INDEX_CONFIG_REVISION_DDL } from "../migrations/0008_index_config_revision.js";
+// Feature migration (Task 4.5 §refresh) — NOT in openStore's default retained set; the
+// workflows layer registers it at store-open alongside 0006 (see 0009's header).
+export { migration0009RunSupersessions, RUN_SUPERSESSIONS_DDL } from "../migrations/0009_run_supersessions.js";
 
 export { ProvenanceRepo, captureId } from "./repos/provenance.js";
 export type {
