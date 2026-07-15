@@ -97,6 +97,14 @@ export {
 } from "./approve-run.js";
 
 export {
+  reviewRun,
+  verifyRun,
+  type ReviewReport,
+  type VerifyReport,
+  type VerifyDivergence,
+} from "./review.js";
+
+export {
   enqueueReverification,
   classifyReanchor,
   reverifyKey,
