@@ -10,6 +10,17 @@ import { runGit, GitError } from "./exec.js";
 import { agentRef, assertAgentRef, attachHeadToAgentRef, readRef, updateAgentRef } from "./refs.js";
 import { makeWorktree, type Worktree } from "./worktree.js";
 
+/**
+ * A registered git worktree as reported by `git worktree list --porcelain`: its
+ * absolute working-directory path, the commit its HEAD points at, and the ref its
+ * HEAD is attached to (`branch`), or `null` when the worktree is detached.
+ */
+export interface WorktreeEntry {
+  readonly path: string;
+  readonly head: string | null;
+  readonly branch: string | null;
+}
+
 export interface Repo {
   /** Absolute path to the repository working directory. */
   readonly dir: string;
@@ -31,6 +42,14 @@ export interface Repo {
   addWorktree(ref: string, dir: string): Promise<Worktree>;
   /** Remove the worktree at `dir` (also pruning its administrative metadata). */
   removeWorktree(dir: string): Promise<void>;
+  /**
+   * List the repository's registered worktrees (`git worktree list --porcelain`),
+   * each with its absolute path and the ref its HEAD is attached to. Read-only.
+   * `git cleanup` uses this to VERIFY a recorded worktree is actually bound to the
+   * run's own `refs/agent/<runId>` before removing it, so a stale/corrupt ledger
+   * `ref_name` can never force-remove an unrelated (e.g. open-run) worktree.
+   */
+  listWorktrees(): Promise<WorktreeEntry[]>;
   /**
    * Resolve the TREE object a commit-ish points at (`<commitish>^{tree}`), or
    * `null` if it does not resolve. Read-only; used by recovery to prove a recorded
@@ -121,6 +140,31 @@ class RepoImpl implements Repo {
 
   async removeWorktree(dir: string): Promise<void> {
     await runGit(this.dir, ["worktree", "remove", "--force", resolve(dir)]);
+  }
+
+  async listWorktrees(): Promise<WorktreeEntry[]> {
+    // `--porcelain` emits one attribute per line, records separated by a blank
+    // line: `worktree <abspath>`, then `HEAD <sha>`, then either `branch <ref>`
+    // (HEAD attached to that ref) or `detached`.
+    const out = await runGit(this.dir, ["worktree", "list", "--porcelain"]);
+    const entries: WorktreeEntry[] = [];
+    let cur: { path: string; head: string | null; branch: string | null } | null = null;
+    const flush = (): void => {
+      if (cur !== null) entries.push({ path: resolve(cur.path), head: cur.head, branch: cur.branch });
+      cur = null;
+    };
+    for (const line of out.split("\n")) {
+      if (line.startsWith("worktree ")) {
+        flush();
+        cur = { path: line.slice("worktree ".length), head: null, branch: null };
+      } else if (cur !== null && line.startsWith("HEAD ")) {
+        cur.head = line.slice("HEAD ".length);
+      } else if (cur !== null && line.startsWith("branch ")) {
+        cur.branch = line.slice("branch ".length);
+      }
+    }
+    flush();
+    return entries;
   }
 }
 
