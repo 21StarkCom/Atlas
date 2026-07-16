@@ -116,6 +116,12 @@ export {
 } from "./broker-integrator.js";
 
 export {
+  makeModelPlanGenerator,
+  type PlanGeneratorDeps,
+  type PlanModelsClient,
+} from "./model-plan-generator.js";
+
+export {
   classifyRollback,
   renditionDependents,
   type RollbackClass,
