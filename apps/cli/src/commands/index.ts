@@ -41,3 +41,4 @@ import "./reconcile.js";
 import "./index-ops.js";
 import "./evidence-review.js";
 import "./evidence-retry.js";
+import "./evidence-resolve.js";
