@@ -6,7 +6,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -40,15 +40,22 @@ describe.skipIf(!existsSync(BIN))("brain bin launcher", () => {
     }
   });
 
-  it("routes a real registry command and maps not-implemented → 5 (--json)", () => {
+  it("maps a registry-known but handler-less command to not-implemented → 5 (--json)", () => {
+    // Every real command now has a handler, so the not-implemented BRANCH is exercised against a
+    // SYNTHETIC registry: a `phantom` command present in commands.json with no wired handler,
+    // loaded via the `ATLAS_ROOT` override (the real binary, end-to-end through the mapped exit).
     const cwd = mkdtempSync(join(tmpdir(), "atlas-bin-"));
+    const contractDir = join(cwd, "docs", "specs", "cli-contract");
+    mkdirSync(contractDir, { recursive: true });
+    writeFileSync(
+      join(contractDir, "commands.json"),
+      JSON.stringify({ version: 1, commands: [{ name: "phantom", schemaRef: "docs/specs/cli-contract/phantom.schema.json", phase: 1, idempotency: "none", privilege: "shared", implemented: false }] }),
+      "utf8",
+    );
     writeFileSync(join(cwd, "brain.config.yaml"), EXAMPLE, "utf8");
     try {
-      // `db status` is a real registry command with no handler in this build — the
-      // stable not-implemented example (`git refresh` is now the implemented Task-4.11
-      // command; `enrich` the synthesis command; `query` the Tier-0 retrieval command).
-      const r = run(["db", "status", "--json"], cwd);
-      expect(r.status).toBe(5);
+      const r = spawnSync(process.execPath, [BIN, "phantom", "--json"], { cwd, encoding: "utf8", env: { ...process.env, ATLAS_ROOT: cwd, NO_COLOR: "1" } });
+      expect(r.status, r.stdout + r.stderr).toBe(5);
       expect(JSON.parse(r.stdout).code).toBe("not-implemented");
     } finally {
       rmSync(cwd, { recursive: true, force: true });

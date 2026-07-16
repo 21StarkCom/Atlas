@@ -12,7 +12,7 @@ Registry version: **1** · Commands: **49**
 | 1 | `db migrate` | intrinsic | shared | yes | `docs/specs/cli-contract/db-migrate.schema.json` |
 | 1 | `db rebuild` | intrinsic | shared | yes | `docs/specs/cli-contract/db-rebuild.schema.json` |
 | 1 | `db restore` | key-accepting | privileged | yes | `docs/specs/cli-contract/db-restore.schema.json` |
-| 1 | `db status` | none | shared | no | `docs/specs/cli-contract/db-status.schema.json` |
+| 1 | `db status` | none | shared | yes | `docs/specs/cli-contract/db-status.schema.json` |
 | 1 | `db verify` | none | shared | yes | `docs/specs/cli-contract/db-verify.schema.json` |
 | 1 | `doctor` | none | shared | yes | `docs/specs/cli-contract/doctor.schema.json` |
 | 1 | `inspect` | none | shared | yes | `docs/specs/cli-contract/inspect.schema.json` |

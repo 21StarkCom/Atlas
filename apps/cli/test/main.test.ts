@@ -4,7 +4,7 @@
  * with a temp cwd + config and injected fake handlers.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCli, type CommandHandler, type RunContext } from "../src/main.js";
@@ -226,15 +226,22 @@ describe("runCli", () => {
     expect(env.details.field).toContain("indexing.dimensions");
   });
 
-  it("reports a not-implemented command from the registry (exit 5)", async () => {
-    // `db status` is a real registry command with no handler wired in this build.
-    // This case gets re-pointed each time its stand-in ships: `db migrate` served it until
-    // it became the shared migration composition root, then `ingest` until Task 2.6 (#32),
-    // then `enrich`, then `git refresh` until Task 4.11 implemented them. Pick any row still
-    // `implemented: false`.
-    const { code, out } = await run(["db", "status", "--json"], {}, {});
-    expect(code).toBe(EXIT.USAGE);
-    expect(JSON.parse(out).code).toBe("not-implemented");
+  it("maps a registry-known but handler-less command to not-implemented (exit 5)", async () => {
+    // Every real command now has a handler, so the not-implemented branch is exercised against a
+    // SYNTHETIC registry: a `phantom` command present in commands.json with no wired handler,
+    // loaded via the root override.
+    const contractDir = join(cwd, "docs", "specs", "cli-contract");
+    mkdirSync(contractDir, { recursive: true });
+    writeFileSync(
+      join(contractDir, "commands.json"),
+      JSON.stringify({ version: 1, commands: [{ name: "phantom", schemaRef: "phantom.schema.json", phase: 1, idempotency: "none", privilege: "shared", implemented: false }] }),
+      "utf8",
+    );
+    const out = capture();
+    const err = capture();
+    const code = await runCli(["phantom", "--json"], {}, { cwd, stdout: out, stderr: err, root: cwd });
+    expect(code, out.text + err.text).toBe(EXIT.USAGE);
+    expect(JSON.parse(out.text).code).toBe("not-implemented");
   });
 
   it("wires config-derived locks + logs (a handler can withLock and log)", async () => {
