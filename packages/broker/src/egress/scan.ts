@@ -1,12 +1,18 @@
 /**
- * In-broker payload scan (INVARIANT 2). The egress broker scans the EXACT
- * SERIALIZED payload — request AND response — with the `@atlas/scan` engine on
- * every transmission. A secret planted in a prompt is caught here, in-broker,
- * before it leaves the host (request scan) or before a provider echo re-enters
- * (response scan); the offending bytes are quarantined (AEAD, CLI-side sink) and
- * the transmission is refused. The engine runs against the same deterministic
- * versioned ruleset every other boundary uses (D15) — the exact serialized bytes,
- * not a re-parsed view, so nothing hides in serialization.
+ * In-broker payload scan (INVARIANT 2, as amended by ADR-0001). The egress broker
+ * scans every transmission with the `@atlas/scan` engine, per direction:
+ *   - **request** — the EXACT serialized HTTP bytes, before dispatch (a secret
+ *     planted in a prompt is caught before it leaves the host);
+ *   - **response (final 2xx)** — the canonical serialization of the RELEASED
+ *     result, i.e. exactly the bytes that re-enter the host (ADR-0001: provider
+ *     envelope fields the adapter discards — Gemini's `thoughtSignature` — never
+ *     leave the broker and are not scanned; a secret echoed in the generated
+ *     text/object is in the released bytes by definition);
+ *   - **error / intermediate-retry bodies** — raw, via the transmit hook (they
+ *     are never parsed, so raw is their only form).
+ * On a dirty verdict the offending bytes are quarantined (ciphertext-only,
+ * CLI-side sink) and the transmission refused. The engine runs the same
+ * deterministic versioned ruleset every other boundary uses (D15).
  */
 import { scanBytes, type QuarantineSink, type ScanVerdict, type SecretFinding } from "@atlas/scan";
 import { EgressRefusal } from "./errors.js";
