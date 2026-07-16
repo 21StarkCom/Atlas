@@ -1160,9 +1160,12 @@ describe("Phase-4 privileged schemas ⇄ broker authzContract (per-command exits
   const opByName = new Map(authzContract.privilegedOps.map((o) => [o.op, o]));
   const privileged = registry.commands.filter((c) => c.phase === 4 && c.privilege === "privileged");
 
-  it("has the six privileged Phase-4 commands", () => {
+  it("has the five privileged Phase-4 commands", () => {
+    // `git refresh` is SHARED (non-privileged) as of Task 4.11 — it only regenerates a
+    // review-pending proposal's agent branch (no canonical/trust/erase mutation), so it
+    // carries no OS-presence challenge/authorization flow.
     expect(privileged.map((c) => c.name).sort()).toEqual(
-      ["git approve", "git refresh", "git rollback", "purge", "source trust promote", "source trust revoke"].sort(),
+      ["git approve", "git rollback", "purge", "source trust promote", "source trust revoke"].sort(),
     );
   });
 

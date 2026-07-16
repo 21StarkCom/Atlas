@@ -111,7 +111,7 @@
       "schemaRef": "docs/specs/cli-contract/git-refresh.schema.json",
       "phase": 4,
       "idempotency": "key-accepting",
-      "privilege": "privileged",
+      "privilege": "shared",
       "implemented": true
     },
     {

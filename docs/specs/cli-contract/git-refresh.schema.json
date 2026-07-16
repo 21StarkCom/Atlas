@@ -53,7 +53,7 @@
   "x-atlas-contract": {
     "command": "git refresh",
     "phase": 4,
-    "privilege": "privileged",
+    "privilege": "shared",
     "idempotency": "key-accepting",
     "requestHashScope": [
       "command",
@@ -143,110 +143,36 @@
       1,
       2,
       4,
-      5,
-      6
+      5
     ],
     "errorCodes": [
       {
         "code": "usage",
-        "exit": 5,
-        "when": "unknown flag/argument, missing <runId>, or --export-challenge combined with --authorization"
+        "exit": 5
       },
       {
         "code": "config-invalid",
-        "exit": 2,
-        "when": "brain.config.yaml fails schema validation"
+        "exit": 2
       },
       {
-        "code": "run-not-found",
-        "exit": 1,
-        "when": "<runId> does not exist or is not refreshable"
+        "code": "broker-unreachable",
+        "exit": 2
       },
       {
-        "code": "authorization-required",
-        "exit": 6,
-        "when": "no --authorization supplied (challenge exported with --export-challenge)"
+        "code": "not-review-pending",
+        "exit": 1
       },
       {
-        "code": "authz.canonical_moved",
-        "exit": 6,
-        "when": "broker drift: the new canonicalBaseCommit is no longer the canonical tip (security-broker-contract.md \u00a77.3)"
+        "code": "not-refreshable",
+        "exit": 1
       },
       {
-        "code": "authz.target_mismatch",
-        "exit": 6,
-        "when": "broker drift: targetCommit/runId differs from the re-derived challenge"
-      },
-      {
-        "code": "authz.nonce_expired",
-        "exit": 6,
-        "when": "broker: the challenge nonce expired (expiresAt passed)"
-      },
-      {
-        "code": "authz.presence_unverified",
-        "exit": 6,
-        "when": "broker: the OS presence assertion is absent or not bound to the challenge"
-      },
-      {
-        "code": "authz.signature_invalid",
-        "exit": 1,
-        "when": "broker: Ed25519 signature verification failed"
-      },
-      {
-        "code": "authz.payload_mismatch",
-        "exit": 1,
-        "when": "broker: signingPayload differs from the broker-recomputed canonical bytes"
-      },
-      {
-        "code": "authz.schema_invalid",
-        "exit": 1,
-        "when": "broker: the challenge/response fails the contracts schema (universal broker validation failure, security-broker-contract.md \u00a77.3)"
-      },
-      {
-        "code": "authz.canonicalization_unsupported",
-        "exit": 1,
-        "when": "broker: the response's payloadCanonicalization id is unknown (universal broker validation failure, security-broker-contract.md \u00a77.3)"
-      },
-      {
-        "code": "authz.signer_unknown",
-        "exit": 1,
-        "when": "broker: signerId is not in the signer registry"
-      },
-      {
-        "code": "authz.signer_revoked",
-        "exit": 1,
-        "when": "broker: the signer is revoked"
-      },
-      {
-        "code": "authz.signer_not_permitted",
-        "exit": 1,
-        "when": "broker: the signer is not permitted for this op"
-      },
-      {
-        "code": "authz.nonce_unknown",
-        "exit": 1,
-        "when": "broker: the nonce was not issued by this broker"
-      },
-      {
-        "code": "authz.nonce_replayed",
-        "exit": 1,
-        "when": "broker: the nonce was already consumed"
-      },
-      {
-        "code": "locked:canonical-integration",
-        "exit": 2,
-        "when": "another integration holder is active"
-      },
-      {
-        "code": "backup-unhealthy",
-        "exit": 2,
-        "retryable": true,
-        "when": "the fail-closed backup watermark blocks a ledger-writing run"
+        "code": "input-unavailable",
+        "exit": 1
       },
       {
         "code": "internal",
-        "exit": 4,
-        "when": "unexpected internal failure during refresh"
+        "exit": 4
       }
     ],
     "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
