@@ -15,7 +15,9 @@
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "contract:check": "node tools/gen-cli-contract.ts --check",
-    "contract:write": "node tools/gen-cli-contract.ts --write"
+    "contract:write": "node tools/gen-cli-contract.ts --write",
+    "failpoints:check": "node tools/gen-failpoints.ts --check",
+    "failpoints:write": "node tools/gen-failpoints.ts --write"
   },
   "devDependencies": {
     "typescript": "catalog:"
