@@ -287,12 +287,19 @@ describe("phase-1 exit surface (inspect / doctor / status + audit wiring)", () =
     expect(after.projection.diverged).toBe(false);
   });
 
-  it("db rebuild --from-git is rejected, not falsely reported successful (finding F4)", async () => {
+  it("db rebuild --from-git rebuilds the clean subset best-effort and surfaces the ledger/audit gaps (Task 4.11)", async () => {
+    const before = auditCount(c, "run.projection");
     const r = await cli(c, ["db", "rebuild", "--from-git", "--json"]);
-    expect(r.code).toBe(5); // usage/unsupported, not exit 0
-    expect(r.out + r.err).toMatch(/from-git|not supported/i);
-    // And no run.projection was recorded for the rejected invocation.
-    expect(auditCount(c, "run.projection")).toBe(0);
+    expect(r.code, r.out + r.err).toBe(0);
+    const out = JSON.parse(r.out) as { command: string; fromGit?: boolean; rebuilt: { table: string; rows: number }[]; gaps?: { storageClass: string }[] };
+    expect(out.fromGit).toBe(true);
+    // A clean 3-note vault reproduces its notes from canonical Markdown.
+    expect(out.rebuilt.find((t) => t.table === "notes")?.rows).toBe(3);
+    // The three ledger/audit classes are ALWAYS surfaced as gaps (never derivable from Markdown).
+    const classes = (out.gaps ?? []).map((g) => g.storageClass);
+    for (const cls of ["agent_runs", "audit_events", "workflow_idempotency"]) expect(classes, cls).toContain(cls);
+    // It IS a real state change: exactly one more run.projection than before.
+    expect(auditCount(c, "run.projection")).toBe(before + 1);
   });
 
   it("emits EXACTLY one run.readonly per executed inspect — git ref advances by one, SQLite agrees (cardinality)", async () => {

@@ -25,33 +25,27 @@ import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { openMigratedStore } from "./store-open.js";
 import { runReadAudit, assertReadAuditReady } from "../audit/readonly.js";
+import { rebuildFromGit, type FromGitGap } from "../workflows/rebuild-from-git.js";
 
-function parseArgs(argv: string[]): void {
+function parseArgs(argv: string[]): { fromGit: boolean } {
+  let fromGit = false;
   for (const a of argv) {
-    if (a === "--from-git") {
-      // --from-git contracts an audit-ref fold + ledger reconstruction that is
-      // owned by a LATER phase (Phase 2 disaster-recovery); it is not implemented
-      // here. Rather than accept it and report a FALSE success (round-2 finding
-      // F4), reject it explicitly until its owning phase lands.
-      throw new CliError({
-        code: "unsupported",
-        message: "`db rebuild --from-git` is not supported yet",
-        hint: "The from-git audit-ref fold / ledger reconstruction is owned by a later phase. Run `db rebuild` (rebuild projections from Markdown) without --from-git.",
-        exitCode: EXIT.USAGE,
-      });
-    }
-    throw CliError.usage(`unknown flag/argument for \`db rebuild\`: ${a}`);
+    if (a === "--from-git") fromGit = true;
+    else throw CliError.usage(`unknown flag/argument for \`db rebuild\`: ${a}`);
   }
+  return { fromGit };
 }
 
 interface RebuildOutput {
   command: "db rebuild";
   rebuilt: { table: string; rows: number }[];
   durationMs: number;
+  fromGit?: boolean;
+  gaps?: FromGitGap[];
 }
 
 async function dbRebuild(ctx: RunContext): Promise<number> {
-  parseArgs(ctx.argv);
+  const { fromGit } = parseArgs(ctx.argv);
 
   let snapshot: VaultSnapshot;
   try {
@@ -84,38 +78,74 @@ async function dbRebuild(ctx: RunContext): Promise<number> {
 
       const started = Date.now();
       let report: RebuildReport | undefined;
+      // --from-git (DR): best-effort rebuild that surfaces gaps instead of throwing. The gaps
+      // are captured here so they land in the output even though the fold ran inside finalize.
+      let gaps: FromGitGap[] | undefined;
+      let fromGitRebuilt: { notes: number; identityKeys: number; links: number } | undefined;
 
       // The projection rebuild runs INSIDE finalize's step-3 transaction (as
-      // `extraCommit`), atomically with the `run.projection` audit row. A rebuild
-      // failure (snapshot errors / dangling link) throws here → the whole §2.8
-      // transaction rolls back → the prior projection stays readable AND no audit
-      // event is committed. `strictBackup` makes an exhausted covering-backup THROW
-      // rather than silently blocking, so a rebuild never reports exit 0 without a
-      // covering backup (round-3 finding 2). NOT backup-coalesced — a projection is
-      // a real state change.
+      // `extraCommit`), atomically with the `run.projection` audit row. In the STRICT
+      // (default) mode a rebuild failure (snapshot errors / dangling link) throws here
+      // → the whole §2.8 transaction rolls back → the prior projection stays readable
+      // AND no audit event is committed. In --from-git (DR) mode the rebuild is
+      // best-effort: unreadable files / dangling links become GAPS (never a throw), so
+      // the clean subset commits with the run.projection event and the gaps are
+      // reported. `strictBackup` makes an exhausted covering-backup THROW rather than
+      // silently blocking, so a rebuild never reports exit 0 without a covering backup
+      // (round-3 finding 2). NOT backup-coalesced — a projection is a real state change.
       let audit;
       try {
         audit = await runReadAudit(ctx, "run.projection", "db rebuild", store, {
           extraCommit: (db) => {
-            report = rebuildProjections(db, snapshot, { now: () => new Date().toISOString().replace(/\.\d{3}Z$/, "Z") });
+            if (fromGit) {
+              const r = rebuildFromGit(db, snapshot);
+              gaps = [...r.gaps];
+              fromGitRebuilt = r.rebuilt;
+            } else {
+              report = rebuildProjections(db, snapshot, { now: () => new Date().toISOString().replace(/\.\d{3}Z$/, "Z") });
+            }
           },
           strictBackup: true,
         });
       } catch (e) {
         // Surface a rebuild-specific failure (snapshot errors / dangling link) with
         // its own code, even though it propagated through the audit orchestrator.
+        // (--from-git never reaches here for those — they are gaps, not throws.)
         const cause = e instanceof CliError ? e.cause : e;
         if (cause instanceof SnapshotHasErrorsError || cause instanceof DanglingLinkError) {
           throw new CliError({
             code: "rebuild-failed",
             message: `projection rebuild failed and was rolled back: ${cause.message}`,
-            hint: "Fix the vault issues surfaced by `brain inspect`, then retry.",
+            hint: "Fix the vault issues surfaced by `brain inspect`, then retry (or use --from-git to rebuild the clean subset and surface the rest as gaps).",
             exitCode: EXIT.INTERNAL,
             cause,
           });
         }
         throw e;
       }
+      const durationMs = Date.now() - started;
+
+      if (fromGit) {
+        if (fromGitRebuilt === undefined || gaps === undefined) {
+          throw new CliError({ code: "rebuild-failed", message: "from-git rebuild did not execute inside the audit transaction", exitCode: EXIT.INTERNAL });
+        }
+        ctx.log.info("db.rebuild", { fromGit: true, notes: fromGitRebuilt.notes, links: fromGitRebuilt.links, gaps: gaps.length, audited: audit.recorded, runId: audit.runId });
+        const out: RebuildOutput = {
+          command: "db rebuild",
+          rebuilt: [
+            { table: "notes", rows: fromGitRebuilt.notes },
+            { table: "note_identity_keys", rows: fromGitRebuilt.identityKeys },
+            { table: "note_links", rows: fromGitRebuilt.links },
+          ],
+          durationMs,
+          fromGit: true,
+          gaps,
+        };
+        if (ctx.output.mode === "json") emitJson(out);
+        else ctx.render(`db rebuild --from-git — ${fromGitRebuilt.notes} note(s), ${fromGitRebuilt.links} link(s), ${gaps.length} gap(s) in ${durationMs}ms`);
+        return EXIT.OK;
+      }
+
       if (report === undefined) {
         // Defensive: finalize returned without running the step-3 commit closure.
         throw new CliError({
@@ -124,7 +154,6 @@ async function dbRebuild(ctx: RunContext): Promise<number> {
           exitCode: EXIT.INTERNAL,
         });
       }
-      const durationMs = Date.now() - started;
       ctx.log.info("db.rebuild", { notes: report.notes, links: report.links, audited: audit.recorded, runId: audit.runId });
 
       const out: RebuildOutput = {
