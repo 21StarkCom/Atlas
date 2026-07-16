@@ -257,13 +257,16 @@ export class IntentsRepo {
 }
 
 /**
- * Allocate the next D6 ledger-internal (`db.*`) seq from the disjoint high range
- * ({@link DB_EVENT_SEQ_BASE}). These never reach the broker (contract §11), so
- * they must not perturb the gapless `run.*` chain.
+ * Allocate the next D6 ledger-internal seq from the disjoint high range
+ * ({@link DB_EVENT_SEQ_BASE}). These never reach the broker (contract §11), so they must not
+ * perturb the gapless `run.*` chain. The range is shared across ALL ledger-internal event kinds
+ * (`db.backup`/`db.restore`/`db.force_unblock` AND `evidence.retry_enqueued`), so the allocator
+ * counts every non-`run.*` event — narrowing to `db.%` would collide a second `evidence.*` event
+ * onto the base seq of the first.
  */
 export function nextDbEventSeq(db: SqliteDatabase): number {
   const row = db
-    .prepare(`SELECT COALESCE(MAX(seq), ?) AS m FROM audit_events WHERE event_type LIKE 'db.%'`)
+    .prepare(`SELECT COALESCE(MAX(seq), ?) AS m FROM audit_events WHERE event_type NOT LIKE 'run.%'`)
     .get(DB_EVENT_SEQ_BASE - 1) as { m: number };
   return row.m + 1;
 }

@@ -40,7 +40,7 @@ export type AuditEventKind = (typeof AUDIT_EVENT_KINDS)[number];
  * SQLite `audit_events` table only — they are NOT part of the `refs/audit/runs`
  * enumeration and are not chained into the WORM anchor's event count.
  */
-export const LEDGER_EVENT_KINDS = ["db.backup", "db.restore", "db.force_unblock"] as const;
+export const LEDGER_EVENT_KINDS = ["db.backup", "db.restore", "db.force_unblock", "evidence.retry_enqueued"] as const;
 
 export type LedgerEventKind = (typeof LEDGER_EVENT_KINDS)[number];
 
