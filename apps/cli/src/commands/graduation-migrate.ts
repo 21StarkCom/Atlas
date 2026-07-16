@@ -15,6 +15,7 @@ import { newRunId } from "@atlas/contracts";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { readScanState, scanStatePath } from "../graduation/state.js";
+import { readReleases, releasesPath } from "../graduation/releases.js";
 import { planBootstrapMigration, type MigrationPlan } from "../graduation/migrate-plan.js";
 import { applyBootstrapMigration, rollbackBootstrapMigration, readOriginalInputs } from "../graduation/migrate-apply.js";
 import { ledgerDbPath } from "./backup-config.js";
@@ -61,7 +62,10 @@ async function graduationMigrate(ctx: RunContext): Promise<number> {
   const p = parseArgs(ctx.argv);
   const { copy, head, bootstrapTimestamp } = resolveCopy(ctx);
   const migrationRunId = newRunId();
-  const plan = planBootstrapMigration(readOriginalInputs(copy), { bootstrapTimestamp });
+  // Operator-authorized releases (from `quarantine resolve --resolution release`) re-include
+  // otherwise-blocked incompatible-link notes as-is (§7.1).
+  const released = readReleases(releasesPath(ledgerDbPath(ctx)));
+  const plan = planBootstrapMigration(readOriginalInputs(copy), { bootstrapTimestamp, released });
 
   // PREVIEW (default): the plan, zero mutation, no auth, no audit-ref event.
   if (!p.apply && !p.rollback) {
