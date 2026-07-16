@@ -100,11 +100,23 @@ export interface QuarantineHeader {
 }
 
 /** The sensitive metadata sealed WITH the payload (never on disk in plaintext). */
+/** Optional graduation-quarantine context, sealed for the privileged `quarantine inspect` command. */
+export interface GraduationQuarantineContext {
+  /** Repo-relative path of the offending note/file (sealed — inside the AEAD envelope, never plaintext). */
+  readonly origin: string;
+  /** The §7 category (e.g. `detected-credential`). */
+  readonly category: string;
+  /** Which graduation step quarantined it (`graduation-scan` | `graduation-audit` | `graduation-migrate`). */
+  readonly detectedAt: string;
+}
+
 export interface QuarantineMeta {
   readonly originHash: string;
   readonly contentHash: string;
   readonly sizeBytes: number;
   readonly findings: readonly StoredFinding[];
+  /** Present for a graduation-quarantined item (the privileged inspect surface); absent for egress spool items. */
+  readonly graduation?: GraduationQuarantineContext;
 }
 
 /** The encrypted inner document (metadata + the quarantined bytes) sealed as one unit. */
@@ -330,6 +342,7 @@ export class QuarantineStore implements QuarantineSink {
     readonly bytes: Uint8Array;
     readonly origin: string;
     readonly findings: readonly SecretFinding[];
+    readonly graduation?: GraduationQuarantineContext;
   }): string {
     this.ensureDir();
 
@@ -358,6 +371,7 @@ export class QuarantineStore implements QuarantineSink {
         startOffset: f.startOffset,
         endOffset: f.endOffset,
       })),
+      ...(input.graduation ? { graduation: input.graduation } : {}),
       payload: Buffer.from(input.bytes).toString("base64"),
     };
 
@@ -520,6 +534,7 @@ export class QuarantineStore implements QuarantineSink {
       contentHash: inner.contentHash,
       sizeBytes: inner.sizeBytes,
       findings: inner.findings,
+      ...(inner.graduation ? { graduation: inner.graduation } : {}),
     };
     return { header, meta, bytes };
   }

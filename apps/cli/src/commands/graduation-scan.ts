@@ -66,13 +66,14 @@ async function graduationScan(ctx: RunContext): Promise<number> {
     const findings: Finding[] = [];
     if (wt.hits.length + hist.hits.length > 0) {
       const q = quarantineStoreFromContext(ctx);
+      const grad = (origin: string) => ({ origin, category: "detected-credential", detectedAt: "graduation-scan" });
       for (const hit of wt.hits) {
-        const opaqueId = q.quarantineItem({ bytes: readFileSync(resolvePath(ctx, `${copy}/${hit.file}`)), origin: hit.file, findings: hit.findings });
+        const opaqueId = q.quarantineItem({ bytes: readFileSync(resolvePath(ctx, `${copy}/${hit.file}`)), origin: hit.file, findings: hit.findings, graduation: grad(hit.file) });
         for (const f of hit.findings) findings.push({ opaqueId, path: hit.file, location: "working-tree", rule: f.ruleId });
       }
       for (const hit of hist.hits) {
         const bytes = execFileSync("git", ["-C", copy, "cat-file", "blob", `${hit.commit}:${hit.file}`], { maxBuffer: 256 * 1024 * 1024 });
-        const opaqueId = q.quarantineItem({ bytes, origin: `${hit.file}@${hit.commit}`, findings: hit.findings });
+        const opaqueId = q.quarantineItem({ bytes, origin: `${hit.file}@${hit.commit}`, findings: hit.findings, graduation: grad(hit.file) });
         for (const f of hit.findings) findings.push({ opaqueId, path: hit.file, location: "history", rule: f.ruleId, commit: hit.commit });
       }
     }
