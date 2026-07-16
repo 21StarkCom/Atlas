@@ -296,7 +296,7 @@
       "phase": 4,
       "idempotency": "key-accepting",
       "privilege": "privileged",
-      "implemented": false
+      "implemented": true
     },
     {
       "name": "quarantine inspect",
