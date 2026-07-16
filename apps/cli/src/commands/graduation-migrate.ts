@@ -41,9 +41,9 @@ function parseArgs(argv: string[]): Parsed {
   return { apply, rollback, exportChallenge, ...(authorization !== undefined ? { authorization } : {}) };
 }
 
-/** The deterministic migration-plan digest bound into the graduate authorization. */
+/** The deterministic migration-plan digest bound into the graduate authorization (`sha256:` form). */
 function planDigest(plan: MigrationPlan): string {
-  return createHash("sha256").update(JSON.stringify({ idMap: plan.idMap, notes: plan.notes, quarantined: plan.quarantined, refused: plan.refused })).digest("hex");
+  return `sha256:${createHash("sha256").update(JSON.stringify({ idMap: plan.idMap, notes: plan.notes, quarantined: plan.quarantined, refused: plan.refused })).digest("hex")}`;
 }
 
 /** The graduation copy the scan cleared + its git HEAD (the deterministic bootstrapTimestamp source). */
@@ -76,9 +76,12 @@ async function graduationMigrate(ctx: RunContext): Promise<number> {
   }
 
   // --apply / --rollback: BROKER-AUTHORIZED (op graduation migrate, graduate effect).
+  // The authorized op binds only DETERMINISTIC state (op + the copy HEAD + the graduate effect's
+  // plan digest), NOT the per-invocation migrationRunId — so `--export-challenge` and the later
+  // `--authorization` call re-derive the SAME op and the signed authorization verifies (a per-call
+  // runId would drift target_mismatch between the two invocations).
   const op = {
     op: "graduation migrate",
-    runId: migrationRunId,
     canonicalBaseCommit: head,
     intendedEffect: { kind: "graduate" as const, fromGeneration: 0, toGeneration: 1, migrationPlanDigest: planDigest(plan) },
   };
