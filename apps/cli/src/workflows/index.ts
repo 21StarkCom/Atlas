@@ -111,6 +111,21 @@ export {
 } from "./rebuild-from-git.js";
 
 export {
+  classifyRollback,
+  renditionDependents,
+  type RollbackClass,
+  type RollbackClassification,
+  type RunToRollback,
+} from "./rollback.js";
+
+export {
+  rollbackRun,
+  RollbackError,
+  type RollbackDeps,
+  type RollbackOutcome,
+} from "./rollback-run.js";
+
+export {
   enqueueReverification,
   classifyReanchor,
   reverifyKey,
