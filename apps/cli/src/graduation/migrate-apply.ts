@@ -182,6 +182,70 @@ export function applyBootstrapMigration(copyDir: string, plan: MigrationPlan, op
   return { checkpoint, applied, skipped };
 }
 
+/** One note's byte-exact reversal outcome (§8.2). */
+export interface RolledBackNote {
+  readonly path: string;
+  readonly restoredToStatus: "pending";
+  readonly preImageRestored: true;
+  readonly restoredToSha256: string;
+}
+/** A note that could not be reverted because a post-migration edit landed (fail-closed, §8.2). */
+export interface RollbackConflict {
+  readonly path: string;
+  readonly expectedPostImageSha256: string;
+  readonly actualSha256: string;
+  readonly outcome: "conflict";
+  readonly preImageRestored: false;
+}
+export interface RollbackResult {
+  readonly mode: "rolled-back";
+  readonly rolledBack: RolledBackNote[];
+  /** Notes whose CURRENT bytes no longer match their post-image (null when there are none). */
+  readonly rollbackConflicts: RollbackConflict[] | null;
+  /** The reverse sorted-path order notes were processed for reversal. */
+  readonly rollbackOrder: string[];
+  /** Notes re-reverted this pass — ALWAYS empty (rollback is idempotent; a reverted note is skipped). */
+  readonly reReverted: string[];
+}
+
+/**
+ * Revert a bootstrap migration byte-exact using the per-note checkpoints, in REVERSE sorted-path
+ * order (§8.2). For each applied note whose CURRENT on-disk bytes still hash to its post-image, the
+ * retained pre-image bytes are restored (atomic) and the note is marked `pending`/`reverted`. A note
+ * whose bytes drifted from the post-image (a post-migration edit) is a fail-closed CONFLICT — its
+ * pre-image is NOT restored. Idempotent: an already-`reverted` note is skipped (never re-reverted).
+ */
+export function rollbackBootstrapMigration(copyDir: string): RollbackResult {
+  const cp = loadCheckpoint(copyDir);
+  if (cp === null) throw new Error(`no ${CHECKPOINT_FILE} at ${copyDir}: nothing to roll back`);
+
+  // Applied notes (those with a retained pre-image), reverse sorted-path order.
+  const applied = cp.notes.filter((n) => n.preImage !== null).sort((a, b) => b.path.localeCompare(a.path));
+  const rolledBack: RolledBackNote[] = [];
+  const conflicts: RollbackConflict[] = [];
+  const rollbackOrder: string[] = [];
+
+  for (const n of applied) {
+    rollbackOrder.push(n.path);
+    if (n.rollbackStatus === "reverted") continue; // idempotent — already reverted
+
+    const full = join(copyDir, n.path);
+    const actual = existsSync(full) ? sha256(readFileSync(full)) : "";
+    if (actual !== n.postImageSha256) {
+      conflicts.push({ path: n.path, expectedPostImageSha256: n.postImageSha256 ?? "", actualSha256: actual, outcome: "conflict", preImageRestored: false });
+      continue; // fail-closed — a post-migration edit; do NOT clobber it
+    }
+    const preBytes = readFileSync(join(copyDir, n.preImage!));
+    atomicWrite(full, preBytes.toString("utf8"));
+    n.status = "pending";
+    n.rollbackStatus = "reverted";
+    rolledBack.push({ path: n.path, restoredToStatus: "pending", preImageRestored: true, restoredToSha256: sha256(preBytes) });
+  }
+
+  saveCheckpoint(copyDir, cp);
+  return { mode: "rolled-back", rolledBack, rollbackConflicts: conflicts.length > 0 ? conflicts : null, rollbackOrder, reReverted: [] };
+}
+
 /** Read the original bytes for a note: its retained pre-image if one exists (resume), else the file. */
 function readOriginal(copyDir: string, path: string, prev: CheckpointNote | undefined): string {
   if (prev?.preImage) {
