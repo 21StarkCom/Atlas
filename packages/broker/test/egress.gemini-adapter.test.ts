@@ -49,6 +49,23 @@ describe("GeminiAdapter — success paths", () => {
     expect(r).toEqual({ text: "hello", usage: { inputTokens: 10, outputTokens: 5 }, model: MODEL, retries: 0 });
   });
 
+  it("generateText drops thought parts (thought: true) — reasoning traces never release", async () => {
+    // Gemini 3.5 thinking responses interleave `thought: true` parts with the
+    // answer; concatenating them leaked raw reasoning into the released text
+    // (observed live 2026-07-16). Only non-thought parts are the answer.
+    const body = {
+      candidates: [{ content: { parts: [
+        { text: "Let me check the org notes first…", thought: true },
+        { text: "Rotem Arel leads the Cloud team." },
+      ] } }],
+      usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 },
+    };
+    const transport: Transport = () => Promise.resolve(jsonResponse(body));
+    const adapter = new GeminiAdapter({ apiKey: "k", transport, sleep: noSleep });
+    const r = await adapter.generateText(textReq);
+    expect(r.text).toBe("Rotem Arel leads the Cloud team.");
+  });
+
   it("rejects a cross-operation / non-allowlisted model before transport (model_incompatible)", async () => {
     const transport = vi.fn<Transport>(() => Promise.resolve(jsonResponse(textCandidate("x"))));
     const adapter = new GeminiAdapter({ apiKey: "k", transport, sleep: noSleep });
