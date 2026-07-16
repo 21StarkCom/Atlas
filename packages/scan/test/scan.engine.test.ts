@@ -293,6 +293,18 @@ describe("scanBytes — ruleset v2 entropy precision guards (real-vault FP corpu
       text: `"[Attitude Is Everything](https://www.amazon.com/dp/B0C1X2Y3Z4?cmp-8896614386:adg-91345587082:crv-411479337354&qid=1719858372&sr=8-1)"`,
     },
     {
+      name: "markdown-link Slack archive URL (digit-heavy thread path, span joined by `](`)",
+      text: "- [Slack message](https://getevinced.slack.com/archives/D06PZHZAFGA/p1780479296037719?thread_ts=1780479296.037719&cid=D06PZHZAFGA)",
+    },
+    {
+      name: "Slack-export angle URL (<https://…|label>, high-entropy doc id)",
+      text: "see <https://docs.google.com/document/d/1QD4bC3dE4fG5hI6jK7lM8nO9pQ0rS1tU2vW3xY4zA5/edit?tab=t.0|summary of today's meeting> now",
+    },
+    {
+      name: "parenthesized Drive share URL (digit-bearing id)",
+      text: "For reference: [Questionnaire](https://drive.google.com/file/d/1aB2cD3eF4gH5iJ6kL7mN8oP9qR0sT1uV2wX3y/view?usp=sharing)",
+    },
+    {
       name: "kebab-case slug filename",
       text: "ref: 30_Research/the-90-day-onboarding-notebook-for-new-engineering-managers.md",
     },

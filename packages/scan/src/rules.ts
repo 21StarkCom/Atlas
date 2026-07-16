@@ -201,15 +201,18 @@ export function isMixedAlphabet(s: string): boolean {
 
 /**
  * True when the candidate token at `start` sits inside a URL: the containing
- * non-whitespace span begins with `http://` / `https://`. URL path/query segments
- * (share links, tracking blobs, doc ids) are the dominant entropy false-positive
- * class in real prose vaults and are never a *stored* secret assignment — a bare
- * token pasted outside a URL still flags. (Ruleset v2.)
+ * non-whitespace span CONTAINS `http://` / `https://` before the token. URL
+ * path/query segments (share links, tracking blobs, doc ids) are the dominant
+ * entropy false-positive class in real prose vaults and are never a *stored*
+ * secret assignment — a bare token pasted outside a URL still flags. The scheme
+ * test is contains-, not prefix-anchored, because prose URLs are routinely
+ * wrapped in punctuation that joins the span: markdown links (`…](https://…`),
+ * Slack exports (`<https://…|label>`), quoted/parenthesized URLs. (Ruleset v2.)
  */
 export function isUrlContext(text: string, start: number): boolean {
   let i = start;
   while (i > 0 && !/\s/.test(text[i - 1]!)) i--;
-  return /^https?:\/\//i.test(text.slice(i, start));
+  return /https?:\/\//i.test(text.slice(i, start));
 }
 
 /**
