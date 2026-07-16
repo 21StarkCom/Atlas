@@ -43,7 +43,7 @@ Registry version: **1** · Commands: **49**
 | 4 | `git approve` | key-accepting | privileged | no | `docs/specs/cli-contract/git-approve.schema.json` |
 | 4 | `git refresh` | key-accepting | privileged | no | `docs/specs/cli-contract/git-refresh.schema.json` |
 | 4 | `git reject` | intrinsic | shared | no | `docs/specs/cli-contract/git-reject.schema.json` |
-| 4 | `git review` | none | shared | no | `docs/specs/cli-contract/git-review.schema.json` |
+| 4 | `git review` | none | shared | yes | `docs/specs/cli-contract/git-review.schema.json` |
 | 4 | `git rollback` | key-accepting | privileged | no | `docs/specs/cli-contract/git-rollback.schema.json` |
 | 4 | `git verify` | intrinsic | shared | yes | `docs/specs/cli-contract/git-verify.schema.json` |
 | 4 | `maintain` | key-accepting | shared | no | `docs/specs/cli-contract/maintain.schema.json` |

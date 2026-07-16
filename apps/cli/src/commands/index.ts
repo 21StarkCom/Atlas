@@ -20,5 +20,6 @@ import "./note.js";
 import "./git-status.js";
 import "./git-cleanup.js";
 import "./git-verify.js";
+import "./git-review.js";
 import "./query.js";
 import "./index-ops.js";
