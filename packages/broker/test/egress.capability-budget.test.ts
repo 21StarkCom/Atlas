@@ -246,8 +246,8 @@ describe("egress in-broker payload scan (INVARIANT 2)", () => {
 
   it("blocks a secret echoed back in the response payload and quarantines it", async () => {
     const sink = memSink();
-    // The provider echoes the secret in the RAW response bytes → the response scan
-    // catches it before parse/release.
+    // The provider echoes the secret in the generated TEXT — it is in the RELEASED
+    // bytes (ADR-0001), so the response scan catches it before release.
     const leaky = fakeAdapter({
       transmit: () => Promise.resolve({ rawResponse: Buffer.from(JSON.stringify({ text: PLANTED, usage: { inputTokens: 3, outputTokens: 3 } }), "utf8"), retries: 0 }),
     });
@@ -256,6 +256,28 @@ describe("egress in-broker payload scan (INVARIANT 2)", () => {
     expect(out.ok).toBe(false);
     if (!out.ok && "refusal" in out) expect(out.refusal.code).toBe("egress.secret_detected");
     expect(sink.captures.length).toBe(1);
+  });
+
+  it("releases a clean answer whose ENVELOPE carries a discarded high-entropy field (Gemini thoughtSignature, ADR-0001)", async () => {
+    const sink = memSink();
+    // A realistic Gemini 3.5 response: clean generated text + a multi-KB opaque
+    // base64 `thoughtSignature` the adapter's parse DISCARDS. Scan-wise the blob is
+    // indistinguishable from a secret, but it never re-enters the host — under
+    // ADR-0001 the released bytes are scanned, so the call must SUCCEED. (Before
+    // the ADR this refused every thinking-model response — issue #146.)
+    const thoughtSignature = randomBytes(2048).toString("base64");
+    const raw = JSON.stringify({
+      candidates: [{ content: { parts: [{ text: "A perfectly ordinary grounded answer citing note-write-rules.", thoughtSignature }], role: "model" }, finishReason: "STOP" }],
+      usageMetadata: { promptTokenCount: 12, candidatesTokenCount: 9, totalTokenCount: 21 },
+      modelVersion: MODEL,
+    });
+    const transport: Transport = () => Promise.resolve(new Response(raw, { status: 200, headers: { "content-type": "application/json" } }));
+    const adapter = new GeminiAdapter({ apiKey: "k", transport, maxRetries: 0, sleep: () => Promise.resolve() });
+    const svc = new EgressService({ adapter, quarantine: sink, capabilitySecret: SECRET });
+    const out = await svc.invoke(invoke(cap(), textReq("clean prompt")));
+    expect(out.ok, JSON.stringify(out)).toBe(true);
+    if (out.ok) expect((out.result as { text: string }).text).toContain("ordinary grounded answer");
+    expect(sink.captures.length).toBe(0); // nothing quarantined — the blob never left the broker
   });
 
   it("does not consume budget for a pre-flight-refused (request-scan) call", async () => {

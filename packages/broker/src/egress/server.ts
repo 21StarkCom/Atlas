@@ -12,8 +12,11 @@
  *      the per-run budget (D19) — held across the round-trip so concurrent calls
  *      cannot race the ceiling;
  *   6. TRANSMITS via the in-broker adapter (the sole credential + network holder);
- *   7. scans the EXACT RAW RESPONSE BYTES in-broker BEFORE parsing/releasing them,
- *      then parses;
+ *      error/intermediate-retry bodies are scanned RAW via the transmit hook;
+ *   7. parses the final response, then scans the canonical serialization of the
+ *      RELEASED result in-broker BEFORE releasing it (ADR-0001: discarded provider
+ *      envelope fields — e.g. Gemini's high-entropy `thoughtSignature` — never
+ *      re-enter the host and are not part of the scanned surface);
  *   8. RECONCILES the reservation to the actual usage (or charges the dispatched
  *      bytes on a provider error) and returns a RECEIPT carrying ONLY allowlisted
  *      audit fields (request/response hashes, destination, model, tokens, latency,
@@ -275,26 +278,11 @@ export class EgressService {
     const responseBytes = transmitted.rawResponse;
     const responseHash = sha256Hex(responseBytes);
 
-    // (7a) In-broker response scan — on the EXACT RAW (final, 2xx) RESPONSE BYTES,
-    // before parse. (Error/intermediate bodies were already scanned by the hook.)
-    try {
-      await scanEgressPayload(responseBytes, "response", origin, this.cfg.quarantine);
-    } catch (err) {
-      if (err instanceof EgressRefusal) {
-        // Dispatched but the released response is blocked: retain the conservative charge.
-        this.chargeConservative(reservation, requestBytes.byteLength * (retries + 1));
-        return {
-          ok: false,
-          providerError: false,
-          refusal: err,
-          receipt: this.receipt(claims, operation, requestHash, params.declaredSensitivity, { outcome: "refused", reasonCode: err.code, responseHash, latencyMs, retries }),
-        };
-      }
-      this.chargeConservative(reservation, requestBytes.byteLength * (retries + 1));
-      throw err;
-    }
-
-    // (7b) Parse the scanned raw bytes into the typed result.
+    // (7a) Parse the raw (final, 2xx) response bytes into the typed result FIRST
+    // (ADR-0001). Envelope fields the adapter discards (e.g. Gemini's per-response
+    // `thoughtSignature` — an opaque high-entropy blob scan-indistinguishable from
+    // a secret) never leave the broker, so they are not part of the scanned
+    // surface. (Error/intermediate bodies were already scanned RAW by the hook.)
     let usage: Usage;
     let result: unknown;
     try {
@@ -307,6 +295,28 @@ export class EgressService {
         // retain the conservative projected tokens/cost (never reconciled to zero).
         this.chargeConservative(reservation, requestBytes.byteLength * (retries + 1));
         return { ok: false, providerError: true, error: err, receipt: this.receipt(claims, operation, requestHash, params.declaredSensitivity, { outcome: "error", reasonCode: err.kind, responseHash, latencyMs, retries }) };
+      }
+      this.chargeConservative(reservation, requestBytes.byteLength * (retries + 1));
+      throw err;
+    }
+
+    // (7b) In-broker response scan — on the canonical serialization of the RELEASED
+    // result: exactly the bytes that re-enter the host (ADR-0001). A provider echo
+    // of a secret in the generated text/object is in these bytes by definition and
+    // blocks + quarantines just as before.
+    const releasedBytes = Buffer.from(JSON.stringify(result ?? null), "utf8");
+    try {
+      await scanEgressPayload(releasedBytes, "response", origin, this.cfg.quarantine);
+    } catch (err) {
+      if (err instanceof EgressRefusal) {
+        // Dispatched but the released response is blocked: retain the conservative charge.
+        this.chargeConservative(reservation, requestBytes.byteLength * (retries + 1));
+        return {
+          ok: false,
+          providerError: false,
+          refusal: err,
+          receipt: this.receipt(claims, operation, requestHash, params.declaredSensitivity, { outcome: "refused", reasonCode: err.code, responseHash, latencyMs, retries }),
+        };
       }
       this.chargeConservative(reservation, requestBytes.byteLength * (retries + 1));
       throw err;
