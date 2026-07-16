@@ -184,7 +184,7 @@
       "phase": 3,
       "idempotency": "intrinsic",
       "privilege": "shared",
-      "implemented": false
+      "implemented": true
     },
     {
       "name": "index repair",
@@ -192,7 +192,7 @@
       "phase": 3,
       "idempotency": "intrinsic",
       "privilege": "shared",
-      "implemented": false
+      "implemented": true
     },
     {
       "name": "index status",
@@ -200,7 +200,7 @@
       "phase": 3,
       "idempotency": "none",
       "privilege": "shared",
-      "implemented": false
+      "implemented": true
     },
     {
       "name": "index verify",
@@ -208,7 +208,7 @@
       "phase": 3,
       "idempotency": "none",
       "privilege": "shared",
-      "implemented": false
+      "implemented": true
     },
     {
       "name": "ingest",
@@ -320,7 +320,7 @@
       "phase": 3,
       "idempotency": "none",
       "privilege": "shared",
-      "implemented": false
+      "implemented": true
     },
     {
       "name": "reconcile",
