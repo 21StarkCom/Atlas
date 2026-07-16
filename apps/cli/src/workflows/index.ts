@@ -111,6 +111,11 @@ export {
 } from "./rebuild-from-git.js";
 
 export {
+  makeBrokerIntegrator,
+  type BrokerIntegratorAuth,
+} from "./broker-integrator.js";
+
+export {
   classifyRollback,
   renditionDependents,
   type RollbackClass,
