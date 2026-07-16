@@ -25,6 +25,7 @@ import {
   type RefAdvanceResult,
   type SourceCaptureRequest,
   type SignAndSourceCaptureRequest,
+  type SignAndAdvanceRequest,
 } from "./refs.js";
 
 /** The audit-attestation keypair the broker uses to sign the WORM anchor (§4). */
@@ -207,6 +208,29 @@ export class BrokerService {
         captureCommit: r.captureCommit,
         expectedBase: r.expectedBase,
         manifest: r.manifest,
+        auditEvent: signed,
+      });
+      await this.refreshCanonicalTip();
+      return res;
+    });
+  }
+
+  /**
+   * The GENERAL-SCOPE sign-and-advance for synthesis/approve/rollback (D-review defect #2): the
+   * broker fills `prevAuditHead`, signs the canonical-installing event with the attestation key,
+   * verifies the Tier-3 authorization (when present) + audit-event binding, and advances the
+   * protected ref under CAS — all in one lock-held step. The CLI never holds the attestation key.
+   */
+  signAndAdvanceProtectedRef(r: SignAndAdvanceRequest): Promise<RefAdvanceResult> {
+    return this.runExclusive(async () => {
+      const signed = await this.audit.signCanonicalInstalling(r.event, this.attestationPrivateKey);
+      const res = await this.writer.advanceProtectedRef({
+        ref: r.ref,
+        expectedOld: r.expectedOld,
+        newCommit: r.newCommit,
+        manifest: r.manifest,
+        ...(r.authorization !== undefined ? { authorization: r.authorization } : {}),
+        ...(r.authorizedOp !== undefined ? { authorizedOp: r.authorizedOp } : {}),
         auditEvent: signed,
       });
       await this.refreshCanonicalTip();

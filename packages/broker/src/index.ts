@@ -41,6 +41,7 @@ export {
   type RefAdvanceResult,
   type SourceCaptureRequest,
   type SignAndSourceCaptureRequest,
+  type SignAndAdvanceRequest,
   type AuthorizedOp,
 } from "./refs.js";
 

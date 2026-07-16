@@ -25,7 +25,7 @@ import {
 } from "./protocol.js";
 import type { AppendResult } from "./audit-append.js";
 import type { PrivilegedOpDescriptor } from "./authorize.js";
-import type { RefAdvanceRequest, RefAdvanceResult, SourceCaptureRequest, SignAndSourceCaptureRequest } from "./refs.js";
+import type { RefAdvanceRequest, RefAdvanceResult, SourceCaptureRequest, SignAndSourceCaptureRequest, SignAndAdvanceRequest } from "./refs.js";
 import type { PrivilegedOpResult } from "./service.js";
 
 /** The read-only audit-chain health verdict returned by {@link BrokerClient.getAuditChainStatus}. */
@@ -162,6 +162,16 @@ export class BrokerClient {
    */
   signAndIntegrateSourceCapture(r: SignAndSourceCaptureRequest): Promise<RefAdvanceResult> {
     return this.call("signAndIntegrateSourceCapture", r);
+  }
+
+  /**
+   * Advance a protected ref whose canonical-installing event the BROKER signs internally (the
+   * general-scope analogue of {@link signAndIntegrateSourceCapture} for synthesis/approve/rollback).
+   * The CLI submits the unsigned event (+ a Tier-3 authorization when required); the broker fills
+   * `prevAuditHead`, signs with the attestation key, verifies the authorization, and advances under CAS.
+   */
+  signAndAdvanceProtectedRef(r: SignAndAdvanceRequest): Promise<RefAdvanceResult> {
+    return this.call("signAndAdvanceProtectedRef", r);
   }
 
   /** Mint an authorization challenge for a privileged op. */

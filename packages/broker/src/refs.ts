@@ -92,6 +92,28 @@ export interface SignAndSourceCaptureRequest {
   readonly event: Omit<AuditEvent, "prevAuditHead">;
 }
 
+/**
+ * A request to advance a protected ref whose canonical-installing `run.integrated` /
+ * `run.rolled_back` event the BROKER signs INTERNALLY — the general-scope analogue of
+ * {@link SignAndSourceCaptureRequest} for synthesis/approve/rollback (D-review defect #2). The
+ * unprivileged CLI cannot hold the audit-attestation key and `signAndAppendAuditEvent` refuses
+ * canonical-installing kinds, so the caller submits the UNSIGNED event here and the broker's
+ * protected-ref path fills `prevAuditHead`, signs with the attestation key, verifies the
+ * authorization (Tier-3), and advances canonical under CAS in one lock-held step.
+ */
+export interface SignAndAdvanceRequest {
+  readonly ref: string;
+  readonly expectedOld: string;
+  readonly newCommit: string;
+  readonly manifest: RunManifest;
+  /** Present for Tier-3 privileged advances (approve/rollback/refresh) — verified broker-side. */
+  readonly authorization?: AuthorizationResponse;
+  /** REQUIRED whenever `authorization` is present (binds the auth to the op + effect). */
+  readonly authorizedOp?: AuthorizedOp;
+  /** The UNSIGNED canonical-installing event the broker signs internally. */
+  readonly event: Omit<AuditEvent, "prevAuditHead">;
+}
+
 /** The result of a successful protected-ref advance. */
 export interface RefAdvanceResult {
   readonly ok: true;
