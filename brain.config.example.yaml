@@ -37,7 +37,7 @@ git:
   audit_anchor_path: /usr/local/var/atlas/audit-anchor # D8 (macOS; Linux: /var/lib/atlas/audit-anchor)
 
 models:
-  generation_model: gemini-3-5-flash
+  generation_model: gemini-3.5-flash
   embedding_model: gemini-embedding-001
 
 policies:
