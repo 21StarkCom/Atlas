@@ -49,7 +49,7 @@ Registry version: **1** · Commands: **49**
 | 4 | `maintain` | key-accepting | shared | no | `docs/specs/cli-contract/maintain.schema.json` |
 | 4 | `purge` | key-accepting | privileged | no | `docs/specs/cli-contract/purge.schema.json` |
 | 4 | `reconcile` | key-accepting | shared | no | `docs/specs/cli-contract/reconcile.schema.json` |
-| 4 | `source trust promote` | key-accepting | privileged | no | `docs/specs/cli-contract/source-trust-promote.schema.json` |
+| 4 | `source trust promote` | key-accepting | privileged | yes | `docs/specs/cli-contract/source-trust-promote.schema.json` |
 | 4 | `source trust revoke` | key-accepting | privileged | no | `docs/specs/cli-contract/source-trust-revoke.schema.json` |
 | 4 | `validate` | none | shared | yes | `docs/specs/cli-contract/validate.schema.json` |
 | 5 | `graduation audit` | none | shared | yes | `docs/specs/cli-contract/graduation-audit.schema.json` |
