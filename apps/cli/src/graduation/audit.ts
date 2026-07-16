@@ -11,7 +11,14 @@ import { parse as parseYaml } from "yaml";
 import { watermarkHealth, type SqliteDatabase, type WatermarkHealth } from "@atlas/sqlite-store";
 import type { VaultSnapshot } from "@atlas/contracts";
 import { splitFrontmatter } from "../markdown/parse.js";
-import { POLICY_TARGET_TYPES } from "../policies/mutation-policy.js";
+
+/**
+ * The bootstrap-migration §3 known types (V1): the managed set migration can infer/assign. A note
+ * whose explicit `type` is outside this set is `unknown-type`. This is the migration contract's set
+ * (`note`/`concept`/`person`/`source`/`project`) — NOT the mutation-policy target types, which omit
+ * `note` and add `research`/`decision`/`task` (a note-typed note must never be mis-flagged unknown).
+ */
+export const GRADUATION_KNOWN_TYPES = ["note", "concept", "person", "source", "project"] as const;
 
 /** The bootstrap-migration §7 quarantine categories the graduation audit inventories. */
 export const GRADUATION_CATEGORIES = [
@@ -62,7 +69,7 @@ function classifyMissing(vaultPath: string, rel: string): GraduationCategory[] {
  */
 export function categorizeGraduationCopy(vaultPath: string, snapshot: VaultSnapshot): { totalNotes: number; categories: GraduationCategories } {
   const cats = Object.fromEntries(GRADUATION_CATEGORIES.map((c) => [c, [] as string[]])) as GraduationCategories;
-  const known = new Set<string>(POLICY_TARGET_TYPES);
+  const known = new Set<string>(GRADUATION_KNOWN_TYPES);
 
   for (const e of snapshot.errors) {
     switch (e.kind) {
