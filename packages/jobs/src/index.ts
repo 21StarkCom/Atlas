@@ -23,6 +23,7 @@ export {
   claimNext,
   completeJob,
   scheduleRetry,
+  resetForRetry,
   failJob,
   cancelRunning,
   payloadHash,

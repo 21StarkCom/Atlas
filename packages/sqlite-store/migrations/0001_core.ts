@@ -175,7 +175,7 @@ CREATE TABLE audit_events (
   event_type    TEXT    NOT NULL CHECK (event_type IN (
                   'run.started', 'run.planned', 'run.integrated', 'run.refreshed', 'run.rejected',
                   'run.rolled_back', 'run.failed', 'run.cancelled', 'run.readonly', 'run.projection',
-                  'db.backup', 'db.restore', 'db.force_unblock')),
+                  'db.backup', 'db.restore', 'db.force_unblock', 'evidence.retry_enqueued')),
   payload_hash  TEXT    NOT NULL,                         -- hash of the canonical allowlisted-metadata payload
   git_head      TEXT,                                     -- refs/audit/runs head returned by the broker append
   created_at    TEXT    NOT NULL,

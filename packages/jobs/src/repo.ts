@@ -515,6 +515,28 @@ export function scheduleRetry(
   }).immediate();
 }
 
+/** The outcome of {@link resetForRetry}: a terminal job was re-queued, or it was already active. */
+export type RetryResetOutcome = "requeued" | "already-active";
+
+/**
+ * Operator-initiated retry of a TERMINAL job (`failed`/`cancelled`/`succeeded`): reset it to a fresh
+ * `pending` attempt (attempts → 0, next_run_at → now, lease_epoch bumped to fence any stale lease).
+ * IDEMPOTENT — a job already `pending`/`running` is left untouched and reported `already-active`, so
+ * a repeat retry of an in-flight job is a no-op. The single UPDATE runs in an IMMEDIATE transaction.
+ */
+export function resetForRetry(db: SqliteDatabase, jobId: string, now: string): RetryResetOutcome {
+  return db.transaction((): RetryResetOutcome => {
+    const row = db.prepare(`SELECT state FROM jobs WHERE job_id = ?`).get(jobId) as { state: JobState } | undefined;
+    if (row === undefined) throw new Error(`job ${jobId} not found`);
+    if (row.state === "pending" || row.state === "running") return "already-active";
+    db.prepare(
+      `UPDATE jobs SET state = 'pending', attempts = 0, next_run_at = @now, updated_at = @now,
+              lease_epoch = lease_epoch + 1 WHERE job_id = @id`,
+    ).run({ now, id: jobId });
+    return "requeued";
+  }).immediate();
+}
+
 /**
  * Finalize a running attempt as `failed` and drive the job terminal
  * (`running → failed`, contract §1 `attempts-exhausted` / `permanent-error`).
