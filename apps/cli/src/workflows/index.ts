@@ -105,6 +105,12 @@ export {
 } from "./review.js";
 
 export {
+  rebuildFromGit,
+  type FromGitReport,
+  type FromGitGap,
+} from "./rebuild-from-git.js";
+
+export {
   enqueueReverification,
   classifyReanchor,
   reverifyKey,
