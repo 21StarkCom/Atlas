@@ -31,4 +31,5 @@ import "./validate.js";
 import "./query.js";
 import "./enrich.js";
 import "./maintain.js";
+import "./reconcile.js";
 import "./index-ops.js";

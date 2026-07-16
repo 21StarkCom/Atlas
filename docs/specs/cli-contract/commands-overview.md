@@ -48,7 +48,7 @@ Registry version: **1** · Commands: **49**
 | 4 | `git verify` | intrinsic | shared | yes | `docs/specs/cli-contract/git-verify.schema.json` |
 | 4 | `maintain` | key-accepting | shared | yes | `docs/specs/cli-contract/maintain.schema.json` |
 | 4 | `purge` | key-accepting | privileged | yes | `docs/specs/cli-contract/purge.schema.json` |
-| 4 | `reconcile` | key-accepting | shared | no | `docs/specs/cli-contract/reconcile.schema.json` |
+| 4 | `reconcile` | key-accepting | shared | yes | `docs/specs/cli-contract/reconcile.schema.json` |
 | 4 | `source trust promote` | key-accepting | privileged | yes | `docs/specs/cli-contract/source-trust-promote.schema.json` |
 | 4 | `source trust revoke` | key-accepting | privileged | yes | `docs/specs/cli-contract/source-trust-revoke.schema.json` |
 | 4 | `validate` | none | shared | yes | `docs/specs/cli-contract/validate.schema.json` |
