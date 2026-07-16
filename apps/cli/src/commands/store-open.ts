@@ -12,7 +12,7 @@
  * otherwise returns the open store WITHOUT migrating.
  */
 import { existsSync } from "node:fs";
-import { openStore, type Store } from "@atlas/sqlite-store";
+import { openStore, registerGenerationMigration, type Store } from "@atlas/sqlite-store";
 import { registerJobsMigration } from "@atlas/jobs";
 import { CliError, EXIT } from "../errors/envelope.js";
 import { ledgerDbPath } from "./backup-config.js";
@@ -36,6 +36,12 @@ import type { RunContext } from "../handlers.js";
 export function registerFeatureMigrations(store: Store): void {
   registerJobsMigration(store);
   registerWorkflowMigrations(store);
+  // `0008_index_config_revision` (generation/activation layer). Without this line a
+  // real deployment's `db migrate` never applies 0008 and the FIRST live
+  // `index rebuild` dies in `GenerationRepo.adoptConfig` ("no such table:
+  // index_config_revisions") — the package tests masked it by registering the
+  // migration themselves. Found on the 2026-07-16 live drive.
+  registerGenerationMigration(store);
 }
 
 /** The core migration whose presence proves the ledger has been migrated. */
