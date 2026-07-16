@@ -22,7 +22,7 @@ import {
   type WireSignedAuditEvent,
 } from "./protocol.js";
 import type { AuditEvent, SignedAuditEvent, AuthorizationResponse } from "@atlas/contracts";
-import type { RefAdvanceRequest, SourceCaptureRequest, SignAndSourceCaptureRequest } from "./refs.js";
+import type { RefAdvanceRequest, SourceCaptureRequest, SignAndSourceCaptureRequest, SignAndAdvanceRequest } from "./refs.js";
 import type { PrivilegedOpDescriptor } from "./authorize.js";
 
 /** A running broker socket server. */
@@ -50,6 +50,8 @@ async function dispatch(service: BrokerService, method: BrokerMethod, params: un
       const p = params as SourceCaptureRequest & { auditEvent: WireSignedAuditEvent };
       return service.integrateSourceCapture({ ...p, auditEvent: decodeAuditEvent(p.auditEvent) as SignedAuditEvent });
     }
+    case "signAndAdvanceProtectedRef":
+      return service.signAndAdvanceProtectedRef(params as SignAndAdvanceRequest);
     case "signAndIntegrateSourceCapture":
       // The unsigned event is plain JSON (no signature to decode); the broker fills
       // prevAuditHead + signs it with the attestation key inside the ref move.

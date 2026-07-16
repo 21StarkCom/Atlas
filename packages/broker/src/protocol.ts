@@ -22,6 +22,7 @@ export type BrokerMethod =
   | "advanceProtectedRef"
   | "integrateSourceCapture"
   | "signAndIntegrateSourceCapture"
+  | "signAndAdvanceProtectedRef"
   | "mintChallenge"
   | "execAuthorized";
 
@@ -33,6 +34,7 @@ export const BROKER_METHODS = [
   "advanceProtectedRef",
   "integrateSourceCapture",
   "signAndIntegrateSourceCapture",
+  "signAndAdvanceProtectedRef",
   "mintChallenge",
   "execAuthorized",
 ] as const;
@@ -144,6 +146,15 @@ const METHOD_PARAM_SCHEMAS: Record<BrokerMethod, z.ZodTypeAny> = {
     manifest: RunManifestSchema,
     event: UnsignedAuditEventSchema,
   }),
+  signAndAdvanceProtectedRef: z.object({
+    ref: z.string().min(1),
+    expectedOld: z.string().min(1),
+    newCommit: z.string().min(1),
+    manifest: RunManifestSchema,
+    authorization: AuthorizationResponseSchema.optional(),
+    authorizedOp: z.object({ op: z.string().min(1), intendedEffect: IntendedEffectSchema }).optional(),
+    event: UnsignedAuditEventSchema,
+  }),
   mintChallenge: PrivilegedOpDescriptorSchema,
   execAuthorized: z.object({
     op: PrivilegedOpDescriptorSchema,
@@ -242,6 +253,7 @@ const METHOD_RESULT_SCHEMAS: Record<BrokerMethod, z.ZodTypeAny> = {
   advanceProtectedRef: RefAdvanceResultSchema,
   integrateSourceCapture: RefAdvanceResultSchema,
   signAndIntegrateSourceCapture: RefAdvanceResultSchema,
+  signAndAdvanceProtectedRef: RefAdvanceResultSchema,
   mintChallenge: AuthorizationChallengeSchema,
   execAuthorized: PrivilegedOpResultSchema,
 };
