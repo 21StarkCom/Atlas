@@ -227,11 +227,11 @@ describe("runCli", () => {
   });
 
   it("reports a not-implemented command from the registry (exit 5)", async () => {
-    // `enrich` is a real registry command (Phase 4) with no handler wired in this build.
+    // `git refresh` is a real registry command with no handler wired in this build.
     // This case gets re-pointed each time its stand-in ships: `db migrate` served it until
-    // it became the shared migration composition root, then `ingest` until Task 2.6 (#32)
-    // implemented it. Pick any row still `implemented: false` in commands.json.
-    const { code, out } = await run(["enrich", "--json"], {}, {});
+    // it became the shared migration composition root, then `ingest` until Task 2.6 (#32),
+    // then `enrich` until Task 4.11 implemented it. Pick any row still `implemented: false`.
+    const { code, out } = await run(["git", "refresh", "--json"], {}, {});
     expect(code).toBe(EXIT.USAGE);
     expect(JSON.parse(out).code).toBe("not-implemented");
   });

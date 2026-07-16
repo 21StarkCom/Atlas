@@ -36,7 +36,7 @@ Registry version: **1** · Commands: **49**
 | 3 | `index status` | none | shared | no | `docs/specs/cli-contract/index-status.schema.json` |
 | 3 | `index verify` | none | shared | no | `docs/specs/cli-contract/index-verify.schema.json` |
 | 3 | `query` | none | shared | no | `docs/specs/cli-contract/query.schema.json` |
-| 4 | `enrich` | key-accepting | shared | no | `docs/specs/cli-contract/enrich.schema.json` |
+| 4 | `enrich` | key-accepting | shared | yes | `docs/specs/cli-contract/enrich.schema.json` |
 | 4 | `evidence resolve` | intrinsic | shared | no | `docs/specs/cli-contract/evidence-resolve.schema.json` |
 | 4 | `evidence retry` | intrinsic | shared | no | `docs/specs/cli-contract/evidence-retry.schema.json` |
 | 4 | `evidence review` | none | shared | no | `docs/specs/cli-contract/evidence-review.schema.json` |
