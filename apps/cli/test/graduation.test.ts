@@ -103,6 +103,19 @@ describe("graduation audit category inventory (Task 5.2)", () => {
     expect(categories["missing-id"]).toEqual(["noid.md"]); // re-parsed: id absent
     expect(categories["detected-credential"]).toEqual([]); // clean-gate precondition
   });
+
+  it("uses the bootstrap §3 known-type set: a `note`-typed note is NOT unknown-type; a truly-alien type IS", () => {
+    const dir = join(root, "types");
+    mkdirSync(dir, { recursive: true });
+    const snapshot: VaultSnapshot = {
+      // `note` + `source` are §3-known (source is also policy, `note` is NOT — the regression guard);
+      // `gizmo` is outside the managed set.
+      notes: [note("plain", "note"), note("src", "source"), note("weird", "gizmo")],
+      errors: [],
+    } as VaultSnapshot;
+    const { categories } = categorizeGraduationCopy(dir, snapshot);
+    expect(categories["unknown-type"]).toEqual(["weird.md"]);
+  });
 });
 
 describe("graduation scan-state gate (Task 5.1)", () => {
