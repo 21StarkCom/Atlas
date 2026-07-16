@@ -9,6 +9,7 @@ import "./db-backup.js";
 import "./db-rebuild.js";
 import "./db-restore.js";
 import "./db-verify.js";
+import "./db-status.js";
 import "./inspect.js";
 import "./doctor.js";
 import "./status.js";

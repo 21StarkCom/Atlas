@@ -87,7 +87,12 @@ export async function runCli(
   const cwd = options.cwd ?? process.cwd();
   const stdout = options.stdout ?? process.stdout;
   const stderr = options.stderr ?? process.stderr;
-  const root = options.root ?? findRoot(MODULE_DIR);
+  // Root resolution precedence: an explicit `options.root` (in-process callers/tests) →
+  // the `ATLAS_ROOT` env override (points the installed binary at an alternate cli-contract
+  // root; a dev/test convenience, e.g. exercising the not-implemented path against a synthetic
+  // registry) → auto-detect from the module's install location.
+  const envRoot = env.ATLAS_ROOT?.trim();
+  const root = options.root ?? (envRoot ? envRoot : findRoot(MODULE_DIR));
 
   let registry: Registry;
   try {
