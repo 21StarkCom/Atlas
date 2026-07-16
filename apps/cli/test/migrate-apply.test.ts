@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { readdirSync, statSync } from "node:fs";
 import { planBootstrapMigration, type MigrationInputFile, type ReleaseInput } from "../src/graduation/migrate-plan.js";
-import { applyBootstrapMigration, serializeMigratedNote, readOriginalInputs } from "../src/graduation/migrate-apply.js";
+import { applyBootstrapMigration, serializeMigratedNote, readOriginalInputs, rollbackBootstrapMigration } from "../src/graduation/migrate-apply.js";
 
 const FIXTURES = join(import.meta.dirname, "..", "..", "..", "docs/specs/fixtures/bootstrap-migration");
 
@@ -84,5 +84,42 @@ describe("bootstrap-migration apply — byte-exact output + resumable checkpoint
     expect(res2.applied).toEqual([]);
     expect(res2.skipped.sort()).toEqual(["Concepts/Atlas.md", "People/Koral.md"]);
     expect(readFileSync(join(copy, "People/Koral.md"), "utf8")).toBe(after1); // unchanged
+  });
+});
+
+describe("bootstrap-migration rollback — byte-exact reversal, fail-closed, idempotent (§8.2)", () => {
+  it("rollback: reverts each note to its pre-image in reverse sorted-path order; rerun re-reverts nothing", () => {
+    const expected = JSON.parse(readFileSync(join(FIXTURES, "rollback", "expected.json"), "utf8"));
+    const copy = join(root, "rb");
+    cpSync(join(FIXTURES, "rollback", "input"), copy, { recursive: true });
+
+    const res = rollbackBootstrapMigration(copy);
+    expect(res.mode).toBe("rolled-back");
+    expect(res.rollbackOrder).toEqual(expected.migrate.rollbackOrder);
+    expect(res.rolledBack).toEqual(expected.migrate.rolledBack);
+    expect(res.rollbackConflicts).toBeNull();
+    // Each reverted note now equals its retained pre-image byte-for-byte.
+    for (const rb of res.rolledBack) {
+      expect(readFileSync(join(copy, rb.path), "utf8")).toBe(readFileSync(join(copy, ".bootstrap-backup", rb.path), "utf8"));
+    }
+    // Idempotent rerun: nothing newly reverted, nothing re-reverted.
+    const rerun = rollbackBootstrapMigration(copy);
+    expect(rerun.rolledBack).toEqual([]);
+    expect(rerun.reReverted).toEqual([]);
+  });
+
+  it("rollback-conflict: a post-migration-edited note is a fail-closed conflict (pre-image NOT restored)", () => {
+    const expected = JSON.parse(readFileSync(join(FIXTURES, "rollback-conflict", "expected.json"), "utf8"));
+    const copy = join(root, "rbc");
+    cpSync(join(FIXTURES, "rollback-conflict", "input"), copy, { recursive: true });
+
+    const edited = readFileSync(join(copy, "Edited.md"), "utf8"); // the drifted bytes, must survive
+    const res = rollbackBootstrapMigration(copy);
+    expect(res.rollbackOrder).toEqual(expected.migrate.rollbackOrder);
+    expect(res.rolledBack).toEqual(expected.migrate.rolledBack);
+    expect(res.rollbackConflicts).toEqual(expected.migrate.rollbackConflicts);
+    // The clean note reverted; the edited note was left exactly as-is (never clobbered).
+    expect(readFileSync(join(copy, "Clean.md"), "utf8")).toBe(readFileSync(join(copy, ".bootstrap-backup", "Clean.md"), "utf8"));
+    expect(readFileSync(join(copy, "Edited.md"), "utf8")).toBe(edited);
   });
 });
