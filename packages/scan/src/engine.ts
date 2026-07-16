@@ -22,7 +22,9 @@ import {
   RULESET_ID,
   RULESET_VERSION,
   STRUCTURAL_RULES,
+  hasSecretLikeRun,
   isMixedAlphabet,
+  isUrlContext,
   shannonEntropy,
   tokenize,
   type RawMatch,
@@ -141,6 +143,11 @@ function entropyMatches(text: string, claimed: RawMatch[]): RawMatch[] {
     if (!isMixedAlphabet(tok.value)) continue;
     const entropy = shannonEntropy(tok.value);
     if (entropy < ENTROPY_RULE.minEntropyBitsPerChar) continue;
+    // Ruleset v2 precision guards: URL path/query segments never flag (structural
+    // rules still catch credential shapes inside URLs, e.g. Slack webhooks), and
+    // the token must carry a secret-like separator-free run (see rules.ts).
+    if (isUrlContext(text, tok.start)) continue;
+    if (!hasSecretLikeRun(tok.value)) continue;
     const end = tok.start + tok.value.length;
     if (overlapsAny(tok.start, end, claimed)) continue;
     out.push({

@@ -21,7 +21,7 @@ import type { FindingSeverity } from "./types.js";
 /** Stable ruleset identity (reproducibility stamp on every verdict). */
 export const RULESET_ID = "atlas-scan-ruleset-v1" as const;
 /** Integer ruleset version — bumped whenever any rule below changes. */
-export const RULESET_VERSION = 1 as const;
+export const RULESET_VERSION = 2 as const;
 
 /** A raw match a rule produced, before redaction/normalization by the engine. */
 export interface RawMatch {
@@ -132,8 +132,11 @@ export const STRUCTURAL_RULES: readonly StructuralRule[] = [
     title: "Secret-like assignment",
     severity: "high",
     // A secret-ish key name assigned a non-trivial value (quoted or ≥ 8 non-space chars).
+    // The separator deliberately does NOT cross a newline (`[ \t]` instead of `\s`):
+    // a prose line ending "…secret:" must not swallow the next line's first word
+    // (ruleset v2 — a real `key: value` assignment sits on one line).
     pattern:
-      /\b(?:password|passwd|pwd|secret|api[_-]?key|apikey|access[_-]?token|auth[_-]?token|client[_-]?secret|private[_-]?key|token)\b\s*[:=]\s*(?:"([^"\n]{6,})"|'([^'\n]{6,})'|([^\s"'#]{8,}))/gi,
+      /\b(?:password|passwd|pwd|secret|api[_-]?key|apikey|access[_-]?token|auth[_-]?token|client[_-]?secret|private[_-]?key|token)\b[ \t]*[:=][ \t]*(?:"([^"\n]{6,})"|'([^'\n]{6,})'|([^\s"'#]{8,}))/gi,
     group: 0,
   },
 ] as const;
@@ -154,6 +157,23 @@ export const ENTROPY_RULE = {
    * between them.
    */
   minEntropyBitsPerChar: 4.3,
+  /**
+   * Ruleset v2 precision guards. A candidate token must additionally contain a
+   * SECRET-LIKE RUN: a `-`/`_`-free segment of ≥ `minRunLength` chars whose own
+   * entropy clears `minEntropyBitsPerChar` and which contains ≥ 1 digit.
+   * Rationale (measured on a real vault corpus, 369/369 findings triaged FP):
+   *   - kebab-case slugs / snake_case identifiers (filenames, BigQuery table
+   *     names, wiki refs) mix classes ACROSS separators but their separator-free
+   *     segments are short dictionary-ish words — no run survives;
+   *   - CamelCase word chains clear whole-token entropy via case mixing but
+   *     essentially never contain a digit;
+   *   - real random secrets (base64/base62) keep long contiguous runs, and a
+   *     ≥24-char base64 run without a single digit has ~0.7% probability — an
+   *     acceptable miss rate for a MEDIUM-severity heuristic backstopping the
+   *     structural rules. `/`, `+`, `=` stay inside runs so slash-containing
+   *     base64 secrets (e.g. AWS secret keys) still flag.
+   */
+  minRunLength: 24,
 } as const;
 
 /** Shannon entropy (bits per character) of `s`. Deterministic; pure. */
@@ -177,6 +197,34 @@ export function isMixedAlphabet(s: string): boolean {
   if (/[0-9]/.test(s)) classes++;
   if (/[+/=_-]/.test(s)) classes++;
   return classes >= 2;
+}
+
+/**
+ * True when the candidate token at `start` sits inside a URL: the containing
+ * non-whitespace span begins with `http://` / `https://`. URL path/query segments
+ * (share links, tracking blobs, doc ids) are the dominant entropy false-positive
+ * class in real prose vaults and are never a *stored* secret assignment — a bare
+ * token pasted outside a URL still flags. (Ruleset v2.)
+ */
+export function isUrlContext(text: string, start: number): boolean {
+  let i = start;
+  while (i > 0 && !/\s/.test(text[i - 1]!)) i--;
+  return /^https?:\/\//i.test(text.slice(i, start));
+}
+
+/**
+ * True when `value` contains a secret-like run per the v2 entropy guards: split
+ * on `-`/`_` (structure separators that never appear inside random base64), keep
+ * `/`, `+`, `=` inside runs, and require some run of ≥ {@link ENTROPY_RULE.minRunLength}
+ * chars with entropy ≥ {@link ENTROPY_RULE.minEntropyBitsPerChar} and ≥ 1 digit.
+ */
+export function hasSecretLikeRun(value: string): boolean {
+  for (const run of value.split(/[-_]+/)) {
+    if (run.length < ENTROPY_RULE.minRunLength) continue;
+    if (!/[0-9]/.test(run)) continue;
+    if (shannonEntropy(run) >= ENTROPY_RULE.minEntropyBitsPerChar) return true;
+  }
+  return false;
 }
 
 /**

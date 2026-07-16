@@ -271,3 +271,79 @@ describe("GeneratedArtifactGuard", () => {
     expect(sink.calls).toHaveLength(0);
   });
 });
+
+describe("scanBytes — ruleset v2 entropy precision guards (real-vault FP corpus)", () => {
+  // Each case reproduces a false-positive CLASS measured on a real 226-file vault
+  // (369/369 entropy findings triaged, all FPs). None may flag.
+  const FALSE_POSITIVES: { name: string; text: string }[] = [
+    {
+      name: "GitHub issue URL (path segments)",
+      text: "- issue opened: [#450 Verify btree_gist](https://github.com/21-Stark-AI/meridian/issues/450)",
+    },
+    {
+      name: "Slack archive URL (?thread_ts query)",
+      text: "see https://getevinced.slack.com/archives/D06PZHZAFGA/p1780479296037719?thread_ts=1780479296.037719&cid=D06PZHZAFGA today",
+    },
+    {
+      name: "Google Docs share URL (high-entropy doc id inside a URL)",
+      text: "- https://docs.google.com/document/d/1qA2bC3dE4fG5hI6jK7lM8nO9pQ0rS1tU2vW3xY4zA5/edit?usp=drivesdk",
+    },
+    {
+      name: "Amazon tracking URL (ad-blob query tail)",
+      text: `"[Attitude Is Everything](https://www.amazon.com/dp/B0C1X2Y3Z4?cmp-8896614386:adg-91345587082:crv-411479337354&qid=1719858372&sr=8-1)"`,
+    },
+    {
+      name: "kebab-case slug filename",
+      text: "ref: 30_Research/the-90-day-onboarding-notebook-for-new-engineering-managers.md",
+    },
+    {
+      name: "BigQuery billing table name (underscore + hex chunks)",
+      text: "tables: `gcp_billing_export_v1_018EF0_DBA3E5_848D68`, `gcp_billing_export_resource_v1_018EF0_DBA3E5_848D68`",
+    },
+    {
+      name: "CamelCase product word-chain (no digits)",
+      text: "Integrates BigQueryLookerCoralogixHiBobGithubJiraSlackNotion.",
+    },
+    {
+      name: "prose line ending 'secret:' followed by a policy list line",
+      text: "Never store any secret:\n  Passwords, tokens, private keys, session cookies, credentials.",
+    },
+  ];
+  for (const c of FALSE_POSITIVES) {
+    it(`does not flag: ${c.name}`, () => {
+      expect(scanText(c.text)).toMatchObject({ clean: true });
+    });
+  }
+
+  // True positives the guards MUST retain (assembled at runtime, synthetic).
+  it("still flags a bare slash-containing base64 secret (AWS-secret shape, no keyword)", () => {
+    const tok = ["wJalrXUtnFEMI", "K7MDENG", "bPxRfiCYEXAMPLEKEY"].join("/");
+    const v = scanText(`the value is ${tok} end`);
+    expect(v.clean).toBe(false);
+    if (v.clean) return;
+    expect(v.findings.map((f) => f.ruleId)).toContain("high-entropy-token");
+  });
+
+  it("still flags a bare Google-Docs-style id OUTSIDE a URL", () => {
+    const v = scanText("doc id is 1qA2bC3dE4fG5hI6jK7lM8nO9pQ0rS1tU2vW3xY4zA5 here");
+    expect(v.clean).toBe(false);
+  });
+
+  it("still flags a structural credential shape INSIDE a URL (webhook)", () => {
+    const v = scanText(`hook: https://hooks.slack.com/services/T${"0".repeat(8)}/B${"0".repeat(8)}/${"a1B2c3D4".repeat(3)}`);
+    expect(v.clean).toBe(false);
+    if (v.clean) return;
+    expect(v.findings.map((f) => f.ruleId)).toContain("slack-webhook");
+  });
+
+  it("still flags a single-line secret assignment", () => {
+    const v = scanText(`client_secret: ${"a1B2c3D4".repeat(3)}`);
+    expect(v.clean).toBe(false);
+    if (v.clean) return;
+    expect(v.findings.map((f) => f.ruleId)).toContain("generic-secret-assignment");
+  });
+
+  it("hex digest stays clean (unchanged from v1)", () => {
+    expect(scanText(`sha256: ${"9f2c4d8e1a3b".repeat(6)}`)).toMatchObject({ clean: true });
+  });
+});
