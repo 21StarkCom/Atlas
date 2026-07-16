@@ -11,9 +11,11 @@
  *     `model_calls` row per transmission with **no `run.*` event per call** (D6) —
  *     the many transmissions fold into the run's SINGLE terminal audit event.
  *
- * SCOPE (Task 2.10): this asserts only what Phase-2 code produces. `--from-git`
- * reproduction is DEFERRED to Task 4.11 (`rebuildFromGit`) and is deliberately NOT
- * asserted here; the full matrix (incl. `--from-git`) completes there.
+ * SCOPE: the first describe block asserts what Phase-2 code produces (Task 2.10). The second
+ * (Task 4.11) completes the matrix's `--from-git` reproduction dimension: for a real run class it
+ * drives `rebuildFromGit` and asserts the PROJECTION reproduces from canonical Markdown while the
+ * ledger/audit classes (run history + the signed audit chain) are surfaced as explicit GAPS —
+ * never silently reconstructed, so a from-git rebuild can never fabricate run history.
  *
  * Runs WITHOUT `ATLAS_PROVISIONED` (in-process broker + git fixture vault), so it
  * is part of the required `pnpm -r test` CI gate on both OS.
@@ -25,8 +27,10 @@ import { probeSandbox } from "@atlas/sources";
 import { newRunId } from "@atlas/contracts";
 import { buildModelCallStatement } from "@atlas/models";
 import { applyLedgerWrite } from "@atlas/sqlite-store";
-import { startRun, type WorkflowDeps } from "../src/workflows/index.js";
+import { startRun, rebuildFromGit, type WorkflowDeps } from "../src/workflows/index.js";
 import { recordReadonlyRun } from "../src/audit/readonly.js";
+import { readVault } from "../src/vault/reader.js";
+import { openStore } from "@atlas/sqlite-store";
 import {
   captureViaBroker,
   driveModelTransmittingRun,
@@ -408,6 +412,45 @@ describeIfSandbox("observability-matrix (Phase-2 classes): ledger completeness +
       expect(auditCount(store, captured.runId, "run.integrated")).toBe(1);
     } finally {
       store.close();
+    }
+  });
+});
+
+describeIfSandbox("observability-matrix (Task 4.11): --from-git reproduction — projections reproduce, ledger is a GAP", () => {
+  it("capture Tier-1 → from-git reproduces the note projection; run history + audit chain are surfaced as gaps, never reconstructed", async () => {
+    // Drive a REAL capture: the note is committed to canonical AND a full ledger/audit history
+    // exists in the harness store.
+    const captured = await captureViaBroker(h, join(REPO_ROOT, "fixtures/inputs/sample.md"));
+    // Canonical Markdown is the SSOT — read it back as the from-git snapshot.
+    const snapshot = await readVault(h.runContext().config.config);
+    expect(snapshot.notes.length).toBeGreaterThan(0);
+
+    // Rebuild into a FRESH store (simulating lost SQLite AND lost backups — the DR case).
+    const fresh = openStore({ path: ":memory:" });
+    try {
+      fresh.migrate();
+      const report = rebuildFromGit(fresh.db, snapshot);
+
+      // Projection REPRODUCES from canonical Markdown (ledger completeness, DR half).
+      expect(report.rebuilt.notes).toBe(snapshot.notes.length);
+      expect((fresh.db.prepare(`SELECT COUNT(*) AS n FROM notes`).get() as { n: number }).n).toBe(snapshot.notes.length);
+
+      // Ledger/audit classes are GAPS — run history + the signed chain are NOT in canonical Markdown.
+      const classes = report.gaps.map((g) => g.storageClass);
+      expect(classes).toContain("agent_runs");
+      expect(classes).toContain("audit_events");
+      expect(classes).toContain("workflow_idempotency");
+
+      // PROOF the gap is REAL (not silently reconstructed): the captured run's agent_runs row +
+      // audit events did NOT reproduce in the fresh store — a from-git rebuild can never fabricate
+      // run history.
+      expect(fresh.db.prepare(`SELECT 1 FROM agent_runs WHERE run_id = ?`).get(captured.runId)).toBeUndefined();
+      expect((fresh.db.prepare(`SELECT COUNT(*) AS n FROM audit_events`).get() as { n: number }).n).toBe(0);
+
+      // A clean vault (no unreadable files / dangling links) ⇒ clean === true (only ledger gaps).
+      expect(report.clean).toBe(true);
+    } finally {
+      fresh.close();
     }
   });
 });
