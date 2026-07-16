@@ -34,6 +34,8 @@ export {
   SCHEMA_PROJECTION_EPOCH,
   SnapshotHasErrorsError,
   DanglingLinkError,
+  deriveSlug,
+  noteIdentityKeys,
 } from "./rebuild.js";
 export type {
   RebuildReport,
