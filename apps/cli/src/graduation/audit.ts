@@ -5,7 +5,95 @@
  * partially-migrated or tampered copy is caught before any privileged graduation step runs.
  * Purely read-only + fail-closed: any unhealthy signal makes the whole audit `ok: false`.
  */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { parse as parseYaml } from "yaml";
 import { watermarkHealth, type SqliteDatabase, type WatermarkHealth } from "@atlas/sqlite-store";
+import type { VaultSnapshot } from "@atlas/contracts";
+import { splitFrontmatter } from "../markdown/parse.js";
+import { POLICY_TARGET_TYPES } from "../policies/mutation-policy.js";
+
+/** The bootstrap-migration §7 quarantine categories the graduation audit inventories. */
+export const GRADUATION_CATEGORIES = [
+  "missing-id",
+  "missing-type",
+  "missing-schema-version",
+  "ambiguous-alias",
+  "duplicate-identity",
+  "incompatible-link",
+  "detected-credential",
+  "unknown-type",
+  "unsupported-schema-version",
+] as const;
+export type GraduationCategory = (typeof GRADUATION_CATEGORIES)[number];
+
+/** Per-category repo-relative note-path lists (§7). Every key is always present (empty if none). */
+export type GraduationCategories = Record<GraduationCategory, string[]>;
+
+/** Split which required frontmatter field(s) an unparseable/invalid note is missing. */
+function classifyMissing(vaultPath: string, rel: string): GraduationCategory[] {
+  let raw: string;
+  try {
+    raw = readFileSync(join(vaultPath, rel), "utf8");
+  } catch {
+    return ["missing-id"]; // unreadable ⇒ no id derivable
+  }
+  const { frontmatter } = splitFrontmatter(raw);
+  if (frontmatter === null) return ["missing-id"];
+  let fm: Record<string, unknown> | null = null;
+  try {
+    fm = parseYaml(frontmatter) as Record<string, unknown>;
+  } catch {
+    return ["missing-id"]; // malformed YAML ⇒ treat as missing id
+  }
+  const out: GraduationCategory[] = [];
+  if (fm == null || fm.id == null) out.push("missing-id");
+  if (fm == null || fm.type == null) out.push("missing-type");
+  if (fm == null || fm.schema_version == null) out.push("missing-schema-version");
+  return out.length > 0 ? out : ["missing-id"]; // invalid for some other reason ⇒ default
+}
+
+/**
+ * Inventory a graduation copy by the §7 categories (Task 5.2), read-only. Maps every vault-reader
+ * defect (parse errors, duplicate ids, identity collisions, broken/ambiguous links, unsupported
+ * schema versions) to its §7 category, splits the missing-field defects per re-parsed frontmatter,
+ * and flags notes whose `type` is outside the canonical set. `detected-credential` is always empty
+ * here — the fail-closed scan-state gate guarantees a CLEAN scan precedes the audit.
+ */
+export function categorizeGraduationCopy(vaultPath: string, snapshot: VaultSnapshot): { totalNotes: number; categories: GraduationCategories } {
+  const cats = Object.fromEntries(GRADUATION_CATEGORIES.map((c) => [c, [] as string[]])) as GraduationCategories;
+  const known = new Set<string>(POLICY_TARGET_TYPES);
+
+  for (const e of snapshot.errors) {
+    switch (e.kind) {
+      case "duplicate-id":
+        cats["duplicate-identity"].push(e.path);
+        break;
+      case "identity-collision":
+        cats["ambiguous-alias"].push(e.path);
+        break;
+      case "broken-link":
+      case "ambiguous-link":
+        cats["incompatible-link"].push(e.path);
+        break;
+      case "unsupported-schema-version":
+        cats["unsupported-schema-version"].push(e.path);
+        break;
+      case "missing-frontmatter":
+      case "invalid-frontmatter":
+      case "read-error":
+        for (const m of classifyMissing(vaultPath, e.path)) cats[m].push(e.path);
+        break;
+      default:
+        break; // an unrecognized reader-error kind is not force-fit into a §7 category
+    }
+  }
+  for (const n of snapshot.notes) if (!known.has(n.type)) cats["unknown-type"].push(n.path);
+
+  for (const c of GRADUATION_CATEGORIES) cats[c] = [...new Set(cats[c])].sort();
+  const totalNotes = snapshot.notes.length + new Set(snapshot.errors.map((e) => e.path)).size;
+  return { totalNotes, categories: cats };
+}
 
 /** The broker's read-only audit-chain health verdict (mirrors `BrokerClient.getAuditChainStatus`). */
 export interface AuditChainStatus {
