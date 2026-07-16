@@ -586,11 +586,15 @@ function parseRetryAfterMs(header: string | null, nowMs: () => number): number |
   return undefined;
 }
 
-/** Extract the first candidate's concatenated text, or `null` if none. */
+/**
+ * Extract the first candidate's concatenated ANSWER text, or `null` if none.
+ * Parts flagged `thought: true` (Gemini 3.5 thinking traces) are internal
+ * reasoning, not the answer — they are dropped, never released to the CLI.
+ */
 function extractText(json: unknown): string | null {
-  const parts = (json as { candidates?: { content?: { parts?: { text?: string }[] } }[] }).candidates?.[0]?.content?.parts;
+  const parts = (json as { candidates?: { content?: { parts?: { text?: string; thought?: boolean }[] } }[] }).candidates?.[0]?.content?.parts;
   if (!Array.isArray(parts)) return null;
-  const text = parts.map((p) => p.text ?? "").join("");
+  const text = parts.filter((p) => p.thought !== true).map((p) => p.text ?? "").join("");
   return text.length > 0 ? text : null;
 }
 
