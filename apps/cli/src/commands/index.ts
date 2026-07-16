@@ -30,4 +30,5 @@ import "./git-rollback.js";
 import "./validate.js";
 import "./query.js";
 import "./enrich.js";
+import "./maintain.js";
 import "./index-ops.js";

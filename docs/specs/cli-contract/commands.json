@@ -264,7 +264,7 @@
       "phase": 4,
       "idempotency": "key-accepting",
       "privilege": "shared",
-      "implemented": false
+      "implemented": true
     },
     {
       "name": "note history",
