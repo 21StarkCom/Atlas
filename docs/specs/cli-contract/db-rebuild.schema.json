@@ -1,27 +1,98 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "atlas://cli-contract/db-rebuild.schema.json",
-  "title": "brain db rebuild — --json success output",
-  "description": "Rebuild the vault-projection tables from Markdown inside a single transaction, replacing only the projection set that exists at that point. Intrinsically idempotent and crash-safe: a crash mid-rebuild leaves the prior projection readable. NEVER touches the ledger tables or db_schema_migrations. Acquires the exclusive vault-maintenance lock; db migrate must have completed first. (The --from-git audit-ref fold / ledger reconstruction is a later-phase disaster-recovery capability and is deliberately NOT part of the Phase-1 contract.)",
+  "title": "brain db rebuild \u2014 --json success output",
+  "description": "Rebuild the vault-projection tables from Markdown inside a single transaction, replacing only the projection set that exists at that point. Intrinsically idempotent and crash-safe: a crash mid-rebuild leaves the prior projection readable. NEVER touches the ledger tables or db_schema_migrations. Acquires the exclusive vault-maintenance lock; db migrate must have completed first. (The --from-git audit-ref fold / ledger reconstruction is a later-phase disaster-recovery capability and is deliberately NOT part of the Phase-1 contract.) With --from-git it runs in disaster-recovery mode: a best-effort projection rebuild from the committed git state that surfaces every non-derivable fact (the ledger/audit classes, unreadable files, dangling links) as an explicit gap instead of failing, so a partial history can never masquerade as complete.",
   "type": "object",
   "unevaluatedProperties": false,
-  "required": ["command", "rebuilt"],
+  "required": [
+    "command",
+    "rebuilt"
+  ],
   "properties": {
-    "command": { "const": "db rebuild" },
+    "command": {
+      "const": "db rebuild"
+    },
     "rebuilt": {
       "type": "array",
       "items": {
         "type": "object",
         "unevaluatedProperties": false,
-        "required": ["table", "rows"],
-        "properties": { "table": { "type": "string" }, "rows": { "type": "integer", "minimum": 0 } }
+        "required": [
+          "table",
+          "rows"
+        ],
+        "properties": {
+          "table": {
+            "type": "string"
+          },
+          "rows": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
       }
     },
-    "durationMs": { "type": "integer", "minimum": 0 }
+    "durationMs": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "fromGit": {
+      "type": "boolean",
+      "description": "True when the rebuild ran in --from-git disaster-recovery mode (best-effort projection rebuild from canonical Markdown, surfacing every non-derivable fact as a gap)."
+    },
+    "gaps": {
+      "type": "array",
+      "description": "Facts the --from-git rebuild could not reconstruct from canonical Markdown (always includes the ledger/audit classes; never silently dropped). Absent/empty for a plain rebuild.",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": [
+          "storageClass",
+          "reason"
+        ],
+        "properties": {
+          "storageClass": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          }
+        }
+      }
+    }
   },
   "examples": [
-    { "command": "db rebuild", "rebuilt": [ { "table": "notes", "rows": 3 }, { "table": "note_links", "rows": 5 }, { "table": "note_identity_keys", "rows": 4 } ] },
-    { "command": "db rebuild", "rebuilt": [ { "table": "notes", "rows": 3 } ], "durationMs": 42 }
+    {
+      "command": "db rebuild",
+      "rebuilt": [
+        {
+          "table": "notes",
+          "rows": 3
+        },
+        {
+          "table": "note_links",
+          "rows": 5
+        },
+        {
+          "table": "note_identity_keys",
+          "rows": 4
+        }
+      ]
+    },
+    {
+      "command": "db rebuild",
+      "rebuilt": [
+        {
+          "table": "notes",
+          "rows": 3
+        }
+      ],
+      "durationMs": 42
+    }
   ],
   "x-atlas-contract": {
     "command": "db rebuild",
@@ -31,8 +102,21 @@
     "executionClass": "projection-write",
     "summary": "Transactionally rebuild vault-projection tables from Markdown; never touches ledger tables.",
     "args": [],
-    "flags": [],
-    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "flags": [
+      {
+        "flag": "--from-git",
+        "description": "Disaster-recovery rebuild: reconstruct the projection from the committed git state (Markdown is SSOT) BEST-EFFORT, surfacing every fact git cannot reconstruct (the ledger/audit classes, tampered files, dangling links) as an explicit gap rather than failing hard."
+      }
+    ],
+    "commonFlags": [
+      "--json",
+      "--quiet",
+      "--verbose",
+      "--plain",
+      "--no-color",
+      "--config <path>",
+      "--vault <path>"
+    ],
     "sideEffects": [
       "replaces the vault-projection tables inside one transaction",
       "emits exactly one run.projection git-ref audit event (executed projection-only command)"
@@ -43,16 +127,54 @@
       "no canonical branch change",
       "a crash mid-rebuild must leave the prior projection readable"
     ],
-    "locks": [{ "scope": "vault-maintenance", "mode": "exclusive" }],
-    "exitCodes": [0, 2, 4, 5],
+    "locks": [
+      {
+        "scope": "vault-maintenance",
+        "mode": "exclusive"
+      }
+    ],
+    "exitCodes": [
+      0,
+      2,
+      4,
+      5
+    ],
     "errorCodes": [
-      { "code": "usage", "exit": 5, "when": "unknown flag/argument or malformed invocation" },
-      { "code": "config-invalid", "exit": 2, "when": "brain.config.yaml fails schema validation" },
-      { "code": "vault-error", "exit": 2, "when": "the vault is missing/unreadable so projections cannot be re-derived" },
-      { "code": "db-unavailable", "exit": 2, "when": "the SQLite store file is missing or unopenable" },
-      { "code": "locked:vault-maintenance", "exit": 2, "when": "the exclusive vault-maintenance lock is held by a live process" },
-      { "code": "rebuild-failed", "exit": 4, "when": "the rebuild transaction failed and was rolled back" },
-      { "code": "internal", "exit": 4, "when": "unexpected internal failure" }
+      {
+        "code": "usage",
+        "exit": 5,
+        "when": "unknown flag/argument or malformed invocation"
+      },
+      {
+        "code": "config-invalid",
+        "exit": 2,
+        "when": "brain.config.yaml fails schema validation"
+      },
+      {
+        "code": "vault-error",
+        "exit": 2,
+        "when": "the vault is missing/unreadable so projections cannot be re-derived"
+      },
+      {
+        "code": "db-unavailable",
+        "exit": 2,
+        "when": "the SQLite store file is missing or unopenable"
+      },
+      {
+        "code": "locked:vault-maintenance",
+        "exit": 2,
+        "when": "the exclusive vault-maintenance lock is held by a live process"
+      },
+      {
+        "code": "rebuild-failed",
+        "exit": 4,
+        "when": "the rebuild transaction failed and was rolled back"
+      },
+      {
+        "code": "internal",
+        "exit": 4,
+        "when": "unexpected internal failure"
+      }
     ],
     "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
   }
