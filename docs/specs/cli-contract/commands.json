@@ -72,7 +72,7 @@
       "phase": 4,
       "idempotency": "intrinsic",
       "privilege": "shared",
-      "implemented": false
+      "implemented": true
     },
     {
       "name": "evidence retry",
