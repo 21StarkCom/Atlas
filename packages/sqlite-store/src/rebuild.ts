@@ -94,9 +94,34 @@ export interface RebuildOptions {
 export const SCHEMA_PROJECTION_EPOCH = "1970-01-01T00:00:00Z";
 
 /** vault-relative path → deterministic slug (basename without `.md`). */
-function deriveSlug(path: string): string {
+export function deriveSlug(path: string): string {
   const base = path.split("/").pop() ?? path;
   return base.replace(/\.md$/i, "");
+}
+
+/**
+ * The normalized identity keys a note claims in `note_identity_keys` — its
+ * path-derived slug plus each alias, normalized and deduplicated PER NOTE exactly
+ * as {@link rebuildProjections} inserts them (the slug wins any within-note
+ * overlap). Exposed so the DR (`--from-git`) rebuild can pre-detect a CROSS-note
+ * collision (two notes claiming the same key — a global-PK conflict that would
+ * otherwise abort the whole transactional rebuild) and drop the offenders as gaps
+ * instead. The strict {@link rebuildProjections} path still treats a collision as
+ * a hard, all-or-nothing error.
+ */
+export function noteIdentityKeys(note: { path: string; aliases: readonly string[] }): string[] {
+  const keys: string[] = [];
+  const seen = new Set<string>();
+  const slugKey = normalizeIdentityKey(deriveSlug(note.path));
+  seen.add(slugKey);
+  keys.push(slugKey);
+  for (const alias of note.aliases) {
+    const k = normalizeIdentityKey(alias);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    keys.push(k);
+  }
+  return keys;
 }
 
 /**

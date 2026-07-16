@@ -240,8 +240,20 @@ function effectiveRealPath(p: string): string {
  * The default quarantine dir: an OS state directory OUTSIDE the repo + vault (the
  * plan requires the store live outside the repository — `.gitignore` is not an
  * isolation boundary). Honours `XDG_STATE_HOME`; else the per-OS convention.
+ *
+ * Under the gated test seam (`ATLAS_TEST_MODE=1` + `ATLAS_CUSTODY_TEST_DIR`, the
+ * SAME gate the AEAD-custody source uses) the default lands in a dedicated subdir
+ * of the test custody root instead of the shared OS state dir. Without this, every
+ * e2e fixture that quarantines writes into `~/Library/Application Support/atlas/
+ * quarantine`, and a host carrying real bundles (e.g. after a real `graduation
+ * scan`) fails `doctor` — the quarantine-security check sees foreign bundles it
+ * cannot verify with the fixture custody key (#144). The seam is ignored in any
+ * non-test invocation, so production always uses the real OS state dir.
  */
 function defaultStateDir(ctx: RunContext): string {
+  if (ctx.env.ATLAS_TEST_MODE === "1" && ctx.env.ATLAS_CUSTODY_TEST_DIR) {
+    return join(resolvePath(ctx, ctx.env.ATLAS_CUSTODY_TEST_DIR), "quarantine-store");
+  }
   const xdg = ctx.env.XDG_STATE_HOME;
   if (xdg && isAbsolute(xdg)) return join(xdg, "atlas", "quarantine");
   const home = ctx.env.HOME ?? homedir();
