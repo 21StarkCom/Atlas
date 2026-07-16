@@ -21,6 +21,7 @@ import "./git-status.js";
 import "./git-cleanup.js";
 import "./git-verify.js";
 import "./git-review.js";
+import "./git-approve.js";
 import "./validate.js";
 import "./query.js";
 import "./index-ops.js";

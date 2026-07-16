@@ -40,7 +40,7 @@ Registry version: **1** · Commands: **49**
 | 4 | `evidence resolve` | intrinsic | shared | no | `docs/specs/cli-contract/evidence-resolve.schema.json` |
 | 4 | `evidence retry` | intrinsic | shared | no | `docs/specs/cli-contract/evidence-retry.schema.json` |
 | 4 | `evidence review` | none | shared | no | `docs/specs/cli-contract/evidence-review.schema.json` |
-| 4 | `git approve` | key-accepting | privileged | no | `docs/specs/cli-contract/git-approve.schema.json` |
+| 4 | `git approve` | key-accepting | privileged | yes | `docs/specs/cli-contract/git-approve.schema.json` |
 | 4 | `git refresh` | key-accepting | privileged | no | `docs/specs/cli-contract/git-refresh.schema.json` |
 | 4 | `git reject` | intrinsic | shared | no | `docs/specs/cli-contract/git-reject.schema.json` |
 | 4 | `git review` | none | shared | yes | `docs/specs/cli-contract/git-review.schema.json` |
