@@ -1,18 +1,44 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "atlas://cli-contract/git-refresh.schema.json",
-  "title": "brain git refresh <runId> [--export-challenge | --authorization <path>] — --json success output",
-  "description": "Privileged regeneration of a review-pending run against the current canonical head: replays the run's plan on top of the latest canonical, produces a new agent commit + manifest + supersession record, and returns the run to review-pending. Authorized ONLY by an OS-presence assertion bound to the broker challenge (op git refresh) or the non-interactive --export-challenge → sign → --authorization flow (security-broker-contract.md §7); --yes never authorizes. Idempotent: a repeat refresh against the same canonical head returns the existing superseding commit rather than creating another. Without an authorization, exits 6 (action-required) and, with --export-challenge, emits an AuthorizationChallenge (security-broker-contract.md §7.1) instead of this success object.",
+  "title": "brain git refresh <runId> [--export-challenge | --authorization <path>] \u2014 --json success output",
+  "description": "Regeneration of a review-pending run against the current canonical head: replays the run's plan on top of the latest canonical, produces a new agent commit + manifest + supersession record, and returns the run to review-pending. NON-PRIVILEGED: refresh performs NO canonical/trust/erase mutation \u2014 it only regenerates a pending proposal the operator must still approve at the review gate \u2014 so it needs no OS-presence authorization; it emits a run.refreshed audit event through the normal audit path (engine core refreshRun, plan \u00a74.5). Idempotent: a repeat refresh against the same canonical head returns the existing superseding commit rather than creating another.",
   "type": "object",
   "unevaluatedProperties": false,
-  "required": ["command", "runId", "newCommit", "superseded", "state"],
+  "required": [
+    "command",
+    "runId",
+    "newCommit",
+    "superseded",
+    "state"
+  ],
   "properties": {
-    "command": { "const": "git refresh" },
-    "runId": { "type": "string", "minLength": 1, "description": "ULID run id." },
-    "newCommit": { "type": "string", "minLength": 1, "description": "40-char hex superseding agent commit regenerated against current canonical." },
-    "superseded": { "type": "string", "minLength": 1, "description": "40-char hex prior agent commit that this refresh supersedes." },
-    "baseCommit": { "type": "string", "description": "40-char hex current canonical head the new commit was rebased onto." },
-    "state": { "const": "review-pending", "description": "The run returns to the review gate after refresh." }
+    "command": {
+      "const": "git refresh"
+    },
+    "runId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "ULID run id."
+    },
+    "newCommit": {
+      "type": "string",
+      "minLength": 1,
+      "description": "40-char hex superseding agent commit regenerated against current canonical."
+    },
+    "superseded": {
+      "type": "string",
+      "minLength": 1,
+      "description": "40-char hex prior agent commit that this refresh supersedes."
+    },
+    "baseCommit": {
+      "type": "string",
+      "description": "40-char hex current canonical head the new commit was rebased onto."
+    },
+    "state": {
+      "const": "review-pending",
+      "description": "The run returns to the review gate after refresh."
+    }
   },
   "examples": [
     {
@@ -27,27 +53,70 @@
   "x-atlas-contract": {
     "command": "git refresh",
     "phase": 4,
-    "privilege": "privileged",
+    "privilege": "shared",
     "idempotency": "key-accepting",
-    "requestHashScope": ["command", "runId", "superseded", "baseCommit", "idempotencyKey"],
+    "requestHashScope": [
+      "command",
+      "runId",
+      "superseded",
+      "baseCommit",
+      "idempotencyKey"
+    ],
     "authz": {
       "op": "git refresh",
       "mechanism": "broker-signature",
-      "challengeFields": ["op", "runId", "targetCommit", "canonicalBaseCommit", "nonce", "expiresAt"],
-      "driftCodes": ["authz.canonical_moved", "authz.target_mismatch", "authz.signature_invalid", "authz.payload_mismatch", "authz.signer_unknown", "authz.signer_revoked", "authz.signer_not_permitted", "authz.nonce_unknown", "authz.nonce_expired", "authz.nonce_replayed"],
-      "universalCodes": ["authz.schema_invalid", "authz.canonicalization_unsupported"]
+      "challengeFields": [
+        "op",
+        "runId",
+        "targetCommit",
+        "canonicalBaseCommit",
+        "nonce",
+        "expiresAt"
+      ],
+      "driftCodes": [
+        "authz.canonical_moved",
+        "authz.target_mismatch",
+        "authz.signature_invalid",
+        "authz.payload_mismatch",
+        "authz.signer_unknown",
+        "authz.signer_revoked",
+        "authz.signer_not_permitted",
+        "authz.nonce_unknown",
+        "authz.nonce_expired",
+        "authz.nonce_replayed"
+      ],
+      "universalCodes": [
+        "authz.schema_invalid",
+        "authz.canonicalization_unsupported"
+      ]
     },
     "executionClass": "ledger-writing",
     "summary": "Broker-authorized regeneration of a review-pending run against current canonical; new commit + supersession record, back to review-pending; idempotent.",
     "args": [
-      { "arg": "<runId>", "type": "string", "required": true, "description": "The review-pending run to regenerate." }
+      {
+        "arg": "<runId>",
+        "type": "string",
+        "required": true,
+        "description": "The review-pending run to regenerate."
+      }
     ],
     "flags": [
-      { "flag": "--export-challenge", "type": "boolean", "default": false, "description": "Emit the broker AuthorizationChallenge (op git refresh, bound to runId) to stdout and exit 6 instead of refreshing; sign it out of band with an enrolled approver key." },
-      { "flag": "--authorization <path>", "type": "string", "default": null, "description": "Path to a signed AuthorizationResponse produced from a prior --export-challenge; presents it to the broker to authorize the refresh." },
-      { "flag": "--idempotency-key <key>", "type": "string", "default": null, "description": "Caller-supplied idempotency key; a repeat refresh with the same key + request-hash (requestHashScope: runId, superseded commit, current canonical base) returns the existing superseding commit rather than creating another (registry idempotency: key-accepting)." }
+      {
+        "flag": "--idempotency-key <key>",
+        "type": "string",
+        "default": null,
+        "description": "Caller-supplied idempotency key; a repeat refresh with the same key + request-hash (requestHashScope: runId, superseded commit, current canonical base) returns the existing superseding commit rather than creating another (registry idempotency: key-accepting)."
+      }
     ],
-    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "commonFlags": [
+      "--json",
+      "--quiet",
+      "--verbose",
+      "--plain",
+      "--no-color",
+      "--config <path>",
+      "--vault <path>"
+    ],
     "sideEffects": [
       "regenerates the run's plan against current canonical head, producing a new agent commit + manifest",
       "writes a supersession record linking the new commit to the prior one",
@@ -60,31 +129,51 @@
       "never runs without the canonical-integration exclusive lock"
     ],
     "locks": [
-      { "scope": "canonical-integration", "mode": "exclusive" },
-      { "scope": "shared", "mode": "shared" }
+      {
+        "scope": "canonical-integration",
+        "mode": "exclusive"
+      },
+      {
+        "scope": "shared",
+        "mode": "shared"
+      }
     ],
-    "exitCodes": [0, 1, 2, 4, 5, 6],
+    "exitCodes": [
+      0,
+      1,
+      2,
+      4,
+      5
+    ],
     "errorCodes": [
-      { "code": "usage", "exit": 5, "when": "unknown flag/argument, missing <runId>, or --export-challenge combined with --authorization" },
-      { "code": "config-invalid", "exit": 2, "when": "brain.config.yaml fails schema validation" },
-      { "code": "run-not-found", "exit": 1, "when": "<runId> does not exist or is not refreshable" },
-      { "code": "authorization-required", "exit": 6, "when": "no --authorization supplied (challenge exported with --export-challenge)" },
-      { "code": "authz.canonical_moved", "exit": 6, "when": "broker drift: the new canonicalBaseCommit is no longer the canonical tip (security-broker-contract.md §7.3)" },
-      { "code": "authz.target_mismatch", "exit": 6, "when": "broker drift: targetCommit/runId differs from the re-derived challenge" },
-      { "code": "authz.nonce_expired", "exit": 6, "when": "broker: the challenge nonce expired (expiresAt passed)" },
-      { "code": "authz.presence_unverified", "exit": 6, "when": "broker: the OS presence assertion is absent or not bound to the challenge" },
-      { "code": "authz.signature_invalid", "exit": 1, "when": "broker: Ed25519 signature verification failed" },
-      { "code": "authz.payload_mismatch", "exit": 1, "when": "broker: signingPayload differs from the broker-recomputed canonical bytes" },
-      { "code": "authz.schema_invalid", "exit": 1, "when": "broker: the challenge/response fails the contracts schema (universal broker validation failure, security-broker-contract.md §7.3)" },
-      { "code": "authz.canonicalization_unsupported", "exit": 1, "when": "broker: the response's payloadCanonicalization id is unknown (universal broker validation failure, security-broker-contract.md §7.3)" },
-      { "code": "authz.signer_unknown", "exit": 1, "when": "broker: signerId is not in the signer registry" },
-      { "code": "authz.signer_revoked", "exit": 1, "when": "broker: the signer is revoked" },
-      { "code": "authz.signer_not_permitted", "exit": 1, "when": "broker: the signer is not permitted for this op" },
-      { "code": "authz.nonce_unknown", "exit": 1, "when": "broker: the nonce was not issued by this broker" },
-      { "code": "authz.nonce_replayed", "exit": 1, "when": "broker: the nonce was already consumed" },
-      { "code": "locked:canonical-integration", "exit": 2, "when": "another integration holder is active" },
-      { "code": "backup-unhealthy", "exit": 2, "retryable": true, "when": "the fail-closed backup watermark blocks a ledger-writing run" },
-      { "code": "internal", "exit": 4, "when": "unexpected internal failure during refresh" }
+      {
+        "code": "usage",
+        "exit": 5
+      },
+      {
+        "code": "config-invalid",
+        "exit": 2
+      },
+      {
+        "code": "broker-unreachable",
+        "exit": 2
+      },
+      {
+        "code": "not-review-pending",
+        "exit": 1
+      },
+      {
+        "code": "not-refreshable",
+        "exit": 1
+      },
+      {
+        "code": "input-unavailable",
+        "exit": 1
+      },
+      {
+        "code": "internal",
+        "exit": 4
+      }
     ],
     "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
   }

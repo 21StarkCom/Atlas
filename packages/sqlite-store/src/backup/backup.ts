@@ -49,6 +49,7 @@ import { migration0006WorkflowIdempotency } from "../../migrations/0006_workflow
 import { migration0008IndexConfigRevision } from "../../migrations/0008_index_config_revision.js";
 import { migration0009RunSupersessions } from "../../migrations/0009_run_supersessions.js";
 import { migration0010TrustState } from "../../migrations/0010_trust_state.js";
+import { migration0011RunInputs } from "../../migrations/0011_run_inputs.js";
 
 /**
  * The schema-migration heads THIS binary understands (§8 compatibility check). A
@@ -75,6 +76,8 @@ const KNOWN_SCHEMA_HEADS: Set<string> = new Set([
   migration0009RunSupersessions.id,
   // The Task 4.8 trust-state projection (registered by the workflows layer): same rationale.
   migration0010TrustState.id,
+  // The Task 4.11 run-input record (registered by the workflows layer, for `git refresh`): same rationale.
+  migration0011RunInputs.id,
 ]);
 
 /**

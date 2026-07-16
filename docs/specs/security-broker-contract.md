@@ -241,9 +241,11 @@ The privileged subset derives from the canonical `commands.json` registry (**sol
 privilege classification). Every command the registry marks `privilege: "privileged"` is authorized
 here, plus the one privileged **variant** of a shared command that the plan defines (`db backup
 --force-unblock`, D6). The registry-privileged set is (registry names): `db restore`, `git approve`,
-`git refresh`, `git rollback`, `graduation migrate`, `purge`, `quarantine inspect`, `quarantine
-resolve`, `source trust promote`, `source trust revoke`. Note that `git reject` is **shared, not
-privileged** (rejecting a proposal writes no protected ref) and is therefore **not** in this set.
+`git rollback`, `graduation migrate`, `purge`, `quarantine inspect`, `quarantine
+resolve`, `source trust promote`, `source trust revoke`. Note that `git reject` and `git refresh`
+are **shared, not privileged** (rejecting a proposal writes no protected ref; refresh only
+regenerates a review-pending proposal's agent branch — no canonical/trust/erase mutation — the
+operator must still approve it at the review gate) and are therefore **not** in this set.
 
 The machine-readable **§7.5 `authzContract` block** is the SSOT for the op→challenge→verification→
 error mapping; the `contract-lint` gate asserts it covers **exactly** the registry-privileged set
@@ -354,7 +356,6 @@ touch a protected ref and so are not broker-signed). `nonce_*` = `nonce_unknown`
 | Op (registry name) | Mechanism | Required challenge fields | Verification steps | Drift codes |
 |--------------------|-----------|---------------------------|--------------------|-------------|
 | `git approve` | broker-signature | `op,runId,targetCommit,canonicalBaseCommit,intendedEffect{integrate,tier,changePlanDigest},nonce,expiresAt` | canonical tip == base; target unchanged; broker re-parses tree, recomputes `effectiveRisk`, matches `changePlanDigest`; signer permitted | `canonical_moved`,`target_mismatch`,`signature_invalid`,`payload_mismatch`,`signer_*`,`nonce_*` |
-| `git refresh` | broker-signature | `op,runId,targetCommit,canonicalBaseCommit,nonce,expiresAt` | canonical tip == new base; run is refreshable (not yet integrated); target unchanged; signer permitted | `canonical_moved`,`target_mismatch`,`signature_invalid`,`payload_mismatch`,`signer_*`,`nonce_*` |
 | `git rollback` | broker-signature | `+ intendedEffect.revertCommit` (broker-derived) | derive revert commit from target run + canonical; compare; verify signature over payload incl. `revertCommit` | `revert_mismatch`,`canonical_moved`,`signature_invalid`,`payload_mismatch`,`signer_*`,`nonce_*` |
 | `purge` | broker-signature | `op,intendedEffect{erase,oldHead,replacementHead,scope},nonce,expiresAt` | derive replacement head deterministically; match `replacementHead`; authorize the signed non-fast-forward canonical-ref replacement (§12.2) | `target_mismatch`,`canonical_moved`,`signature_invalid`,`payload_mismatch`,`signer_*`,`nonce_*` |
 | `db restore` | broker-signature | `op,intendedEffect{restore,backupRef,backupContentHash},nonce,expiresAt` | backup ref exists; content hash matches; authorize restore (crypto runs CLI-side, §2) | `backup_hash_mismatch`,`signature_invalid`,`payload_mismatch`,`signer_*`,`nonce_*` |
@@ -414,20 +415,6 @@ mechanically enforces acceptance criterion 1 and can never drift from the regist
         "canonical tip equals canonicalBaseCommit",
         "targetCommit unchanged from the run's proposed commit",
         "broker re-parses the tree and recomputes effectiveRisk, matching intendedEffect.changePlanDigest",
-        "signerId is enrolled, active, and permitted for this op",
-        "Ed25519 signature verifies over the recomputed signingPayload"
-      ],
-      "driftCodes": ["authz.canonical_moved", "authz.target_mismatch", "authz.signature_invalid", "authz.payload_mismatch", "authz.signer_unknown", "authz.signer_revoked", "authz.signer_not_permitted", "authz.nonce_unknown", "authz.nonce_expired", "authz.nonce_replayed"]
-    },
-    {
-      "op": "git refresh",
-      "command": "git refresh",
-      "mechanism": "broker-signature",
-      "challengeFields": ["op", "runId", "targetCommit", "canonicalBaseCommit", "nonce", "expiresAt"],
-      "verificationSteps": [
-        "canonical tip equals the new canonicalBaseCommit",
-        "run is refreshable (not yet integrated)",
-        "targetCommit unchanged from the run's proposed commit",
         "signerId is enrolled, active, and permitted for this op",
         "Ed25519 signature verifies over the recomputed signingPayload"
       ],
@@ -618,7 +605,7 @@ the broker recomputes + compares (`authz.payload_mismatch` on mismatch).
 {
   "signerId": "atlas-approver-hsm-01",
   "publicKey": "ed25519:MCowBQYDK2VwAyEA...",
-  "permittedOps": ["git approve", "git refresh", "git rollback", "purge", "db restore", "graduation migrate", "source trust promote", "source trust revoke", "db backup --force-unblock"],
+  "permittedOps": ["git approve", "git rollback", "purge", "db restore", "graduation migrate", "source trust promote", "source trust revoke", "db backup --force-unblock"],
   "status": "active",
   "enrolledAt": "2026-07-01T00:00:00.000Z"
 }

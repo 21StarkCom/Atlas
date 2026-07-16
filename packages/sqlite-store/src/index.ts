@@ -145,6 +145,7 @@ export { migration0008IndexConfigRevision, INDEX_CONFIG_REVISION_DDL } from "../
 export { migration0009RunSupersessions, RUN_SUPERSESSIONS_DDL } from "../migrations/0009_run_supersessions.js";
 // Feature migration (Task 4.8 trust projection) — registered by the workflows layer at store-open.
 export { migration0010TrustState, TRUST_STATE_DDL } from "../migrations/0010_trust_state.js";
+export { migration0011RunInputs, RUN_INPUTS_DDL } from "../migrations/0011_run_inputs.js";
 
 export { ProvenanceRepo, captureId } from "./repos/provenance.js";
 export type {

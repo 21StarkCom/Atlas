@@ -27,6 +27,7 @@ import "./git-review.js";
 import "./git-approve.js";
 import "./git-reject.js";
 import "./git-rollback.js";
+import "./git-refresh.js";
 import "./validate.js";
 import "./query.js";
 import "./enrich.js";
