@@ -18,6 +18,7 @@ import "./source-add.js";
 import "./source.js";
 import "./source-trust-promote.js";
 import "./source-trust-revoke.js";
+import "./purge.js";
 import "./note.js";
 import "./git-status.js";
 import "./git-cleanup.js";
