@@ -53,6 +53,7 @@
 import {
   migration0006WorkflowIdempotency,
   migration0009RunSupersessions,
+  migration0010TrustState,
   openStore,
   type LedgerStatement,
   type SqliteConfig,
@@ -70,6 +71,7 @@ import { CliError, EXIT } from "../errors/envelope.js";
 export function registerWorkflowMigrations(store: Store): void {
   store.registerMigration(migration0006WorkflowIdempotency);
   store.registerMigration(migration0009RunSupersessions);
+  store.registerMigration(migration0010TrustState);
 }
 
 /**

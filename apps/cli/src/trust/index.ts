@@ -8,6 +8,14 @@
 export { trustStateFor, isTrusted, DEFAULT_TRUST, type TrustState } from "./state.js";
 export { taintOf, type Taint } from "./taint.js";
 export {
+  promoteTrust,
+  revokeTrust,
+  readTrustState,
+  TrustError,
+  type TrustTarget,
+  type TrustDeps,
+} from "./promote.js";
+export {
   revocationEffect,
   spawnRemediationRun,
   REMEDIATION_WORKFLOW,

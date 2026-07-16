@@ -48,6 +48,7 @@ import { migration0005LedgerFinalize } from "../../migrations/0005_ledger_finali
 import { migration0006WorkflowIdempotency } from "../../migrations/0006_workflow_idempotency.js";
 import { migration0008IndexConfigRevision } from "../../migrations/0008_index_config_revision.js";
 import { migration0009RunSupersessions } from "../../migrations/0009_run_supersessions.js";
+import { migration0010TrustState } from "../../migrations/0010_trust_state.js";
 
 /**
  * The schema-migration heads THIS binary understands (§8 compatibility check). A
@@ -72,6 +73,8 @@ const KNOWN_SCHEMA_HEADS: Set<string> = new Set([
   // store-open alongside 0006): once applied it becomes the schema head, so a backup
   // stamped with it must be recognized as a KNOWN (not future/unknown) schema.
   migration0009RunSupersessions.id,
+  // The Task 4.8 trust-state projection (registered by the workflows layer): same rationale.
+  migration0010TrustState.id,
 ]);
 
 /**
