@@ -19,6 +19,8 @@ import "./source.js";
 import "./source-trust-promote.js";
 import "./source-trust-revoke.js";
 import "./purge.js";
+import "./graduation-scan.js";
+import "./graduation-audit.js";
 import "./note.js";
 import "./git-status.js";
 import "./git-cleanup.js";
