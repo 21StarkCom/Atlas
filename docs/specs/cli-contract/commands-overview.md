@@ -31,11 +31,11 @@ Registry version: **1** · Commands: **49**
 | 2 | `source list` | none | shared | yes | `docs/specs/cli-contract/source-list.schema.json` |
 | 2 | `source show` | none | shared | yes | `docs/specs/cli-contract/source-show.schema.json` |
 | 2 | `source trust show` | none | shared | yes | `docs/specs/cli-contract/source-trust-show.schema.json` |
-| 3 | `index rebuild` | intrinsic | shared | no | `docs/specs/cli-contract/index-rebuild.schema.json` |
-| 3 | `index repair` | intrinsic | shared | no | `docs/specs/cli-contract/index-repair.schema.json` |
-| 3 | `index status` | none | shared | no | `docs/specs/cli-contract/index-status.schema.json` |
-| 3 | `index verify` | none | shared | no | `docs/specs/cli-contract/index-verify.schema.json` |
-| 3 | `query` | none | shared | no | `docs/specs/cli-contract/query.schema.json` |
+| 3 | `index rebuild` | intrinsic | shared | yes | `docs/specs/cli-contract/index-rebuild.schema.json` |
+| 3 | `index repair` | intrinsic | shared | yes | `docs/specs/cli-contract/index-repair.schema.json` |
+| 3 | `index status` | none | shared | yes | `docs/specs/cli-contract/index-status.schema.json` |
+| 3 | `index verify` | none | shared | yes | `docs/specs/cli-contract/index-verify.schema.json` |
+| 3 | `query` | none | shared | yes | `docs/specs/cli-contract/query.schema.json` |
 | 4 | `enrich` | key-accepting | shared | yes | `docs/specs/cli-contract/enrich.schema.json` |
 | 4 | `evidence resolve` | intrinsic | shared | no | `docs/specs/cli-contract/evidence-resolve.schema.json` |
 | 4 | `evidence retry` | intrinsic | shared | no | `docs/specs/cli-contract/evidence-retry.schema.json` |
