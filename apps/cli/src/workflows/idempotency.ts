@@ -54,6 +54,7 @@ import {
   migration0006WorkflowIdempotency,
   migration0009RunSupersessions,
   migration0010TrustState,
+  migration0011RunInputs,
   openStore,
   type LedgerStatement,
   type SqliteConfig,
@@ -72,6 +73,7 @@ export function registerWorkflowMigrations(store: Store): void {
   store.registerMigration(migration0006WorkflowIdempotency);
   store.registerMigration(migration0009RunSupersessions);
   store.registerMigration(migration0010TrustState);
+  store.registerMigration(migration0011RunInputs);
 }
 
 /**

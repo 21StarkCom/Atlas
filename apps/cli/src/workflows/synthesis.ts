@@ -21,7 +21,7 @@ import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { canonicalSerialize, newRunId, type ChangePlan, type ChangePlanOperation, type NoteType, type ParsedNote, type RiskTier, type RunManifest } from "@atlas/contracts";
-import type { AuditBroker, LedgerBackupConfig, Store } from "@atlas/sqlite-store";
+import type { AuditBroker, LedgerBackupConfig, SqliteDatabase, Store } from "@atlas/sqlite-store";
 import type { Repo } from "@atlas/git";
 import { GeneratedArtifactGuard } from "@atlas/scan";
 import { packContext, type ContextPack } from "../retrieval/pack.js";
@@ -349,6 +349,11 @@ export async function applySynthesis(
     const wdeps: WorkflowDeps = { store: deps.store, broker: deps.broker, backup: deps.backup, repo: deps.repo, now };
     const handle = await startRun(wdeps, { operation: kind, runId, targetNoteId: note.id, canonicalCommit: base });
 
+    // Record the run's synthesis input so `git refresh <runId>` can reconstruct the generation
+    // (kind + target live on agent_runs; the instruction + retrieval knobs do not). Guarded on the
+    // 0011 table's presence so a store that predates the migration is never broken by the write.
+    persistRunInput(deps.store.db, runId, input);
+
     let worktreeDir: string | null = null;
     try {
       await handle.checkpoint("planned", {
@@ -543,4 +548,44 @@ function isDestructive(op: ChangePlanOperation): boolean {
     default:
       return false;
   }
+}
+
+/** The persisted synthesis input for a run, reconstructed by `git refresh` (Task 4.11). */
+export interface PersistedRunInput {
+  readonly instruction: string;
+  readonly retrievalK?: number;
+  readonly typeFilter?: string;
+}
+
+/** True when the 0011 `run_inputs` table exists in `db` (feature-migration presence). */
+function hasRunInputsTable(db: SqliteDatabase): boolean {
+  return db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'run_inputs'`).get() !== undefined;
+}
+
+/**
+ * Record a run's synthesis input (idempotent). Guarded on the 0011 table so a store that predates
+ * the migration is never broken; `INSERT OR REPLACE` makes a checkpoint replay a no-op.
+ */
+export function persistRunInput(db: SqliteDatabase, runId: string, input: WorkflowInput): void {
+  if (!hasRunInputsTable(db)) return;
+  db.prepare(`INSERT OR REPLACE INTO run_inputs (run_id, instruction, retrieval_k, type_filter) VALUES (?, ?, ?, ?)`).run(
+    runId,
+    input.instruction,
+    input.retrievalK ?? null,
+    input.typeFilter ?? null,
+  );
+}
+
+/** Read a run's persisted synthesis input, or `null` when absent (pre-0011 / non-synthesis run). */
+export function readRunInput(db: SqliteDatabase, runId: string): PersistedRunInput | null {
+  if (!hasRunInputsTable(db)) return null;
+  const row = db.prepare(`SELECT instruction, retrieval_k, type_filter FROM run_inputs WHERE run_id = ?`).get(runId) as
+    | { instruction: string; retrieval_k: number | null; type_filter: string | null }
+    | undefined;
+  if (row === undefined) return null;
+  return {
+    instruction: row.instruction,
+    ...(row.retrieval_k !== null ? { retrievalK: row.retrieval_k } : {}),
+    ...(row.type_filter !== null ? { typeFilter: row.type_filter } : {}),
+  };
 }

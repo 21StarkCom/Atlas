@@ -44,10 +44,10 @@ describe.skipIf(!existsSync(BIN))("brain bin launcher", () => {
     const cwd = mkdtempSync(join(tmpdir(), "atlas-bin-"));
     writeFileSync(join(cwd, "brain.config.yaml"), EXAMPLE, "utf8");
     try {
-      // `git refresh` is a real registry command with no handler in this build — the
-      // stable not-implemented example (`enrich` is now the implemented Task-4.11
-      // synthesis command; `query` the Tier-0 retrieval command, Task 3.4).
-      const r = run(["git", "refresh", "--json"], cwd);
+      // `evidence review` is a real registry command with no handler in this build — the
+      // stable not-implemented example (`git refresh` is now the implemented Task-4.11
+      // command; `enrich` the synthesis command; `query` the Tier-0 retrieval command).
+      const r = run(["evidence", "review", "--json"], cwd);
       expect(r.status).toBe(5);
       expect(JSON.parse(r.stdout).code).toBe("not-implemented");
     } finally {
