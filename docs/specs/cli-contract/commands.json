@@ -128,7 +128,7 @@
       "phase": 4,
       "idempotency": "none",
       "privilege": "shared",
-      "implemented": false
+      "implemented": true
     },
     {
       "name": "git rollback",
