@@ -35,6 +35,22 @@
 
 ---
 
+## Task 0: Branch setup
+
+- [ ] Verify a clean worktree on the expected base and create the feature branch BEFORE any edit or commit (Task 1 commits immediately — the branch must already exist).
+
+```bash
+git -C ~/Code/21Stark/atlas status --short          # MUST be empty
+git -C ~/Code/21Stark/atlas fetch origin main
+git -C ~/Code/21Stark/atlas switch -c feat/open-type-system origin/main 2>/dev/null \
+  || git -C ~/Code/21Stark/atlas switch feat/open-type-system
+git -C ~/Code/21Stark/atlas branch --show-current   # MUST print feat/open-type-system
+```
+
+All Task 1-5 commits land on this branch; never commit on `main`.
+
+---
+
 ## Task 1: Type registry in @atlas/contracts
 
 **Files:**
@@ -48,9 +64,9 @@
   - `interface TypeDef { name: string; tier: "strict" | "loose"; defaultSensitivity: Sensitivity }`
   - `const STRICT_TYPES: readonly string[]` = `["project","repo","tool","cloud","person","team","meeting","conversation","memory"]`
   - `const LOOSE_TYPES: readonly string[]` = `["research","personal"]`
-  - `const V1_COMPAT_TYPES: readonly string[]` = `["note","concept","source"]` (retained for back-compat; `note`/`concept`→strict-ish? no — treat `note` loose, `concept`/`source` strict per V1). Registered as: `concept`,`source` strict; `note` loose.
+  - `note`/`concept`/`source` — V1 compat types folded into the sets above: `concept`/`source` strict, `note` loose.
   - `function resolveType(name: string | null | undefined): TypeDef` — registered name → its def; unknown/empty → `{ name: name||"note", tier: "loose", defaultSensitivity: "internal" }`.
-  - `function classificationToSensitivity(classification: string | null | undefined): Sensitivity` — `public`→`public`; `personal`/`internal`/anything-else/absent→`internal`.
+  - `function classificationToSensitivity(classification: string | null | undefined): Sensitivity` — fail UP: `public`→`public`; `internal`/absent→`internal`; `personal` + any unrecognized non-empty value → `confidential`; explicit `confidential`/`restricted` preserved. Never downgrades a sensitive note to `internal`.
   - `const STRICT_BASE_FIELDS: readonly string[]` = `["id","type","status","title","aliases","tags","related","updated","confidence","classification","source"]`
   - `const LOOSE_BASE_FIELDS: readonly string[]` = `["id","type","title"]`
   - `function isRegisteredType(name: string): boolean`
@@ -86,10 +102,12 @@ describe("type-registry", () => {
     expect(resolveType("")).toMatchObject({ name: "note", tier: "loose" });
     expect(resolveType(null)).toMatchObject({ name: "note", tier: "loose" });
   });
-  it("maps classification to sensitivity (public→public, else→internal)", () => {
+  it("maps classification to sensitivity, failing up (public→public, personal/unknown→confidential)", () => {
     expect(classificationToSensitivity("public")).toBe("public");
-    expect(classificationToSensitivity("personal")).toBe("internal");
     expect(classificationToSensitivity("internal")).toBe("internal");
+    expect(classificationToSensitivity("personal")).toBe("confidential");
+    expect(classificationToSensitivity("Restricted")).toBe("restricted");
+    expect(classificationToSensitivity("weird-value")).toBe("confidential");
     expect(classificationToSensitivity(undefined)).toBe("internal");
   });
   it("registry covers exactly the vault's 11 types + V1 compat (14)", () => {
@@ -155,13 +173,22 @@ export function resolveType(name: string | null | undefined): TypeDef {
 }
 
 /**
- * Map the vault's `classification` (public|personal|internal) to Atlas
- * `declaredSensitivity`. `public`→`public`; everything else (personal, internal,
- * unknown, absent) → `internal` (fail-safe: the vault forbids confidential/
- * restricted, so nothing declares above internal).
+ * Map the vault's `classification` to Atlas `declaredSensitivity`, failing UP so no
+ * sensitive note is silently downgraded. `public`→`public`; `internal`/absent→
+ * `internal`; explicit `confidential`/`restricted` preserved; `personal` and any
+ * unrecognized non-empty value → `confidential` (personal/business content is treated
+ * as sensitive, never flattened to org-wide `internal`).
  */
 export function classificationToSensitivity(classification: string | null | undefined): Sensitivity {
-  return typeof classification === "string" && classification.trim().toLowerCase() === "public" ? "public" : "internal";
+  const c = typeof classification === "string" ? classification.trim().toLowerCase() : "";
+  switch (c) {
+    case "public": return "public";
+    case "internal": return "internal";
+    case "": return "internal";               // absent → internal floor
+    case "confidential": return "confidential";
+    case "restricted": return "restricted";
+    default: return "confidential";           // personal + unknown → fail up, never down
+  }
 }
 ```
 
@@ -343,7 +370,10 @@ Expected: PASS.
 - [ ] **Step 9: Commit**
 
 ```bash
-git add apps/cli/src/graduation/migrate-plan.ts apps/cli/src/graduation/audit.ts apps/cli/test/migrate-open-types.test.ts apps/cli/test/graduation-migrate.cli.test.ts
+# Stage EVERY test the Step-7 search actually modified, not just the two named files.
+git add apps/cli/src/graduation/migrate-plan.ts apps/cli/src/graduation/audit.ts apps/cli/test
+git diff --check                                    # no conflict/whitespace markers
+test -z "$(git status --short apps/cli/test | grep '^.M')" || { echo 'unstaged test edits remain'; exit 1; }
 git commit -m "feat(graduation): open type gate — any type ingests, schema coerced, never refused (#151)"
 ```
 
@@ -357,7 +387,7 @@ git commit -m "feat(graduation): open type gate — any type ingests, schema coe
 
 **Interfaces:**
 - Consumes: the total `migrable` set (Task 2).
-- Produces: `planBootstrapMigration` returns `quarantined: []` for `duplicate-identity`/`ambiguous-alias`/`incompatible-link` shape defects — those notes now appear in `notes`. Duplicate explicit ids are numeric-suffix-disambiguated (same `collision` rule already used for derived ids). Incompatible/ambiguous links are preserved verbatim (`resolution: "preserved-unresolved"|"preserved-ambiguous"`) and the note still migrates. `QuarantineEntry` is retained in the shape but produced ONLY by the secret-scan path (which lives in `graduation/scan.ts`, untouched).
+- Produces: `planBootstrapMigration` returns `quarantined: []` for `duplicate-identity`/`ambiguous-alias`/`incompatible-link` shape defects — those notes now appear in `notes`. Duplicate explicit ids are numeric-suffix-disambiguated (same `collision` rule already used for derived ids). Incompatible/ambiguous links are flattened to plain display text (`resolution: "flattened-unresolved"|"flattened-ambiguous"`) and the note still migrates. `QuarantineEntry` is retained in the shape but produced ONLY by the secret-scan path (which lives in `graduation/scan.ts`, untouched).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -375,13 +405,14 @@ describe("graduation migrate — open type system (identity + links)", () => {
     expect(ids).toEqual(["repo-dup", "repo-dup-2"]);
   });
 
-  it("a note with an unresolved wikilink migrates with the link preserved verbatim (no incompatible-link quarantine)", () => {
+  it("a note with an unresolved wikilink migrates with the link flattened (no incompatible-link quarantine)", () => {
     const plan = planBootstrapMigration([
       note("x/a.md", "id: note-a\ntype: note\ntitle: A", "See [[Nonexistent Target]] here.\n"),
     ], { bootstrapTimestamp: TS });
     expect(plan.quarantined).toEqual([]);
     expect(plan.notes).toHaveLength(1);
-    expect(plan.notes[0]!.linkRewrites[0]).toMatchObject({ resolution: "preserved-unresolved" });
+    expect(plan.notes[0]!.linkRewrites[0]).toMatchObject({ resolution: "flattened-unresolved" });
+    expect(plan.notes[0]!.body).not.toContain("[["); // flattened → reader-safe
   });
 
   it("an ambiguous-title note still migrates (no ambiguous-alias quarantine)", () => {
@@ -408,14 +439,22 @@ In `planBootstrapMigration` Pass 1, replace the `duplicate-identity` quarantine 
     if (typeof eid === "string" && eid.trim() !== "") (explicitById.get(eid) ?? explicitById.set(eid, []).get(eid)!).push(doc.path);
   }
   // Open system: a shared explicit id no longer quarantines. The first owner (sorted
-  // path) keeps the bare id; the rest are treated as if they had no explicit id and
-  // get numeric-suffix-disambiguated in Pass 2 (deterministic).
-  const reserved = new Set<string>();
-  const supersededExplicit = new Set<string>(); // paths whose explicit id lost the reservation race
+  // path) keeps the bare id; each LATER owner keeps its OWN explicit id numeric-
+  // suffixed (`repo-dup-2`, `repo-dup-3`, …) in sorted-path order — NOT re-derived
+  // from the title (that would produce `repo-dup-b`, breaking the numeric-suffix rule).
+  // `assigned` is the shared reservation set also consulted by Pass-2 derivation.
+  const supersededExplicit = new Map<string, string>(); // path → its disambiguated explicit id
   for (const [id, paths] of explicitById) {
     const sorted = [...paths].sort();
-    reserved.add(id);
-    for (const p of sorted.slice(1)) supersededExplicit.add(p);
+    assigned.add(id); // first owner keeps the bare id
+    let n = 2;
+    for (const p of sorted.slice(1)) {
+      let candidate = `${id}-${n}`;
+      while (assigned.has(candidate)) candidate = `${id}-${++n}`;
+      assigned.add(candidate);
+      supersededExplicit.set(p, candidate);
+      n++;
+    }
   }
 ```
 
@@ -424,10 +463,10 @@ Delete the `dupIdPaths` set entirely. Everywhere `dupIdPaths.has(doc.path)` was 
 ```typescript
   for (const { doc, type } of migrable) {
     const explicitId = typeof doc.fm.id === "string" && doc.fm.id.trim() !== "" ? doc.fm.id : null;
-    const eid = explicitId !== null && !supersededExplicit.has(doc.path) ? explicitId : null;
     let newId: string;
-    if (eid !== null) {
-      newId = eid;
+    if (explicitId !== null) {
+      // First owner keeps the bare id; a superseded owner uses its pre-suffixed id.
+      newId = supersededExplicit.get(doc.path) ?? explicitId;
     } else {
       const { slug, ambiguous } = slugify(doc.title);
       if (ambiguous) ambiguousAlias.add(doc.path); // recorded for the report, NOT quarantined
@@ -441,17 +480,19 @@ Delete the `dupIdPaths` set entirely. Everywhere `dupIdPaths.has(doc.path)` was 
   }
 ```
 
-- [ ] **Step 4: Migrate incompatible-link notes by default (released-by-default)**
+- [ ] **Step 4: Migrate incompatible-link notes by FLATTENING the link (reader-safe)**
 
-In the link-resolution loop, replace the `if (hasUnresolved && release === undefined) { incompatibleLink.add(...); continue; }` block so an unresolved link NEVER blocks migration — the link is simply kept verbatim (the `linkRewrites` already record `preserved-unresolved`/`preserved-ambiguous`):
+The unchanged strict `readVault()` rejects `broken-link`/`ambiguous-link`, so a preserved-verbatim wikilink would make the graduated vault un-rebuildable. Replace the `if (hasUnresolved && release === undefined) { incompatibleLink.add(...); continue; }` block so an unresolved link NEVER blocks migration AND never survives as a wikilink — it is FLATTENED to its plain display text in the emitted body (deterministic), and `linkRewrites` records the resolution:
 
 ```typescript
-    // Open system: an unresolved/ambiguous wikilink no longer blocks. The note
-    // migrates with the link preserved verbatim (linkRewrites records the
-    // resolution); the operator can re-link later. `released` stays supported for
-    // provenance but is no longer REQUIRED to migrate.
+    // Open system: an unresolved/ambiguous `[[Target|Display]]` no longer blocks and
+    // no longer survives as a wikilink (the strict reader would reject it). It is
+    // flattened in-body to its display text (`Display`, else `Target`); linkRewrites
+    // records `flattened-unresolved`/`flattened-ambiguous`. `released` stays supported
+    // for provenance but is no longer REQUIRED to migrate.
     const release = released[doc.path];
-    // (no `continue` — every note proceeds to build its outcome)
+    // (no `continue` — the link is flattened in the emitted body, then the note builds
+    //  its outcome; the resulting note contains no unresolved wikilinks.)
 ```
 
 Delete the `incompatibleLink` set and its quarantine tail (`for (const p of [...incompatibleLink].sort()) ...`).
@@ -477,7 +518,10 @@ Expected: PASS.
 - [ ] **Step 9: Commit**
 
 ```bash
-git add apps/cli/src/graduation/migrate-plan.ts apps/cli/test/migrate-open-types.test.ts apps/cli/test/graduation-migrate.cli.test.ts
+# Stage every test touched by the Step-7 quarantine search, not just the named files.
+git add apps/cli/src/graduation/migrate-plan.ts apps/cli/test
+git diff --check
+test -z "$(git status --short apps/cli/test | grep '^.M')" || { echo 'unstaged test edits remain'; exit 1; }
 git commit -m "feat(graduation): identity/link/alias shape defects normalize instead of quarantine (#151)"
 ```
 
@@ -496,7 +540,7 @@ git commit -m "feat(graduation): identity/link/alias shape defects normalize ins
 - Produces:
   - `interface NormalizedEntry { path: string; filled: string[]; coerced: string[]; note: string }` (capped list; `note` is a short human reason).
   - `MigrationPlan` gains `readonly normalized: NormalizedEntry[]`.
-  - `NoteOutcome.initializedFrontmatter` for a STRICT type now includes filled defaults for any missing base field: `status: "active"`, `confidence: "medium"`, `classification: "internal"`, `aliases: []`, `tags: []`, `related: []`, plus `declaredSensitivity` derived from `classification`.
+  - `NoteOutcome.initializedFrontmatter` for a STRICT type is filled/coerced for EVERY required base field (`STRICT_BASE_FIELDS`), so the strict reader always receives a well-formed note: `status: "active"`, `confidence: "medium"`, `classification: "internal"`, `source: <original vault path>`, `aliases: []`, `tags: []`, `related: []`, plus `declaredSensitivity` re-derived from the coerced `classification`. Present-but-malformed values (null, wrong shape, invalid enum, blank) are COERCED to the default, not copied through.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -511,8 +555,9 @@ describe("graduation migrate — strict field-fill + normalized report", () => {
     expect(fm.confidence).toBe("medium");
     expect(fm.classification).toBe("internal");
     expect(fm.aliases).toEqual([]);
+    expect(fm.source).toBe("Repos/x.md"); // required strict field, never omitted
     const rep = plan.normalized.find((n) => n.path === "Repos/x.md");
-    expect(rep?.filled).toEqual(expect.arrayContaining(["status", "confidence", "classification"]));
+    expect(rep?.filled).toEqual(expect.arrayContaining(["status", "confidence", "classification", "source"]));
   });
 
   it("declaredSensitivity derives from classification: public→public, else internal", () => {
@@ -525,6 +570,16 @@ describe("graduation migrate — strict field-fill + normalized report", () => {
   it("a loose 'research' note is NOT force-filled with strict base fields", () => {
     const plan = planBootstrapMigration([note("R/x.md", "id: research-x\ntype: research\ntitle: X")], { bootstrapTimestamp: TS });
     expect(plan.notes[0]!.initializedFrontmatter.confidence).toBeUndefined();
+  });
+
+  it("present-but-malformed strict fields are COERCED, not copied through (null aliases, bad enum)", () => {
+    const plan = planBootstrapMigration([note("Repos/m.md", "id: repo-m\ntype: repo\ntitle: M\naliases:\nstatus: bogus\nconfidence: '   '")], { bootstrapTimestamp: TS });
+    const fm = plan.notes[0]!.initializedFrontmatter;
+    expect(fm.aliases).toEqual([]);      // null → []
+    expect(fm.status).toBe("active");    // invalid enum → default
+    expect(fm.confidence).toBe("medium"); // whitespace → default
+    const rep = plan.normalized.find((n) => n.path === "Repos/m.md");
+    expect(rep?.coerced).toEqual(expect.arrayContaining(["aliases", "status", "confidence"]));
   });
 });
 ```
@@ -573,13 +628,28 @@ Replace the `initialized` object build with a tier-aware version using the regis
     // Coercion: an unsupported schema_version was clamped to 1 (Task 2 keeps supportedMax).
     const sv = doc.fm.schema_version;
     if (typeof sv === "number" && sv > (opts.supportedSchemaMax ?? DEFAULT_SCHEMA_MAX)) coerced.push("schema_version");
-    // Strict types: fill any missing base field with a judgement default (never refuse).
+    // Strict types: every required base field is FILLED if absent or COERCED if
+    // present-but-malformed (null, wrong shape, invalid enum, blank/whitespace), so
+    // the strict reader always receives a well-formed note. Driven off the required
+    // set so no field (e.g. `source`) can be silently omitted.
     if (def.tier === "strict") {
-      const defaults: Record<string, unknown> = { status: "active", confidence: "medium", classification: "internal", aliases: [], tags: [], related: [] };
-      for (const [k, v] of Object.entries(defaults)) {
-        if (doc.fm[k] === undefined) { initialized[k] = v; filled.push(k); }
-        else initialized[k] = doc.fm[k];
+      const ENUM = { status: ["active", "archived", "draft"], confidence: ["low", "medium", "high"], classification: ["public", "internal", "personal"] } as const;
+      const DEFAULT: Record<string, string> = { status: "active", confidence: "medium", classification: "internal", source: doc.path };
+      for (const k of ["status", "confidence", "classification", "source"] as const) {
+        const raw = doc.fm[k];
+        if (raw === undefined) { initialized[k] = DEFAULT[k]; filled.push(k); }
+        else if (typeof raw !== "string" || raw.trim() === "" || (k in ENUM && !ENUM[k as keyof typeof ENUM].includes(raw.trim() as never))) {
+          initialized[k] = DEFAULT[k]; coerced.push(k);
+        } else initialized[k] = raw.trim();
       }
+      for (const k of ["aliases", "tags", "related"] as const) {
+        const raw = doc.fm[k];
+        if (raw === undefined) { initialized[k] = []; filled.push(k); }
+        else if (!Array.isArray(raw)) { initialized[k] = []; coerced.push(k); } // null / scalar → []
+        else initialized[k] = raw;
+      }
+      // Re-derive sensitivity from the COERCED classification (not the raw frontmatter).
+      initialized.declaredSensitivity = classificationToSensitivity(initialized.classification as string);
     }
     if (filled.length > 0 || coerced.length > 0) {
       normalized.push({ path: doc.path, filled: filled.sort(), coerced, note: `${def.tier} type '${type.value}'` });
@@ -649,7 +719,9 @@ For each drifted fixture (`explicit-collision`, `guards`, and any asserting `unk
 
 - [ ] **Step 3: Add the full-taxonomy fixture**
 
-Create `docs/specs/fixtures/bootstrap-migration/full-taxonomy/input/` with one note per type (`person`, `repo`, `research`, `project`, `memory`, `meeting`, `conversation`, `personal`, `team`, `cloud`, `tool`, plus one `podcast` unknown, one no-frontmatter file, one strict note missing base fields), and the expected `plan.json`. Wire it into the fixture test loop (follow the existing `basic`/`collision` pattern).
+Create `docs/specs/fixtures/bootstrap-migration/full-taxonomy/input/` with one note per type (`person`, `repo`, `research`, `project`, `memory`, `meeting`, `conversation`, `personal`, `team`, `cloud`, `tool`, plus one `podcast` unknown, one no-frontmatter file, one strict note missing ALL base fields, one note with a duplicate explicit id, and one with an unresolved `[[link]]`), and the expected `plan.json`. Wire it into the fixture test loop (follow the existing `basic`/`collision` pattern).
+
+Also add the **reader-compatibility gate** (the proof the normalized output is well-formed): a test that APPLIES the full-taxonomy plan into a temp copy, runs `readVault()` + strict rebuild over the result, and asserts ZERO reader errors — no `broken-link`, `ambiguous-link`, `identity-collision`, or schema errors survive. This is what makes "total ingestion" real rather than reported.
 
 - [ ] **Step 4: Run the entire affected suite**
 
@@ -677,11 +749,22 @@ ATLAS_TEST_MODE=1 ATLAS_CUSTODY_TEST_DIR=<custody> \
   node ~/Code/21Stark/atlas/apps/cli/dist/bin.js graduation migrate --json | python3 -c "import json,sys; d=json.load(sys.stdin); print('refused', len(d['refused']), '| migrating', len(d['notes']), '| quarantined', len(d['quarantined']), '| normalized', len(d['normalized']))"
 ```
 
-Expected: `refused 0`, `migrating` ≈ full vault (200+), `quarantined` = only secret-bearing notes. Record the numbers in a comment on #151.
+Then APPLY the plan and run the strict reader over the result — the migrate summary alone can hide notes missing `source` or carrying malformed fields:
+
+```bash
+ATLAS_TEST_MODE=1 ATLAS_CUSTODY_TEST_DIR=<custody> \
+  node ~/Code/21Stark/atlas/apps/cli/dist/bin.js graduation migrate --apply --out <migrated-copy> --json
+# Strict-reader gate: the graduated vault MUST rebuild with zero errors.
+node ~/Code/21Stark/atlas/apps/cli/dist/bin.js vault validate --source <migrated-copy> --json \
+  | python3 -c "import json,sys; d=json.load(sys.stdin); assert not d['errors'], d['errors']; print('reader OK', d.get('noteCount'))"
+```
+
+Expected: `refused 0`, `migrating` ≈ full vault (200+), `quarantined` = only secret-bearing notes, reader errors `0`, and exact conservation — `scanned == written + credential-quarantines` with no unexplained omissions. Record the numbers in a comment on #151.
 
 - [ ] **Step 7: Open the PR + post the live result**
 
 ```bash
+git status --short   # MUST be empty — every in-scope src + test edit committed
 git push -u origin feat/open-type-system
 ```
 Open the PR (title "feat: open type system — full-vault ingestion (#151)"), paste the live acceptance numbers, and link the spec. Merge once CI is green.
