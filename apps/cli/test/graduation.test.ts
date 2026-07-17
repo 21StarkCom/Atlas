@@ -10,9 +10,9 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ParsedNote, VaultSnapshot, VaultError } from "@atlas/contracts";
+import { STRICT_TYPES, LOOSE_TYPES, type ParsedNote, type VaultSnapshot, type VaultError } from "@atlas/contracts";
 import { scanVaultCopy, scanGitHistory } from "../src/graduation/scan.js";
-import { categorizeGraduationCopy } from "../src/graduation/audit.js";
+import { categorizeGraduationCopy, GRADUATION_KNOWN_TYPES } from "../src/graduation/audit.js";
 import { readScanState, writeScanState, scanStatePath } from "../src/graduation/state.js";
 import { parseArgs as scanParseArgs } from "../src/commands/graduation-scan.js";
 
@@ -83,13 +83,13 @@ function note(id: string, type: string): ParsedNote {
 }
 
 describe("graduation audit category inventory (Task 5.2)", () => {
-  it("maps each vault-reader defect to its §7 category and flags an unknown type; detected-credential is empty (clean-gate precondition)", () => {
+  it("maps each vault-reader defect to its §7 category; detected-credential is empty (clean-gate precondition)", () => {
     const dir = join(root, "vault");
     mkdirSync(dir, { recursive: true });
     // A file that is missing its id (for the missing-* re-parse split).
     writeFileSync(join(dir, "noid.md"), "---\ntype: concept\nschema_version: 1\n---\n# x\n");
     const snapshot: VaultSnapshot = {
-      notes: [note("good", "concept"), note("weird", "gizmo")], // 'gizmo' is not a canonical type
+      notes: [note("good", "concept"), note("weird", "gizmo")], // open registry: 'gizmo' is still known (non-empty)
       errors: [err("dup.md", "duplicate-id"), err("alias.md", "identity-collision"), err("link.md", "broken-link"), err("old.md", "unsupported-schema-version"), err("noid.md", "invalid-frontmatter")],
     } as VaultSnapshot;
 
@@ -99,22 +99,27 @@ describe("graduation audit category inventory (Task 5.2)", () => {
     expect(categories["ambiguous-alias"]).toEqual(["alias.md"]);
     expect(categories["incompatible-link"]).toEqual(["link.md"]);
     expect(categories["unsupported-schema-version"]).toEqual(["old.md"]);
-    expect(categories["unknown-type"]).toEqual(["weird.md"]);
+    expect(categories["unknown-type"]).toEqual([]); // open registry: a non-empty type is never unknown-type
     expect(categories["missing-id"]).toEqual(["noid.md"]); // re-parsed: id absent
     expect(categories["detected-credential"]).toEqual([]); // clean-gate precondition
   });
 
-  it("uses the bootstrap §3 known-type set: a `note`-typed note is NOT unknown-type; a truly-alien type IS", () => {
+  it("open registry (#151): a `note`-typed note AND a truly-alien type are both known — neither is unknown-type", () => {
     const dir = join(root, "types");
     mkdirSync(dir, { recursive: true });
     const snapshot: VaultSnapshot = {
-      // `note` + `source` are §3-known (source is also policy, `note` is NOT — the regression guard);
-      // `gizmo` is outside the managed set.
+      // `note` + `source` are registered (source is also policy, `note` is NOT — the regression guard);
+      // `gizmo` is NOT registered but is still "known" under the open registry (any non-empty type).
       notes: [note("plain", "note"), note("src", "source"), note("weird", "gizmo")],
       errors: [],
     } as VaultSnapshot;
     const { categories } = categorizeGraduationCopy(dir, snapshot);
-    expect(categories["unknown-type"]).toEqual(["weird.md"]);
+    expect(categories["unknown-type"]).toEqual([]);
+  });
+
+  it("GRADUATION_KNOWN_TYPES is back-compat-exported, now DERIVED from the full 14-name contracts registry (#151)", () => {
+    expect(GRADUATION_KNOWN_TYPES.length).toBe(14);
+    expect(new Set(GRADUATION_KNOWN_TYPES)).toEqual(new Set([...STRICT_TYPES, ...LOOSE_TYPES]));
   });
 });
 

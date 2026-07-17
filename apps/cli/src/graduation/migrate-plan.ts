@@ -2,20 +2,23 @@
  * `graduation/migrate-plan` — the DETERMINISTIC bootstrap-migration core (Task 5.3, bootstrap-
  * migration.md §2–§6). Pure function of the input vault + config (never wall-clock): two-pass id
  * derivation (reserve explicit ids, then derive the rest in sorted-path order with numeric-suffix
- * collision), type inference (frontmatter/folder/filename/default; unknown/malformed explicit type
- * REFUSED), wikilink rewrite + preservation, reader-required-field initialization, and §7 quarantine
+ * collision), type inference (frontmatter/folder/filename/default — OPEN type system, #151: ANY
+ * asserted type is accepted and normalized via `@atlas/contracts` `resolveType`, never refused;
+ * an unsupported explicit schema_version is likewise coerced to SCHEMA_VERSION, never refused),
+ * wikilink rewrite + preservation, reader-required-field initialization, and §7 quarantine
  * classification. Produces the `graduation migrate` plan (the applied mutation + checkpoints are the
  * command's job). Validated byte-exactly against `docs/specs/fixtures/bootstrap-migration/`.
  */
 import { basename } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { resolveType, isRegisteredType, SCHEMA_VERSION } from "@atlas/contracts";
 import { splitFrontmatter } from "../markdown/parse.js";
 
-/** The §3 known types (V1) migration can infer/assign. */
-const KNOWN_TYPES = new Set(["note", "concept", "person", "source", "project"]);
-/** Top-level folder → type (§3, case-sensitive). */
-const FOLDER_TYPE: Record<string, string> = { People: "person", Concepts: "concept", Sources: "source", Projects: "project" };
-const DEFAULT_SCHEMA_MAX = 1;
+/** Top-level folder → type (§3, case-sensitive) — vault folders included. */
+const FOLDER_TYPE: Record<string, string> = {
+  People: "person", Concepts: "concept", Sources: "source", Projects: "project",
+  Repos: "repo", Teams: "team", Meetings: "meeting", Conversations: "conversation", Tools: "tool",
+};
 
 export interface MigrationInputFile {
   readonly path: string;
@@ -28,7 +31,6 @@ export interface ReleaseInput {
 }
 export interface MigrationPlanOptions {
   readonly bootstrapTimestamp: string;
-  readonly supportedSchemaMax?: number;
   /** path → release authorization (from `quarantine resolve --resolution release`). */
   readonly released?: Readonly<Record<string, ReleaseInput>>;
 }
@@ -128,18 +130,19 @@ function parseDoc(f: MigrationInputFile): Doc {
   return { path: f.path, fm, hasFm, body, title };
 }
 
-type TypeResult = { kind: "ok"; value: string; source: NoteOutcome["type"]["source"] } | { kind: "unknown"; assertedType: string };
+type TypeResult = { value: string; source: NoteOutcome["type"]["source"] };
 function inferType(d: Doc): TypeResult {
   const explicit = d.fm.type;
-  if (explicit !== undefined && explicit !== null && explicit !== "") {
-    if (typeof explicit === "string" && KNOWN_TYPES.has(explicit)) return { kind: "ok", value: explicit, source: "frontmatter" };
-    return { kind: "unknown", assertedType: String(explicit) }; // unknown string OR non-string ⇒ refused
+  if (explicit !== undefined && explicit !== null && String(explicit).trim() !== "") {
+    // ANY asserted type is accepted (open registry). resolveType() owns trimming +
+    // fallback, so we emit the canonical name (e.g. "  repo " → "repo"), never raw.
+    return { value: resolveType(String(explicit)).name, source: "frontmatter" };
   }
   const top = d.path.includes("/") ? d.path.split("/")[0]! : "";
-  if (top && FOLDER_TYPE[top]) return { kind: "ok", value: FOLDER_TYPE[top]!, source: "folder" };
+  if (top && FOLDER_TYPE[top]) return { value: FOLDER_TYPE[top]!, source: "folder" };
   const pfx = /^([a-z]+)-/.exec(stem(d.path));
-  if (pfx && KNOWN_TYPES.has(pfx[1]!)) return { kind: "ok", value: pfx[1]!, source: "filename" };
-  return { kind: "ok", value: "note", source: "default" };
+  if (pfx && isRegisteredType(pfx[1]!)) return { value: pfx[1]!, source: "filename" };
+  return { value: "note", source: "default" };
 }
 
 /** The managed reader-required keys migration writes (order = the initializedFrontmatter shape). */
@@ -150,31 +153,14 @@ const MANAGED_KEYS = ["id", "type", "schema_version", "title", "created", "updat
  * (incompatible-link) notes to migrate as-is. Pure: no wall-clock, no filesystem writes.
  */
 export function planBootstrapMigration(files: readonly MigrationInputFile[], opts: MigrationPlanOptions): MigrationPlan {
-  const supportedMax = opts.supportedSchemaMax ?? DEFAULT_SCHEMA_MAX;
   const released = opts.released ?? {};
   const docs = [...files].map(parseDoc).sort((a, b) => a.path.localeCompare(b.path));
 
-  const refused: RefusalEntry[] = [];
+  const refused: RefusalEntry[] = []; // retained in the shape; now always empty (open type + schema-version coercion)
   const quarantined: QuarantineEntry[] = [];
 
-  // ── Refusals (never mutated): unsupported schema version, then unknown/malformed type. ──
-  const refusedPaths = new Set<string>();
-  const migrable: { doc: Doc; type: { value: string; source: NoteOutcome["type"]["source"] } }[] = [];
-  for (const d of docs) {
-    const sv = d.fm.schema_version;
-    if (typeof sv === "number" && sv > supportedMax) {
-      refused.push({ path: d.path, category: "unsupported-schema-version", assertedSchemaVersion: sv, supportedMax, outcome: "refused", mutated: false });
-      refusedPaths.add(d.path);
-      continue;
-    }
-    const t = inferType(d);
-    if (t.kind === "unknown") {
-      refused.push({ path: d.path, category: "unknown-type", assertedType: t.assertedType, outcome: "refused", mutated: false });
-      refusedPaths.add(d.path);
-      continue;
-    }
-    migrable.push({ doc: d, type: { value: t.value, source: t.source } });
-  }
+  const migrable: { doc: Doc; type: TypeResult }[] = [];
+  for (const d of docs) migrable.push({ doc: d, type: inferType(d) });
 
   // ── Pass 1: reserve explicit ids; a shared explicit id ⇒ duplicate-identity quarantine. ──
   const explicitById = new Map<string, string[]>(); // id → paths
@@ -269,7 +255,7 @@ export function planBootstrapMigration(files: readonly MigrationInputFile[], opt
     const initialized: Record<string, unknown> = {
       id: newId,
       type: type.value,
-      schema_version: 1,
+      schema_version: SCHEMA_VERSION,
       title: doc.title,
       created: opts.bootstrapTimestamp,
       updated: opts.bootstrapTimestamp,
@@ -280,7 +266,7 @@ export function planBootstrapMigration(files: readonly MigrationInputFile[], opt
       oldId: typeof doc.fm.id === "string" && doc.fm.id.trim() !== "" ? doc.fm.id : null,
       newId,
       type,
-      schemaVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
       status: "migrated",
       ...(collisionByPath.has(doc.path) ? { collision: collisionByPath.get(doc.path)! } : {}),
       initializedFrontmatter: initialized,

@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { describe, expect, it } from "vitest";
-import { ProviderErrorSchema, CHANGE_PLAN_OPS } from "@atlas/contracts";
+import { ProviderErrorSchema, CHANGE_PLAN_OPS, SCHEMA_VERSION } from "@atlas/contracts";
 import {
   checkAuthzContractCompleteness,
   checkFixtureConsistency,
@@ -1633,28 +1633,55 @@ describe("Phase-5 bootstrap-migration executable fixtures (Task 5.0 — the cont
     expect(exp.audit.categories["duplicate-identity"].sort()).toEqual(["ExplicitA.md", "ExplicitB.md"]);
   });
 
-  it("guards: unsupported schema_version is refused (not mutated); unknown frontmatter is preserved", () => {
+  it("guards (#151 open type gate): an unsupported schema_version is COERCED (never refused); an unknown/malformed type MIGRATES as-is; unknown frontmatter is preserved", () => {
     const exp = expectedOf("guards");
-    const refused = exp.migrate.refused.find(
-      (r: { category: string }) => r.category === "unsupported-schema-version",
-    );
-    expect(refused.category).toBe("unsupported-schema-version");
-    expect(refused.mutated).toBe(false);
-    expect(refused.assertedSchemaVersion).toBeGreaterThan(refused.supportedMax);
-    // R3-F7: an unknown/malformed explicit type is REFUSED under unknown-type (never mutated,
-    // never quarantined) — migration owns the `type` key and can neither overwrite nor guess.
-    const unknownType = exp.migrate.refused.filter(
-      (r: { category: string }) => r.category === "unknown-type",
-    );
-    expect(unknownType.map((r: { path: string }) => r.path).sort()).toEqual(["Alien.md", "MalformedType.md"]);
-    for (const r of unknownType) {
-      expect(r.mutated).toBe(false);
-      expect(r.outcome).toBe("refused");
-      expect(typeof r.assertedType).toBe("string");
-    }
-    expect(exp.audit.categories["unknown-type"].sort()).toEqual(["Alien.md", "MalformedType.md"]);
+    // The type/schema-version refusal categories no longer occur — planBootstrapMigration is total.
+    expect(exp.migrate.refused ?? []).toEqual([]);
+    const byPath = new Map(exp.migrate.notes.map((n: { path: string }) => [n.path, n]));
+    // FromFuture.md asserted schema_version: 99 — coerced to SCHEMA_VERSION, migrated (not refused).
+    const future = byPath.get("FromFuture.md") as { schemaVersion: number; initializedFrontmatter: { schema_version: number } } | undefined;
+    expect(future, "FromFuture.md migrates").toBeTruthy();
+    expect(future!.schemaVersion).toBe(SCHEMA_VERSION);
+    expect(future!.initializedFrontmatter.schema_version).toBe(SCHEMA_VERSION);
+    // Alien.md (`type: alien`) and MalformedType.md (`type: 42`) are open-registry types — kept as
+    // asserted (resolver-normalized), never refused (bootstrap-migration.md §3, #151).
+    const alien = byPath.get("Alien.md") as { type: { value: string } } | undefined;
+    expect(alien, "Alien.md migrates").toBeTruthy();
+    expect(alien!.type.value).toBe("alien");
+    const malformed = byPath.get("MalformedType.md") as { type: { value: string } } | undefined;
+    expect(malformed, "MalformedType.md migrates").toBeTruthy();
+    expect(malformed!.type.value).toBe("42");
+    // Open registry: neither is unknown-type in the audit inventory either (any non-empty type is known).
+    expect(exp.audit.categories["unknown-type"]).toEqual([]);
     const preserved = exp.migrate.notes.find((n: { preservedFrontmatter?: string[] }) => n.preservedFrontmatter);
     expect(preserved.preservedFrontmatter).toEqual(expect.arrayContaining(["custom_field", "source_url", "tags"]));
+  });
+
+  it("graduation-migrate.schema.json's notes[].type.value is OPEN (#151): a fixture note with an unregistered type (e.g. `podcast`) validates", () => {
+    const schema = JSON.parse(readFileSync(join(root, "docs/specs/cli-contract", "graduation-migrate.schema.json"), "utf8"));
+    const ajv = new Ajv2020({ strict: false, allErrors: true });
+    const validate = ajv.compile(schema);
+    const instance = {
+      command: "graduation migrate",
+      mode: "preview",
+      migrationRunId: "01J9ZBOOTSTRAPPODCAST00000",
+      notes: [
+        {
+          path: "x/Podcast.md",
+          oldId: null,
+          newId: "podcast-ep1",
+          type: { value: "podcast", source: "frontmatter" },
+          schemaVersion: 1,
+          status: "migrated",
+          linkRewrites: [],
+        },
+      ],
+      quarantined: [],
+      refused: [],
+      idMap: { "x/Podcast.md": "podcast-ep1" },
+    };
+    const ok = validate(instance);
+    expect(ok, ajv.errorsText(validate.errors)).toBe(true);
   });
 
   it("idempotent: a checkpoint resume skips migrated notes, re-applies nothing, and yields the same id map", () => {
