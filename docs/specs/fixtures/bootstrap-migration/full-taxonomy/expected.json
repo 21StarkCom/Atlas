@@ -1,6 +1,6 @@
 {
   "case": "full-taxonomy",
-  "description": "Full open-type-system census (#151): one note per registered type (person/repo/research/project/memory/meeting/conversation/personal/team/cloud/tool) inferred by folder or frontmatter, one UNKNOWN type (podcast, kept as a generic loose type), one no-frontmatter file (→ default `note`), one STRICT note with only a `type` field (missing all base fields, fully filled), a duplicate-explicit-id pair (→ numeric-suffix disambiguation), a same-slug pair at different folders (the meridian case → the sorted-later note is RENAMED), an UNRESOLVED [[link]] (→ flattened to text), a RESOLVED link (→ rewritten to a canonical [[id|display]] wikilink), and an alias↔alias collision (→ the sorted-later note drops the shared alias). Every note migrates: quarantined/refused/releases are all empty. The applied tree passes the strict reader with ZERO errors (full-taxonomy-reader.test.ts).",
+  "description": "Full open-type-system census (#151): one note per registered type (person/repo/research/project/memory/meeting/conversation/personal/team/cloud/tool) inferred by folder or frontmatter, one UNKNOWN type (podcast, kept as a generic loose type), one no-frontmatter file (→ default `note`), one STRICT note with only a `type` field (missing all base fields, fully filled), a duplicate-explicit-id pair (→ numeric-suffix disambiguation), a same-slug pair at different folders (the meridian case → the sorted-later note is RENAMED), an UNRESOLVED [[link]] (→ flattened to text), a RESOLVED link (→ rewritten to a canonical [[id|display]] wikilink), a STRICT alias↔alias collision AND a LOOSE (type: research) alias↔alias collision (→ in both, the sorted-later note drops the shared alias — proving loose notes drop colliding aliases too). Every note migrates: quarantined/refused/releases are all empty. The applied tree passes the strict reader with ZERO errors (full-taxonomy-reader.test.ts).",
   "bootstrapTimestamp": "2026-07-12T00:00:00Z",
   "migrate": {
     "command": "graduation migrate",
@@ -13,6 +13,8 @@
       "Conversations/kickoff-chat.md": "conversation-kickoff-chat",
       "dup-a.md": "shared-dup",
       "dup-b.md": "shared-dup-2",
+      "loose-alias-a.md": "research-loose-alias-a",
+      "loose-alias-b.md": "research-loose-alias-b",
       "Meetings/standup.md": "meeting-daily-standup",
       "memory-first.md": "memory-first-memory",
       "People/Ada.md": "person-ada",
@@ -188,6 +190,52 @@
           "title": "Dup B",
           "created": "2026-07-12T00:00:00Z",
           "updated": "2026-07-12T00:00:00Z",
+          "declaredSensitivity": "internal"
+        },
+        "linkRewrites": []
+      },
+      {
+        "path": "loose-alias-a.md",
+        "oldId": null,
+        "newId": "research-loose-alias-a",
+        "type": {
+          "value": "research",
+          "source": "frontmatter"
+        },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "research-loose-alias-a",
+          "type": "research",
+          "schema_version": 1,
+          "title": "Loose Alias A",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z",
+          "declaredSensitivity": "internal"
+        },
+        "preservedFrontmatter": [
+          "aliases"
+        ],
+        "linkRewrites": []
+      },
+      {
+        "path": "loose-alias-b.md",
+        "oldId": null,
+        "newId": "research-loose-alias-b",
+        "type": {
+          "value": "research",
+          "source": "frontmatter"
+        },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "research-loose-alias-b",
+          "type": "research",
+          "schema_version": 1,
+          "title": "Loose Alias B",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z",
+          "aliases": [],
           "declaredSensitivity": "internal"
         },
         "linkRewrites": []
@@ -669,6 +717,32 @@
         "note": "loose type 'note'"
       },
       {
+        "path": "loose-alias-a.md",
+        "filled": [
+          "created",
+          "declaredSensitivity",
+          "id",
+          "schema_version",
+          "updated"
+        ],
+        "coerced": [],
+        "note": "loose type 'research'"
+      },
+      {
+        "path": "loose-alias-b.md",
+        "filled": [
+          "created",
+          "declaredSensitivity",
+          "id",
+          "schema_version",
+          "updated"
+        ],
+        "coerced": [
+          "aliases"
+        ],
+        "note": "loose type 'research'"
+      },
+      {
         "path": "Meetings/standup.md",
         "filled": [
           "aliases",
@@ -909,6 +983,9 @@
     "aliasDrops": {
       "alias-y.md": [
         "Shared Alias"
+      ],
+      "loose-alias-b.md": [
+        "open, q"
       ]
     }
   }

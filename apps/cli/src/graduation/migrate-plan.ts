@@ -403,7 +403,18 @@ export function planBootstrapMigration(files: readonly MigrationInputFile[], opt
       // undefined), re-derived from the coerced classification (public→public else internal).
       put("declaredSensitivity", doc.fm.declaredSensitivity, classificationToSensitivity(initialized.classification as string));
     } else {
-      // loose: NOT force-filled with strict base fields; still derive declaredSensitivity (tracked).
+      // loose: NOT force-filled with strict base fields — BUT a colliding alias must still be
+      // dropped, else the UNCHANGED strict reader keys identity off it and emits identity-collision.
+      // Only intervene when there's an actual drop: emit a FILTERED aliases list via put() so the
+      // dropped alias leaves `preserved` and lands on disk. A loose note with no drop keeps its
+      // aliases verbatim (Task 4: loose notes aren't force-filled — no `aliases: []` force-fill).
+      const drop = aliasDrops.get(doc.path);
+      if (drop && drop.size > 0) {
+        const raw = doc.fm.aliases;
+        const val: unknown[] = (Array.isArray(raw) ? raw : []).filter((a) => typeof a === "string" && !drop.has(a));
+        put("aliases", raw, val);
+      }
+      // still derive declaredSensitivity (tracked).
       put("declaredSensitivity", doc.fm.declaredSensitivity, classificationToSensitivity(typeof doc.fm.classification === "string" ? doc.fm.classification : undefined));
     }
     if ((renames.get(doc.path) ?? doc.path) !== doc.path) coerced.push("path"); // Task-3 rename recorded as a coercion

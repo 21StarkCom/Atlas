@@ -4,10 +4,12 @@
  * `applyBootstrapMigration`, then runs the strict `readVault()` over the RESULT and asserts ZERO
  * errors — no broken-link, ambiguous-link, identity-collision, duplicate-id, or schema errors.
  *
- * It specifically exercises the three collision-clearing mutations on disk:
+ * It specifically exercises the collision-clearing mutations on disk:
  *   • the meridian same-slug pair — the rename cleared the identity collision;
  *   • the flattened unresolved link — no `[[…]]` survives to become a broken link;
- *   • the alias↔alias collision — the dropped alias (Task 4 consumes `plan.aliasDrops`) cleared it.
+ *   • the STRICT alias↔alias collision — the dropped alias (Task 4 consumes `plan.aliasDrops`);
+ *   • the LOOSE alias↔alias collision — a loose note's colliding alias is ALSO dropped (the drop is
+ *     applied in the loose emit branch too, else the strict reader would emit identity-collision).
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, cpSync, rmSync, readFileSync, existsSync, readdirSync, statSync } from "node:fs";
@@ -50,10 +52,11 @@ afterEach(() => rmSync(root, { recursive: true, force: true }));
 describe("full-taxonomy reader-compat gate (Task 5.4, #151)", () => {
   it("the applied full-taxonomy copy passes readVault() with ZERO errors of every kind", async () => {
     const plan = planBootstrapMigration(readTree(copy), { bootstrapTimestamp: TS });
-    // Guard the fixture is doing its job: 19 notes, one rename, one alias drop, one flattened link.
-    expect(plan.notes.length).toBe(19);
+    // Guard the fixture is doing its job: 21 notes, one rename, two alias drops (one STRICT pair, one
+    // LOOSE pair), one flattened link.
+    expect(plan.notes.length).toBe(21);
     expect(plan.renames).toEqual([{ from: "Projects/Meridian.md", to: "Projects/Meridian-project.md" }]);
-    expect(plan.aliasDrops).toEqual({ "alias-y.md": ["Shared Alias"] });
+    expect(plan.aliasDrops).toEqual({ "alias-y.md": ["Shared Alias"], "loose-alias-b.md": ["open, q"] });
 
     applyBootstrapMigration(copy, plan, OPTS);
 
@@ -64,7 +67,7 @@ describe("full-taxonomy reader-compat gate (Task 5.4, #151)", () => {
     for (const kind of ["broken-link", "ambiguous-link", "identity-collision", "duplicate-id"]) {
       expect(snap.errors.filter((e) => e.kind === kind), kind).toEqual([]);
     }
-    expect(snap.notes.length).toBe(19); // every note parsed (no schema/read errors dropped one)
+    expect(snap.notes.length).toBe(21); // every note parsed (no schema/read errors dropped one)
   });
 
   it("the meridian same-slug pair is on disk under distinct slugs (the rename cleared the collision)", async () => {
@@ -104,6 +107,24 @@ describe("full-taxonomy reader-compat gate (Task 5.4, #151)", () => {
     };
     expect(fmOf("alias-x.md").aliases).toEqual(["Shared Alias"]); // winner keeps it
     expect(fmOf("alias-y.md").aliases).toEqual([]); // loser dropped it on disk
+
+    const snap = await readVault(cfgFor(copy));
+    expect(snap.errors.filter((e) => e.kind === "identity-collision")).toEqual([]);
+  });
+
+  it("the LOOSE alias↔alias collision is cleared on disk: the loose loser dropped its colliding alias", async () => {
+    const plan = planBootstrapMigration(readTree(copy), { bootstrapTimestamp: TS });
+    applyBootstrapMigration(copy, plan, OPTS);
+
+    const fmOf = (p: string): Record<string, unknown> => {
+      const { frontmatter } = splitFrontmatter(readFileSync(join(copy, p), "utf8"));
+      return parseYaml(frontmatter!) as Record<string, unknown>;
+    };
+    // "Open Q" and "open, q" fold to the same identity key; loose-alias-a (sorted first) wins and
+    // keeps its alias VERBATIM, loose-alias-b drops the colliding alias — proving the loose emit
+    // branch applies aliasDrops (the whole point of this fix).
+    expect(fmOf("loose-alias-a.md").aliases).toEqual(["Open Q"]); // loose winner keeps it verbatim
+    expect(fmOf("loose-alias-b.md").aliases).toEqual([]); // loose loser dropped it on disk
 
     const snap = await readVault(cfgFor(copy));
     expect(snap.errors.filter((e) => e.kind === "identity-collision")).toEqual([]);
