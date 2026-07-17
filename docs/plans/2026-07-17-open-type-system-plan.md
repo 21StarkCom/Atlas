@@ -7,7 +7,7 @@
 **Architecture:** A data-driven type registry in `@atlas/contracts` is the single in-repo authority for the taxonomy (kept honest against the external `main-vault/00_System/Vault Schema.md` by a checked-in canonical fixture + an unconditional CI drift gate). Graduation becomes a *total function* end-to-end — **planner (`migrate-plan.ts`) AND apply (`migrate-apply.ts`) both change**, because normalization only counts once it reaches disk:
 
 - The `unknown-type` and `unsupported-schema-version` refusals are removed (unknown → loose, kept; schema coerced to the contracts-owned `SCHEMA_VERSION`).
-- Duplicate explicit ids are numeric-suffix-disambiguated; **filename-slug collisions** (which the strict reader keys off — see below) are deterministically renamed and their inbound links rewritten *in apply*; unresolved/ambiguous wikilinks are **flattened to plain text in the emitted body** (the strict reader rejects `broken-link`/`ambiguous-link`, so nothing may survive as a wikilink).
+- Duplicate explicit ids are numeric-suffix-disambiguated; **filename-slug collisions** (which the strict reader keys off — see below) are deterministically renamed and their inbound links rewritten *in apply*; unresolved/ambiguous wikilinks are **flattened to plain text in the emitted body** (the strict reader rejects `broken-link`/`ambiguous-link`, so no *unresolved or ambiguous* wikilink may survive; a resolvable link stays a canonical `rewritten` wikilink).
 - Strict-type base fields are filled/coerced against the **real vault schema** (six statuses, `source` as a structured list, `classification ∈ {public,personal,internal}`), and the apply serializer writes **every** managed field (not the legacy six) via one canonical field definition shared by planner and apply.
 - A per-note `normalized[]` report records **every** applied fill/coercion, produced by routing every managed-field assignment through a compare helper.
 
@@ -21,7 +21,7 @@
 - Commits authored `Aryeh Stark <aryeh@21stark.com>` (per-repo git config already set).
 - Branch + PR for everything; every review finding lands on the PR. Merge to `main` once CI green (no canary).
 - Graduation stays DETERMINISTIC: pure function of input vault + scan-state + config, no wall-clock, no per-note LLM/egress calls. Byte-exact fixtures under `docs/specs/fixtures/bootstrap-migration/` remain the contract.
-- **Secret boundary (in-run, revised):** a detected credential still quarantines and is never written to the graduated vault. The existing scan engine **already AEAD-quarantines each offending file** — it removes the plaintext from the working-tree copy at scan time (`graduation-scan.ts` `~:67-79`), so a credential-bearing note is physically absent from `COPY` before migrate runs. This plan adds only the *bookkeeping* seam: `graduation scan` additionally persists the set of credential-bearing paths (`credentialPaths`) into scan state, and `graduation migrate` consumes it — recording one `detected-credential` quarantine entry per such path so the report is complete and conservation balances. The scan *engine* + its AEAD quarantine are unchanged; only the persisted state shape + the migrate/scan-gate handshake change. Because the plaintext is already gone from the copy, migrate "skips" nothing on disk — it never sees those files in its input; it only accounts for them in the report. (Operator-approved scope expansion, 2026-07-17.)
+- **Secret boundary (in-run, revised):** a detected credential still quarantines and is never written to the graduated vault. **Verified codebase fact:** `graduation scan` is READ-ONLY — it reads each offending file and writes an AES-GCM *evidence copy* to a quarantine store OUTSIDE the repo/vault (`quarantine/store.ts`); it does **not** delete, move, or overwrite the plaintext file in `COPY` (`scan.ts:48` "never mutates the copy"). So after scan the plaintext credential file is **still present** in `COPY`. Two changes make the in-run boundary real: (1) `graduation scan` additionally persists the credential-bearing paths (`credentialPaths`) into scan state; (2) `graduation migrate` genuinely EXCLUDES every `credentialPaths` entry from the migrable set (so it is never in `plan.notes`) and emits one `detected-credential` quarantine per path, **and apply DELETES each such file from `COPY`** (with checkpoint/rollback coverage) so the graduated vault contains no credential plaintext. The scan detection *engine* is unchanged; the persisted state shape, the migrate exclusion, and apply's deletion are the new seam. (Operator-approved scope expansion, 2026-07-17.)
 - Do NOT modify the spec-locked mutation-policy table (`policies/mutation-policy.ts`, `workflow-risk-contract.md`) — out of scope (spec non-goal).
 - Exit codes unchanged: `0` ok · `1` validation · `2` config · `3` secret-scan · `4` internal · `5` usage · `6` action-required (apply/rollback authorization).
 
@@ -37,7 +37,7 @@
 - **Create** `packages/contracts/test/type-registry.test.ts` — exact-membership unit tests + unconditional drift test vs the fixture + optional drift test vs the live `Vault Schema.md`.
 - **Modify** `apps/cli/src/vault/reader.ts` — import `SCHEMA_VERSION` from contracts so the reader and migrator share one supported-version authority (no behavior change beyond sourcing the constant).
 - **Modify** `apps/cli/src/graduation/migrate-plan.ts` — consume the registry; route all type inference through `resolveType`; remove the two refusal branches; disambiguate duplicate ids; detect filename-slug collisions and record deterministic renames; flatten unresolved/ambiguous links; fill/coerce strict base fields against the real schema; emit `normalized[]`; use the shared `MANAGED_FRONTMATTER` spec.
-- **Modify** `apps/cli/src/graduation/migrate-apply.ts` — serialize **every** managed field from the shared spec (not the legacy six); apply the recorded file renames (with checkpoint/rollback coverage) and rewrite inbound links; apply `flattened-*` body rewrites; skip credential-quarantined paths.
+- **Modify** `apps/cli/src/graduation/migrate-apply.ts` — serialize **every** managed field from the shared spec (not the legacy six); apply the recorded file renames (with checkpoint/rollback coverage) and rewrite inbound links; apply `flattened-*` body rewrites; delete credential-quarantined files from the copy (journaled for rollback) so no credential plaintext survives.
 - **Modify** `apps/cli/src/graduation/scan.ts` + `apps/cli/src/commands/graduation-scan.ts` — persist per-path credential dispositions in scan state (engine detection unchanged).
 - **Modify** `apps/cli/src/commands/graduation-migrate.ts` — consume credential dispositions; surface `normalized[]`.
 - **Modify** `apps/cli/src/graduation/audit.ts` — derive `GRADUATION_KNOWN_TYPES` from the registry; open the audit's known-type rule.
@@ -573,31 +573,36 @@ Delete the `dupIdPaths` skip set. In Pass 2 use `supersededExplicit.get(doc.path
 
 The strict reader collides on a shared **normalized identity key**, where each note owns its **filename slug** (`stem(doc.path)`) **plus each declared alias** (`reader.ts` `detectIdentityCollisions` + `normalizeIdentityKey`), NOT its id. A collision can therefore be slug↔slug, slug↔alias, or alias↔alias. Build one ownership map over BOTH kinds and resolve each collision by its kind — a **slug** loser is fixed by renaming the file (only a rename changes a slug); an **alias** loser is fixed by dropping that alias:
 
+Use the **reader's own** `normalizeIdentityKey` (exported from `@atlas/contracts` — a full Unicode NFC + case-fold + punctuation/symbol→space + whitespace-collapse fold; NOT `trim().toLowerCase()`, which would miss e.g. `"Foo, Bar"` vs `"foo bar"`). Dedup claims **by owning path** first (a note whose alias equals its own slug is one owner, not two), then resolve each remaining collision by kind:
+
 ```typescript
-  const norm = (s: string) => s.trim().toLowerCase();
-  // identity namespace = slug + aliases, matching the reader.
+import { normalizeIdentityKey } from "@atlas/contracts";
+  // identity namespace = slug + aliases, keyed EXACTLY as the reader keys it.
   type Claim = { path: string; kind: "slug" | "alias"; alias?: string };
   const owners = new Map<string, Claim[]>();
-  const claim = (key: string, c: Claim) => { const a = owners.get(key) ?? []; a.push(c); owners.set(key, a); };
+  const claim = (key: string, c: Claim) => {
+    const a = owners.get(key) ?? []; owners.set(key, a);
+    if (!a.some((x) => x.path === c.path)) a.push(c);   // dedup by owning path
+  };
   for (const { doc } of migrable) {
-    claim(norm(stem(doc.path)), { path: doc.path, kind: "slug" });
+    claim(normalizeIdentityKey(stem(doc.path)), { path: doc.path, kind: "slug" });
     const al = Array.isArray(doc.fm.aliases) ? doc.fm.aliases : [];
-    for (const a of al) if (typeof a === "string" && a.trim() !== "") claim(norm(a), { path: doc.path, kind: "alias", alias: a });
+    for (const a of al) if (typeof a === "string" && a.trim() !== "") claim(normalizeIdentityKey(a), { path: doc.path, kind: "alias", alias: a });
   }
   const renames = new Map<string, string>();          // original path → renamed path (slug losers)
   const aliasDrops = new Map<string, Set<string>>();   // path → aliases to drop (alias losers)
   const taken = new Set<string>(owners.keys());
   for (const [key, claims] of owners) {
-    if (claims.length < 2) continue;
+    if (claims.length < 2) continue;                    // already deduped by path → a real collision
     // deterministic winner: sort by (path, kind) so the first claim keeps the key.
     const sorted = [...claims].sort((x, y) => x.path.localeCompare(y.path) || x.kind.localeCompare(y.kind));
     for (const loser of sorted.slice(1)) {
       if (loser.kind === "slug") {
         const t = migrable.find((m) => m.doc.path === loser.path)!.type.value;
-        let base = `${stem(loser.path)}-${t}`, n = 2, cand = norm(base);
-        while (taken.has(cand)) cand = norm(`${base}-${n++}`);
+        let base = `${stem(loser.path)}-${t}`, n = 2, cand = normalizeIdentityKey(base);
+        while (taken.has(cand)) cand = normalizeIdentityKey(`${base}-${n++}`);
         taken.add(cand);
-        renames.set(loser.path, loser.path.slice(0, loser.path.lastIndexOf("/") + 1) + cand + ".md");
+        renames.set(loser.path, loser.path.slice(0, loser.path.lastIndexOf("/") + 1) + `${base}${n > 2 ? "-" + (n - 1) : ""}.md`);
       } else {
         (aliasDrops.get(loser.path) ?? aliasDrops.set(loser.path, new Set()).get(loser.path)!).add(loser.alias!);
       }
@@ -605,7 +610,7 @@ The strict reader collides on a shared **normalized identity key**, where each n
   }
 ```
 
-Set `outcome.newPath = renames.get(doc.path) ?? doc.path` when building each outcome; return `renames` (as an array) on the plan; and thread `aliasDrops` into Task 4's `aliases` fill (a dropped alias is excluded from the emitted list and recorded `coerced: ["aliases"]`). Record both the rename and any alias drop in `normalized[]`.
+(Note the rename's on-disk filename is the human-readable `base`; `taken`/collision bookkeeping uses the normalized key so two renames can't re-collide under the reader's fold.) Set `outcome.newPath = renames.get(doc.path) ?? doc.path` when building each outcome; return `renames` (as an array) on the plan; and thread `aliasDrops` into Task 4's `aliases` fill (a dropped alias is excluded from the emitted list and recorded `coerced: ["aliases"]`). Record both the rename and any alias drop in `normalized[]`.
 
 - [ ] **Step 5: Flatten unresolved/ambiguous links (planner records; apply rewrites body)**
 
@@ -858,11 +863,13 @@ git commit -m "feat(graduation): schema-valid strict field-fill + total normaliz
 
 - [ ] **Step 1: Persist per-path credential dispositions (scan) + consume them (migrate)**
 
-In `apps/cli/src/graduation/scan.ts` + `graduation-scan.ts`: extend the persisted scan state with `credentialPaths: string[]` (the working-tree paths whose files the engine AEAD-quarantined — the plaintext is already removed from the copy). The detection engine + its AEAD quarantine are unchanged; only the persisted state gains this field. Keep the existing `gate`/exit-3 behavior for a *bare* `graduation scan` invocation.
+In `apps/cli/src/graduation/scan.ts` + `graduation-scan.ts`: extend the persisted scan state with `credentialPaths: string[]` (the working-tree paths whose files carry ≥1 finding). The read-only detection engine is unchanged; only the persisted state gains this field. Keep the existing `gate`/exit-3 behavior for a *bare* `graduation scan` invocation.
 
-In `apps/cli/src/commands/graduation-migrate.ts`: when reading scan state, instead of hard-failing on `gate: blocked` **when credential dispositions exist**, pass `credentialPaths` into `planBootstrapMigration` (new opt `credentialPaths?: string[]`). Those paths are already absent from the copy the planner scans, so the planner simply emits one `quarantined: { path, category: "detected-credential" }` per recorded path (report-only — there is no file to skip or delete). A blocked gate with *no* recorded credential paths (older state) still errors `scan-gate-open` (exit 2) — backward-compatible.
+In `apps/cli/src/commands/graduation-migrate.ts`: when reading scan state, instead of hard-failing on `gate: blocked` **when credential dispositions exist**, pass `credentialPaths` into `planBootstrapMigration` (new opt `credentialPaths?: string[]`). The planner **excludes every such path from `migrable`** (so it never appears in `plan.notes`, is never renamed, and no link is rewritten to it) and emits one `quarantined: { path, category: "detected-credential" }` per excluded path. A blocked gate with *no* recorded credential paths (older state) still errors `scan-gate-open` (exit 2) — backward-compatible.
 
-Add unit tests: a two-note input where one path is in `credentialPaths` (and the corresponding file is absent, mimicking post-AEAD state) → that path is reported `detected-credential`, the other migrates, and `scanned == migrated + quarantined` (exact).
+In `apps/cli/src/graduation/migrate-apply.ts`: because scan leaves the plaintext credential file in `COPY` and apply mutates `COPY` in place, apply must **delete** each `credentialPaths` file from the copy (journaled so rollback restores it) — otherwise the credential leaks into the graduated vault. Skipped-and-deleted, not skipped-and-left.
+
+Add an integration test proving the full chain: a two-note copy where a real credential is scanned → the plaintext file is STILL present after the (read-only) scan → after migrate+apply, that path is absent from `plan.notes`, reported `detected-credential`, and **the file is gone from `COPY`**; the other note migrates; `scanned == migrated + quarantined` (exact).
 
 - [ ] **Step 2: Identify + regenerate drifted fixtures**
 
@@ -916,11 +923,14 @@ node "$BIN" graduation migrate --apply --export-challenge --json > "$WORK/challe
 #    sign the challenge with the production broker per the runbook → $WORK/auth.json
 node ~/Code/21Stark/atlas/scripts/sign-graduation-challenge.js "$WORK/challenge.json" > "$WORK/auth.json"
 node "$BIN" graduation migrate --apply --authorization "$WORK/auth.json" --json > "$WORK/applied.json"
+# 3b. SNAPSHOT the input .md path set NOW — after scan, BEFORE apply — because apply renames
+#     files in place (the post-apply tree has newPath names, not the original input paths).
+find "$COPY" -name '*.md' -type f -printf '%P\n' | sort > "$WORK/inputs.txt"
 # 4. strict-reader gate over the applied copy (validate reads the configured vault → point config at $COPY).
 ATLAS_VAULT_DIR="$COPY" node "$BIN" validate --json > "$WORK/reader.json"
 ```
 
-Then a FAIL-FAST conservation check over the REAL field shapes (scan has no `notes[]`; derive the input path set from the copy's markdown files independently):
+Then a FAIL-FAST conservation check. Two independent conservations: (a) every SNAPSHOTTED input path is either migrated (by its original `path`) or credential-quarantined; (b) the post-apply filesystem matches each note's `newPath ?? path` (rename destinations landed):
 
 ```bash
 python3 - "$WORK" <<'PY'
@@ -928,25 +938,27 @@ import json, sys, pathlib
 W = pathlib.Path(sys.argv[1])
 prev = json.load(open(W/"preview.json"))
 appl = json.load(open(W/"applied.json")); rdr = json.load(open(W/"reader.json"))
-# scan AEAD-removed credential files from COPY, so COPY's .md set is exactly the migrable inputs.
-inputs = {str(p.relative_to(W/"copy")) for p in (W/"copy").rglob("*.md")}
-# each migrated note is keyed by its ORIGINAL input path (renames carry it in `path`; `newPath` is the dest).
-migrated = {n["path"] for n in appl["notes"]}
-quar = {q["path"] for q in prev["quarantined"]}          # detected-credential paths (absent from COPY)
+inputs = set((W/"inputs.txt").read_text().split()) if (W/"inputs.txt").read_text().strip() else set()
+migrated = {n["path"] for n in appl["notes"]}            # keyed by ORIGINAL input path
+quar = {q["path"] for q in prev["quarantined"]}          # detected-credential (deleted from COPY by apply)
 assert prev["refused"] == [], prev["refused"]
 assert all(q["category"] == "detected-credential" for q in prev["quarantined"]), prev["quarantined"]
 assert not rdr.get("findings") and not rdr.get("errors"), rdr        # validate: zero reader errors
-# HARD conservation: every COPY input migrates (total ingestion), and no stray notes appear.
-missing = inputs - migrated
+# (a) source-side: every scanned input migrates or is credential-quarantined; nothing invented.
+missing = inputs - migrated - quar
 assert missing == set(), f"notes omitted from migration: {sorted(missing)}"
 extra = migrated - inputs
-assert extra == set(), f"migrated notes not in COPY inputs: {sorted(extra)}"
-assert len(appl["notes"]) == len(inputs), (len(appl["notes"]), len(inputs))
+assert extra == set(), f"migrated notes not in scanned inputs: {sorted(extra)}"
+assert len(appl["notes"]) + len(quar) == len(inputs), (len(appl["notes"]), len(quar), len(inputs))
+# (b) dest-side: the post-apply filesystem is exactly each note's newPath ?? path.
+on_disk = {str(p.relative_to(W/"copy")) for p in (W/"copy").rglob("*.md")}
+dest = {n.get("newPath", n["path"]) for n in appl["notes"]}
+assert on_disk == dest, f"disk vs planned dest mismatch: only_disk={sorted(on_disk-dest)} only_plan={sorted(dest-on_disk)}"
 print(f"OK refused=0 migrated={len(appl['notes'])} credential-quarantined={len(quar)} reader-errors=0 inputs={len(inputs)}")
 PY
 ```
 
-Expected: `OK`, `migrated` == every non-credential note in COPY (≈ full vault, 200+), `credential-quarantined` = only secret-bearing notes, reader errors = 0. The check FAILS (nonzero exit) on any omitted or stray note. Paste the printed line into a comment on #151. If `scripts/sign-graduation-challenge.js` does not exist, implement the signing per the broker runbook BEFORE this step (it is a prerequisite, not a placeholder).
+Expected: `OK`, `migrated` == every non-credential input (≈ full vault, 200+), `credential-quarantined` = only secret-bearing notes, reader errors = 0. The check FAILS (nonzero exit) on any omitted, stray, or mislocated note. Paste the printed line into a comment on #151. If `scripts/sign-graduation-challenge.js` does not exist, implement the signing per the broker runbook BEFORE this step (it is a prerequisite, not a placeholder).
 
 - [ ] **Step 8: Push + post the live result**
 
