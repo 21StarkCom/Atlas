@@ -11,7 +11,7 @@
  */
 import { basename } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { resolveType, isRegisteredType, SCHEMA_VERSION, normalizeIdentityKey, classificationToSensitivity, MANAGED_FRONTMATTER } from "@atlas/contracts";
+import { resolveType, isRegisteredType, SCHEMA_VERSION, normalizeIdentityKey, classificationToSensitivity } from "@atlas/contracts";
 import { splitFrontmatter } from "../markdown/parse.js";
 
 /** Top-level folder → type (§3, case-sensitive) — vault folders included. */
@@ -197,10 +197,6 @@ function inferType(d: Doc): TypeResult {
   if (pfx && isRegisteredType(pfx[1]!)) return { value: pfx[1]!, source: "filename" };
   return { value: "note", source: "default" };
 }
-
-/** The ONE managed-field authority (shared with apply's serializer): a key ∈ MANAGED_FRONTMATTER
- *  is migration-owned and never preserved verbatim from the source frontmatter. */
-const MANAGED_KEYS: readonly string[] = MANAGED_FRONTMATTER;
 
 /**
  * Compute the deterministic bootstrap-migration plan for `files`. Pure: no wall-clock, no
@@ -411,7 +407,12 @@ export function planBootstrapMigration(files: readonly MigrationInputFile[], opt
       });
     }
 
-    const preserved = doc.hasFm ? Object.keys(doc.fm).filter((k) => !MANAGED_KEYS.includes(k)).sort() : [];
+    // PER-NOTE against what THIS note actually emitted into `initialized` — not the static 14-key
+    // MANAGED_FRONTMATTER list. A strict note emits all 14 managed keys, so behavior is unchanged.
+    // A loose note emits only 7 (id/type/schema_version/title/created/updated/declaredSensitivity),
+    // so its other original managed-named fields (status/aliases/tags/related/confidence/
+    // classification/source) are correctly preserved verbatim instead of being silently dropped.
+    const preserved = doc.hasFm ? Object.keys(doc.fm).filter((k) => !(k in initialized)).sort() : [];
     const outcome: NoteOutcome = {
       path: doc.path,
       ...(renames.has(doc.path) ? { newPath: renames.get(doc.path)! } : {}),

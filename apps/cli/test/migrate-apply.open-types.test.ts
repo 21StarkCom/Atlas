@@ -11,10 +11,12 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
+import { parse as parseYaml } from "yaml";
 import type { AtlasConfig } from "../src/config/schema.js";
 import { planBootstrapMigration, type MigrationInputFile } from "../src/graduation/migrate-plan.js";
 import { applyBootstrapMigration, rollbackBootstrapMigration, readOriginalInputs } from "../src/graduation/migrate-apply.js";
 import { readVault } from "../src/vault/reader.js";
+import { splitFrontmatter } from "../src/markdown/parse.js";
 
 const TS = "2026-07-17T00:00:00Z";
 const OPTS = { migrationRunId: "01J9ZAPPLYOPEN000000000000", bootstrapTimestamp: TS };
@@ -133,5 +135,52 @@ describe("bootstrap-migration apply — slug-collision rename + link flattening 
     const res2 = applyBootstrapMigration(copy, planBootstrapMigration(reconstructed, { bootstrapTimestamp: TS }), OPTS);
     expect(res2.applied).toEqual([]);
     expect(res2.skipped.sort()).toEqual(["10_Work/Projects/meridian.md", "10_Work/Repos/meridian.md"]);
+  });
+});
+
+describe("bootstrap-migration apply — loose-note frontmatter preservation (Task 4 review fix, #151)", () => {
+  it("a loose note's non-emitted managed-named fields (status/tags/aliases/classification) survive ON DISK verbatim", async () => {
+    const copy = seed([
+      {
+        path: "10_Research/x.md",
+        raw: [
+          "---",
+          "id: research-x",
+          "type: research",
+          "title: X",
+          "status: draft",
+          "tags:",
+          "  - ai",
+          "aliases:",
+          "  - Foo",
+          "classification: public",
+          "---",
+          "# X\n",
+        ].join("\n"),
+      },
+    ]);
+    const plan = planBootstrapMigration(readTree(copy), { bootstrapTimestamp: TS });
+    const outcome = plan.notes[0]!;
+    expect(outcome.type.value).toBe("research"); // loose tier — confirms this exercises the loose branch
+
+    // The planner's own report: the 7 loose-emitted keys, plus the rest correctly PRESERVED (not dropped).
+    expect(Object.keys(outcome.initializedFrontmatter).sort()).toEqual(
+      ["created", "declaredSensitivity", "id", "schema_version", "title", "type", "updated"].sort(),
+    );
+    expect(outcome.preservedFrontmatter?.sort()).toEqual(["aliases", "classification", "status", "tags"]);
+    // declaredSensitivity is a managed field, always owned: re-derived from the original classification (public→public).
+    expect(outcome.initializedFrontmatter.declaredSensitivity).toBe("public");
+
+    applyBootstrapMigration(copy, plan, OPTS);
+
+    // Strongest assertion: read the migrated bytes back off disk and confirm nothing was dropped.
+    const raw = readFileSync(join(copy, "10_Research/x.md"), "utf8");
+    const { frontmatter } = splitFrontmatter(raw);
+    expect(frontmatter, "frontmatter block survives").not.toBeNull();
+    const fm = parseYaml(frontmatter!) as Record<string, unknown>;
+    expect(fm.status).toBe("draft");
+    expect(fm.tags).toEqual(["ai"]);
+    expect(fm.aliases).toEqual(["Foo"]);
+    expect(fm.classification).toBe("public");
   });
 });
