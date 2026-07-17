@@ -1,15 +1,26 @@
 {
   "case": "basic",
-  "description": "Type inference by folder, id derivation from title, deterministic initialization of all reader-required frontmatter (id/type/schema_version/title/created/updated), wikilink rewrite with alias preservation, unresolved link preserved verbatim and flagged incompatible; the unresolved-link note migrates only because the operator authorized its release as-is (release record present).",
+  "description": "Type inference by folder, id derivation from title, deterministic strict-base-field fill (id/type/schema_version/title/created/updated + status/aliases/tags/related/confidence/classification/source/declaredSensitivity for STRICT types), wikilink rewrite with alias preservation, and unconditional FLATTENING of an unresolved link to its display text (Task 3, #151) — migration is total, so the note migrates with no operator release.",
   "bootstrapTimestamp": "2026-07-12T00:00:00Z",
   "audit": {
     "categories": {
-      "missing-id": ["Concepts/Atlas.md", "People/Koral.md"],
-      "missing-type": ["Concepts/Atlas.md", "People/Koral.md"],
-      "missing-schema-version": ["Concepts/Atlas.md", "People/Koral.md"],
+      "missing-id": [
+        "Concepts/Atlas.md",
+        "People/Koral.md"
+      ],
+      "missing-type": [
+        "Concepts/Atlas.md",
+        "People/Koral.md"
+      ],
+      "missing-schema-version": [
+        "Concepts/Atlas.md",
+        "People/Koral.md"
+      ],
       "ambiguous-alias": [],
       "duplicate-identity": [],
-      "incompatible-link": ["Concepts/Atlas.md"],
+      "incompatible-link": [
+        "Concepts/Atlas.md"
+      ],
       "detected-credential": [],
       "unsupported-schema-version": []
     },
@@ -28,7 +39,10 @@
         "path": "Concepts/Atlas.md",
         "oldId": null,
         "newId": "concept-atlas",
-        "type": { "value": "concept", "source": "folder" },
+        "type": {
+          "value": "concept",
+          "source": "folder"
+        },
         "schemaVersion": 1,
         "status": "migrated",
         "initializedFrontmatter": {
@@ -37,19 +51,41 @@
           "schema_version": 1,
           "title": "Atlas",
           "created": "2026-07-12T00:00:00Z",
-          "updated": "2026-07-12T00:00:00Z"
+          "updated": "2026-07-12T00:00:00Z",
+          "status": "active",
+          "confidence": "medium",
+          "classification": "internal",
+          "source": [
+            "manual"
+          ],
+          "aliases": [],
+          "tags": [],
+          "related": [],
+          "declaredSensitivity": "internal"
         },
-        "released": { "category": "incompatible-link", "opaqueId": "q-basic-atlas-link", "resolution": "release" },
         "linkRewrites": [
-          { "from": "[[Koral]]", "to": "[[person-koral|Koral]]", "targetId": "person-koral", "resolution": "rewritten" },
-          { "from": "[[Missing Note]]", "to": "[[Missing Note]]", "targetId": null, "resolution": "preserved-unresolved" }
+          {
+            "from": "[[Koral]]",
+            "to": "[[person-koral|Koral]]",
+            "targetId": "person-koral",
+            "resolution": "rewritten"
+          },
+          {
+            "from": "[[Missing Note]]",
+            "to": "Missing Note",
+            "targetId": null,
+            "resolution": "flattened-unresolved"
+          }
         ]
       },
       {
         "path": "People/Koral.md",
         "oldId": null,
         "newId": "person-koral",
-        "type": { "value": "person", "source": "folder" },
+        "type": {
+          "value": "person",
+          "source": "folder"
+        },
         "schemaVersion": 1,
         "status": "migrated",
         "initializedFrontmatter": {
@@ -58,17 +94,76 @@
           "schema_version": 1,
           "title": "Koral",
           "created": "2026-07-12T00:00:00Z",
-          "updated": "2026-07-12T00:00:00Z"
+          "updated": "2026-07-12T00:00:00Z",
+          "status": "active",
+          "confidence": "medium",
+          "classification": "internal",
+          "source": [
+            "manual"
+          ],
+          "aliases": [
+            "Koral Bonfil",
+            "K. Bonfil"
+          ],
+          "tags": [],
+          "related": [],
+          "declaredSensitivity": "internal"
         },
-        "preservedFrontmatter": ["aliases"],
         "linkRewrites": [
-          { "from": "[[Atlas]]", "to": "[[concept-atlas|Atlas]]", "targetId": "concept-atlas", "resolution": "rewritten" }
+          {
+            "from": "[[Atlas]]",
+            "to": "[[concept-atlas|Atlas]]",
+            "targetId": "concept-atlas",
+            "resolution": "rewritten"
+          }
         ]
       }
     ],
     "quarantined": [],
-    "releases": [
-      { "path": "Concepts/Atlas.md", "category": "incompatible-link", "opaqueId": "q-basic-atlas-link", "resolution": "release", "authorization": "authz_basic_atlas_link" }
+    "refused": [],
+    "releases": [],
+    "normalized": [
+      {
+        "path": "Concepts/Atlas.md",
+        "filled": [
+          "aliases",
+          "classification",
+          "confidence",
+          "created",
+          "declaredSensitivity",
+          "id",
+          "related",
+          "schema_version",
+          "source",
+          "status",
+          "tags",
+          "title",
+          "type",
+          "updated"
+        ],
+        "coerced": [],
+        "note": "strict type 'concept'"
+      },
+      {
+        "path": "People/Koral.md",
+        "filled": [
+          "classification",
+          "confidence",
+          "created",
+          "declaredSensitivity",
+          "id",
+          "related",
+          "schema_version",
+          "source",
+          "status",
+          "tags",
+          "title",
+          "type",
+          "updated"
+        ],
+        "coerced": [],
+        "note": "strict type 'person'"
+      }
     ]
   }
 }

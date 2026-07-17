@@ -33,7 +33,10 @@ function releasesFor(expected: { migrate?: { releases?: { path: string; opaqueId
 }
 
 // The pure-transformation cases (the checkpoint/rollback cases test the command, not the planner).
-const CASES = ["basic", "collision", "explicit-collision", "guards"] as const;
+// `full-taxonomy` (#151) is the open-type-system census: every registered type + unknown type +
+// no-frontmatter + strict-fill + dup-explicit-id + same-slug rename + link flatten/rewrite + alias drop.
+const CASES = ["basic", "collision", "explicit-collision", "full-taxonomy", "guards"] as const;
+const ranCases: string[] = [];
 
 describe("bootstrap-migration deterministic core ⇄ fixtures (Task 5.3)", () => {
   for (const name of CASES) {
@@ -51,8 +54,15 @@ describe("bootstrap-migration deterministic core ⇄ fixtures (Task 5.3)", () =>
       expect(plan.quarantined).toEqual(m.quarantined ?? []);
       expect(plan.refused).toEqual(m.refused ?? []);
       expect(plan.releases).toEqual(m.releases ?? []);
+      expect(plan.renames).toEqual(m.renames ?? []);
+      expect(plan.normalized).toEqual(m.normalized ?? []);
+      ranCases.push(name);
     });
   }
+
+  it("the full-taxonomy open-type census case actually ran", () => {
+    expect(ranCases).toContain("full-taxonomy");
+  });
 });
 
 describe("slugify (§2.1)", () => {

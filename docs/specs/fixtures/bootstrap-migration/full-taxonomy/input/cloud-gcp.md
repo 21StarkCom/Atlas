@@ -1,0 +1,4 @@
+---
+type: cloud
+---
+# GCP Footprint

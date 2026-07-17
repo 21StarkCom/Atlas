@@ -149,3 +149,11 @@ export type {
   NormalizedRendition,
   Chunk,
 } from "./dtos.js";
+
+// Open note-type registry + shared schema-version authority (open type system, spec 2026-07-16)
+export {
+  resolveType, classificationToSensitivity, isRegisteredType,
+  STRICT_TYPES, LOOSE_TYPES, STRICT_BASE_FIELDS, LOOSE_BASE_FIELDS,
+  SCHEMA_VERSION, MANAGED_FRONTMATTER,
+} from "./type-registry.js";
+export type { TypeDef } from "./type-registry.js";

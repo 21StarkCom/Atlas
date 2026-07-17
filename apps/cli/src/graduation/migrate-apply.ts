@@ -8,15 +8,15 @@
  * pre-image (a resume never skips an unapplied mutation, never re-mutates an ambiguous one).
  */
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { parse as parseYaml, stringify as yamlStringify } from "yaml";
+import { MANAGED_FRONTMATTER } from "@atlas/contracts";
 import { splitFrontmatter } from "../markdown/parse.js";
 import type { MigrationInputFile, MigrationPlan, NoteOutcome } from "./migrate-plan.js";
 
 const BACKUP_DIR = ".bootstrap-backup";
 const CHECKPOINT_FILE = ".checkpoint.json";
-const MANAGED_ORDER = ["id", "type", "schema_version", "title", "created", "updated"] as const;
 
 function sha256(bytes: Uint8Array | string): string {
   return createHash("sha256").update(bytes).digest("hex");
@@ -27,8 +27,17 @@ function sha256(bytes: Uint8Array | string): string {
  * retained pre-image contributes its ORIGINAL bytes; every other `.md` (outside the backup dir)
  * contributes as-is. Re-planning from this is deterministic — id/type/link assignment is a pure
  * function of the ORIGINAL tree, so a resume reproduces the exact same plan (§5 step 3).
+ *
+ * RENAMES: a note the plan RENAMED lives on disk at its `newPath` with its ORIGINAL bytes retained
+ * at `BACKUP_DIR/<original path>`. The checkpoint's rename journal maps newPath → original path, so
+ * reconstruction SKIPS the renamed file on disk and re-contributes the original bytes AT THE
+ * ORIGINAL PATH — otherwise a resume would re-plan the migrated note under its new name.
  */
 export function readOriginalInputs(copyDir: string): MigrationInputFile[] {
+  const cp = loadCheckpoint(copyDir);
+  const renamedDstToSrc = new Map<string, string>(); // newPath → original path
+  for (const n of cp?.notes ?? []) if (n.newPath && n.newPath !== n.path) renamedDstToSrc.set(n.newPath, n.path);
+
   const out: MigrationInputFile[] = [];
   const walk = (cur: string): void => {
     for (const e of readdirSync(cur).sort()) {
@@ -37,25 +46,47 @@ export function readOriginalInputs(copyDir: string): MigrationInputFile[] {
       if (statSync(full).isDirectory()) walk(full);
       else if (e.endsWith(".md")) {
         const rel = relative(copyDir, full);
+        if (renamedDstToSrc.has(rel)) continue; // a renamed note — re-added at its original path below
         const pre = join(copyDir, BACKUP_DIR, rel);
         out.push({ path: rel, raw: readFileSync(existsSync(pre) ? pre : full, "utf8") });
       }
     }
   };
   walk(copyDir);
+  // Re-contribute each renamed note's ORIGINAL bytes at its ORIGINAL path (from the retained pre-image).
+  for (const [, src] of renamedDstToSrc) {
+    const pre = join(copyDir, BACKUP_DIR, src);
+    if (existsSync(pre)) out.push({ path: src, raw: readFileSync(pre, "utf8") });
+  }
   return out;
 }
 
 /**
- * Serialize a migrated note byte-exact: the six managed reader-required keys in fixed order, then
- * the preserved unknown frontmatter (verbatim original order), then the body with resolved wikilinks
- * rewritten. A blank line always separates the frontmatter block from the body.
+ * Serialize a migrated note byte-exact: EVERY managed field present in `initializedFrontmatter` in
+ * the canonical MANAGED_FRONTMATTER order (so the planner's strict base-field fill actually lands on
+ * disk), then the preserved unknown frontmatter (verbatim original order), then the body with
+ * wikilinks applied. A blank line always separates the frontmatter block from the body.
+ *
+ * YAML-safe: EVERY managed value — scalars AND array/object values (aliases/tags/related/source) —
+ * is emitted via `yamlStringify`, so ambiguous scalars are quoted (a numeric/boolean-looking
+ * `type`/`title` stays a STRING on re-parse; a raw `type: 42` would be rejected by the strict reader).
+ *
+ * EVERY linkRewrite is applied (`from` → `to`), across all three resolutions: a `rewritten` link
+ * becomes a canonical `[[id|display]]` wikilink (it resolves); a `flattened-unresolved`/
+ * `flattened-ambiguous` link is replaced by its plain display/target TEXT so NO unresolved or
+ * ambiguous `[[…]]` survives (a resolvable rewritten link legitimately stays a wikilink).
  */
 export function serializeMigratedNote(originalRaw: string, outcome: NoteOutcome): string {
   const { frontmatter, body } = splitFrontmatter(originalRaw);
   const im = outcome.initializedFrontmatter as Record<string, unknown>;
   let fm = "---\n";
-  for (const k of MANAGED_ORDER) fm += `${k}: ${String(im[k])}\n`;
+  for (const k of MANAGED_FRONTMATTER) {
+    if (!(k in im)) continue;
+    // ALL managed values route through `yamlStringify` so ambiguous scalars are quoted (e.g. a
+    // numeric-looking `type: "42"` / boolean-looking `title: "true"` stay STRINGS on re-parse).
+    // A raw `${k}: ${String(v)}` would emit `type: 42`, which the strict reader rejects as a number.
+    fm += yamlStringify({ [k]: im[k] });
+  }
   if (outcome.preservedFrontmatter && outcome.preservedFrontmatter.length > 0 && frontmatter !== null) {
     const orig = parseYaml(frontmatter) as Record<string, unknown>;
     const preserve = new Set(outcome.preservedFrontmatter);
@@ -65,13 +96,15 @@ export function serializeMigratedNote(originalRaw: string, outcome: NoteOutcome)
   }
   fm += "---\n";
   let newBody = body;
-  for (const r of outcome.linkRewrites) if (r.resolution === "rewritten") newBody = newBody.split(r.from).join(r.to);
+  for (const r of outcome.linkRewrites) newBody = newBody.split(r.from).join(r.to);
   return `${fm}\n${newBody.replace(/^\n+/, "")}`;
 }
 
 /** One note's checkpoint entry (§5). */
 export interface CheckpointNote {
   path: string;
+  /** The RENAME destination when the plan renamed this note (else null); the migrated bytes live here. */
+  newPath: string | null;
   oldId: string | null;
   newId: string;
   schemaVersion: number;
@@ -134,47 +167,86 @@ export function applyBootstrapMigration(copyDir: string, plan: MigrationPlan, op
   const backupAbs = join(copyDir, BACKUP_DIR);
 
   for (const outcome of plan.notes) {
-    const full = join(copyDir, outcome.path);
-    const migratedText = serializeMigratedNote(readOriginal(copyDir, outcome.path, priorByPath.get(outcome.path)), outcome);
+    // The migrated bytes are written to `newPath` when the note was renamed (slug collision);
+    // its ORIGINAL bytes + pre-image stay keyed under the ORIGINAL `path`.
+    const srcRel = outcome.path;
+    const dstRel = outcome.newPath ?? outcome.path;
+    const isRename = dstRel !== srcRel;
+    const srcFull = join(copyDir, srcRel);
+    const dstFull = join(copyDir, dstRel);
+    const prev = priorByPath.get(srcRel);
+    const migratedText = serializeMigratedNote(readOriginal(copyDir, srcRel, prev), outcome);
     const postSha = sha256(migratedText);
-    const prev = priorByPath.get(outcome.path);
 
-    // Resume: a note already migrated (on-disk bytes verify against the post-image) is skipped.
-    if (prev?.status === "migrated" && existsSync(full) && sha256(readFileSync(full)) === prev.postImageSha256) {
+    // Resume: a note already migrated (its dst bytes verify against the post-image) is skipped.
+    if (prev?.status === "migrated" && existsSync(dstFull) && sha256(readFileSync(dstFull)) === prev.postImageSha256) {
       notes.push({ ...prev });
-      skipped.push(outcome.path);
+      skipped.push(srcRel);
       continue;
     }
 
-    // Pre-image: the ORIGINAL bytes, captured (atomically) before the first mutation.
-    const preRel = join(BACKUP_DIR, outcome.path);
+    // Pre-image: the ORIGINAL bytes (at the SOURCE path), captured (atomically) before the first mutation.
+    const preRel = join(BACKUP_DIR, srcRel);
     const preAbs = join(copyDir, preRel);
     let preSha: string;
     if (prev?.preImageSha256 && existsSync(preAbs)) {
       preSha = prev.preImageSha256; // resume: pre-image already captured
     } else {
-      const original = readFileSync(full);
+      const original = readFileSync(srcFull);
       preSha = sha256(original);
       atomicWrite(preAbs, original.toString("utf8"));
     }
 
-    // A pending/failed note must still be at its pre-image (never re-mutate an ambiguous note).
-    if (existsSync(full)) {
-      const onDisk = sha256(readFileSync(full));
+    // A pending/failed note must still be at its pre-image (src) or already at the post-image (dst) —
+    // never re-mutate a note whose bytes match neither image.
+    const curFull = isRename ? (existsSync(dstFull) ? dstFull : srcFull) : srcFull;
+    if (existsSync(curFull)) {
+      const onDisk = sha256(readFileSync(curFull));
       if (onDisk !== preSha && onDisk !== postSha) {
-        notes.push({ path: outcome.path, oldId: outcome.oldId, newId: outcome.newId, schemaVersion: outcome.schemaVersion, status: "failed", preImage: preRel, preImageSha256: preSha, postImageSha256: null, rollbackStatus: "not-started" });
+        notes.push({ path: srcRel, newPath: isRename ? dstRel : null, oldId: outcome.oldId, newId: outcome.newId, schemaVersion: outcome.schemaVersion, status: "failed", preImage: preRel, preImageSha256: preSha, postImageSha256: null, rollbackStatus: "not-started" });
         continue;
       }
     }
 
-    atomicWrite(full, migratedText);
-    notes.push({ path: outcome.path, oldId: outcome.oldId, newId: outcome.newId, schemaVersion: outcome.schemaVersion, status: "migrated", preImage: preRel, preImageSha256: preSha, postImageSha256: postSha, rollbackStatus: "not-started" });
-    applied.push(outcome.path);
+    atomicWrite(dstFull, migratedText);
+    if (isRename && existsSync(srcFull)) rmSync(srcFull); // drop the old path — the file MOVED to dst
+    notes.push({ path: srcRel, newPath: isRename ? dstRel : null, oldId: outcome.oldId, newId: outcome.newId, schemaVersion: outcome.schemaVersion, status: "migrated", preImage: preRel, preImageSha256: preSha, postImageSha256: postSha, rollbackStatus: "not-started" });
+    applied.push(srcRel);
   }
 
-  // Record quarantined + refused notes (never written) for a complete checkpoint census.
-  for (const q of plan.quarantined) notes.push({ path: q.path, oldId: null, newId: "", schemaVersion: 0, status: "quarantined", preImage: null, preImageSha256: null, postImageSha256: null, rollbackStatus: "not-started" });
-  for (const r of plan.refused) notes.push({ path: r.path, oldId: null, newId: "", schemaVersion: 0, status: "refused", preImage: null, preImageSha256: null, postImageSha256: null, rollbackStatus: "not-started" });
+  // Credential quarantines (Task 5.1): the scan left the plaintext in the copy, and apply mutates
+  // the copy IN PLACE — so a skipped-but-left credential would leak into the graduated vault. Each
+  // is DELETED, but JOURNALED first (pre-image backed up like a migrated note) so rollback restores
+  // it. `postImageSha256: ""` is the sentinel for "absent on disk" — rollback's `existsSync ? … : ""`
+  // then matches it and restores the pre-image. Idempotent/resumable: a prior run's captured
+  // pre-image is reused and an already-deleted file is not re-read.
+  for (const q of plan.quarantined) {
+    if (q.category !== "detected-credential") {
+      notes.push({ path: q.path, newPath: null, oldId: null, newId: "", schemaVersion: 0, status: "quarantined", preImage: null, preImageSha256: null, postImageSha256: null, rollbackStatus: "not-started" });
+      continue;
+    }
+    const rel = q.path;
+    const full = join(copyDir, rel);
+    const preRel = join(BACKUP_DIR, rel);
+    const preAbs = join(copyDir, preRel);
+    const prev = priorByPath.get(rel);
+    let preSha: string;
+    if (prev?.preImageSha256 && existsSync(preAbs)) {
+      preSha = prev.preImageSha256; // resume: pre-image already captured on a prior run
+    } else if (existsSync(full)) {
+      const original = readFileSync(full);
+      preSha = sha256(original);
+      atomicWrite(preAbs, original.toString("utf8"));
+    } else {
+      // Already gone with no journal — nothing restorable; record the census entry and move on.
+      notes.push({ path: rel, newPath: null, oldId: null, newId: "", schemaVersion: 0, status: "quarantined", preImage: null, preImageSha256: null, postImageSha256: null, rollbackStatus: "not-started" });
+      continue;
+    }
+    if (existsSync(full)) rmSync(full); // delete the plaintext credential from the copy
+    notes.push({ path: rel, newPath: null, oldId: null, newId: "", schemaVersion: 0, status: "quarantined", preImage: preRel, preImageSha256: preSha, postImageSha256: "", rollbackStatus: prev?.rollbackStatus ?? "not-started" });
+  }
+  // Record refused notes (never written) for a complete checkpoint census.
+  for (const r of plan.refused) notes.push({ path: r.path, newPath: null, oldId: null, newId: "", schemaVersion: 0, status: "refused", preImage: null, preImageSha256: null, postImageSha256: null, rollbackStatus: "not-started" });
 
   const checkpoint: Checkpoint = { version: 1, migrationRunId: opts.migrationRunId, bootstrapTimestamp: opts.bootstrapTimestamp, backupDir: BACKUP_DIR, notes };
   saveCheckpoint(copyDir, checkpoint);
@@ -229,14 +301,19 @@ export function rollbackBootstrapMigration(copyDir: string): RollbackResult {
     rollbackOrder.push(n.path);
     if (n.rollbackStatus === "reverted") continue; // idempotent — already reverted
 
-    const full = join(copyDir, n.path);
-    const actual = existsSync(full) ? sha256(readFileSync(full)) : "";
+    // The migrated bytes live at newPath when the note was renamed; the pre-image restores to the
+    // ORIGINAL path (and the renamed file is removed) so a byte-exact reversal restores the tree shape.
+    const dstRel = n.newPath ?? n.path;
+    const isRename = dstRel !== n.path;
+    const dstFull = join(copyDir, dstRel);
+    const actual = existsSync(dstFull) ? sha256(readFileSync(dstFull)) : "";
     if (actual !== n.postImageSha256) {
       conflicts.push({ path: n.path, expectedPostImageSha256: n.postImageSha256 ?? "", actualSha256: actual, outcome: "conflict", preImageRestored: false });
       continue; // fail-closed — a post-migration edit; do NOT clobber it
     }
     const preBytes = readFileSync(join(copyDir, n.preImage!));
-    atomicWrite(full, preBytes.toString("utf8"));
+    atomicWrite(join(copyDir, n.path), preBytes.toString("utf8")); // restore ORIGINAL bytes at ORIGINAL path
+    if (isRename && existsSync(dstFull)) rmSync(dstFull); // remove the renamed file (src !== dst)
     n.status = "pending";
     n.rollbackStatus = "reverted";
     rolledBack.push({ path: n.path, restoredToStatus: "pending", preImageRestored: true, restoredToSha256: sha256(preBytes) });

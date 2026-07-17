@@ -1,14 +1,28 @@
 {
   "case": "collision",
-  "description": "Distinct notes deriving the same id get deterministic numeric suffixes by sorted path; notes asserting the SAME explicit id are a genuine duplicate identity and are quarantined, never silently suffixed.",
+  "description": "Distinct notes deriving the same id get deterministic numeric suffixes by sorted path; two notes asserting the SAME explicit id are no longer quarantined — the sorted-path-first owner keeps the bare id and each later owner is numeric-suffix-disambiguated off it (Task 3, #151), so every note migrates.",
   "bootstrapTimestamp": "2026-07-12T00:00:00Z",
   "audit": {
     "categories": {
-      "missing-id": ["AtlasOne.md", "AtlasTwo.md"],
-      "missing-type": ["AtlasOne.md", "AtlasTwo.md"],
-      "missing-schema-version": ["AtlasOne.md", "AtlasTwo.md", "ExplicitA.md", "ExplicitB.md"],
+      "missing-id": [
+        "AtlasOne.md",
+        "AtlasTwo.md"
+      ],
+      "missing-type": [
+        "AtlasOne.md",
+        "AtlasTwo.md"
+      ],
+      "missing-schema-version": [
+        "AtlasOne.md",
+        "AtlasTwo.md",
+        "ExplicitA.md",
+        "ExplicitB.md"
+      ],
       "ambiguous-alias": [],
-      "duplicate-identity": ["ExplicitA.md", "ExplicitB.md"],
+      "duplicate-identity": [
+        "ExplicitA.md",
+        "ExplicitB.md"
+      ],
       "incompatible-link": [],
       "detected-credential": [],
       "unsupported-schema-version": []
@@ -21,14 +35,19 @@
     "migrationRunId": "01J9ZC0000000000000000000A",
     "idMap": {
       "AtlasOne.md": "note-atlas",
-      "AtlasTwo.md": "note-atlas-2"
+      "AtlasTwo.md": "note-atlas-2",
+      "ExplicitA.md": "shared-x",
+      "ExplicitB.md": "shared-x-2"
     },
     "notes": [
       {
         "path": "AtlasOne.md",
         "oldId": null,
         "newId": "note-atlas",
-        "type": { "value": "note", "source": "default" },
+        "type": {
+          "value": "note",
+          "source": "default"
+        },
         "schemaVersion": 1,
         "status": "migrated",
         "initializedFrontmatter": {
@@ -37,7 +56,8 @@
           "schema_version": 1,
           "title": "Atlas",
           "created": "2026-07-12T00:00:00Z",
-          "updated": "2026-07-12T00:00:00Z"
+          "updated": "2026-07-12T00:00:00Z",
+          "declaredSensitivity": "internal"
         },
         "linkRewrites": []
       },
@@ -45,24 +65,129 @@
         "path": "AtlasTwo.md",
         "oldId": null,
         "newId": "note-atlas-2",
-        "type": { "value": "note", "source": "default" },
+        "type": {
+          "value": "note",
+          "source": "default"
+        },
         "schemaVersion": 1,
         "status": "migrated",
-        "collision": { "derivedId": "note-atlas", "disambiguatedTo": "note-atlas-2", "rule": "numeric-suffix-by-sorted-path" },
+        "collision": {
+          "derivedId": "note-atlas",
+          "disambiguatedTo": "note-atlas-2",
+          "rule": "numeric-suffix-by-sorted-path"
+        },
         "initializedFrontmatter": {
           "id": "note-atlas-2",
           "type": "note",
           "schema_version": 1,
           "title": "Atlas",
           "created": "2026-07-12T00:00:00Z",
-          "updated": "2026-07-12T00:00:00Z"
+          "updated": "2026-07-12T00:00:00Z",
+          "declaredSensitivity": "internal"
+        },
+        "linkRewrites": []
+      },
+      {
+        "path": "ExplicitA.md",
+        "oldId": "shared-x",
+        "newId": "shared-x",
+        "type": {
+          "value": "note",
+          "source": "frontmatter"
+        },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "shared-x",
+          "type": "note",
+          "schema_version": 1,
+          "title": "Explicit A",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z",
+          "declaredSensitivity": "internal"
+        },
+        "linkRewrites": []
+      },
+      {
+        "path": "ExplicitB.md",
+        "oldId": "shared-x",
+        "newId": "shared-x-2",
+        "type": {
+          "value": "note",
+          "source": "frontmatter"
+        },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "shared-x-2",
+          "type": "note",
+          "schema_version": 1,
+          "title": "Explicit B",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z",
+          "declaredSensitivity": "internal"
         },
         "linkRewrites": []
       }
     ],
-    "quarantined": [
-      { "path": "ExplicitA.md", "assertedId": "shared-x", "category": "duplicate-identity", "peers": ["ExplicitB.md"] },
-      { "path": "ExplicitB.md", "assertedId": "shared-x", "category": "duplicate-identity", "peers": ["ExplicitA.md"] }
+    "quarantined": [],
+    "refused": [],
+    "releases": [],
+    "normalized": [
+      {
+        "path": "AtlasOne.md",
+        "filled": [
+          "created",
+          "declaredSensitivity",
+          "id",
+          "schema_version",
+          "title",
+          "type",
+          "updated"
+        ],
+        "coerced": [],
+        "note": "loose type 'note'"
+      },
+      {
+        "path": "AtlasTwo.md",
+        "filled": [
+          "created",
+          "declaredSensitivity",
+          "id",
+          "schema_version",
+          "title",
+          "type",
+          "updated"
+        ],
+        "coerced": [],
+        "note": "loose type 'note'"
+      },
+      {
+        "path": "ExplicitA.md",
+        "filled": [
+          "created",
+          "declaredSensitivity",
+          "schema_version",
+          "title",
+          "updated"
+        ],
+        "coerced": [],
+        "note": "loose type 'note'"
+      },
+      {
+        "path": "ExplicitB.md",
+        "filled": [
+          "created",
+          "declaredSensitivity",
+          "schema_version",
+          "title",
+          "updated"
+        ],
+        "coerced": [
+          "id"
+        ],
+        "note": "loose type 'note'"
+      }
     ]
   }
 }

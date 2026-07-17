@@ -8,13 +8,18 @@
  */
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
-import type { Sensitivity } from "@atlas/contracts";
+import { SCHEMA_VERSION, type Sensitivity } from "@atlas/contracts";
 
 /** Sensitivity classes (plan §2.5; unlabeled content defaults to `internal`). */
 const SENSITIVITY = ["public", "internal", "confidential", "restricted"] as const;
 
-/** The only schema version this reader understands (schema-v1 fixture note). */
-export const SUPPORTED_SCHEMA_VERSION = 1;
+/**
+ * The only schema version this reader understands (schema-v1 fixture note).
+ * Sourced from `@atlas/contracts` `SCHEMA_VERSION` — the single supported/emitted
+ * schema-version authority shared with the graduation migrator, so reader and
+ * migrator advance together rather than drifting on separate literals.
+ */
+export const SUPPORTED_SCHEMA_VERSION = SCHEMA_VERSION;
 
 /** Default lifecycle status for a note whose frontmatter omits `status` (dictionary convention). */
 export const DEFAULT_NOTE_STATUS = "active";

@@ -9,16 +9,12 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { watermarkHealth, type SqliteDatabase, type WatermarkHealth } from "@atlas/sqlite-store";
-import type { VaultSnapshot } from "@atlas/contracts";
+import { STRICT_TYPES, LOOSE_TYPES, type VaultSnapshot } from "@atlas/contracts";
 import { splitFrontmatter } from "../markdown/parse.js";
 
-/**
- * The bootstrap-migration §3 known types (V1): the managed set migration can infer/assign. A note
- * whose explicit `type` is outside this set is `unknown-type`. This is the migration contract's set
- * (`note`/`concept`/`person`/`source`/`project`) — NOT the mutation-policy target types, which omit
- * `note` and add `research`/`decision`/`task` (a note-typed note must never be mis-flagged unknown).
- */
-export const GRADUATION_KNOWN_TYPES = ["note", "concept", "person", "source", "project"] as const;
+/** Back-compat export, now DERIVED from the registry (open system). Consumers that
+ *  imported this constant keep working; it now reflects the full registered set. */
+export const GRADUATION_KNOWN_TYPES: readonly string[] = [...STRICT_TYPES, ...LOOSE_TYPES];
 
 /** The bootstrap-migration §7 quarantine categories the graduation audit inventories. */
 export const GRADUATION_CATEGORIES = [
@@ -64,12 +60,16 @@ function classifyMissing(vaultPath: string, rel: string): GraduationCategory[] {
  * Inventory a graduation copy by the §7 categories (Task 5.2), read-only. Maps every vault-reader
  * defect (parse errors, duplicate ids, identity collisions, broken/ambiguous links, unsupported
  * schema versions) to its §7 category, splits the missing-field defects per re-parsed frontmatter,
- * and flags notes whose `type` is outside the canonical set. `detected-credential` is always empty
- * here — the fail-closed scan-state gate guarantees a CLEAN scan precedes the audit.
+ * and flags notes with an empty/absent `type` as `unknown-type` (open registry, #151: any
+ * non-empty asserted type — registered or not — is "known"). `detected-credential` is always
+ * empty here — the fail-closed scan-state gate guarantees a CLEAN scan precedes the audit.
  */
 export function categorizeGraduationCopy(vaultPath: string, snapshot: VaultSnapshot): { totalNotes: number; categories: GraduationCategories } {
   const cats = Object.fromEntries(GRADUATION_CATEGORIES.map((c) => [c, [] as string[]])) as GraduationCategories;
-  const known = new Set<string>(GRADUATION_KNOWN_TYPES);
+  // Open system: registration no longer gates the audit. Any non-empty asserted type
+  // is "known" (the migrator keeps unknown types as loose, never refused). An empty/
+  // absent type still falls through to the existing missing-type category.
+  const isKnown = (type: string): boolean => type.trim() !== "";
 
   for (const e of snapshot.errors) {
     switch (e.kind) {
@@ -95,7 +95,7 @@ export function categorizeGraduationCopy(vaultPath: string, snapshot: VaultSnaps
         break; // an unrecognized reader-error kind is not force-fit into a §7 category
     }
   }
-  for (const n of snapshot.notes) if (!known.has(n.type)) cats["unknown-type"].push(n.path);
+  for (const n of snapshot.notes) if (!isKnown(n.type)) cats["unknown-type"].push(n.path);
 
   for (const c of GRADUATION_CATEGORIES) cats[c] = [...new Set(cats[c])].sort();
   const totalNotes = snapshot.notes.length + new Set(snapshot.errors.map((e) => e.path)).size;

@@ -5,10 +5,19 @@ schema_version: 1
 title: Atlas
 created: 2026-07-12T00:00:00Z
 updated: 2026-07-12T00:00:00Z
+status: active
+aliases: []
+tags: []
+related: []
+confidence: medium
+classification: internal
+source:
+  - manual
+declaredSensitivity: internal
 ---
 
 # Atlas
 
 Atlas is a personal knowledge system. See [[person-koral|Koral]] for the design partner.
 
-Related: [[Missing Note]].
+Related: Missing Note.

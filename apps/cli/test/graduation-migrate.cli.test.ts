@@ -65,6 +65,31 @@ function seedCleanGate(): string {
   writeScanState(scanStatePath(join(cwd, ".atlas", "atlas.db")), { copy, copyHead, gate: "clean", scannedAt: "2026-07-16T00:00:00Z", findingCount: 0 });
   return copy;
 }
+/**
+ * A BLOCKED scan gate over a copy carrying a credential-bearing note (`Secrets/creds.md`) plus one
+ * clean note. Passing `credentialPaths` records the Task-5.1 handshake (migrate proceeds, quarantining
+ * exactly those paths); omitting it models a pre-Task-5 sidecar (migrate must hard-fail).
+ */
+function seedBlockedGate(credentialPaths?: readonly string[], historyCredentialCount = 0): string {
+  const copy = join(root, "grad-copy");
+  mkdirSync(join(copy, "People"), { recursive: true });
+  mkdirSync(join(copy, "Secrets"), { recursive: true });
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: copy });
+  execFileSync("git", ["-C", copy, "config", "user.email", "t@t"]);
+  execFileSync("git", ["-C", copy, "config", "user.name", "t"]);
+  execFileSync("git", ["-C", copy, "config", "commit.gpgsign", "false"]);
+  writeFileSync(join(copy, "People", "Koral.md"), "# Koral\n\nA standalone person.\n");
+  writeFileSync(join(copy, "Secrets", "creds.md"), "# Creds\n\nAKIAIOSFODNN7EXAMPLE credential.\n");
+  execFileSync("git", ["-C", copy, "add", "-A"]);
+  execFileSync("git", ["-C", copy, "commit", "-q", "-m", "seed"]);
+  const copyHead = execFileSync("git", ["-C", copy, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  writeScanState(scanStatePath(join(cwd, ".atlas", "atlas.db")), {
+    copy, copyHead, gate: "blocked", scannedAt: "2026-07-16T00:00:00Z", findingCount: 1 + historyCredentialCount,
+    ...(credentialPaths ? { credentialPaths } : {}),
+    ...(historyCredentialCount ? { historyCredentialCount } : {}),
+  });
+  return copy;
+}
 
 beforeEach(() => {
   root = mkdtempSync(join("/tmp", "atlas-gm-"));
@@ -133,5 +158,37 @@ describe("brain graduation migrate (preview + gates)", () => {
     const r = await cli(["graduation", "migrate", "--json"]);
     expect(r.code).toBe(2);
     expect(JSON.parse(r.out).code).toBe("scan-gate-open");
+  });
+
+  it("blocked gate WITH recorded credentialPaths ⇒ migrate proceeds; credential quarantined, others migrate", async () => {
+    seedBlockedGate(["Secrets/creds.md"]);
+    const r = await cli(["graduation", "migrate", "--json"]);
+    expect(r.code, r.out).toBe(0);
+    const out = JSON.parse(r.out);
+    validateSchema("graduation-migrate", out);
+    // The credential path is EXCLUDED from planning (never gets an id / never a link target) and
+    // re-surfaced as a detected-credential quarantine; the clean note migrates normally.
+    expect(out.quarantined).toEqual([{ path: "Secrets/creds.md", category: "detected-credential" }]);
+    expect(Object.keys(out.idMap)).toEqual(["People/Koral.md"]);
+    expect(out.idMap["People/Koral.md"]).toBe("person-koral");
+    expect(out.notes).toHaveLength(1);
+  });
+
+  it("blocked gate WITHOUT credentialPaths (older/pre-Task-5 state) ⇒ scan-gate-open (exit 2)", async () => {
+    seedBlockedGate();
+    const r = await cli(["graduation", "migrate", "--json"]);
+    expect(r.code).toBe(2);
+    expect(JSON.parse(r.out).code).toBe("scan-gate-open");
+  });
+
+  it("blocked gate with a HISTORY-ONLY credential ⇒ scan-gate-open (exit 2), even with credentialPaths", async () => {
+    // A working-tree credential (recorded in credentialPaths, deletable by apply) AND a history-only
+    // credential (in a past commit apply never scrubs). The handshake must NOT unblock migrate here.
+    seedBlockedGate(["Secrets/creds.md"], 1);
+    const r = await cli(["graduation", "migrate", "--json"]);
+    expect(r.code).toBe(2);
+    const out = JSON.parse(r.out);
+    expect(out.code).toBe("scan-gate-open");
+    expect(out.message).toMatch(/history-only/);
   });
 });

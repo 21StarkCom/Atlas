@@ -1,0 +1,992 @@
+{
+  "case": "full-taxonomy",
+  "description": "Full open-type-system census (#151): one note per registered type (person/repo/research/project/memory/meeting/conversation/personal/team/cloud/tool) inferred by folder or frontmatter, one UNKNOWN type (podcast, kept as a generic loose type), one no-frontmatter file (→ default `note`), one STRICT note with only a `type` field (missing all base fields, fully filled), a duplicate-explicit-id pair (→ numeric-suffix disambiguation), a same-slug pair at different folders (the meridian case → the sorted-later note is RENAMED), an UNRESOLVED [[link]] (→ flattened to text), a RESOLVED link (→ rewritten to a canonical [[id|display]] wikilink), a STRICT alias↔alias collision AND a LOOSE (type: research) alias↔alias collision (→ in both, the sorted-later note drops the shared alias — proving loose notes drop colliding aliases too). Every note migrates: quarantined/refused/releases are all empty. The applied tree passes the strict reader with ZERO errors (full-taxonomy-reader.test.ts).",
+  "bootstrapTimestamp": "2026-07-12T00:00:00Z",
+  "migrate": {
+    "command": "graduation migrate",
+    "mode": "applied",
+    "migrationRunId": "01J9ZT0000000000000000000A",
+    "idMap": {
+      "alias-x.md": "memory-alias-x",
+      "alias-y.md": "memory-alias-y",
+      "cloud-gcp.md": "cloud-gcp-footprint",
+      "Conversations/kickoff-chat.md": "conversation-kickoff-chat",
+      "dup-a.md": "shared-dup",
+      "dup-b.md": "shared-dup-2",
+      "loose-alias-a.md": "research-loose-alias-a",
+      "loose-alias-b.md": "research-loose-alias-b",
+      "Meetings/standup.md": "meeting-daily-standup",
+      "memory-first.md": "memory-first-memory",
+      "People/Ada.md": "person-ada",
+      "People/Meridian.md": "person-meridian",
+      "personal-journal.md": "personal-journal",
+      "plain-note.md": "note-plain-note",
+      "podcast-ep.md": "podcast-episode-1",
+      "Projects/Beacon.md": "project-beacon",
+      "Projects/Meridian.md": "project-meridian",
+      "Repos/atlas-cli.md": "repo-atlas-cli",
+      "research-note.md": "research-open-questions",
+      "Teams/platform.md": "team-platform-team",
+      "Tools/ripgrep.md": "tool-ripgrep"
+    },
+    "notes": [
+      {
+        "path": "alias-x.md",
+        "oldId": null,
+        "newId": "memory-alias-x",
+        "type": {
+          "value": "memory",
+          "source": "frontmatter"
+        },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "memory-alias-x",
+          "type": "memory",
+          "schema_version": 1,
+          "title": "Alias X",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z",
+          "status": "active",
+          "confidence": "medium",
+          "classification": "internal",
+          "source": [
+            "manual"
+          ],
+          "aliases": [
+            "Shared Alias"
+          ],
+          "tags": [],
+          "related": [],
+          "declaredSensitivity": "internal"
+        },
+        "linkRewrites": []
+      },
+      {
+        "path": "alias-y.md",
+        "oldId": null,
+        "newId": "memory-alias-y",
+        "type": {
+          "value": "memory",
+          "source": "frontmatter"
+        },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "memory-alias-y",
+          "type": "memory",
+          "schema_version": 1,
+          "title": "Alias Y",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z",
+          "status": "active",
+          "confidence": "medium",
+          "classification": "internal",
+          "source": [
+            "manual"
+          ],
+          "aliases": [],
+          "tags": [],
+          "related": [],
+          "declaredSensitivity": "internal"
+        },
+        "linkRewrites": []
+      },
+      {
+        "path": "cloud-gcp.md",
+        "oldId": null,
+        "newId": "cloud-gcp-footprint",
+        "type": {
+          "value": "cloud",
+          "source": "frontmatter"
+        },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "cloud-gcp-footprint",
+          "type": "cloud",
+          "schema_version": 1,
+          "title": "GCP Footprint",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z",
+          "status": "active",
+          "confidence": "medium",
+          "classification": "internal",
+          "source": [
+            "manual"
+          ],
+          "aliases": [],
+          "tags": [],
+          "related": [],
+          "declaredSensitivity": "internal"
+        },
+        "linkRewrites": []
+      },
+      {
+        "path": "Conversations/kickoff-chat.md",
+        "oldId": null,
+        "newId": "conversation-kickoff-chat",
+        "type": {
+          "value": "conversation",
+          "source": "folder"
+        },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "conversation-kickoff-chat",
+          "type": "conversation",
+          "schema_version": 1,
+          "title": "Kickoff Chat",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z",
+          "status": "active",
+          "confidence": "medium",
+          "classification": "internal",
+          "source": [
+            "manual"
+          ],
+          "aliases": [],
+          "tags": [],
+          "related": [],
+          "declaredSensitivity": "internal"
+        },
+        "linkRewrites": []
+      },
+      {
+        "path": "dup-a.md",
+        "oldId": "shared-dup",
+        "newId": "shared-dup",
+        "type": {
+          "value": "note",
+          "source": "frontmatter"
+        },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "shared-dup",
+          "type": "note",
+          "schema_version": 1,
+          "title": "Dup A",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z",
+          "declaredSensitivity": "internal"
+        },
+        "linkRewrites": []
+      },
+      {
+        "path": "dup-b.md",
+        "oldId": "shared-dup",
+        "newId": "shared-dup-2",
+        "type": {
+          "value": "note",
+          "source": "frontmatter"
+        },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "shared-dup-2",
+          "type": "note",
+          "schema_version": 1,
+          "title": "Dup B",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z",
+          "declaredSensitivity": "internal"
+        },
+        "linkRewrites": []
+      },
+      {
+        "path": "loose-alias-a.md",
+        "oldId": null,
+        "newId": "research-loose-alias-a",
+        "type": {
+          "value": "research",
+          "source": "frontmatter"
+        },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "research-loose-alias-a",
+          "type": "research",
+          "schema_version": 1,
+          "title": "Loose Alias A",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z",
+          "declaredSensitivity": "internal"
+        },
+        "preservedFrontmatter": [
+          "aliases"
+        ],
+        "linkRewrites": []
+      },
+      {
+        "path": "loose-alias-b.md",
+        "oldId": null,
+        "newId": "research-loose-alias-b",
+        "type": {
+          "value": "research",
+          "source": "frontmatter"
+        },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "research-loose-alias-b",
+          "type": "research",
+          "schema_version": 1,
+          "title": "Loose Alias B",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z",
+          "aliases": [],
+          "declaredSensitivity": "internal"
+        },
+        "linkRewrites": []
+      },
+      {
+        "path": "Meetings/standup.md",
+        "oldId": null,
+        "newId": "meeting-daily-standup",
+        "type": {
+          "value": "meeting",
+          "source": "folder"
+        },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "meeting-daily-standup",
+          "type": "meeting",
+          "schema_version": 1,
+          "title": "Daily Standup",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z",
+          "status": "active",
+          "confidence": "medium",
+          "classification": "internal",
+          "source": [
+            "manual"
+          ],
+          "aliases": [],
+          "tags": [],
+          "related": [],
+          "declaredSensitivity": "internal"
+        },
+        "linkRewrites": []
+      },
+      {
+        "path": "memory-first.md",
+        "oldId": null,
+        "newId": "memory-first-memory",
+        "type": {
+          "value": "memory",
+          "source": "frontmatter"
+        },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "memory-first-memory",
+          "type": "memory",
+          "schema_version": 1,
+          "title": "First Memory",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z",
+          "status": "active",
+          "confidence": "medium",
+          "classification": "internal",
+          "source": [
+            "manual"
+          ],
+          "aliases": [],
+          "tags": [],
+          "related": [],
+          "declaredSensitivity": "internal"
+        },
+        "linkRewrites": []
+      },
+      {
+        "path": "People/Ada.md",
+        "oldId": null,
+        "newId": "person-ada",
+        "type": {
+          "value": "person",
+          "source": "folder"
+        },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "person-ada",
+          "type": "person",
+          "schema_version": 1,
+          "title": "Ada",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z",
+          "status": "active",
+          "confidence": "medium",
+          "classification": "internal",
+          "source": [
+            "manual"
+          ],
+          "aliases": [],
+          "tags": [],
+          "related": [],
+          "declaredSensitivity": "internal"
+        },
+        "linkRewrites": []
+      },
+      {
+        "path": "People/Meridian.md",
+        "oldId": null,
+        "newId": "person-meridian",
+        "type": {
+          "value": "person",
+          "source": "folder"
+        },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "person-meridian",
+          "type": "person",
+          "schema_version": 1,
+          "title": "Meridian",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z",
+          "status": "active",
+          "confidence": "medium",
+          "classification": "internal",
+          "source": [
+            "manual"
+          ],
+          "aliases": [],
+          "tags": [],
+          "related": [],
+          "declaredSensitivity": "internal"
+        },
+        "linkRewrites": []
+      },
+      {
+        "path": "personal-journal.md",
+        "oldId": null,
+        "newId": "personal-journal",
+        "type": {
+          "value": "personal",
+          "source": "frontmatter"
+        },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "personal-journal",
+          "type": "personal",
+          "schema_version": 1,
+          "title": "Journal",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z",
+          "declaredSensitivity": "internal"
+        },
+        "linkRewrites": [
+          {
+            "from": "[[Ada]]",
+            "to": "[[person-ada|Ada]]",
+            "targetId": "person-ada",
+            "resolution": "rewritten"
+          }
+        ]
+      },
+      {
+        "path": "plain-note.md",
+        "oldId": null,
+        "newId": "note-plain-note",
+        "type": {
+          "value": "note",
+          "source": "default"
+        },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "note-plain-note",
+          "type": "note",
+          "schema_version": 1,
+          "title": "Plain Note",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z",
+          "declaredSensitivity": "internal"
+        },
+        "linkRewrites": []
+      },
+      {
+        "path": "podcast-ep.md",
+        "oldId": null,
+        "newId": "podcast-episode-1",
+        "type": {
+          "value": "podcast",
+          "source": "frontmatter"
+        },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "podcast-episode-1",
+          "type": "podcast",
+          "schema_version": 1,
+          "title": "Episode 1",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z",
+          "declaredSensitivity": "internal"
+        },
+        "linkRewrites": []
+      },
+      {
+        "path": "Projects/Beacon.md",
+        "oldId": null,
+        "newId": "project-beacon",
+        "type": {
+          "value": "project",
+          "source": "folder"
+        },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "project-beacon",
+          "type": "project",
+          "schema_version": 1,
+          "title": "Beacon",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z",
+          "status": "draft",
+          "confidence": "medium",
+          "classification": "internal",
+          "source": [
+            "manual"
+          ],
+          "aliases": [],
+          "tags": [],
+          "related": [],
+          "declaredSensitivity": "internal"
+        },
+        "linkRewrites": []
+      },
+      {
+        "path": "Projects/Meridian.md",
+        "newPath": "Projects/Meridian-project.md",
+        "oldId": null,
+        "newId": "project-meridian",
+        "type": {
+          "value": "project",
+          "source": "folder"
+        },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "project-meridian",
+          "type": "project",
+          "schema_version": 1,
+          "title": "Meridian",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z",
+          "status": "active",
+          "confidence": "medium",
+          "classification": "internal",
+          "source": [
+            "manual"
+          ],
+          "aliases": [],
+          "tags": [],
+          "related": [],
+          "declaredSensitivity": "internal"
+        },
+        "linkRewrites": []
+      },
+      {
+        "path": "Repos/atlas-cli.md",
+        "oldId": null,
+        "newId": "repo-atlas-cli",
+        "type": {
+          "value": "repo",
+          "source": "folder"
+        },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "repo-atlas-cli",
+          "type": "repo",
+          "schema_version": 1,
+          "title": "Atlas CLI",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z",
+          "status": "active",
+          "confidence": "medium",
+          "classification": "internal",
+          "source": [
+            "manual"
+          ],
+          "aliases": [],
+          "tags": [],
+          "related": [],
+          "declaredSensitivity": "internal"
+        },
+        "linkRewrites": []
+      },
+      {
+        "path": "research-note.md",
+        "oldId": null,
+        "newId": "research-open-questions",
+        "type": {
+          "value": "research",
+          "source": "frontmatter"
+        },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "research-open-questions",
+          "type": "research",
+          "schema_version": 1,
+          "title": "Open Questions",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z",
+          "declaredSensitivity": "internal"
+        },
+        "linkRewrites": [
+          {
+            "from": "[[Nonexistent Thing]]",
+            "to": "Nonexistent Thing",
+            "targetId": null,
+            "resolution": "flattened-unresolved"
+          }
+        ]
+      },
+      {
+        "path": "Teams/platform.md",
+        "oldId": null,
+        "newId": "team-platform-team",
+        "type": {
+          "value": "team",
+          "source": "folder"
+        },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "team-platform-team",
+          "type": "team",
+          "schema_version": 1,
+          "title": "Platform Team",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z",
+          "status": "active",
+          "confidence": "medium",
+          "classification": "internal",
+          "source": [
+            "manual"
+          ],
+          "aliases": [],
+          "tags": [],
+          "related": [],
+          "declaredSensitivity": "internal"
+        },
+        "linkRewrites": []
+      },
+      {
+        "path": "Tools/ripgrep.md",
+        "oldId": null,
+        "newId": "tool-ripgrep",
+        "type": {
+          "value": "tool",
+          "source": "folder"
+        },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "tool-ripgrep",
+          "type": "tool",
+          "schema_version": 1,
+          "title": "ripgrep",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z",
+          "status": "active",
+          "confidence": "medium",
+          "classification": "internal",
+          "source": [
+            "manual"
+          ],
+          "aliases": [],
+          "tags": [],
+          "related": [],
+          "declaredSensitivity": "internal"
+        },
+        "linkRewrites": []
+      }
+    ],
+    "quarantined": [],
+    "refused": [],
+    "releases": [],
+    "normalized": [
+      {
+        "path": "alias-x.md",
+        "filled": [
+          "classification",
+          "confidence",
+          "created",
+          "declaredSensitivity",
+          "id",
+          "related",
+          "schema_version",
+          "source",
+          "status",
+          "tags",
+          "updated"
+        ],
+        "coerced": [],
+        "note": "strict type 'memory'"
+      },
+      {
+        "path": "alias-y.md",
+        "filled": [
+          "classification",
+          "confidence",
+          "created",
+          "declaredSensitivity",
+          "id",
+          "related",
+          "schema_version",
+          "source",
+          "status",
+          "tags",
+          "updated"
+        ],
+        "coerced": [
+          "aliases"
+        ],
+        "note": "strict type 'memory'"
+      },
+      {
+        "path": "cloud-gcp.md",
+        "filled": [
+          "aliases",
+          "classification",
+          "confidence",
+          "created",
+          "declaredSensitivity",
+          "id",
+          "related",
+          "schema_version",
+          "source",
+          "status",
+          "tags",
+          "title",
+          "updated"
+        ],
+        "coerced": [],
+        "note": "strict type 'cloud'"
+      },
+      {
+        "path": "Conversations/kickoff-chat.md",
+        "filled": [
+          "aliases",
+          "classification",
+          "confidence",
+          "created",
+          "declaredSensitivity",
+          "id",
+          "related",
+          "schema_version",
+          "source",
+          "status",
+          "tags",
+          "type",
+          "updated"
+        ],
+        "coerced": [],
+        "note": "strict type 'conversation'"
+      },
+      {
+        "path": "dup-a.md",
+        "filled": [
+          "created",
+          "declaredSensitivity",
+          "schema_version",
+          "updated"
+        ],
+        "coerced": [],
+        "note": "loose type 'note'"
+      },
+      {
+        "path": "dup-b.md",
+        "filled": [
+          "created",
+          "declaredSensitivity",
+          "schema_version",
+          "updated"
+        ],
+        "coerced": [
+          "id"
+        ],
+        "note": "loose type 'note'"
+      },
+      {
+        "path": "loose-alias-a.md",
+        "filled": [
+          "created",
+          "declaredSensitivity",
+          "id",
+          "schema_version",
+          "updated"
+        ],
+        "coerced": [],
+        "note": "loose type 'research'"
+      },
+      {
+        "path": "loose-alias-b.md",
+        "filled": [
+          "created",
+          "declaredSensitivity",
+          "id",
+          "schema_version",
+          "updated"
+        ],
+        "coerced": [
+          "aliases"
+        ],
+        "note": "loose type 'research'"
+      },
+      {
+        "path": "Meetings/standup.md",
+        "filled": [
+          "aliases",
+          "classification",
+          "confidence",
+          "created",
+          "declaredSensitivity",
+          "id",
+          "related",
+          "schema_version",
+          "source",
+          "status",
+          "tags",
+          "type",
+          "updated"
+        ],
+        "coerced": [],
+        "note": "strict type 'meeting'"
+      },
+      {
+        "path": "memory-first.md",
+        "filled": [
+          "aliases",
+          "classification",
+          "confidence",
+          "created",
+          "declaredSensitivity",
+          "id",
+          "related",
+          "schema_version",
+          "source",
+          "status",
+          "tags",
+          "updated"
+        ],
+        "coerced": [],
+        "note": "strict type 'memory'"
+      },
+      {
+        "path": "People/Ada.md",
+        "filled": [
+          "aliases",
+          "classification",
+          "confidence",
+          "created",
+          "declaredSensitivity",
+          "id",
+          "related",
+          "schema_version",
+          "source",
+          "status",
+          "tags",
+          "title",
+          "type",
+          "updated"
+        ],
+        "coerced": [],
+        "note": "strict type 'person'"
+      },
+      {
+        "path": "People/Meridian.md",
+        "filled": [
+          "aliases",
+          "classification",
+          "confidence",
+          "created",
+          "declaredSensitivity",
+          "id",
+          "related",
+          "schema_version",
+          "source",
+          "status",
+          "tags",
+          "type",
+          "updated"
+        ],
+        "coerced": [],
+        "note": "strict type 'person'"
+      },
+      {
+        "path": "personal-journal.md",
+        "filled": [
+          "created",
+          "declaredSensitivity",
+          "id",
+          "schema_version",
+          "updated"
+        ],
+        "coerced": [],
+        "note": "loose type 'personal'"
+      },
+      {
+        "path": "plain-note.md",
+        "filled": [
+          "created",
+          "declaredSensitivity",
+          "id",
+          "schema_version",
+          "title",
+          "type",
+          "updated"
+        ],
+        "coerced": [],
+        "note": "loose type 'note'"
+      },
+      {
+        "path": "podcast-ep.md",
+        "filled": [
+          "created",
+          "declaredSensitivity",
+          "id",
+          "schema_version",
+          "updated"
+        ],
+        "coerced": [],
+        "note": "loose type 'podcast'"
+      },
+      {
+        "path": "Projects/Beacon.md",
+        "filled": [
+          "aliases",
+          "classification",
+          "confidence",
+          "created",
+          "declaredSensitivity",
+          "id",
+          "related",
+          "schema_version",
+          "source",
+          "tags",
+          "type",
+          "updated"
+        ],
+        "coerced": [],
+        "note": "strict type 'project'"
+      },
+      {
+        "path": "Projects/Meridian.md",
+        "filled": [
+          "aliases",
+          "classification",
+          "confidence",
+          "created",
+          "declaredSensitivity",
+          "id",
+          "related",
+          "schema_version",
+          "source",
+          "status",
+          "tags",
+          "type",
+          "updated"
+        ],
+        "coerced": [
+          "path"
+        ],
+        "note": "strict type 'project'"
+      },
+      {
+        "path": "Repos/atlas-cli.md",
+        "filled": [
+          "aliases",
+          "classification",
+          "confidence",
+          "created",
+          "declaredSensitivity",
+          "id",
+          "related",
+          "schema_version",
+          "source",
+          "status",
+          "tags",
+          "type",
+          "updated"
+        ],
+        "coerced": [],
+        "note": "strict type 'repo'"
+      },
+      {
+        "path": "research-note.md",
+        "filled": [
+          "created",
+          "declaredSensitivity",
+          "id",
+          "schema_version",
+          "updated"
+        ],
+        "coerced": [],
+        "note": "loose type 'research'"
+      },
+      {
+        "path": "Teams/platform.md",
+        "filled": [
+          "aliases",
+          "classification",
+          "confidence",
+          "created",
+          "declaredSensitivity",
+          "id",
+          "related",
+          "schema_version",
+          "source",
+          "status",
+          "tags",
+          "type",
+          "updated"
+        ],
+        "coerced": [],
+        "note": "strict type 'team'"
+      },
+      {
+        "path": "Tools/ripgrep.md",
+        "filled": [
+          "aliases",
+          "classification",
+          "confidence",
+          "created",
+          "declaredSensitivity",
+          "id",
+          "related",
+          "schema_version",
+          "source",
+          "status",
+          "tags",
+          "type",
+          "updated"
+        ],
+        "coerced": [],
+        "note": "strict type 'tool'"
+      }
+    ],
+    "renames": [
+      {
+        "from": "Projects/Meridian.md",
+        "to": "Projects/Meridian-project.md"
+      }
+    ],
+    "aliasDrops": {
+      "alias-y.md": [
+        "Shared Alias"
+      ],
+      "loose-alias-b.md": [
+        "open, q"
+      ]
+    }
+  }
+}

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "atlas://cli-contract/graduation-migrate.schema.json",
   "title": "brain graduation migrate [--apply | --rollback] [--export-challenge | --authorization <path>] — --json success output",
-  "description": "Privileged, deterministic, review-gated bootstrap migration of the graduation copy per bootstrap-migration.md: assign stable ids, infer type by the contract precedence, initialize schema_version 1, preserve/rewrite links, quarantine identity conflicts, refuse unsupported schema_version + unknown/malformed explicit type. Per-note checkpoints (with BOTH pre AND post images persisted before the atomic rename) make it idempotent + resumable; --rollback reverts via those checkpoints. Non-mutating preview by default. BOTH mutating modes (--apply and --rollback) are Tier-3 review-gated and authorized by the same broker op (graduation migrate, security-broker-contract.md §7.4/§7.5) via THREE distinct flows: (1) an interactive OS-presence assertion bound to the challenge in-process, (2) the --export-challenge → sign → --authorization out-of-band flow, or (3) a supplied --authorization; --yes never authorizes. --apply is a forward graduate binding intendedEffect{fromGeneration,toGeneration,migrationPlanDigest}; --rollback is the SAME op in the REVERSE direction — a graduate whose fromGeneration is the current (migrated) generation, toGeneration is the pre-migration generation, and migrationPlanDigest is the reversal plan digest (the broker SSOT's GraduateEffect, no rollback-specific fields). A stale rollback whose current generation no longer equals the challenge fromGeneration is rejected authz.generation_mismatch; a drifted reversal plan authz.migration_plan_mismatch; a replayed authorization authz.nonce_replayed. Exit 6 only when presence is unavailable/declined (and no --authorization) or a challenge is exported with --export-challenge (which emits an AuthorizationChallenge instead of this object). Runs under the vault-maintenance lock, agent-branch-only, never on main-vault.",
+  "description": "Privileged, deterministic, review-gated bootstrap migration of the graduation copy per bootstrap-migration.md: assign stable ids, infer type by the contract precedence (open type system — ANY asserted type is accepted and kept, normalized via the contracts type-registry `resolveType`; there is no unknown-type refusal), initialize schema_version (an explicit unsupported value is coerced to the current SCHEMA_VERSION rather than refused), rewrite/flatten links, and resolve identity conflicts totally (duplicate explicit ids are numeric-suffix-disambiguated, reader-fatal filename-slug collisions are resolved by a deterministic file rename recorded in `renames`, and unresolved/ambiguous wikilinks are flattened to display text — the only remaining quarantine category is the secret-scan gate's `detected-credential`). Per-note checkpoints (with BOTH pre AND post images persisted before the atomic rename) make it idempotent + resumable; --rollback reverts via those checkpoints. Non-mutating preview by default. BOTH mutating modes (--apply and --rollback) are Tier-3 review-gated and authorized by the same broker op (graduation migrate, security-broker-contract.md §7.4/§7.5) via THREE distinct flows: (1) an interactive OS-presence assertion bound to the challenge in-process, (2) the --export-challenge → sign → --authorization out-of-band flow, or (3) a supplied --authorization; --yes never authorizes. --apply is a forward graduate binding intendedEffect{fromGeneration,toGeneration,migrationPlanDigest}; --rollback is the SAME op in the REVERSE direction — a graduate whose fromGeneration is the current (migrated) generation, toGeneration is the pre-migration generation, and migrationPlanDigest is the reversal plan digest (the broker SSOT's GraduateEffect, no rollback-specific fields). A stale rollback whose current generation no longer equals the challenge fromGeneration is rejected authz.generation_mismatch; a drifted reversal plan authz.migration_plan_mismatch; a replayed authorization authz.nonce_replayed. Exit 6 only when presence is unavailable/declined (and no --authorization) or a challenge is exported with --export-challenge (which emits an AuthorizationChallenge instead of this object). Runs under the vault-maintenance lock, agent-branch-only, never on main-vault.",
   "type": "object",
   "unevaluatedProperties": false,
   "required": ["command", "mode", "migrationRunId", "notes", "quarantined", "idMap"],
@@ -19,6 +19,7 @@
         "required": ["path", "newId", "type", "schemaVersion", "status"],
         "properties": {
           "path": { "type": "string", "minLength": 1 },
+          "newPath": { "type": "string", "minLength": 1, "description": "Present when a reader-fatal filename-slug collision was resolved by RENAMING this note's file. The deterministic destination (dir + `<stem>-<type>[-n].md`); apply writes the migrated bytes here and removes `path`, and rollback restores `path`." },
           "oldId": { "type": ["string", "null"] },
           "newId": { "type": "string", "minLength": 1 },
           "type": {
@@ -26,7 +27,7 @@
             "unevaluatedProperties": false,
             "required": ["value", "source"],
             "properties": {
-              "value": { "enum": ["note", "concept", "person", "source", "project"] },
+              "value": { "type": "string", "minLength": 1 },
               "source": { "enum": ["frontmatter", "folder", "filename", "default"] }
             }
           },
@@ -42,7 +43,7 @@
                 "from": { "type": "string", "minLength": 1 },
                 "to": { "type": "string", "minLength": 1 },
                 "targetId": { "type": ["string", "null"] },
-                "resolution": { "enum": ["rewritten", "preserved-unresolved", "preserved-ambiguous"] }
+                "resolution": { "enum": ["rewritten", "flattened-unresolved", "flattened-ambiguous"], "description": "rewritten ⇒ resolved to exactly one owner, stays a canonical `[[id|display]]` wikilink; flattened-unresolved ⇒ zero owners; flattened-ambiguous ⇒ multiple owners — both replace the wikilink with its display/target TEXT so no unresolved/ambiguous `[[…]]` survives." }
               }
             }
           },
@@ -59,16 +60,24 @@
           "preservedFrontmatter": { "type": "array", "items": { "type": "string", "minLength": 1 } },
           "initializedFrontmatter": {
             "type": "object",
-            "description": "The managed frontmatter migration deterministically writes so the migrated note satisfies the canonical reader's required set (apps/cli vault frontmatter schema): id, type, schema_version, title, created, updated. created/updated come from the copy's git history for the path, deterministically falling back to the config bootstrapTimestamp when the path has no history (§1: a pure function of input vault + config — no wall-clock).",
+            "description": "The managed frontmatter migration deterministically writes so the migrated note satisfies the canonical reader (apps/cli vault frontmatter schema). ALWAYS present: id, type, schema_version, title, created, updated, declaredSensitivity. For a STRICT type the full vault base set is additionally filled/coerced to schema-valid values: status, aliases, tags, related, confidence, classification, source (valid existing values are PRESERVED, not reset). created/updated preserve a valid ISO timestamp and otherwise fall back to the config bootstrapTimestamp (§1: a pure function of input vault + config — no wall-clock). declaredSensitivity is re-derived from classification (public→public else internal; the vault forbids confidential/restricted). source is a STRUCTURED LIST (default the vault-tolerated bare [\"manual\"]), never a path string.",
             "unevaluatedProperties": false,
-            "required": ["id", "type", "schema_version", "title", "created", "updated"],
+            "required": ["id", "type", "schema_version", "title", "created", "updated", "declaredSensitivity"],
             "properties": {
               "id": { "type": "string", "minLength": 1 },
               "type": { "type": "string", "minLength": 1 },
               "schema_version": { "const": 1 },
               "title": { "type": "string", "minLength": 1 },
               "created": { "type": "string", "minLength": 1 },
-              "updated": { "type": "string", "minLength": 1 }
+              "updated": { "type": "string", "minLength": 1 },
+              "status": { "enum": ["active", "draft", "needs-review", "stale", "archived", "deprecated"], "description": "Strict-type lifecycle status (vault schema enum); default active only when absent/malformed." },
+              "aliases": { "type": "array", "items": {} },
+              "tags": { "type": "array", "items": {} },
+              "related": { "type": "array", "items": {} },
+              "confidence": { "enum": ["low", "medium", "high"], "description": "Strict-type confidence; default medium." },
+              "classification": { "enum": ["public", "personal", "internal"], "description": "Strict-type classification (vault forbids confidential/restricted); default internal." },
+              "source": { "type": "array", "items": {}, "minItems": 1, "description": "Structured source list (e.g. [{type,date}]); the bare [\"manual\"] is tolerated. Default [\"manual\"]." },
+              "declaredSensitivity": { "enum": ["public", "internal"], "description": "Re-derived from classification: public→public, else internal." }
             }
           },
           "released": {
@@ -103,7 +112,7 @@
     },
     "refused": {
       "type": "array",
-      "description": "Notes refused (never mutated): an unsupported schema_version, or an explicit `type` outside the managed set (unknown-type — bootstrap-migration.md §3, since migration owns the `type` key it can neither overwrite the asserted value nor guess).",
+      "description": "Retained for back-compatible shape only; ALWAYS EMPTY. The open type system (bootstrap-migration.md §3, any asserted type is accepted and normalized via resolveType) and schema_version coercion (an unsupported explicit value is rewritten to SCHEMA_VERSION) mean neither `unknown-type` nor `unsupported-schema-version` is ever produced by planBootstrapMigration.",
       "items": {
         "type": "object",
         "unevaluatedProperties": false,
@@ -175,6 +184,34 @@
           "authorization": { "type": "string", "minLength": 1, "description": "Identifier of the authorization that released the item." }
         }
       }
+    },
+    "renames": {
+      "type": "array",
+      "description": "Deterministic file renames applied to resolve reader-fatal filename-slug collisions (two files fold to the same normalized identity key). Each `{from,to}` moves the note's file from its original repo-relative path to `<dir>/<stem>-<type>[-n].md`. Apply writes the migrated bytes at `to`, removes `from`, and journals the rename so rollback restores `from`.",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["from", "to"],
+        "properties": {
+          "from": { "type": "string", "minLength": 1 },
+          "to": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "normalized": {
+      "type": "array",
+      "description": "Per-note TOTAL normalization report (present in preview + applied): each entry lists the managed fields whose emitted value was FILLED (absent in the source) or COERCED (present but differed from the schema-valid emit — including a Task-3 file rename recorded as coerced [\"path\"]). Notes with no change are omitted. filled/coerced are capped at 32 entries each; note at 120 chars.",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["path", "filled", "coerced", "note"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "filled": { "type": "array", "maxItems": 32, "items": { "type": "string", "minLength": 1 } },
+          "coerced": { "type": "array", "maxItems": 32, "items": { "type": "string", "minLength": 1 } },
+          "note": { "type": "string", "maxLength": 120 }
+        }
+      }
     }
   },
   "examples": [
@@ -212,15 +249,24 @@
           "status": "migrated",
           "collision": { "derivedId": "note-atlas", "disambiguatedTo": "note-atlas-2", "rule": "numeric-suffix-by-sorted-path" },
           "linkRewrites": []
+        },
+        {
+          "path": "Repos/meridian.md",
+          "newPath": "Repos/meridian-repo.md",
+          "oldId": null,
+          "newId": "repo-meridian",
+          "type": { "value": "repo", "source": "folder" },
+          "schemaVersion": 1,
+          "status": "migrated",
+          "linkRewrites": [
+            { "from": "[[Nowhere]]", "to": "Nowhere", "targetId": null, "resolution": "flattened-unresolved" }
+          ]
         }
       ],
-      "quarantined": [
-        { "path": "ExplicitA.md", "assertedId": "shared-x", "category": "duplicate-identity", "peers": ["ExplicitB.md"] }
-      ],
-      "refused": [
-        { "path": "FromFuture.md", "category": "unsupported-schema-version", "assertedSchemaVersion": 99, "supportedMax": 1, "outcome": "refused", "mutated": false }
-      ],
-      "idMap": { "AtlasTwo.md": "note-atlas-2" }
+      "quarantined": [],
+      "refused": [],
+      "idMap": { "AtlasTwo.md": "note-atlas-2", "Repos/meridian.md": "repo-meridian" },
+      "renames": [{ "from": "Repos/meridian.md", "to": "Repos/meridian-repo.md" }]
     },
     {
       "command": "graduation migrate",
@@ -276,8 +322,8 @@
     "prohibitedEffects": [
       "never mutates the live main-vault (copy + agent-branch only)",
       "never authorized by --yes; never bypasses the broker challenge",
-      "never silently suffixes a duplicate explicit id (quarantines it)",
-      "never downgrades or rewrites an unsupported schema_version (refuses it)",
+      "never refuses a SHAPE defect: a duplicate explicit id is numeric-suffix-disambiguated, a reader-fatal filename-slug collision is resolved by a deterministic file rename, and an unresolved/ambiguous wikilink is flattened to display text — none quarantine",
+      "never refuses a note for an unsupported schema_version or an unregistered explicit type — both migrate: schema_version is coerced to SCHEMA_VERSION and the type is kept as asserted (open type system)",
       "preview never mutates and never emits an audit-ref event"
     ],
     "locks": [

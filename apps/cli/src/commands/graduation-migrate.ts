@@ -47,29 +47,38 @@ function planDigest(plan: MigrationPlan): string {
 }
 
 /** The graduation copy the scan cleared + its git HEAD (the deterministic bootstrapTimestamp source). */
-function resolveCopy(ctx: RunContext): { copy: string; head: string; bootstrapTimestamp: string } {
+function resolveCopy(ctx: RunContext): { copy: string; head: string; bootstrapTimestamp: string; credentialPaths: string[] } {
   const state = readScanState(scanStatePath(ledgerDbPath(ctx)));
   if (state === null) throw new CliError({ code: "scan-gate-open", message: "no graduation scan-state gate found; run `brain graduation scan` first", hint: "Migration operates only on a scanned copy.", exitCode: EXIT.CONFIG });
-  if (state.gate !== "clean") throw new CliError({ code: "scan-gate-open", message: `the graduation scan gate is ${state.gate}; resolve findings before migrating`, hint: "Resolve the quarantined findings and re-scan.", exitCode: EXIT.CONFIG });
+  // A BLOCKED gate is tolerated ONLY when the scan recorded the credential-bearing paths (Task 5.1
+  // handshake): migrate then SKIPS + quarantines exactly those and migrates everything else. A
+  // blocked gate with NO recorded paths (pre-Task-5 sidecar) still hard-fails — backward-compatible.
+  const credentialPaths = [...(state.credentialPaths ?? [])];
+  if (state.gate !== "clean" && credentialPaths.length === 0) throw new CliError({ code: "scan-gate-open", message: `the graduation scan gate is ${state.gate}; resolve findings before migrating`, hint: "Resolve the quarantined findings and re-scan.", exitCode: EXIT.CONFIG });
+  // HISTORY-ONLY credentials live in past commits, which apply NEVER scrubs — it mutates only
+  // working-tree files (the ones credentialPaths records + deletes) and the copy keeps its full
+  // `.git` history. A blocked gate with ANY history-only finding therefore still hard-fails: the
+  // working-tree handshake can't cover a secret buried in history. (Absent ⇒ 0 ⇒ pre-Task-5 state.)
+  if (state.gate !== "clean" && (state.historyCredentialCount ?? 0) > 0) throw new CliError({ code: "scan-gate-open", message: `the graduation scan found ${state.historyCredentialCount} history-only credential finding(s); apply scrubs only the working tree, so migration cannot proceed`, hint: "Purge the credentials from git history (e.g. git filter-repo) and re-scan.", exitCode: EXIT.CONFIG });
   if (!existsSync(state.copy)) throw new CliError({ code: "config-invalid", message: `the scanned copy no longer exists at ${state.copy}`, hint: "Re-run `brain graduation scan`.", exitCode: EXIT.CONFIG });
   const head = execFileSync("git", ["-C", state.copy, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   // §6.1 fallback timestamp: the copy HEAD's committer date (deterministic; git-per-note dates layer on later).
   const bootstrapTimestamp = execFileSync("git", ["-C", state.copy, "show", "-s", "--format=%cd", "--date=iso-strict", head], { encoding: "utf8" }).trim();
-  return { copy: state.copy, head, bootstrapTimestamp };
+  return { copy: state.copy, head, bootstrapTimestamp, credentialPaths };
 }
 
 async function graduationMigrate(ctx: RunContext): Promise<number> {
   const p = parseArgs(ctx.argv);
-  const { copy, head, bootstrapTimestamp } = resolveCopy(ctx);
+  const { copy, head, bootstrapTimestamp, credentialPaths } = resolveCopy(ctx);
   const migrationRunId = newRunId();
   // Operator-authorized releases (from `quarantine resolve --resolution release`) re-include
   // otherwise-blocked incompatible-link notes as-is (§7.1).
   const released = readReleases(releasesPath(ledgerDbPath(ctx)));
-  const plan = planBootstrapMigration(readOriginalInputs(copy), { bootstrapTimestamp, released });
+  const plan = planBootstrapMigration(readOriginalInputs(copy), { bootstrapTimestamp, released, credentialPaths });
 
   // PREVIEW (default): the plan, zero mutation, no auth, no audit-ref event.
   if (!p.apply && !p.rollback) {
-    const out = { command: "graduation migrate", mode: "preview", migrationRunId, idMap: plan.idMap, notes: plan.notes, quarantined: plan.quarantined, refused: plan.refused };
+    const out = { command: "graduation migrate", mode: "preview", migrationRunId, idMap: plan.idMap, notes: plan.notes, quarantined: plan.quarantined, refused: plan.refused, normalized: plan.normalized, ...(plan.renames.length > 0 ? { renames: plan.renames } : {}) };
     if (ctx.output.mode === "json") emitJson(out);
     else ctx.render(`graduation migrate (preview): ${plan.notes.length} migrable, ${plan.quarantined.length} quarantined, ${plan.refused.length} refused`);
     return EXIT.OK;
@@ -110,7 +119,7 @@ async function graduationMigrate(ctx: RunContext): Promise<number> {
       return EXIT.OK;
     }
     const res = applyBootstrapMigration(copy, plan, { migrationRunId, bootstrapTimestamp });
-    const out = { command: "graduation migrate", mode: "applied", migrationRunId, idMap: plan.idMap, notes: plan.notes, quarantined: plan.quarantined, refused: plan.refused };
+    const out = { command: "graduation migrate", mode: "applied", migrationRunId, idMap: plan.idMap, notes: plan.notes, quarantined: plan.quarantined, refused: plan.refused, normalized: plan.normalized, ...(plan.renames.length > 0 ? { renames: plan.renames } : {}) };
     if (ctx.output.mode === "json") emitJson(out);
     else ctx.render(`graduation migrate --apply: ${res.applied.length} migrated, ${plan.quarantined.length} quarantined, ${plan.refused.length} refused`);
     return EXIT.OK;
