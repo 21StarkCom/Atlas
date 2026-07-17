@@ -59,7 +59,7 @@ the registry (back-compat with V1 fixtures) but are not vault-present.
 
 ## Design
 
-### 1. Type registry (new module, `apps/cli/src/graduation/type-registry.ts` or `packages/contracts`)
+### 1. Type registry (new module in `packages/contracts`)
 
 A data-driven registry — one owner, drift-proof, mirroring the CLI-contract
 registry pattern:
@@ -105,16 +105,26 @@ Normalization judgement (deterministic), per gap:
 
 The migrate report keeps `refused` in its schema for back-compat but it is now
 **always empty for shape reasons** (only ever populated if a future hard-refusal
-class is added); a new `normalized[]` section reports what judgement filled, so
-nothing is silently changed.
+class is added); a new `normalized[]` section reports, **per note (capped list,
+overflow counted)**, exactly which fields judgement filled or coerced — so nothing
+is silently changed and the operator can audit every applied default.
 
 ### 3. Classification → sensitivity mapping
 
-Vault `classification` → Atlas `declaredSensitivity` (drives the egress ceiling):
-`public → internal`(lowest in use) *(open decision — see below)*, `personal →
-internal`, `internal → internal`. The vault forbids `confidential`/`secret` in
-`classification` (advisory); Atlas's higher sensitivities are unreachable from
-vault content, which is correct.
+Vault `classification` → Atlas `declaredSensitivity` (drives the egress ceiling).
+Atlas's ladder is `public | internal | confidential | restricted`
+(`contracts/dtos.ts`), so the vault's `public` maps to a real distinct value:
+
+| vault `classification` | Atlas `declaredSensitivity` |
+|---|---|
+| `public` | `public` |
+| `personal` | `internal` |
+| `internal` | `internal` |
+| absent | `internal` (fail-safe default) |
+
+The vault forbids `confidential`/`restricted` in `classification` (advisory), so
+Atlas's higher sensitivities are unreachable from vault content — correct: nothing
+in the vault can declare above `internal`.
 
 ### 4. Reader / rebuild (`vault/reader.ts`, `identity.ts`)
 
@@ -152,13 +162,12 @@ already gaps collisions per #150.)
   "insufficient context" (e.g. "who runs the Cloud team").
 - All existing suites green; new fixtures + drift test + live-drive record.
 
-## Open decisions for review
+## Resolved decisions (2026-07-17)
 
-1. **`public` classification mapping** — map to Atlas's lowest sensitivity
-   (a distinct `public`), or fold into `internal`? (Leaning: distinct `public` if
-   the ladder has one, else `internal`.)
-2. **Registry home** — `packages/contracts` (shared, if the reader also consumes
-   it) vs `apps/cli/src/graduation` (migration-local). Leaning contracts, since
-   `isPolicyTarget`/`defaultSensitivity` are consumed beyond migration.
-3. **`normalized[]` report granularity** — per-note list of filled fields, or a
-   per-category count? (Leaning: per-note, capped, for auditability.)
+1. **`public` classification** → maps to Atlas `public` (the ladder has a distinct
+   `public`, confirmed in `contracts/dtos.ts`). `personal`/`internal`/absent →
+   `internal`.
+2. **Registry home** → `packages/contracts` — `isPolicyTarget`/`defaultSensitivity`
+   are consumed beyond migration (policies, reader, egress ceiling).
+3. **`normalized[]` report** → per-note capped list (overflow counted) of the exact
+   fields filled/coerced, for auditability.
