@@ -70,10 +70,21 @@ TypeDef = {
   tier: "strict" | "loose",
   // fields enforced at NORMALIZE time only as defaults-to-fill, never as refusals
   baseFields: canonical 11 (strict) | {id,type,title} (loose),
-  isPolicyTarget: boolean,   // replaces the POLICY_TARGET_TYPES hardcode
-  defaultSensitivity: Sensitivity,
+  defaultSensitivity: Sensitivity,   // from classification when present, else this
 }
 ```
+
+**On the mutation-policy table (discovered during planning):** a THIRD type
+universe already exists — `POLICY_TARGET_TYPES` in `policies/mutation-policy.ts`
+(`concept/person/project/research/decision/source/task`), which is **spec-locked**
+(`workflow-risk-contract.md` §mutation-policy, guarded by an anti-drift deep-equals
+test). It governs what *ongoing ChangePlan mutations* are permitted per type —
+graduation ingestion does NOT consult it. Reconciling the vault's `repo/cloud/tool/
+team/meeting/conversation/memory` types with that table (so Atlas knows how it may
+later EDIT them) is a **separate follow-up** (see non-goals): it only bites once
+Atlas mutates a note of an unmodeled type, which is post-ingestion. Until then an
+unmodeled type is treated as `review` (the safe default — never silently `auto`).
+This spec deliberately does not touch the spec-locked policy table.
 
 - Registered types = the vault's 11 + V1's `note`/`concept`/`source` (retained).
 - **Open fallback:** any `type:` string not in the registry is accepted and
@@ -137,6 +148,11 @@ already gaps collisions per #150.)
 
 ## Non-goals
 
+- **Mutation-policy-table reconciliation** — extending the spec-locked
+  `POLICY_TARGET_TYPES` (and its `workflow-risk-contract.md` block + anti-drift
+  test) to cover `repo/cloud/tool/team/meeting/conversation/memory`. Ingestion
+  doesn't consult it; unmodeled types default to `review` for ongoing edits until a
+  follow-up models them. Separate spec/plan.
 - Per-note LLM/model-assisted type or field inference (determinism + cost).
 - Per-type *specialized* schemas beyond the base contract + tier (e.g. `person`'s
   `identities`, `meeting`'s attendees) — a later incremental refinement; this spec
