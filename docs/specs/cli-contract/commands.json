@@ -184,7 +184,7 @@
       "phase": 5,
       "idempotency": "none",
       "privilege": "shared",
-      "implemented": false
+      "implemented": true
     },
     {
       "name": "index rebuild",
