@@ -65,6 +65,33 @@ describe("bootstrap-migration apply — slug-collision rename + link flattening 
     expect(snap.errors.filter((e) => e.kind === "broken-link" || e.kind === "ambiguous-link")).toEqual([]);
   });
 
+  it("a loser that claims a name via BOTH its slug AND an alias is renamed AND has that alias dropped (real-vault regression)", async () => {
+    // The real vault had `Repos/meridian.md` (slug `meridian`) that ALSO listed alias `meridian`,
+    // colliding with `Projects/meridian.md` (slug `meridian`). Renaming the file alone left the alias
+    // still claiming `meridian`, so `readVault()` kept emitting identity-collision. The loser must
+    // shed EVERY claim: rename the file AND drop the colliding alias.
+    const copy = seed([
+      { path: "10_Work/Projects/meridian.md", raw: "---\nid: project-meridian\ntype: project\ntitle: Meridian\n---\n# Meridian Project\n" },
+      { path: "10_Work/Repos/meridian.md", raw: "---\nid: repo-meridian\ntype: repo\ntitle: meridian\naliases:\n  - repo-meridian\n  - meridian\n---\n# Meridian Repo\n" },
+    ]);
+    const plan = planBootstrapMigration(readTree(copy), { bootstrapTimestamp: TS });
+    // the repo note (higher path) loses: its file is renamed AND its `meridian` alias is dropped.
+    expect(plan.renames).toEqual([{ from: "10_Work/Repos/meridian.md", to: "10_Work/Repos/meridian-repo.md" }]);
+    expect(plan.aliasDrops["10_Work/Repos/meridian.md"]).toContain("meridian");
+
+    applyBootstrapMigration(copy, plan, OPTS);
+
+    // the renamed file's emitted aliases no longer contain the colliding `meridian`
+    const renamedRaw = readFileSync(join(copy, "10_Work/Repos/meridian-repo.md"), "utf8");
+    const fm = parseYaml(splitFrontmatter(renamedRaw).frontmatter!) as { aliases?: string[] };
+    expect(fm.aliases ?? []).not.toContain("meridian");
+    expect(fm.aliases ?? []).toContain("repo-meridian"); // the non-colliding alias is kept
+
+    // and the strict reader is clean — the collision is truly gone, not just the file renamed
+    const snap = await readVault(cfgFor(copy));
+    expect(snap.errors.filter((e) => e.kind === "identity-collision")).toEqual([]);
+  });
+
   it("unresolved + ambiguous wikilinks are flattened on disk: no flattened [[…]] survives, reader is clean", async () => {
     const copy = seed([
       // two notes share the slug/title 'dup' ⇒ [[dup]] is ambiguous; [[Nope]] resolves to nothing.

@@ -263,7 +263,7 @@ export function planBootstrapMigration(files: readonly MigrationInputFile[], opt
     if (key === "") return; // an empty normalized key owns nothing (reader parity)
     const a = owners.get(key) ?? [];
     owners.set(key, a);
-    if (!a.some((x) => x.path === c.path)) a.push(c); // dedup by owning path
+    a.push(c); // keep EVERY claim: a note can own one key via BOTH its slug AND an alias.
   };
   for (const { doc } of migrable) {
     claim(normalizeIdentityKey(stem(doc.path)), { path: doc.path, kind: "slug" });
@@ -271,25 +271,34 @@ export function planBootstrapMigration(files: readonly MigrationInputFile[], opt
     for (const a of al) if (typeof a === "string" && a.trim() !== "") claim(normalizeIdentityKey(a), { path: doc.path, kind: "alias", alias: a });
   }
   const renames = new Map<string, string>(); // original path → renamed path (slug losers)
-  const aliasDrops = new Map<string, Set<string>>(); // path → aliases to drop (alias losers; Task 4)
-  const taken = new Set<string>(owners.keys()); // normalized keys already claimed (rename target guard)
+  const aliasDrops = new Map<string, Set<string>>(); // path → aliases to drop (alias losers)
+  const taken = new Set<string>(owners.keys()); // normalized keys already claimed (rename-target guard)
   for (const [, claims] of owners) {
-    if (claims.length < 2) continue; // deduped by path ⇒ a real collision
-    // deterministic winner: sort by (path, kind) so the first claim keeps the key.
-    const sorted = [...claims].sort((x, y) => x.path.localeCompare(y.path) || x.kind.localeCompare(y.kind));
-    for (const loser of sorted.slice(1)) {
-      if (loser.kind === "slug") {
-        const t = migrable.find((m) => m.doc.path === loser.path)!.type.value;
-        const dir = loser.path.slice(0, loser.path.lastIndexOf("/") + 1);
-        let base = `${stem(loser.path)}-${t}`;
-        let cand = normalizeIdentityKey(base);
-        for (let n = 2; taken.has(cand); n++) { base = `${stem(loser.path)}-${t}-${n}`; cand = normalizeIdentityKey(base); }
-        taken.add(cand);
-        renames.set(loser.path, `${dir}${base}.md`);
-      } else {
-        const s = aliasDrops.get(loser.path) ?? new Set<string>();
-        aliasDrops.set(loser.path, s);
-        s.add(loser.alias!);
+    // The reader folds identity BY OWNING NOTE, so a key collides only when ≥2 DISTINCT notes claim
+    // it. Group this key's claims by owning path; a single note owning it via slug+alias is not a
+    // collision. Each LOSER note must shed EVERY claim it makes on the key — rename its file if its
+    // SLUG claims the key AND drop each ALIAS that claims it. (The prior code deduped slug+alias to
+    // one claim and only renamed, leaving the colliding alias behind — the real-vault bug.)
+    const byPath = new Map<string, Claim[]>();
+    for (const c of claims) { const a = byPath.get(c.path) ?? []; byPath.set(c.path, a); a.push(c); }
+    if (byPath.size < 2) continue;
+    const loserPaths = [...byPath.keys()].sort().slice(1); // lowest path wins; the rest shed their claims
+    for (const loserPath of loserPaths) {
+      for (const c of byPath.get(loserPath)!) {
+        if (c.kind === "slug") {
+          if (renames.has(loserPath)) continue; // one rename per file
+          const t = migrable.find((m) => m.doc.path === loserPath)!.type.value;
+          const dir = loserPath.slice(0, loserPath.lastIndexOf("/") + 1);
+          let base = `${stem(loserPath)}-${t}`;
+          let cand = normalizeIdentityKey(base);
+          for (let n = 2; taken.has(cand); n++) { base = `${stem(loserPath)}-${t}-${n}`; cand = normalizeIdentityKey(base); }
+          taken.add(cand);
+          renames.set(loserPath, `${dir}${base}.md`);
+        } else {
+          const s = aliasDrops.get(loserPath) ?? new Set<string>();
+          aliasDrops.set(loserPath, s);
+          s.add(c.alias!);
+        }
       }
     }
   }
