@@ -1,14 +1,12 @@
 ---
-id: person-koral
-type: person
+id: concept-future
+type: concept
 schema_version: 1
-title: Koral
+title: From The Future
 created: 2026-07-12T00:00:00Z
 updated: 2026-07-12T00:00:00Z
 status: active
-aliases:
-  - Koral Bonfil
-  - K. Bonfil
+aliases: []
 tags: []
 related: []
 confidence: medium
@@ -18,6 +16,6 @@ source:
 declaredSensitivity: internal
 ---
 
-# Koral
+# From The Future
 
-Design partner on [[concept-atlas|Atlas]].
+A note stamped with a schema_version newer than this build supports.

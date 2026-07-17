@@ -33,6 +33,12 @@ export interface MigrationPlanOptions {
   readonly bootstrapTimestamp: string;
   /** path → release authorization (from `quarantine resolve --resolution release`). */
   readonly released?: Readonly<Record<string, ReleaseInput>>;
+  /**
+   * Working-tree paths the secret-scan gate flagged as credential-bearing (Task 5.1 handshake).
+   * Each is EXCLUDED from `migrable` — never migrated, never renamed, never a link target — and
+   * emitted as a `detected-credential` quarantine so apply deletes it from the copy.
+   */
+  readonly credentialPaths?: readonly string[];
 }
 
 export interface LinkRewrite {
@@ -207,11 +213,15 @@ function inferType(d: Doc): TypeResult {
  * remains is `detected-credential` — produced by the secret-scan gate, never by this planner.
  */
 export function planBootstrapMigration(files: readonly MigrationInputFile[], opts: MigrationPlanOptions): MigrationPlan {
-  const docs = [...files].map(parseDoc).sort((a, b) => a.path.localeCompare(b.path));
+  // Credential-bearing paths (from the scan handshake) are EXCLUDED before any planning: they never
+  // become migrable, so they can't take an id, own a slug/alias key, or be a wikilink target — and
+  // are re-surfaced below as `detected-credential` quarantines (deterministic, sorted).
+  const credentialPaths = new Set(opts.credentialPaths ?? []);
+  const docs = [...files].filter((f) => !credentialPaths.has(f.path)).map(parseDoc).sort((a, b) => a.path.localeCompare(b.path));
 
   const normalized: NormalizedEntry[] = []; // per-note total fill/coerce report (Task 4)
   const refused: RefusalEntry[] = []; // retained in the shape; now always empty (open type + schema-version coercion)
-  const quarantined: QuarantineEntry[] = []; // planner never populates it (secret-scan gate owns detected-credential)
+  const quarantined: QuarantineEntry[] = [...credentialPaths].sort().map((path) => ({ path, category: "detected-credential" as const }));
   const releases: ReleaseRecord[] = []; // retained shape; now always empty (links flatten, nothing is blocked)
 
   const migrable: { doc: Doc; type: TypeResult }[] = [];

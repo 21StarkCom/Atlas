@@ -21,6 +21,14 @@ export interface GraduationScanState {
   readonly scannedAt: string;
   /** Number of findings that produced the gate (0 iff clean). */
   readonly findingCount: number;
+  /**
+   * The working-tree paths whose files carried ≥1 credential finding (Task 5.1 handshake). A
+   * BLOCKED gate that records these lets `graduation migrate` proceed by SKIPPING + quarantining
+   * exactly these paths (they never migrate); apply then deletes them from the copy. A blocked
+   * gate with NO recorded credentialPaths (older state) still hard-fails migrate (scan-gate-open).
+   * Optional so pre-Task-5 sidecars read back cleanly.
+   */
+  readonly credentialPaths?: readonly string[];
 }
 
 /** The scan-state sidecar path (next to the ledger DB, in a `graduation/` subdir). */

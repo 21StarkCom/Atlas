@@ -37,11 +37,17 @@
       "exercises": ["explicit-id-reservation-before-derivation", "derived-sorts-before-and-after-explicit-owner"]
     },
     {
+      "id": "full-taxonomy",
+      "input": "full-taxonomy/input",
+      "expected": "full-taxonomy/expected.json",
+      "exercises": ["all-registered-types", "unknown-type-generic-loose", "no-frontmatter-default-note", "strict-base-field-fill", "duplicate-explicit-id-disambiguation", "same-slug-rename", "unresolved-link-flatten", "resolved-link-rewrite", "alias-collision-drop", "reader-compat-zero-errors"]
+    },
+    {
       "id": "guards",
       "input": "guards/input",
       "output": "guards/output",
       "expected": "guards/expected.json",
-      "exercises": ["unsupported-schema-version-refusal", "unknown-type-refusal", "malformed-type-refusal", "unknown-frontmatter-preservation", "required-field-init", "byte-exact-output-artifacts", "reader-required-frontmatter"]
+      "exercises": ["unsupported-schema-version-coercion", "unknown-type-migrates-as-loose", "malformed-type-migrates-as-loose", "unknown-frontmatter-preservation", "required-field-init", "byte-exact-output-artifacts", "reader-required-frontmatter"]
     },
     {
       "id": "idempotent",

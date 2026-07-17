@@ -5,6 +5,7 @@ schema_version: 1
 title: Provenance Note
 created: 2026-07-12T00:00:00Z
 updated: 2026-07-12T00:00:00Z
+declaredSensitivity: internal
 custom_field: keep-me
 source_url: https://example.test/original
 tags:

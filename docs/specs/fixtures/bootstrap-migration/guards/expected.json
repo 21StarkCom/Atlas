@@ -1,18 +1,30 @@
 {
   "case": "guards",
-  "description": "A future/unsupported schema_version is refused (never downgraded or silently rewritten); unknown frontmatter and provenance fields are preserved verbatim alongside the injected reader-required frontmatter (id/type/schema_version/title/created/updated). An explicit `type` outside the managed set — an unknown value (Alien.md: `type: alien`) or a malformed non-string value (MalformedType.md: `type: 42`) — is REFUSED under `unknown-type` (bootstrap-migration.md §3): migration owns the `type` key and can neither overwrite the asserted value nor guess, so the note is never mutated.",
+  "description": "Open type gate (#151): an unsupported schema_version is COERCED to SCHEMA_VERSION (never refused or downgraded); an unknown (Alien.md: `type: alien`) or malformed non-string (MalformedType.md: `type: 42`) type is kept as asserted (resolver-normalized) and MIGRATES as a generic loose type, never refused; unknown/provenance frontmatter is preserved verbatim alongside the injected reader-required frontmatter. refused[] is always empty — planBootstrapMigration is total.",
   "bootstrapTimestamp": "2026-07-12T00:00:00Z",
   "audit": {
     "categories": {
-      "missing-id": ["Alien.md", "MalformedType.md", "Provenance.md"],
-      "missing-type": ["Provenance.md"],
-      "missing-schema-version": ["Alien.md", "MalformedType.md", "Provenance.md"],
+      "missing-id": [
+        "Alien.md",
+        "MalformedType.md",
+        "Provenance.md"
+      ],
+      "missing-type": [
+        "Provenance.md"
+      ],
+      "missing-schema-version": [
+        "Alien.md",
+        "MalformedType.md",
+        "Provenance.md"
+      ],
       "ambiguous-alias": [],
       "duplicate-identity": [],
       "incompatible-link": [],
       "detected-credential": [],
-      "unknown-type": ["Alien.md", "MalformedType.md"],
-      "unsupported-schema-version": ["FromFuture.md"]
+      "unknown-type": [],
+      "unsupported-schema-version": [
+        "FromFuture.md"
+      ]
     },
     "treeHashUnchanged": true
   },
@@ -21,14 +33,92 @@
     "mode": "applied",
     "migrationRunId": "01J9ZG0000000000000000000A",
     "idMap": {
+      "Alien.md": "alien-alien-typed-note",
+      "FromFuture.md": "concept-future",
+      "MalformedType.md": "42-malformed-type-note",
       "Provenance.md": "note-provenance-note"
     },
     "notes": [
       {
+        "path": "Alien.md",
+        "oldId": null,
+        "newId": "alien-alien-typed-note",
+        "type": {
+          "value": "alien",
+          "source": "frontmatter"
+        },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "alien-alien-typed-note",
+          "type": "alien",
+          "schema_version": 1,
+          "title": "Alien Typed Note",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z",
+          "declaredSensitivity": "internal"
+        },
+        "linkRewrites": []
+      },
+      {
+        "path": "FromFuture.md",
+        "oldId": "concept-future",
+        "newId": "concept-future",
+        "type": {
+          "value": "concept",
+          "source": "frontmatter"
+        },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "concept-future",
+          "type": "concept",
+          "schema_version": 1,
+          "title": "From The Future",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z",
+          "status": "active",
+          "confidence": "medium",
+          "classification": "internal",
+          "source": [
+            "manual"
+          ],
+          "aliases": [],
+          "tags": [],
+          "related": [],
+          "declaredSensitivity": "internal"
+        },
+        "linkRewrites": []
+      },
+      {
+        "path": "MalformedType.md",
+        "oldId": null,
+        "newId": "42-malformed-type-note",
+        "type": {
+          "value": "42",
+          "source": "frontmatter"
+        },
+        "schemaVersion": 1,
+        "status": "migrated",
+        "initializedFrontmatter": {
+          "id": "42-malformed-type-note",
+          "type": "42",
+          "schema_version": 1,
+          "title": "Malformed Type Note",
+          "created": "2026-07-12T00:00:00Z",
+          "updated": "2026-07-12T00:00:00Z",
+          "declaredSensitivity": "internal"
+        },
+        "linkRewrites": []
+      },
+      {
         "path": "Provenance.md",
         "oldId": null,
         "newId": "note-provenance-note",
-        "type": { "value": "note", "source": "default" },
+        "type": {
+          "value": "note",
+          "source": "default"
+        },
         "schemaVersion": 1,
         "status": "migrated",
         "initializedFrontmatter": {
@@ -37,36 +127,83 @@
           "schema_version": 1,
           "title": "Provenance Note",
           "created": "2026-07-12T00:00:00Z",
-          "updated": "2026-07-12T00:00:00Z"
+          "updated": "2026-07-12T00:00:00Z",
+          "declaredSensitivity": "internal"
         },
-        "preservedFrontmatter": ["custom_field", "source_url", "tags"],
+        "preservedFrontmatter": [
+          "custom_field",
+          "source_url",
+          "tags"
+        ],
         "linkRewrites": []
       }
     ],
-    "refused": [
+    "quarantined": [],
+    "refused": [],
+    "releases": [],
+    "normalized": [
       {
         "path": "Alien.md",
-        "assertedType": "alien",
-        "category": "unknown-type",
-        "outcome": "refused",
-        "mutated": false
+        "filled": [
+          "created",
+          "declaredSensitivity",
+          "id",
+          "schema_version",
+          "title",
+          "updated"
+        ],
+        "coerced": [],
+        "note": "loose type 'alien'"
       },
       {
         "path": "FromFuture.md",
-        "assertedSchemaVersion": 99,
-        "supportedMax": 1,
-        "category": "unsupported-schema-version",
-        "outcome": "refused",
-        "mutated": false
+        "filled": [
+          "aliases",
+          "classification",
+          "confidence",
+          "created",
+          "declaredSensitivity",
+          "related",
+          "source",
+          "status",
+          "tags",
+          "title",
+          "updated"
+        ],
+        "coerced": [
+          "schema_version"
+        ],
+        "note": "strict type 'concept'"
       },
       {
         "path": "MalformedType.md",
-        "assertedType": "42",
-        "category": "unknown-type",
-        "outcome": "refused",
-        "mutated": false
+        "filled": [
+          "created",
+          "declaredSensitivity",
+          "id",
+          "schema_version",
+          "title",
+          "updated"
+        ],
+        "coerced": [
+          "type"
+        ],
+        "note": "loose type '42'"
+      },
+      {
+        "path": "Provenance.md",
+        "filled": [
+          "created",
+          "declaredSensitivity",
+          "id",
+          "schema_version",
+          "title",
+          "type",
+          "updated"
+        ],
+        "coerced": [],
+        "note": "loose type 'note'"
       }
-    ],
-    "quarantined": []
+    ]
   }
 }

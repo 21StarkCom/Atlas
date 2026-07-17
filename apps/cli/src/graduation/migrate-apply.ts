@@ -213,8 +213,38 @@ export function applyBootstrapMigration(copyDir: string, plan: MigrationPlan, op
     applied.push(srcRel);
   }
 
-  // Record quarantined + refused notes (never written) for a complete checkpoint census.
-  for (const q of plan.quarantined) notes.push({ path: q.path, newPath: null, oldId: null, newId: "", schemaVersion: 0, status: "quarantined", preImage: null, preImageSha256: null, postImageSha256: null, rollbackStatus: "not-started" });
+  // Credential quarantines (Task 5.1): the scan left the plaintext in the copy, and apply mutates
+  // the copy IN PLACE — so a skipped-but-left credential would leak into the graduated vault. Each
+  // is DELETED, but JOURNALED first (pre-image backed up like a migrated note) so rollback restores
+  // it. `postImageSha256: ""` is the sentinel for "absent on disk" — rollback's `existsSync ? … : ""`
+  // then matches it and restores the pre-image. Idempotent/resumable: a prior run's captured
+  // pre-image is reused and an already-deleted file is not re-read.
+  for (const q of plan.quarantined) {
+    if (q.category !== "detected-credential") {
+      notes.push({ path: q.path, newPath: null, oldId: null, newId: "", schemaVersion: 0, status: "quarantined", preImage: null, preImageSha256: null, postImageSha256: null, rollbackStatus: "not-started" });
+      continue;
+    }
+    const rel = q.path;
+    const full = join(copyDir, rel);
+    const preRel = join(BACKUP_DIR, rel);
+    const preAbs = join(copyDir, preRel);
+    const prev = priorByPath.get(rel);
+    let preSha: string;
+    if (prev?.preImageSha256 && existsSync(preAbs)) {
+      preSha = prev.preImageSha256; // resume: pre-image already captured on a prior run
+    } else if (existsSync(full)) {
+      const original = readFileSync(full);
+      preSha = sha256(original);
+      atomicWrite(preAbs, original.toString("utf8"));
+    } else {
+      // Already gone with no journal — nothing restorable; record the census entry and move on.
+      notes.push({ path: rel, newPath: null, oldId: null, newId: "", schemaVersion: 0, status: "quarantined", preImage: null, preImageSha256: null, postImageSha256: null, rollbackStatus: "not-started" });
+      continue;
+    }
+    if (existsSync(full)) rmSync(full); // delete the plaintext credential from the copy
+    notes.push({ path: rel, newPath: null, oldId: null, newId: "", schemaVersion: 0, status: "quarantined", preImage: preRel, preImageSha256: preSha, postImageSha256: "", rollbackStatus: prev?.rollbackStatus ?? "not-started" });
+  }
+  // Record refused notes (never written) for a complete checkpoint census.
   for (const r of plan.refused) notes.push({ path: r.path, newPath: null, oldId: null, newId: "", schemaVersion: 0, status: "refused", preImage: null, preImageSha256: null, postImageSha256: null, rollbackStatus: "not-started" });
 
   const checkpoint: Checkpoint = { version: 1, migrationRunId: opts.migrationRunId, bootstrapTimestamp: opts.bootstrapTimestamp, backupDir: BACKUP_DIR, notes };
