@@ -302,6 +302,7 @@ This contract is realized by the Phase-3 `cli-contract/*` schemas (Task 3.0), on
 | `index verify` | `cli-contract/index-verify.schema.json` | read (SQLite ↔ LanceDB consistency) |
 | `index repair` | `cli-contract/index-repair.schema.json` | projection-write (`run.projection`) |
 | `index rebuild` | `cli-contract/index-rebuild.schema.json` | projection-write (`run.projection`) |
+| `index eval` | `cli-contract/index-eval.schema.json` | Tier-0 audited read (`run.readonly`) — the graduation eval gate (acceptance-thresholds.md §retrieval) |
 
 Each schema's `x-atlas-contract` block carries the command's phase, privilege, idempotency,
 execution class, side/prohibited effects, locks, exit codes (from the §2.5 set), and error catalog,

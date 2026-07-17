@@ -179,6 +179,14 @@
       "implemented": true
     },
     {
+      "name": "index eval",
+      "schemaRef": "docs/specs/cli-contract/index-eval.schema.json",
+      "phase": 5,
+      "idempotency": "none",
+      "privilege": "shared",
+      "implemented": false
+    },
+    {
       "name": "index rebuild",
       "schemaRef": "docs/specs/cli-contract/index-rebuild.schema.json",
       "phase": 3,

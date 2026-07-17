@@ -85,3 +85,4 @@ contains backticked words. The text after the em dash is descriptive only.
 `graduation migrate` — privileged: deterministic, review-gated bootstrap migration.
 `quarantine inspect` — privileged: inspect quarantined items.
 `quarantine resolve` — privileged: resolve a quarantined item.
+`index eval` — retrieval-quality eval (recall@10 / MRR) against a labeled query set; the graduation gate.

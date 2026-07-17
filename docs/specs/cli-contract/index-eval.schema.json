@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/index-eval.schema.json",
+  "title": "brain index eval — --json success output",
+  "description": "Retrieval-quality eval over the live index: scores every labeled query's ranked retrieval (the production retrieve → RRF-fuse path, one in-process seam) and aggregates recall@K + MRR per retrieval-index-contract.md and acceptance-thresholds.md §retrieval. Threshold defaults are the graduation-gate constants (recall@10 ≥ 0.85, MRR ≥ 0.7); a below-threshold result exits 1 with this same success payload (pass=false), mirroring `index verify`'s report-then-exit-1 shape. Emits exactly one terminal run.readonly audit event per eval run.",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": ["command", "k", "thresholds", "metrics", "pass", "queries", "perQuery"],
+  "properties": {
+    "command": { "const": "index eval" },
+    "k": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Top-K recall was computed at (default 10 — the graduation metric)." },
+    "thresholds": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "required": ["recallAt10", "mrr"],
+      "properties": {
+        "recallAt10": { "type": "number", "minimum": 0, "maximum": 1, "description": "Effective recall threshold (default 0.85, acceptance-thresholds.md §retrieval)." },
+        "mrr": { "type": "number", "minimum": 0, "maximum": 1, "description": "Effective MRR threshold (default 0.7)." }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "unevaluatedProperties": false,
+      "required": ["recallAt10", "mrr"],
+      "properties": {
+        "recallAt10": { "type": "number", "minimum": 0, "maximum": 1 },
+        "mrr": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "pass": { "type": "boolean", "description": "metrics.recallAt10 >= thresholds.recallAt10 AND metrics.mrr >= thresholds.mrr." },
+    "queries": { "type": "integer", "minimum": 0, "description": "Number of labeled queries scored." },
+    "degradedQueries": { "type": "integer", "minimum": 0, "description": "Queries served in the §6 FTS-maturity fallback (fts layer dropped). Present when > 0." },
+    "perQuery": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["queryId", "expected", "retrieved", "firstRelevantRank", "reciprocalRank", "recall"],
+        "properties": {
+          "queryId": { "type": "string", "minLength": 1 },
+          "expected": { "type": "array", "items": { "type": "string", "minLength": 1 }, "description": "The labeled relevant note ids." },
+          "retrieved": { "type": "array", "items": { "type": "string", "minLength": 1 }, "description": "The retriever's ranked note ids, truncated to top-K." },
+          "firstRelevantRank": { "type": ["integer", "null"], "minimum": 1, "description": "1-indexed rank of the first relevant note, null on a miss." },
+          "reciprocalRank": { "type": "number", "minimum": 0, "maximum": 1 },
+          "recall": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "command": "index eval",
+      "k": 10,
+      "thresholds": { "recallAt10": 0.85, "mrr": 0.7 },
+      "metrics": { "recallAt10": 0.9, "mrr": 0.82 },
+      "pass": true,
+      "queries": 30,
+      "perQuery": [
+        { "queryId": "q-cloud-team", "expected": ["team-cloud"], "retrieved": ["team-cloud", "person-kobi-sharbat"], "firstRelevantRank": 1, "reciprocalRank": 1, "recall": 1 }
+      ]
+    },
+    {
+      "command": "index eval",
+      "k": 10,
+      "thresholds": { "recallAt10": 0.85, "mrr": 0.7 },
+      "metrics": { "recallAt10": 0.5, "mrr": 0.4 },
+      "pass": false,
+      "queries": 4,
+      "degradedQueries": 4,
+      "perQuery": [
+        { "queryId": "q-miss", "expected": ["note-x"], "retrieved": ["note-y"], "firstRelevantRank": null, "reciprocalRank": 0, "recall": 0 }
+      ]
+    }
+  ],
+  "x-atlas-contract": {
+    "command": "index eval",
+    "phase": 5,
+    "privilege": "shared",
+    "idempotency": "none",
+    "executionClass": "read",
+    "summary": "Score the live hybrid retriever against a labeled query set (recall@K + MRR); exit 1 when below the graduation thresholds; emits exactly one terminal run.readonly audit event.",
+    "args": [],
+    "flags": [
+      { "flag": "--queries <path>", "type": "string", "default": null, "required": true, "description": "EvalQuerySet JSON ({version:1, queries:[{id,text}]})." },
+      { "flag": "--labels <path>", "type": "string", "default": null, "required": true, "description": "EvalLabelSet JSON ({version:1, labels:{<queryId>:[noteId,...]}})." },
+      { "flag": "--k <n>", "type": "integer", "default": 10, "required": false, "description": "Top-K to score recall at; bounds 1..100 (10 = the graduation metric)." },
+      { "flag": "--min-recall <x>", "type": "number", "default": 0.85, "required": false, "description": "Recall threshold in [0,1] (default per acceptance-thresholds.md §retrieval)." },
+      { "flag": "--min-mrr <x>", "type": "number", "default": 0.7, "required": false, "description": "MRR threshold in [0,1] (default per acceptance-thresholds.md §retrieval)." }
+    ],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "terminalAuditEvent": "run.readonly",
+    "sideEffects": [
+      "one egress embed call per query (the vector layer embeds the query text through the egress broker)",
+      "emits exactly one run.readonly git-ref audit event for the whole eval run"
+    ],
+    "prohibitedEffects": [
+      "no ledger business row written (embed receipts are not persisted; the egress broker's own budget/audit still applies)",
+      "no index/projection/vault mutation",
+      "no more than one terminal audit event per run"
+    ],
+    "locks": [{ "scope": "shared", "mode": "shared" }],
+    "exitCodes": [0, 1, 2, 4, 5],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "missing/unknown flag, --k out of 1..100, threshold out of [0,1]" },
+      { "code": "eval-set-invalid", "exit": 1, "when": "queries/labels JSON malformed, version != 1, a query without labels, or a labeled note id absent from the notes projection" },
+      { "code": "eval-below-threshold", "exit": 1, "when": "metrics below thresholds (the success payload is still emitted; pass=false)" },
+      { "code": "config-invalid", "exit": 2, "when": "brain.config.yaml fails schema validation" },
+      { "code": "db-unavailable", "exit": 2, "when": "the SQLite store file is missing or unopenable" },
+      { "code": "index-unavailable", "exit": 2, "when": "the LanceDB index is absent — run `brain index rebuild` first" },
+      { "code": "broker-unreachable", "exit": 2, "when": "the egress broker socket is unreachable" },
+      { "code": "embedding-retryable", "exit": 4, "when": "a query embed hit a provider-retryable failure (rate limit/quota/timeout/transport); envelope carries retryable:true (+retryAfterMs when known). Exit 4 per the §2.5 cap — retryability lives on the flag, not a code the exit set does not define (query.ts convention)" },
+      { "code": "embedding-failed", "exit": 4, "when": "a query embed failed non-retryably (provider validation/auth or egress refusal)" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}
