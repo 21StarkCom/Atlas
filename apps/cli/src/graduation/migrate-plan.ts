@@ -106,6 +106,12 @@ export interface MigrationPlan {
   readonly releases: ReleaseRecord[];
   /** Slug-collision renames (original path → renamed path), sorted by source path. */
   readonly renames: Rename[];
+  /**
+   * Alias-collision losers: path → sorted array of the original alias strings whose identity-key
+   * claim lost to another note and must be dropped (Task 4 strips them from the emitted `aliases`
+   * field). Paths with nothing to drop are omitted.
+   */
+  readonly aliasDrops: Record<string, string[]>;
 }
 
 /** §2.1 slug: NFKD → strip marks → lowercase → non-alnum runs → `-` → trim; empty ⇒ `note`. */
@@ -255,7 +261,6 @@ export function planBootstrapMigration(files: readonly MigrationInputFile[], opt
       }
     }
   }
-  void aliasDrops; // consumed by Task 4's aliases fill (a dropped alias is excluded + recorded coerced)
 
   // ── Pass 2: derive the remaining ids in sorted-path order, suffixing derived collisions. ──
   const idMap: Record<string, string> = {};
@@ -343,5 +348,9 @@ export function planBootstrapMigration(files: readonly MigrationInputFile[], opt
   void ambiguousAlias; // retained for Task 4's per-note normalized[] report (ambiguous slug titles)
 
   const renameList: Rename[] = [...renames.entries()].map(([from, to]) => ({ from, to })).sort((a, b) => a.from.localeCompare(b.from));
-  return { idMap, notes, quarantined, refused, releases, renames: renameList };
+  const aliasDropsRecord: Record<string, string[]> = {};
+  for (const [path, aliases] of [...aliasDrops.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    if (aliases.size > 0) aliasDropsRecord[path] = [...aliases].sort();
+  }
+  return { idMap, notes, quarantined, refused, releases, renames: renameList, aliasDrops: aliasDropsRecord };
 }

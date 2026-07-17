@@ -81,4 +81,15 @@ describe("graduation migrate — identity, slug collisions, links", () => {
     expect(plan.quarantined).toEqual([]);
     expect(plan.notes).toHaveLength(1);
   });
+  it("an alias↔alias identity collision surfaces on plan.aliasDrops (the deterministic loser's alias)", () => {
+    const plan = planBootstrapMigration([
+      note("a/one.md", 'id: note-one\ntype: note\ntitle: One\naliases: ["Foo Bar"]'),
+      note("b/two.md", 'id: note-two\ntype: note\ntitle: Two\naliases: ["foo, bar"]'),
+    ], { bootstrapTimestamp: TS });
+    expect(plan.quarantined).toEqual([]);
+    // both aliases normalize (Unicode fold + punctuation→space) to the same identity key "foo bar";
+    // the sorted-path-first owner (a/one.md) wins, so b/two.md is the deterministic loser.
+    expect(plan.aliasDrops["b/two.md"]).toEqual(["foo, bar"]);
+    expect(plan.aliasDrops["a/one.md"]).toBeUndefined();
+  });
 });

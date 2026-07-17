@@ -11,7 +11,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import type { AtlasConfig } from "@atlas/contracts";
+import type { AtlasConfig } from "../src/config/schema.js";
 import { planBootstrapMigration, type MigrationInputFile } from "../src/graduation/migrate-plan.js";
 import { applyBootstrapMigration, rollbackBootstrapMigration, readOriginalInputs } from "../src/graduation/migrate-apply.js";
 import { readVault } from "../src/vault/reader.js";
