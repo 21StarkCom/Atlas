@@ -94,7 +94,7 @@
       "emits exactly one run.readonly git-ref audit event for the whole eval run"
     ],
     "prohibitedEffects": [
-      "no ledger business row written (embed receipts are not persisted; the egress broker's own budget/audit still applies)",
+      "no ledger business row written (embed receipts are not persisted; the egress broker's own budget enforcement still applies)",
       "no index/projection/vault mutation",
       "no more than one terminal audit event per run"
     ],
@@ -103,6 +103,7 @@
     "errorCodes": [
       { "code": "usage", "exit": 5, "when": "missing/unknown flag, --k out of 1..100, threshold out of [0,1]" },
       { "code": "eval-set-invalid", "exit": 1, "when": "queries/labels JSON malformed, version != 1, a query without labels, or a labeled note id absent from the notes projection" },
+      { "code": "ambiguous-note", "exit": 1, "when": "an eval query's text normalizes to more than one note's slug/alias (identity layer refuses a silent pick; structurally guarded — normalized_key is the store PK and collisions are refused at ingest, documented for parity with query/note-show/note-history/note-related)" },
       { "code": "eval-below-threshold", "exit": 1, "when": "metrics below thresholds (the success payload is still emitted; pass=false)" },
       { "code": "config-invalid", "exit": 2, "when": "brain.config.yaml fails schema validation" },
       { "code": "db-unavailable", "exit": 2, "when": "the SQLite store file is missing or unopenable" },

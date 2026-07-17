@@ -1,5 +1,5 @@
 /**
- * `retrieval-eval.test` — the always-on metric-math test for `runRetrievalEval`
+ * `eval.test` — the always-on metric-math test for `runRetrievalEval`
  * (Task 3.6). Verifies recall@K + MRR against HAND-COMPUTED values with a stubbed
  * retriever (no embeddings, no index), and validates the labeled fixture set is
  * internally consistent. The LIVE end-to-end (real retriever over `source-heavy` under

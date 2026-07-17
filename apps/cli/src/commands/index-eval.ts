@@ -12,7 +12,8 @@
  *
  * Tier-0 audited read: ONE terminal `run.readonly` audit event for the whole eval run
  * (per-query egress embeds are capability-bound to this run; receipts are not persisted
- * — the egress broker's own budget/audit applies). No ledger business row, no mutation.
+ * — the egress broker's own budget enforcement applies). No ledger business row, no
+ * mutation.
  * ONE run id: the invocation ULID (`ctx.runId`) binds the egress embed capability AND
  * anchors the audit event, so logs, broker per-run records, and the run.readonly event
  * join on a single id (the query.ts pattern; handlers.ts documents RunContext.runId).
@@ -25,7 +26,7 @@ import {
   type RetrievalEvalResult,
 } from "@atlas/lancedb-index";
 import { ModelsClient } from "@atlas/models";
-import { EgressClient } from "@atlas/broker";
+import { EgressClient, EgressRefusal } from "@atlas/broker";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { openMigratedStore } from "./store-open.js";
@@ -74,14 +75,22 @@ export function parseIndexEvalArgs(argv: string[]): ParsedIndexEvalArgs {
   return { queriesPath, labelsPath, k, minRecall, minMrr };
 }
 
+/**
+ * A plain base-10 numeric LITERAL (optional sign, digits, optional decimal point).
+ * Lexical validation BEFORE `Number()` — bare coercion silently accepts `""`/whitespace
+ * as 0 (so `--min-recall=$UNSET` would disarm the graduation gate to 0), plus hex and
+ * exponent forms. Same discipline as `pagination.ts`'s `parseIntStrict`.
+ */
+const NUMERIC_LEXICAL_RE = /^[+-]?(\d+\.?\d*|\.\d+)$/;
+
 function parseIntBounded(v: string, flag: string, min: number, max: number): number {
-  const n = Number(v);
+  const n = NUMERIC_LEXICAL_RE.test(v) ? Number(v) : NaN;
   if (!Number.isInteger(n) || n < min || n > max) throw CliError.usage(`${flag} must be an integer in ${min}..${max} (got ${v})`);
   return n;
 }
 
 function parseUnit(v: string, flag: string): number {
-  const n = Number(v);
+  const n = NUMERIC_LEXICAL_RE.test(v) ? Number(v) : NaN;
   if (!Number.isFinite(n) || n < 0 || n > 1) throw CliError.usage(`${flag} must be a number in [0,1] (got ${v})`);
   return n;
 }
@@ -113,21 +122,35 @@ export function loadEvalSet(
       throw evalSetInvalid(`eval-set file ${p} is not valid JSON`);
     }
   };
-  const q = read(queriesPath) as Partial<EvalQuerySet>;
-  const l = read(labelsPath) as Partial<EvalLabelSet>;
+  // JSON.parse can yield any JSON value (`null` included) — reject non-object roots
+  // BEFORE property access so a `null` root is eval-set-invalid, not a TypeError→internal.
+  const qRaw = read(queriesPath);
+  const lRaw = read(labelsPath);
+  if (qRaw === null || typeof qRaw !== "object") throw evalSetInvalid(`${queriesPath}: expected {version:1, queries:[...]}`);
+  if (lRaw === null || typeof lRaw !== "object") throw evalSetInvalid(`${labelsPath}: expected {version:1, labels:{...}}`);
+  const q = qRaw as Partial<EvalQuerySet>;
+  const l = lRaw as Partial<EvalLabelSet>;
   if (q.version !== 1 || !Array.isArray(q.queries)) throw evalSetInvalid(`${queriesPath}: expected {version:1, queries:[...]}`);
-  if (l.version !== 1 || l.labels === undefined || typeof l.labels !== "object") throw evalSetInvalid(`${labelsPath}: expected {version:1, labels:{...}}`);
+  const rawLabels: unknown = l.labels;
+  if (l.version !== 1 || rawLabels === undefined || rawLabels === null || typeof rawLabels !== "object" || Array.isArray(rawLabels))
+    throw evalSetInvalid(`${labelsPath}: expected {version:1, labels:{...}}`);
+  const labels = rawLabels as EvalLabelSet["labels"];
+  if (q.queries.length === 0) throw evalSetInvalid(`${queriesPath}: queries is empty — an empty eval set cannot gate graduation`);
+  const seenIds = new Set<string>();
   for (const query of q.queries) {
     if (typeof query?.id !== "string" || query.id.length === 0 || typeof query?.text !== "string" || query.text.length === 0)
       throw evalSetInvalid(`${queriesPath}: every query needs a non-empty id + text`);
-    const ids = l.labels[query.id];
+    if (seenIds.has(query.id))
+      throw evalSetInvalid(`${queriesPath}: duplicate query id ${query.id} — every query id must be unique (a duplicate double-weights that query in the gate average)`);
+    seenIds.add(query.id);
+    const ids = labels[query.id];
     if (!Array.isArray(ids) || ids.length === 0) throw evalSetInvalid(`query ${query.id} has no labels — every query must name ≥1 expected note id`);
     for (const id of ids) {
       if (typeof id !== "string" || id.length === 0) throw evalSetInvalid(`query ${query.id} has a malformed label entry`);
       if (!noteExists(id)) throw evalSetInvalid(`query ${query.id} labels note id ${id}, which is not in the notes projection — a label that cannot be retrieved silently sinks recall`);
     }
   }
-  return { queries: q.queries, labels: l.labels };
+  return { queries: q.queries, labels };
 }
 
 /** Shape the schema payload from the harness result + thresholds (pure — unit-tested). */
@@ -226,11 +249,22 @@ async function indexEvalCmd(ctx: RunContext): Promise<number> {
           cause: e,
         });
       }
+      // Egress-broker refusals (capability expiry/budget/secret) are the schema's
+      // "egress refusal" arm of embedding-failed — query.ts's mapModelError mapping.
+      if (e instanceof EgressRefusal) {
+        throw new CliError({
+          code: "embedding-failed",
+          message: `the egress broker refused the model call: ${e.code}: ${e.message}`,
+          exitCode: EXIT.INTERNAL,
+          cause: e,
+        });
+      }
       throw e;
     }
 
     const out = evalOutput(result, { minRecall: p.minRecall, minMrr: p.minMrr }, degradedQueries);
-    const audit = await runReadAudit(ctx, "run.readonly", "index eval", store, { strictBackup: true, runId });
+    // Best-effort Tier-0 audit — reuse THIS store (the status/inspect pure-read pattern).
+    const audit = await runReadAudit(ctx, "run.readonly", "index eval", store, { runId });
     ctx.log.info("index.eval", {
       queries: out.queries,
       recallAt10: out.metrics.recallAt10,
