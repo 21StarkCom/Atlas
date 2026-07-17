@@ -11,7 +11,7 @@
  */
 import { basename } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { resolveType, isRegisteredType, SCHEMA_VERSION, normalizeIdentityKey } from "@atlas/contracts";
+import { resolveType, isRegisteredType, SCHEMA_VERSION, normalizeIdentityKey, classificationToSensitivity, MANAGED_FRONTMATTER } from "@atlas/contracts";
 import { splitFrontmatter } from "../markdown/parse.js";
 
 /** Top-level folder → type (§3, case-sensitive) — vault folders included. */
@@ -98,6 +98,18 @@ export interface Rename {
   readonly from: string;
   readonly to: string;
 }
+/**
+ * One note's TOTAL normalization report (Task 4, #151): every managed field whose emitted value
+ * was FILLED (absent in the source) or COERCED (present but differed from the schema-valid emit),
+ * plus a Task-3 file `rename` recorded as a `coerced: ["path"]`. `filled`/`coerced` are capped at
+ * 32 entries each; `note` at 120 chars.
+ */
+export interface NormalizedEntry {
+  readonly path: string;
+  readonly filled: string[];
+  readonly coerced: string[];
+  readonly note: string;
+}
 export interface MigrationPlan {
   readonly idMap: Record<string, string>;
   readonly notes: NoteOutcome[];
@@ -112,6 +124,18 @@ export interface MigrationPlan {
    * field). Paths with nothing to drop are omitted.
    */
   readonly aliasDrops: Record<string, string[]>;
+  /** Per-note total normalization report (fills + coercions); notes with no change are omitted. */
+  readonly normalized: NormalizedEntry[];
+}
+
+/**
+ * Route EVERY managed-field assignment through this so the `normalized[]` report is TOTAL: an
+ * ABSENT original is a `fill`, a present original that differs from the emitted value is a
+ * `coerce` (structural compare via JSON so arrays/objects diff correctly).
+ */
+function track(key: string, original: unknown, emitted: unknown, filled: string[], coerced: string[]): void {
+  if (original === undefined) filled.push(key);
+  else if (JSON.stringify(original) !== JSON.stringify(emitted)) coerced.push(key);
 }
 
 /** §2.1 slug: NFKD → strip marks → lowercase → non-alnum runs → `-` → trim; empty ⇒ `note`. */
@@ -174,8 +198,9 @@ function inferType(d: Doc): TypeResult {
   return { value: "note", source: "default" };
 }
 
-/** The managed reader-required keys migration writes (order = the initializedFrontmatter shape). */
-const MANAGED_KEYS = ["id", "type", "schema_version", "title", "created", "updated"];
+/** The ONE managed-field authority (shared with apply's serializer): a key ∈ MANAGED_FRONTMATTER
+ *  is migration-owned and never preserved verbatim from the source frontmatter. */
+const MANAGED_KEYS: readonly string[] = MANAGED_FRONTMATTER;
 
 /**
  * Compute the deterministic bootstrap-migration plan for `files`. Pure: no wall-clock, no
@@ -188,6 +213,7 @@ const MANAGED_KEYS = ["id", "type", "schema_version", "title", "created", "updat
 export function planBootstrapMigration(files: readonly MigrationInputFile[], opts: MigrationPlanOptions): MigrationPlan {
   const docs = [...files].map(parseDoc).sort((a, b) => a.path.localeCompare(b.path));
 
+  const normalized: NormalizedEntry[] = []; // per-note total fill/coerce report (Task 4)
   const refused: RefusalEntry[] = []; // retained in the shape; now always empty (open type + schema-version coercion)
   const quarantined: QuarantineEntry[] = []; // planner never populates it (secret-scan gate owns detected-credential)
   const releases: ReleaseRecord[] = []; // retained shape; now always empty (links flatten, nothing is blocked)
@@ -320,14 +346,71 @@ export function planBootstrapMigration(files: readonly MigrationInputFile[], opt
       }
     }
 
-    const initialized: Record<string, unknown> = {
-      id: newId,
-      type: type.value,
-      schema_version: SCHEMA_VERSION,
-      title: doc.title,
-      created: opts.bootstrapTimestamp,
-      updated: opts.bootstrapTimestamp,
-    };
+    // ── Strict base-field fill/coerce against the REAL vault schema + TOTAL normalized[] report. ──
+    // Every managed-field assignment flows through put() (→ track()), so a fill or coercion of ANY
+    // field is recorded. Always-managed fields first; then, for a STRICT type, the full base set is
+    // filled/coerced to schema-valid values (valid existing values are PRESERVED, not reset).
+    const def = resolveType(type.value);
+    const filled: string[] = [];
+    const coerced: string[] = [];
+    const initialized: Record<string, unknown> = {};
+    const put = (k: string, orig: unknown, val: unknown): void => { track(k, orig, val, filled, coerced); initialized[k] = val; };
+
+    put("id", doc.fm.id, newId);
+    put("type", doc.fm.type, type.value);
+    // schema_version: any non-current value (missing, string, number ≠ SCHEMA_VERSION) is normalized + recorded.
+    put("schema_version", doc.fm.schema_version, SCHEMA_VERSION);
+    put("title", doc.fm.title, doc.title);
+    // timestamps: preserve a valid ISO string verbatim; otherwise fill/replace with the bootstrap ts + record.
+    const validTs = (v: unknown): boolean => typeof v === "string" && !Number.isNaN(Date.parse(v));
+    put("created", doc.fm.created, validTs(doc.fm.created) ? doc.fm.created : opts.bootstrapTimestamp);
+    put("updated", doc.fm.updated, validTs(doc.fm.updated) ? doc.fm.updated : opts.bootstrapTimestamp);
+
+    if (def.tier === "strict") {
+      const STATUS = ["active", "draft", "needs-review", "stale", "archived", "deprecated"];
+      const CONF = ["low", "medium", "high"];
+      const CLASS = ["public", "personal", "internal"];
+      const enumField = (k: string, allowed: string[], dflt: string): void => {
+        const raw = doc.fm[k];
+        const ok = typeof raw === "string" && allowed.includes(raw.trim().toLowerCase());
+        put(k, raw, ok ? (raw as string).trim().toLowerCase() : dflt);
+      };
+      enumField("status", STATUS, "active");
+      enumField("confidence", CONF, "medium");
+      enumField("classification", CLASS, "internal");
+      // source is a STRUCTURED LIST (vault tolerates the bare ["manual"]) — NEVER the file path.
+      // A valid non-empty array is kept verbatim; anything else defaults to ["manual"].
+      const rawSrc = doc.fm.source;
+      const srcOk = Array.isArray(rawSrc) && rawSrc.length > 0;
+      put("source", rawSrc, srcOk ? rawSrc : ["manual"]);
+      for (const k of ["aliases", "tags", "related"]) {
+        const raw = doc.fm[k];
+        let val: unknown[] = Array.isArray(raw) ? raw : [];
+        // An alias that LOST an identity-collision (Task 3) is dropped here + recorded coerced.
+        if (k === "aliases") {
+          const drop = aliasDrops.get(doc.path);
+          if (drop) val = val.filter((a) => typeof a === "string" && !drop.has(a));
+        }
+        put(k, raw, val);
+      }
+      // declaredSensitivity flows through put() against its ORIGINAL value (compared, never against
+      // undefined), re-derived from the coerced classification (public→public else internal).
+      put("declaredSensitivity", doc.fm.declaredSensitivity, classificationToSensitivity(initialized.classification as string));
+    } else {
+      // loose: NOT force-filled with strict base fields; still derive declaredSensitivity (tracked).
+      put("declaredSensitivity", doc.fm.declaredSensitivity, classificationToSensitivity(typeof doc.fm.classification === "string" ? doc.fm.classification : undefined));
+    }
+    if ((renames.get(doc.path) ?? doc.path) !== doc.path) coerced.push("path"); // Task-3 rename recorded as a coercion
+
+    if (filled.length || coerced.length) {
+      normalized.push({
+        path: doc.path,
+        filled: filled.slice(0, 32).sort(),
+        coerced: coerced.slice(0, 32).sort(),
+        note: `${def.tier} type '${type.value}'`.slice(0, 120),
+      });
+    }
+
     const preserved = doc.hasFm ? Object.keys(doc.fm).filter((k) => !MANAGED_KEYS.includes(k)).sort() : [];
     const outcome: NoteOutcome = {
       path: doc.path,
@@ -352,5 +435,5 @@ export function planBootstrapMigration(files: readonly MigrationInputFile[], opt
   for (const [path, aliases] of [...aliasDrops.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
     if (aliases.size > 0) aliasDropsRecord[path] = [...aliases].sort();
   }
-  return { idMap, notes, quarantined, refused, releases, renames: renameList, aliasDrops: aliasDropsRecord };
+  return { idMap, notes, quarantined, refused, releases, renames: renameList, aliasDrops: aliasDropsRecord, normalized };
 }

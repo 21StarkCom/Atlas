@@ -93,3 +93,53 @@ describe("graduation migrate — identity, slug collisions, links", () => {
     expect(plan.aliasDrops["a/one.md"]).toBeUndefined();
   });
 });
+
+describe("graduation migrate — strict field-fill + normalized report", () => {
+  it("a strict 'repo' note missing base fields gets schema-valid defaults; report lists them", () => {
+    const plan = planBootstrapMigration([note("Repos/x.md", "id: repo-x\ntype: repo\ntitle: X")], { bootstrapTimestamp: TS });
+    const fm = plan.notes[0]!.initializedFrontmatter;
+    expect(fm.status).toBe("active");
+    expect(fm.confidence).toBe("medium");
+    expect(fm.classification).toBe("internal");
+    expect(fm.aliases).toEqual([]);
+    expect(fm.source).toEqual(["manual"]);            // structured list, NOT the path
+    const rep = plan.normalized.find((n) => n.path === "Repos/x.md");
+    expect(rep?.filled).toEqual(expect.arrayContaining(["status", "confidence", "classification", "source"]));
+  });
+  it("valid vault statuses (needs-review/stale/deprecated) are PRESERVED, not reset to active", () => {
+    for (const st of ["needs-review", "stale", "deprecated"]) {
+      const plan = planBootstrapMigration([note("Repos/s.md", `id: repo-s\ntype: repo\ntitle: S\nstatus: ${st}`)], { bootstrapTimestamp: TS });
+      expect(plan.notes[0]!.initializedFrontmatter.status).toBe(st);
+      expect(plan.normalized.find((n) => n.path === "Repos/s.md")?.coerced ?? []).not.toContain("status");
+    }
+  });
+  it("a valid structured source list is preserved verbatim", () => {
+    const plan = planBootstrapMigration([note("Repos/src.md", "id: repo-src\ntype: repo\ntitle: S\nsource:\n  - type: git\n    date: 2026-01-01")], { bootstrapTimestamp: TS });
+    expect(plan.notes[0]!.initializedFrontmatter.source).toEqual([{ type: "git", date: "2026-01-01" }]);
+  });
+  it("declaredSensitivity: public→public, personal/internal→internal (vault forbids confidential)", () => {
+    const pub = planBootstrapMigration([note("a.md", "id: note-a\ntype: note\ntitle: A\nclassification: public")], { bootstrapTimestamp: TS });
+    expect(pub.notes[0]!.initializedFrontmatter.declaredSensitivity).toBe("public");
+    const per = planBootstrapMigration([note("b.md", "id: note-b\ntype: note\ntitle: B\nclassification: personal")], { bootstrapTimestamp: TS });
+    expect(per.notes[0]!.initializedFrontmatter.declaredSensitivity).toBe("internal");
+  });
+  it("a loose 'research' note is NOT force-filled with strict base fields", () => {
+    const plan = planBootstrapMigration([note("R/x.md", "id: research-x\ntype: research\ntitle: X")], { bootstrapTimestamp: TS });
+    expect(plan.notes[0]!.initializedFrontmatter.confidence).toBeUndefined();
+  });
+  it("normalized[] records EVERY change: missing/malformed schema_version, inferred type, replaced timestamp", () => {
+    const p1 = planBootstrapMigration([note("x/n.md", "title: N")], { bootstrapTimestamp: TS });            // no type, no schema_version
+    const r1 = p1.normalized.find((n) => n.path === "x/n.md")!;
+    expect(r1.filled).toEqual(expect.arrayContaining(["schema_version"]));
+    const p2 = planBootstrapMigration([note("x/b.md", 'type: note\ntitle: B\nschema_version: "99"')], { bootstrapTimestamp: TS });
+    expect(p2.normalized.find((n) => n.path === "x/b.md")!.coerced).toEqual(expect.arrayContaining(["schema_version"]));
+  });
+  it("present-but-malformed strict fields are COERCED, not copied through", () => {
+    const plan = planBootstrapMigration([note("Repos/m.md", "id: repo-m\ntype: repo\ntitle: M\naliases:\nstatus: bogus\nconfidence: '   '")], { bootstrapTimestamp: TS });
+    const fm = plan.notes[0]!.initializedFrontmatter;
+    expect(fm.aliases).toEqual([]);
+    expect(fm.status).toBe("active");
+    expect(fm.confidence).toBe("medium");
+    expect(plan.normalized.find((n) => n.path === "Repos/m.md")!.coerced).toEqual(expect.arrayContaining(["aliases", "status", "confidence"]));
+  });
+});

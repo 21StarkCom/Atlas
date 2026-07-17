@@ -60,16 +60,24 @@
           "preservedFrontmatter": { "type": "array", "items": { "type": "string", "minLength": 1 } },
           "initializedFrontmatter": {
             "type": "object",
-            "description": "The managed frontmatter migration deterministically writes so the migrated note satisfies the canonical reader's required set (apps/cli vault frontmatter schema): id, type, schema_version, title, created, updated. created/updated come from the copy's git history for the path, deterministically falling back to the config bootstrapTimestamp when the path has no history (§1: a pure function of input vault + config — no wall-clock).",
+            "description": "The managed frontmatter migration deterministically writes so the migrated note satisfies the canonical reader (apps/cli vault frontmatter schema). ALWAYS present: id, type, schema_version, title, created, updated, declaredSensitivity. For a STRICT type the full vault base set is additionally filled/coerced to schema-valid values: status, aliases, tags, related, confidence, classification, source (valid existing values are PRESERVED, not reset). created/updated preserve a valid ISO timestamp and otherwise fall back to the config bootstrapTimestamp (§1: a pure function of input vault + config — no wall-clock). declaredSensitivity is re-derived from classification (public→public else internal; the vault forbids confidential/restricted). source is a STRUCTURED LIST (default the vault-tolerated bare [\"manual\"]), never a path string.",
             "unevaluatedProperties": false,
-            "required": ["id", "type", "schema_version", "title", "created", "updated"],
+            "required": ["id", "type", "schema_version", "title", "created", "updated", "declaredSensitivity"],
             "properties": {
               "id": { "type": "string", "minLength": 1 },
               "type": { "type": "string", "minLength": 1 },
               "schema_version": { "const": 1 },
               "title": { "type": "string", "minLength": 1 },
               "created": { "type": "string", "minLength": 1 },
-              "updated": { "type": "string", "minLength": 1 }
+              "updated": { "type": "string", "minLength": 1 },
+              "status": { "enum": ["active", "draft", "needs-review", "stale", "archived", "deprecated"], "description": "Strict-type lifecycle status (vault schema enum); default active only when absent/malformed." },
+              "aliases": { "type": "array", "items": {} },
+              "tags": { "type": "array", "items": {} },
+              "related": { "type": "array", "items": {} },
+              "confidence": { "enum": ["low", "medium", "high"], "description": "Strict-type confidence; default medium." },
+              "classification": { "enum": ["public", "personal", "internal"], "description": "Strict-type classification (vault forbids confidential/restricted); default internal." },
+              "source": { "type": "array", "items": {}, "minItems": 1, "description": "Structured source list (e.g. [{type,date}]); the bare [\"manual\"] is tolerated. Default [\"manual\"]." },
+              "declaredSensitivity": { "enum": ["public", "internal"], "description": "Re-derived from classification: public→public, else internal." }
             }
           },
           "released": {
@@ -187,6 +195,21 @@
         "properties": {
           "from": { "type": "string", "minLength": 1 },
           "to": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "normalized": {
+      "type": "array",
+      "description": "Per-note TOTAL normalization report (present in preview + applied): each entry lists the managed fields whose emitted value was FILLED (absent in the source) or COERCED (present but differed from the schema-valid emit — including a Task-3 file rename recorded as coerced [\"path\"]). Notes with no change are omitted. filled/coerced are capped at 32 entries each; note at 120 chars.",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["path", "filled", "coerced", "note"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "filled": { "type": "array", "maxItems": 32, "items": { "type": "string", "minLength": 1 } },
+          "coerced": { "type": "array", "maxItems": 32, "items": { "type": "string", "minLength": 1 } },
+          "note": { "type": "string", "maxLength": 120 }
         }
       }
     }

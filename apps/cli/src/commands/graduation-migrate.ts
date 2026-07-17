@@ -69,7 +69,7 @@ async function graduationMigrate(ctx: RunContext): Promise<number> {
 
   // PREVIEW (default): the plan, zero mutation, no auth, no audit-ref event.
   if (!p.apply && !p.rollback) {
-    const out = { command: "graduation migrate", mode: "preview", migrationRunId, idMap: plan.idMap, notes: plan.notes, quarantined: plan.quarantined, refused: plan.refused, ...(plan.renames.length > 0 ? { renames: plan.renames } : {}) };
+    const out = { command: "graduation migrate", mode: "preview", migrationRunId, idMap: plan.idMap, notes: plan.notes, quarantined: plan.quarantined, refused: plan.refused, normalized: plan.normalized, ...(plan.renames.length > 0 ? { renames: plan.renames } : {}) };
     if (ctx.output.mode === "json") emitJson(out);
     else ctx.render(`graduation migrate (preview): ${plan.notes.length} migrable, ${plan.quarantined.length} quarantined, ${plan.refused.length} refused`);
     return EXIT.OK;
@@ -110,7 +110,7 @@ async function graduationMigrate(ctx: RunContext): Promise<number> {
       return EXIT.OK;
     }
     const res = applyBootstrapMigration(copy, plan, { migrationRunId, bootstrapTimestamp });
-    const out = { command: "graduation migrate", mode: "applied", migrationRunId, idMap: plan.idMap, notes: plan.notes, quarantined: plan.quarantined, refused: plan.refused, ...(plan.renames.length > 0 ? { renames: plan.renames } : {}) };
+    const out = { command: "graduation migrate", mode: "applied", migrationRunId, idMap: plan.idMap, notes: plan.notes, quarantined: plan.quarantined, refused: plan.refused, normalized: plan.normalized, ...(plan.renames.length > 0 ? { renames: plan.renames } : {}) };
     if (ctx.output.mode === "json") emitJson(out);
     else ctx.render(`graduation migrate --apply: ${res.applied.length} migrated, ${plan.quarantined.length} quarantined, ${plan.refused.length} refused`);
     return EXIT.OK;

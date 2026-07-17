@@ -11,12 +11,12 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { parse as parseYaml, stringify as yamlStringify } from "yaml";
+import { MANAGED_FRONTMATTER } from "@atlas/contracts";
 import { splitFrontmatter } from "../markdown/parse.js";
 import type { MigrationInputFile, MigrationPlan, NoteOutcome } from "./migrate-plan.js";
 
 const BACKUP_DIR = ".bootstrap-backup";
 const CHECKPOINT_FILE = ".checkpoint.json";
-const MANAGED_ORDER = ["id", "type", "schema_version", "title", "created", "updated"] as const;
 
 function sha256(bytes: Uint8Array | string): string {
   return createHash("sha256").update(bytes).digest("hex");
@@ -62,9 +62,14 @@ export function readOriginalInputs(copyDir: string): MigrationInputFile[] {
 }
 
 /**
- * Serialize a migrated note byte-exact: the six managed reader-required keys in fixed order, then
- * the preserved unknown frontmatter (verbatim original order), then the body with wikilinks applied.
- * A blank line always separates the frontmatter block from the body.
+ * Serialize a migrated note byte-exact: EVERY managed field present in `initializedFrontmatter` in
+ * the canonical MANAGED_FRONTMATTER order (so the planner's strict base-field fill actually lands on
+ * disk), then the preserved unknown frontmatter (verbatim original order), then the body with
+ * wikilinks applied. A blank line always separates the frontmatter block from the body.
+ *
+ * YAML-safe: array/object managed values (aliases/tags/related/source) are emitted via `yamlStringify`;
+ * scalars (id/type/schema_version/title/created/updated/status/confidence/classification/
+ * declaredSensitivity) stay inline.
  *
  * EVERY linkRewrite is applied (`from` → `to`), across all three resolutions: a `rewritten` link
  * becomes a canonical `[[id|display]]` wikilink (it resolves); a `flattened-unresolved`/
@@ -75,7 +80,12 @@ export function serializeMigratedNote(originalRaw: string, outcome: NoteOutcome)
   const { frontmatter, body } = splitFrontmatter(originalRaw);
   const im = outcome.initializedFrontmatter as Record<string, unknown>;
   let fm = "---\n";
-  for (const k of MANAGED_ORDER) fm += `${k}: ${String(im[k])}\n`;
+  for (const k of MANAGED_FRONTMATTER) {
+    if (!(k in im)) continue;
+    const v = im[k];
+    if (Array.isArray(v) || (v !== null && typeof v === "object")) fm += yamlStringify({ [k]: v });
+    else fm += `${k}: ${String(v)}\n`;
+  }
   if (outcome.preservedFrontmatter && outcome.preservedFrontmatter.length > 0 && frontmatter !== null) {
     const orig = parseYaml(frontmatter) as Record<string, unknown>;
     const preserve = new Set(outcome.preservedFrontmatter);
