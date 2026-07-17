@@ -40,6 +40,7 @@ import "./enrich.js";
 import "./maintain.js";
 import "./reconcile.js";
 import "./index-ops.js";
+import "./index-eval.js";
 import "./evidence-review.js";
 import "./evidence-retry.js";
 import "./evidence-resolve.js";

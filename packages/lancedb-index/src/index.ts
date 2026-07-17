@@ -124,3 +124,13 @@ export {
   indexRepair,
   indexRebuild,
 } from "./repair.js";
+
+export {
+  runRetrievalEval,
+  type EvalQuery,
+  type EvalQuerySet,
+  type EvalLabelSet,
+  type EvalRow,
+  type RetrievalEvalResult,
+  type RetrievalEvalDeps,
+} from "./eval.js";

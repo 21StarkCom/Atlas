@@ -1397,19 +1397,34 @@ describe("Phase-5 cli-contract schema presence (Task 5.0)", () => {
     }
   });
 
-  it("every Phase-5 row is implemented:true AND has an existing schema (Task 5.0 flips the delivered set)", () => {
-    for (const r of phase5) {
+  // NB: schema presence is asserted independently of the `implemented` flag (above).
+  // We deliberately do NOT require Phase-5 rows to stay implemented:false — Task 3
+  // flips `index eval` to implemented:true once its handler lands, and the durable
+  // gate is schema presence, not a temporal implementation-status assertion (which
+  // that handler would necessarily break). Matches the Phase-2/3/4 gate policy above.
+  it("the delivered Task-5.0 graduation/quarantine commands are implemented:true with their schemas present", () => {
+    const delivered = [
+      "graduation audit",
+      "graduation migrate",
+      "graduation scan",
+      "quarantine inspect",
+      "quarantine resolve",
+    ];
+    const rows = phase5.filter((r) => delivered.includes(r.name));
+    expect(rows.map((r) => r.name).sort()).toEqual([...delivered].sort());
+    for (const r of rows) {
       expect(r.implemented, `${r.name} implemented`).toBe(true);
       expect(existsSync(join(root, r.schemaRef)), `${r.name} schema ${r.schemaRef}`).toBe(true);
     }
   });
 
-  it("the Phase-5 command set matches the plan Task 5.0 inventory", () => {
+  it("the Phase-5 command set matches the delivered inventory (Task 5.0 + index eval)", () => {
     expect(phase5.map((c) => c.name).sort()).toEqual(
       [
         "graduation audit",
         "graduation migrate",
         "graduation scan",
+        "index eval",
         "quarantine inspect",
         "quarantine resolve",
       ].sort(),
