@@ -39,3 +39,46 @@ describe("graduation migrate — open type system (types)", () => {
     expect(plan.notes[0]!.initializedFrontmatter.schema_version).toBe(SCHEMA_VERSION);
   });
 });
+
+describe("graduation migrate — identity, slug collisions, links", () => {
+  it("two notes with the SAME explicit id both migrate, disambiguated by numeric suffix", () => {
+    const plan = planBootstrapMigration([
+      note("a/dup.md", "id: repo-dup\ntype: repo\ntitle: Dup A"),
+      note("b/dup.md", "id: repo-dup\ntype: repo\ntitle: Dup B"),
+    ], { bootstrapTimestamp: TS });
+    expect(plan.quarantined).toEqual([]);
+    expect(plan.notes.map((n) => n.newId).sort()).toEqual(["repo-dup", "repo-dup-2"]);
+  });
+  it("a suffix never collides with an existing explicit id (reserve-all-first)", () => {
+    const plan = planBootstrapMigration([
+      note("a/dup.md", "id: repo-dup\ntype: repo\ntitle: Dup A"),
+      note("b/dup.md", "id: repo-dup\ntype: repo\ntitle: Dup B"),
+      note("c/two.md", "id: repo-dup-2\ntype: repo\ntitle: Two"),
+    ], { bootstrapTimestamp: TS });
+    expect(plan.notes.map((n) => n.newId).sort()).toEqual(["repo-dup", "repo-dup-2", "repo-dup-3"]);
+  });
+  it("filename-SLUG collision (reader-fatal) triggers a deterministic file rename", () => {
+    const plan = planBootstrapMigration([
+      note("10_Work/Repos/meridian.md", "id: repo-meridian\ntype: repo\ntitle: Meridian Repo"),
+      note("10_Work/Projects/meridian.md", "id: project-meridian\ntype: project\ntitle: Meridian Project"),
+    ], { bootstrapTimestamp: TS });
+    expect(plan.quarantined).toEqual([]);
+    // exactly one keeps the bare slug; the other is renamed deterministically (sorted-path loser)
+    const renamed = plan.notes.map((n) => n.newPath ?? n.path).sort();
+    expect(new Set(renamed).size).toBe(2);              // distinct basenames now
+    const slugs = renamed.map((p) => p.slice(p.lastIndexOf("/") + 1));
+    expect(new Set(slugs).size).toBe(2);                // no shared slug → reader-safe
+  });
+  it("an unresolved wikilink is FLATTENED to display text (no [[…]] survives)", () => {
+    const plan = planBootstrapMigration([
+      note("x/a.md", "id: note-a\ntype: note\ntitle: A", "See [[Nonexistent Target|the target]] here.\n"),
+    ], { bootstrapTimestamp: TS });
+    expect(plan.quarantined).toEqual([]);
+    expect(plan.notes[0]!.linkRewrites[0]).toMatchObject({ resolution: "flattened-unresolved", to: "the target" });
+  });
+  it("an ambiguous-title note still migrates (no ambiguous-alias quarantine)", () => {
+    const plan = planBootstrapMigration([note("x/weird.md", "type: memory\ntitle: '***'", "# ***\n")], { bootstrapTimestamp: TS });
+    expect(plan.quarantined).toEqual([]);
+    expect(plan.notes).toHaveLength(1);
+  });
+});

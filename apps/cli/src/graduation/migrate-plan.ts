@@ -11,7 +11,7 @@
  */
 import { basename } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { resolveType, isRegisteredType, SCHEMA_VERSION } from "@atlas/contracts";
+import { resolveType, isRegisteredType, SCHEMA_VERSION, normalizeIdentityKey } from "@atlas/contracts";
 import { splitFrontmatter } from "../markdown/parse.js";
 
 /** Top-level folder → type (§3, case-sensitive) — vault folders included. */
@@ -39,10 +39,21 @@ export interface LinkRewrite {
   readonly from: string;
   readonly to: string;
   readonly targetId: string | null;
-  readonly resolution: "rewritten" | "preserved-unresolved" | "preserved-ambiguous";
+  /**
+   * `rewritten` — resolved to exactly one owner; stays a canonical `[[id|display]]` wikilink.
+   * `flattened-unresolved` — zero owners; the wikilink is replaced by its display/target TEXT.
+   * `flattened-ambiguous` — multiple owners; likewise flattened to text (nothing survives as a link).
+   */
+  readonly resolution: "rewritten" | "flattened-unresolved" | "flattened-ambiguous";
 }
 export interface NoteOutcome {
   readonly path: string;
+  /**
+   * Present when the reader-fatal filename-SLUG collision (two files fold to the same normalized
+   * identity key) is resolved by RENAMING this note's file. `newPath` is the deterministic
+   * destination (dir + `<stem>-<type>[-n].md`); apply writes here and removes `path`.
+   */
+  readonly newPath?: string;
   readonly oldId: string | null;
   readonly newId: string;
   readonly type: { readonly value: string; readonly source: "frontmatter" | "folder" | "filename" | "default" };
@@ -57,7 +68,12 @@ export interface NoteOutcome {
 }
 export interface QuarantineEntry {
   readonly path: string;
-  readonly category: "ambiguous-alias" | "duplicate-identity" | "incompatible-link";
+  /**
+   * The only SHAPE-defect category migration still quarantines is `detected-credential` (populated
+   * by the secret-scan gate, not this pure planner). Duplicate ids are numeric-suffix-disambiguated,
+   * slug collisions are renamed, and unresolved/ambiguous links are flattened — none quarantine.
+   */
+  readonly category: "detected-credential";
   readonly assertedId?: string;
   readonly peers?: string[];
 }
@@ -77,12 +93,19 @@ export interface ReleaseRecord {
   readonly resolution: "release";
   readonly authorization: string;
 }
+/** A deterministic file rename applied to resolve a reader-fatal filename-slug collision. */
+export interface Rename {
+  readonly from: string;
+  readonly to: string;
+}
 export interface MigrationPlan {
   readonly idMap: Record<string, string>;
   readonly notes: NoteOutcome[];
   readonly quarantined: QuarantineEntry[];
   readonly refused: RefusalEntry[];
   readonly releases: ReleaseRecord[];
+  /** Slug-collision renames (original path → renamed path), sorted by source path. */
+  readonly renames: Rename[];
 }
 
 /** §2.1 slug: NFKD → strip marks → lowercase → non-alnum runs → `-` → trim; empty ⇒ `note`. */
@@ -149,65 +172,115 @@ function inferType(d: Doc): TypeResult {
 const MANAGED_KEYS = ["id", "type", "schema_version", "title", "created", "updated"];
 
 /**
- * Compute the deterministic bootstrap-migration plan for `files`. `released` authorizes blocked
- * (incompatible-link) notes to migrate as-is. Pure: no wall-clock, no filesystem writes.
+ * Compute the deterministic bootstrap-migration plan for `files`. Pure: no wall-clock, no
+ * filesystem writes. Every migrable note migrates — SHAPE defects are made TOTAL rather than
+ * quarantined: duplicate explicit ids are numeric-suffix-disambiguated (reserve-all-first);
+ * reader-fatal filename-slug collisions are resolved by a deterministic file RENAME; and
+ * unresolved/ambiguous wikilinks are FLATTENED to their display text. The only quarantine that
+ * remains is `detected-credential` — produced by the secret-scan gate, never by this planner.
  */
 export function planBootstrapMigration(files: readonly MigrationInputFile[], opts: MigrationPlanOptions): MigrationPlan {
-  const released = opts.released ?? {};
   const docs = [...files].map(parseDoc).sort((a, b) => a.path.localeCompare(b.path));
 
   const refused: RefusalEntry[] = []; // retained in the shape; now always empty (open type + schema-version coercion)
-  const quarantined: QuarantineEntry[] = [];
+  const quarantined: QuarantineEntry[] = []; // planner never populates it (secret-scan gate owns detected-credential)
+  const releases: ReleaseRecord[] = []; // retained shape; now always empty (links flatten, nothing is blocked)
 
   const migrable: { doc: Doc; type: TypeResult }[] = [];
   for (const d of docs) migrable.push({ doc: d, type: inferType(d) });
 
-  // ── Pass 1: reserve explicit ids; a shared explicit id ⇒ duplicate-identity quarantine. ──
+  // ── Pass 1: duplicate explicit ids → numeric-suffix disambiguation (reserve-all-first). ──
+  // Reserve EVERY explicit id up front so a later owner's suffix can never collide with another
+  // note's bare id; then the sorted-path-first owner keeps the bare id and each later owner takes
+  // the next free `${id}-${n}` against the complete reservation set.
   const explicitById = new Map<string, string[]>(); // id → paths
   for (const { doc } of migrable) {
-    const eid = doc.fm.id;
-    if (typeof eid === "string" && eid.trim() !== "") (explicitById.get(eid) ?? explicitById.set(eid, []).get(eid)!).push(doc.path);
+    const eid = typeof doc.fm.id === "string" ? doc.fm.id.trim() : "";
+    if (eid !== "") { const arr = explicitById.get(eid) ?? []; arr.push(doc.path); explicitById.set(eid, arr); }
   }
-  const dupIdPaths = new Set<string>();
-  const reserved = new Set<string>();
+  const assigned = new Set<string>();
+  for (const id of explicitById.keys()) assigned.add(id); // Phase A
+  const supersededExplicit = new Map<string, string>(); // path → disambiguated explicit id (Phase B)
   for (const [id, paths] of explicitById) {
-    if (paths.length > 1) {
-      for (const p of [...paths].sort()) {
-        quarantined.push({ path: p, category: "duplicate-identity", assertedId: id, peers: paths.filter((x) => x !== p).sort() });
-        dupIdPaths.add(p);
-      }
-    } else {
-      reserved.add(id); // a single explicit owner reserves the id
+    if (paths.length < 2) continue;
+    const sorted = [...paths].sort();
+    let n = 2;
+    for (const p of sorted.slice(1)) {
+      let candidate = `${id}-${n}`;
+      while (assigned.has(candidate)) candidate = `${id}-${++n}`;
+      assigned.add(candidate); supersededExplicit.set(p, candidate); n++;
     }
   }
 
-  // ── Pass 2: derive ids in sorted-path order, suffixing derived collisions against reserved+assigned. ──
-  const assigned = new Set<string>(reserved);
+  // ── Slug/alias identity collisions (reader-fatal) → deterministic rename / alias drop. ──
+  // The strict reader (reader.ts detectIdentityCollisions) collides on a shared NORMALIZED identity
+  // key, where each note owns its filename slug (stem) PLUS every declared alias — keyed via the
+  // contracts' own `normalizeIdentityKey` (full Unicode fold, NOT trim().toLowerCase()). Build one
+  // ownership map over both kinds, dedup by owning path, and resolve each real collision by kind: a
+  // SLUG loser is fixed by renaming the file (only a rename changes a slug); an ALIAS loser is fixed
+  // by dropping that alias (threaded into Task 4's aliases fill — aliases are not emitted here yet).
+  type Claim = { path: string; kind: "slug" | "alias"; alias?: string };
+  const owners = new Map<string, Claim[]>();
+  const claim = (key: string, c: Claim): void => {
+    if (key === "") return; // an empty normalized key owns nothing (reader parity)
+    const a = owners.get(key) ?? [];
+    owners.set(key, a);
+    if (!a.some((x) => x.path === c.path)) a.push(c); // dedup by owning path
+  };
+  for (const { doc } of migrable) {
+    claim(normalizeIdentityKey(stem(doc.path)), { path: doc.path, kind: "slug" });
+    const al = Array.isArray(doc.fm.aliases) ? (doc.fm.aliases as unknown[]) : [];
+    for (const a of al) if (typeof a === "string" && a.trim() !== "") claim(normalizeIdentityKey(a), { path: doc.path, kind: "alias", alias: a });
+  }
+  const renames = new Map<string, string>(); // original path → renamed path (slug losers)
+  const aliasDrops = new Map<string, Set<string>>(); // path → aliases to drop (alias losers; Task 4)
+  const taken = new Set<string>(owners.keys()); // normalized keys already claimed (rename target guard)
+  for (const [, claims] of owners) {
+    if (claims.length < 2) continue; // deduped by path ⇒ a real collision
+    // deterministic winner: sort by (path, kind) so the first claim keeps the key.
+    const sorted = [...claims].sort((x, y) => x.path.localeCompare(y.path) || x.kind.localeCompare(y.kind));
+    for (const loser of sorted.slice(1)) {
+      if (loser.kind === "slug") {
+        const t = migrable.find((m) => m.doc.path === loser.path)!.type.value;
+        const dir = loser.path.slice(0, loser.path.lastIndexOf("/") + 1);
+        let base = `${stem(loser.path)}-${t}`;
+        let cand = normalizeIdentityKey(base);
+        for (let n = 2; taken.has(cand); n++) { base = `${stem(loser.path)}-${t}-${n}`; cand = normalizeIdentityKey(base); }
+        taken.add(cand);
+        renames.set(loser.path, `${dir}${base}.md`);
+      } else {
+        const s = aliasDrops.get(loser.path) ?? new Set<string>();
+        aliasDrops.set(loser.path, s);
+        s.add(loser.alias!);
+      }
+    }
+  }
+  void aliasDrops; // consumed by Task 4's aliases fill (a dropped alias is excluded + recorded coerced)
+
+  // ── Pass 2: derive the remaining ids in sorted-path order, suffixing derived collisions. ──
   const idMap: Record<string, string> = {};
   const collisionByPath = new Map<string, { derivedId: string; disambiguatedTo: string; rule: "numeric-suffix-by-sorted-path" }>();
   const notes: NoteOutcome[] = [];
-  const releases: ReleaseRecord[] = [];
-  const ambiguousAlias = new Set<string>();
-  const incompatibleLink = new Set<string>();
+  const ambiguousAlias = new Set<string>(); // ambiguous slugify() titles — feeds Task 4's normalized[]
 
   // Build the wikilink resolution index (title / filename-stem → migrable note paths), lowercased.
-  const migrablePaths = new Set(migrable.filter((m) => !dupIdPaths.has(m.doc.path)).map((m) => m.doc.path));
   const byKey = new Map<string, string[]>();
   const addKey = (k: string, path: string): void => {
     const key = k.toLowerCase();
     (byKey.get(key) ?? byKey.set(key, []).get(key)!).push(path);
   };
   for (const { doc } of migrable) {
-    if (!migrablePaths.has(doc.path)) continue;
     addKey(doc.title, doc.path);
     addKey(stem(doc.path), doc.path);
   }
 
   for (const { doc, type } of migrable) {
-    if (dupIdPaths.has(doc.path)) continue;
+    const superseded = supersededExplicit.get(doc.path);
     const eid = typeof doc.fm.id === "string" && doc.fm.id.trim() !== "" ? doc.fm.id : null;
     let newId: string;
-    if (eid !== null) {
+    if (superseded !== undefined) {
+      newId = superseded; // duplicate explicit id, disambiguated
+    } else if (eid !== null) {
       newId = eid; // explicit owner keeps its bare id (already reserved)
     } else {
       const { slug, ambiguous } = slugify(doc.title);
@@ -221,35 +294,25 @@ export function planBootstrapMigration(files: readonly MigrationInputFile[], opt
     idMap[doc.path] = newId;
   }
 
-  // Resolve links + build per-note outcomes (in sorted-path order; only migrable, non-dup notes).
+  // Resolve links + build per-note outcomes (in sorted-path order).
   for (const { doc, type } of migrable) {
-    if (dupIdPaths.has(doc.path)) continue;
     const newId = idMap[doc.path]!;
     const linkRewrites: LinkRewrite[] = [];
-    let hasUnresolved = false;
-    // Wikilinks: [[Target]] / [[Target|Display]].
+    // Wikilinks: [[Target]] / [[Target|Display]]. Zero owners ⇒ flattened-unresolved; multiple ⇒
+    // flattened-ambiguous (both replace the wikilink with its display/target TEXT); exactly one ⇒
+    // rewritten (stays a canonical `[[id|display]]` wikilink). Nothing survives as an unresolved link.
     for (const m of doc.body.matchAll(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g)) {
       const from = m[0];
       const target = m[1]!.trim();
       const display = m[2]?.trim();
-      const owners = (byKey.get(target.toLowerCase()) ?? []).filter((p) => p !== doc.path);
-      const uniq = [...new Set(owners)];
+      const owners2 = (byKey.get(target.toLowerCase()) ?? []).filter((p) => p !== doc.path);
+      const uniq = [...new Set(owners2)];
       if (uniq.length === 1) {
         const targetId = idMap[uniq[0]!]!;
         linkRewrites.push({ from, to: `[[${targetId}|${display ?? target}]]`, targetId, resolution: "rewritten" });
       } else {
-        hasUnresolved = true;
-        linkRewrites.push({ from, to: from, targetId: null, resolution: uniq.length === 0 ? "preserved-unresolved" : "preserved-ambiguous" });
+        linkRewrites.push({ from, to: display ?? target, targetId: null, resolution: uniq.length === 0 ? "flattened-unresolved" : "flattened-ambiguous" });
       }
-    }
-    // A note with an unresolved/ambiguous link is BLOCKED unless the operator released it. A
-    // released note MIGRATES (link left verbatim) and is NOT listed in migrate.quarantined; a
-    // still-blocked note is quarantined incompatible-link and does not migrate. (The audit's
-    // category inventory records the defect either way — that is `graduation audit`, not this plan.)
-    const release = released[doc.path];
-    if (hasUnresolved && release === undefined) {
-      incompatibleLink.add(doc.path);
-      continue;
     }
 
     const initialized: Record<string, unknown> = {
@@ -263,6 +326,7 @@ export function planBootstrapMigration(files: readonly MigrationInputFile[], opt
     const preserved = doc.hasFm ? Object.keys(doc.fm).filter((k) => !MANAGED_KEYS.includes(k)).sort() : [];
     const outcome: NoteOutcome = {
       path: doc.path,
+      ...(renames.has(doc.path) ? { newPath: renames.get(doc.path)! } : {}),
       oldId: typeof doc.fm.id === "string" && doc.fm.id.trim() !== "" ? doc.fm.id : null,
       newId,
       type,
@@ -271,16 +335,13 @@ export function planBootstrapMigration(files: readonly MigrationInputFile[], opt
       ...(collisionByPath.has(doc.path) ? { collision: collisionByPath.get(doc.path)! } : {}),
       initializedFrontmatter: initialized,
       ...(preserved.length > 0 ? { preservedFrontmatter: preserved } : {}),
-      ...(hasUnresolved && release ? { released: { category: "incompatible-link" as const, opaqueId: release.opaqueId, resolution: "release" as const } } : {}),
       linkRewrites,
     };
     notes.push(outcome);
-    if (hasUnresolved && release) releases.push({ path: doc.path, category: "incompatible-link", opaqueId: release.opaqueId, resolution: "release", authorization: release.authorization });
   }
 
-  // Quarantine the alias/link defects (in sorted-path order, after dup-identity).
-  for (const p of [...ambiguousAlias].sort()) quarantined.push({ path: p, category: "ambiguous-alias" });
-  for (const p of [...incompatibleLink].sort()) quarantined.push({ path: p, category: "incompatible-link" });
+  void ambiguousAlias; // retained for Task 4's per-note normalized[] report (ambiguous slug titles)
 
-  return { idMap, notes, quarantined, refused, releases };
+  const renameList: Rename[] = [...renames.entries()].map(([from, to]) => ({ from, to })).sort((a, b) => a.from.localeCompare(b.from));
+  return { idMap, notes, quarantined, refused, releases, renames: renameList };
 }

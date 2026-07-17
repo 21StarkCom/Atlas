@@ -1613,23 +1613,29 @@ describe("Phase-5 bootstrap-migration executable fixtures (Task 5.0 — the cont
       expect(n.schemaVersion, `${n.path} schema_version`).toBe(1);
       expect(n.newId, `${n.path} id`).toBe(`${n.type.value}-${slug(n.newId.slice(n.type.value.length + 1))}`);
     }
-    // the unresolved wikilink is preserved verbatim and flagged incompatible-link
+    // the unresolved wikilink is FLATTENED to display text (Task 3, #151) — nothing survives as a link
     const atlas = exp.migrate.notes.find((n: { path: string }) => n.path === "Concepts/Atlas.md");
-    const unresolved = atlas.linkRewrites.find((l: { resolution: string }) => l.resolution === "preserved-unresolved");
-    expect(unresolved.from).toBe(unresolved.to);
+    const flattened = atlas.linkRewrites.find((l: { resolution: string }) => l.resolution === "flattened-unresolved");
+    expect(flattened, "the unresolved link is flattened").toBeTruthy();
+    expect(flattened.to.includes("[["), "flattened link left as plain display text").toBe(false);
+    // the ORIGINAL vault's broken link is still inventoried by the audit (audit reads the pre-migration tree)
     expect(exp.audit.categories["incompatible-link"]).toContain("Concepts/Atlas.md");
   });
 
-  it("collision: distinct derived-id clash → deterministic numeric suffix; explicit-id clash → duplicate-identity quarantine", () => {
+  it("collision: distinct derived-id clash → deterministic numeric suffix; duplicate EXPLICIT id → disambiguated (never quarantined)", () => {
     const exp = expectedOf("collision");
     const suffixed = exp.migrate.notes.find((n: { collision?: unknown }) => n.collision);
     expect(suffixed.collision.rule).toBe("numeric-suffix-by-sorted-path");
     expect(suffixed.collision.disambiguatedTo).toBe(`${suffixed.collision.derivedId}-2`);
     expect(suffixed.newId).toBe(suffixed.collision.disambiguatedTo);
-    // both explicit-id peers are quarantined, never silently suffixed
-    const dups = exp.migrate.quarantined.filter((q: { category: string }) => q.category === "duplicate-identity");
-    expect(dups.length).toBe(2);
-    for (const q of dups) expect(q.assertedId).toBe("shared-x");
+    // duplicate EXPLICIT ids are numeric-suffix-disambiguated (Task 3, #151), never quarantined
+    expect(exp.migrate.quarantined.filter((q: { category: string }) => q.category === "duplicate-identity")).toEqual([]);
+    const explicitIds = exp.migrate.notes
+      .filter((n: { oldId: string | null }) => n.oldId === "shared-x")
+      .map((n: { newId: string }) => n.newId)
+      .sort();
+    expect(explicitIds).toEqual(["shared-x", "shared-x-2"]); // both migrate, distinct ids
+    // the ORIGINAL vault's duplicate ids are still inventoried by the audit (audit reads the pre-migration tree)
     expect(exp.audit.categories["duplicate-identity"].sort()).toEqual(["ExplicitA.md", "ExplicitB.md"]);
   });
 
@@ -1767,16 +1773,14 @@ describe("Phase-5 bootstrap-migration executable fixtures (Task 5.0 — the cont
     }
   });
 
-  it("basic: an unresolved-link note migrates ONLY via an authorized incompatible-link release (never silently)", () => {
+  it("basic: an unresolved-link note migrates by FLATTENING the link (no operator release needed — migration is total)", () => {
     const exp = expectedOf("basic");
     const atlas = exp.migrate.notes.find((n: { path: string }) => n.path === "Concepts/Atlas.md");
-    // it carries an explicit release record naming the resolving authorization
-    expect(atlas.released.category).toBe("incompatible-link");
-    expect(atlas.released.resolution).toBe("release");
-    const rel = exp.migrate.releases.find((r: { path: string }) => r.path === "Concepts/Atlas.md");
-    expect(rel.resolution).toBe("release");
-    expect(rel.authorization, "release names an authorization").toBeTruthy();
-    expect(rel.opaqueId).toBe(atlas.released.opaqueId);
+    // migration is total: the note migrates WITHOUT any release record — the link is flattened in place
+    expect(atlas.released, "no release record — flattening is unconditional").toBeUndefined();
+    const flattened = atlas.linkRewrites.find((l: { resolution: string }) => l.resolution === "flattened-unresolved");
+    expect(flattened, "the unresolved link is flattened").toBeTruthy();
+    expect(exp.migrate.releases ?? [], "no incompatible-link releases remain").toEqual([]);
   });
 
   it("idempotent + reader-required-field init: every migrated note initializes id/type/schema_version/title/created/updated", () => {
