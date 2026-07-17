@@ -4,7 +4,7 @@
 
 **Goal:** Build the retrieval index over the **full** graduated real-vault corpus (~206 notes, all 11 types) and prove it against the graduation retrieval gate — recall@10 ≥ 0.85 AND MRR ≥ 0.7 — via a new operator surface (`brain index eval`), a real-corpus labeled eval set, and a live re-drive of graduation → `db rebuild` → `index rebuild` → eval on a fresh main-vault copy.
 
-**Architecture:** All Phase-3 retrieval machinery already exists and has run live once (2026-07-16 drive: a real LanceDB index over the 32 notes V1's closed type set graduated). The open type system (#151/#152/#153) since made graduation a total function over the whole taxonomy. What is missing is (a) an **operator-grade eval vehicle** — today `runRetrievalEval` is reachable only from vitest, pinned to the repo fixture set, shelling `brain query` once per query (one audit event + one strict backup per query); (b) a **real-corpus eval set**; and (c) the **live full-corpus drive** itself. This plan adds `brain index eval` (a registered Tier-0 read command over the existing `makeRetrieveSeam`, one audit event per eval run), re-homes the pure eval harness into `@atlas/lancedb-index` so production code can import it, authors the graduation eval set in the **vault** (it references personal corpus content — it does not belong in the engine repo), and finishes with the operational runbook.
+**Architecture:** All Phase-3 retrieval machinery already exists and has run live once (2026-07-16 drive: a real LanceDB index over the 32 notes V1's closed type set graduated). The open type system (#151/#152/#153) since made graduation a total function over the whole taxonomy. What is missing is (a) an **operator-grade eval vehicle** — today `runRetrievalEval` is reachable only from vitest, pinned to the repo fixture set, shelling `brain query` once per query (one `run.readonly` audit event + ledger write per query; backups coalesce); (b) a **real-corpus eval set**; and (c) the **live full-corpus drive** itself. This plan adds `brain index eval` (a registered Tier-0 read command over the existing `makeRetrieveSeam`, one audit event per eval run), re-homes the pure eval harness into `@atlas/lancedb-index` so production code can import it, authors the graduation eval set in the **vault** (it references personal corpus content — it does not belong in the engine repo), and finishes with the operational runbook.
 
 **Tech Stack:** TypeScript (strict/ESM/NodeNext), Node ≥ 24, pnpm, vitest, LanceDB, Gemini `gemini-embedding-001` (768-dim, D7) through the egress broker.
 
@@ -35,7 +35,7 @@ Where the search index actually stands (verified against code + the 07-16 drive 
 
 ## Design decisions
 
-**D-A — the live eval runs as a registered `brain index eval` command** (not a tools script, not more env-vars on the vitest suite). Rationale: it will be re-run at every graduation drive and every RRF-weight tune, so it deserves the registered, schema'd, audited surface every other index op has; in-process `makeRetrieveSeam` reuses one table connection + one run capability and appends **one** `run.readonly` audit event per eval run instead of one per query; a tools script would import `apps/cli` internals across the workspace boundary (only test files get away with that today — `apps/cli` compiles with `rootDir: src`). Alternatives rejected: env-parameterizing `apps/cli/test/retrieval-eval.test.ts` (still test-shaped, per-query subprocess + per-query strict backup); wiring eval only into the graduation E2E (no live vehicle).
+**D-A — the live eval runs as a registered `brain index eval` command** (not a tools script, not more env-vars on the vitest suite). Rationale: it will be re-run at every graduation drive and every RRF-weight tune, so it deserves the registered, schema'd, audited surface every other index op has; in-process `makeRetrieveSeam` reuses one table connection + one run capability and appends **one** `run.readonly` audit event per eval run instead of one per query; a tools script would import `apps/cli` internals across the workspace boundary (only test files get away with that today — `apps/cli` compiles with `rootDir: src`). Alternatives rejected: env-parameterizing `apps/cli/test/retrieval-eval.test.ts` (still test-shaped, per-query subprocess + per-query `run.readonly` audit event — backups coalesce under the read-coalescing window, so the cost is events + subprocesses, not backups); wiring eval only into the graduation E2E (no live vehicle).
 
 **D-B — the graduation eval set lives in the vault**, at `main-vault/00_System/retrieval-eval/{queries,labels}.json`, not in the engine repo. It names real note ids and personal/work content; the vault is its natural, hub-synced home, and graduation copies carry it along so the eval set travels with the corpus it labels. The repo keeps only the generic `source-heavy` fixture set. `index eval` takes explicit `--queries/--labels` paths, so nothing hardcodes either location.
 
@@ -44,15 +44,16 @@ Where the search index actually stands (verified against code + the 07-16 drive 
 ## File Structure
 
 - **Create** `packages/lancedb-index/src/eval.ts` — the pure eval harness, moved verbatim from `tools/retrieval-eval.ts` (types `EvalQuery`, `EvalQuerySet`, `EvalLabelSet`, `EvalRow`, `RetrievalEvalResult`, `RetrievalEvalDeps`, function `runRetrievalEval`). Pure (no imports), so D14 (`lancedb-index` imports only `@atlas/contracts`) is untouched.
-- **Create** `packages/lancedb-index/test/eval.test.ts` — the metric-math tests, moved from `tools/retrieval-eval.test.ts`.
+- **Create** `packages/lancedb-index/test/eval.test.ts` — the metric-math tests, moved from `tools/retrieval-eval.test.ts` (harness import AND the two file-relative fixture URLs re-pointed — Task 1 Step 2).
 - **Delete** `tools/retrieval-eval.ts`, `tools/retrieval-eval.test.ts` (re-homed above; `tools/` keeps only the contract harness + failpoints + test-signer).
 - **Modify** `packages/lancedb-index/src/index.ts` — re-export the eval module.
 - **Create** `apps/cli/src/commands/index-eval.ts` — `parseIndexEvalArgs`, `loadEvalSet`, the pure `evalOutput` shaper, and the `index eval` handler (wires `openMigratedStore` + `EgressClient` + `ModelsClient` + `makeRetrieveSeam` + `runRetrievalEval` + `runReadAudit`).
-- **Modify** `apps/cli/src/main.ts` — import `./commands/index-eval.js` at the composition root (the #145 lesson: registration only counts at the root).
+- **Modify** `apps/cli/src/commands/index.ts` — add `import "./index-eval.js";` to the registration barrel (`main.ts` imports the barrel before dispatch; registration only counts when reachable from the composition root — the #145 lesson).
 - **Create** `apps/cli/test/index-eval.cli.test.ts` — parse/validation/output/threshold tests over a stub retriever.
 - **Modify** `apps/cli/test/retrieval-eval.test.ts` — import the harness from `@atlas/lancedb-index` instead of `../../../tools/retrieval-eval.js` (the live opt-in suite itself stays).
 - **Modify** `docs/specs/cli-contract/commands.json` — one new row: `index eval` (sorted by name, before `index rebuild`).
-- **Modify** `docs/specs/cli-contract/cli-surface.fixture.txt` — one new line after `index rebuild`.
+- **Modify** `docs/specs/cli-contract/cli-surface.fixture.txt` — one new line in the `# Graduation & quarantine (Phase 5)` section (the row is `phase: 5`; the generated overview groups by phase).
+- **Modify** `tools/contract-lint.test.ts` — the Phase-5 gates learn the open inventory (Task 2 Step 5): add `index eval` to the inventory list; scope the blanket `implemented:true` assertion to the delivered five (the Phase-2/3/4 "schema presence, not temporal implementation-status" pattern).
 - **Create** `docs/specs/cli-contract/index-eval.schema.json` — the `--json` success contract + `x-atlas-contract` block.
 - **Modify** `docs/specs/retrieval-index-contract.md` §7 — add the `index eval` row to the CLI-surface table.
 - **Regenerate** `docs/specs/cli-contract/commands-overview.md` via `pnpm run contract:write`.
@@ -104,7 +105,7 @@ git mv tools/retrieval-eval.ts packages/lancedb-index/src/eval.ts
 git mv tools/retrieval-eval.test.ts packages/lancedb-index/test/eval.test.ts
 ```
 
-- [ ] **Step 2: Fix the moved test's import**
+- [ ] **Step 2: Fix the moved test's import AND its fixture URLs**
 
 In `packages/lancedb-index/test/eval.test.ts`, change:
 
@@ -117,6 +118,22 @@ to:
 ```ts
 import { runRetrievalEval, type EvalQuerySet, type EvalLabelSet } from "../src/eval.js";
 ```
+
+The last test ("the labeled fixture set is internally consistent", originally `tools/retrieval-eval.test.ts:72-73`) loads the repo-root fixture set via file-relative URLs. From `tools/` that was `../fixtures/...`; from `packages/lancedb-index/test/` it must climb three levels. Change BOTH lines:
+
+```ts
+new URL("../fixtures/retrieval-eval/queries.json", import.meta.url)
+new URL("../fixtures/retrieval-eval/labels.json", import.meta.url)
+```
+
+to:
+
+```ts
+new URL("../../../fixtures/retrieval-eval/queries.json", import.meta.url)
+new URL("../../../fixtures/retrieval-eval/labels.json", import.meta.url)
+```
+
+(Without this, Step 5's vitest run fails ENOENT — the package dir has no `fixtures/`. The harness move is pure; the moved TEST needs these two path edits.)
 
 - [ ] **Step 3: Export from the package barrel**
 
@@ -148,16 +165,19 @@ to:
 import { runRetrievalEval, type EvalQuerySet, type EvalLabelSet } from "@atlas/lancedb-index";
 ```
 
+Also update the file's header comments at lines 3 and 11, which name `tools/retrieval-eval.ts`/`.test.ts` — point them at the new home (`@atlas/lancedb-index` `src/eval.ts` / `packages/lancedb-index/test/eval.test.ts`) so Step 5's sweep can gate on code references.
+
 - [ ] **Step 5: Build + test the touched packages; sweep for stragglers**
 
 ```bash
-grep -rn "tools/retrieval-eval" apps packages tools docs --include="*.ts" --include="*.json" --include="*.md" | grep -v node_modules   # MUST be empty
+grep -rn "tools/retrieval-eval" apps packages tools --include="*.ts" | grep -v node_modules   # MUST be empty (code scope; docs/ and this plan legitimately mention the old path)
+grep -rn '"../fixtures/retrieval-eval' packages --include="*.ts" | grep -v node_modules       # MUST be empty (Step 2's URL rewrite took)
 cd packages/lancedb-index && ../../node_modules/.bin/tsc -p tsconfig.json && npx vitest run && cd ../..
 cd apps/cli && ../../node_modules/.bin/tsc -p tsconfig.json && cd ../..
 cd tools && npx vitest run && cd ..    # contract-lint unaffected but prove it
 ```
 
-Expected: all green; the grep finds nothing.
+Expected: all green; both greps find nothing.
 
 - [ ] **Step 6: Commit**
 
@@ -166,7 +186,8 @@ git add -A
 git commit -m "refactor(retrieval): re-home the pure eval harness into @atlas/lancedb-index
 
 tools/retrieval-eval.ts was reachable only from vitest; brain index eval
-(next commit) needs it from production code. Pure move — no behavior change."
+(next commit) needs it from production code. The harness moves verbatim;
+the moved test re-points its import + file-relative fixture URLs."
 ```
 
 ---
@@ -177,6 +198,7 @@ tools/retrieval-eval.ts was reachable only from vitest; brain index eval
 - Modify: `docs/specs/cli-contract/commands.json`
 - Modify: `docs/specs/cli-contract/cli-surface.fixture.txt`
 - Create: `docs/specs/cli-contract/index-eval.schema.json`
+- Modify: `tools/contract-lint.test.ts` (the Phase-5 gates — Step 5)
 - Modify: `docs/specs/retrieval-index-contract.md` (§7 table)
 - Regenerate: `docs/specs/cli-contract/commands-overview.md`
 
@@ -198,10 +220,10 @@ tools/retrieval-eval.ts was reachable only from vitest; brain index eval
 
 (`phase: 5` — the eval gates *graduation*, acceptance-thresholds.md §retrieval / Task 5.4.)
 
-- [ ] **Step 2: Add the fixture line** in `docs/specs/cli-contract/cli-surface.fixture.txt`, directly after the `index rebuild` line:
+- [ ] **Step 2: Add the fixture line** in `docs/specs/cli-contract/cli-surface.fixture.txt`, at the END of the `# Graduation & quarantine (Phase 5)` section (after the `quarantine resolve` line — the row declares `phase: 5`, and the generated `commands-overview.md` groups by phase; putting it under the Phase-3 heading would make the two artifacts disagree):
 
 ```
-`index eval` — retrieval-quality eval (recall@10 / MRR) against a labeled query set.
+`index eval` — retrieval-quality eval (recall@10 / MRR) against a labeled query set; the graduation gate.
 ```
 
 - [ ] **Step 3: Create `docs/specs/cli-contract/index-eval.schema.json`:**
@@ -290,11 +312,11 @@ tools/retrieval-eval.ts was reachable only from vitest; brain index eval
     "summary": "Score the live hybrid retriever against a labeled query set (recall@K + MRR); exit 1 when below the graduation thresholds; emits exactly one terminal run.readonly audit event.",
     "args": [],
     "flags": [
-      "--queries <path> (required: EvalQuerySet JSON)",
-      "--labels <path> (required: EvalLabelSet JSON)",
-      "--k <n> (default 10; bounds 1..100)",
-      "--min-recall <x> (default 0.85 — acceptance-thresholds.md §retrieval)",
-      "--min-mrr <x> (default 0.7 — acceptance-thresholds.md §retrieval)"
+      { "flag": "--queries <path>", "type": "string", "default": null, "required": true, "description": "EvalQuerySet JSON ({version:1, queries:[{id,text}]})." },
+      { "flag": "--labels <path>", "type": "string", "default": null, "required": true, "description": "EvalLabelSet JSON ({version:1, labels:{<queryId>:[noteId,...]}})." },
+      { "flag": "--k <n>", "type": "integer", "default": 10, "required": false, "description": "Top-K to score recall at; bounds 1..100 (10 = the graduation metric)." },
+      { "flag": "--min-recall <x>", "type": "number", "default": 0.85, "required": false, "description": "Recall threshold in [0,1] (default per acceptance-thresholds.md §retrieval)." },
+      { "flag": "--min-mrr <x>", "type": "number", "default": 0.7, "required": false, "description": "MRR threshold in [0,1] (default per acceptance-thresholds.md §retrieval)." }
     ],
     "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
     "terminalAuditEvent": "run.readonly",
@@ -317,6 +339,8 @@ tools/retrieval-eval.ts was reachable only from vitest; brain index eval
       { "code": "db-unavailable", "exit": 2, "when": "the SQLite store file is missing or unopenable" },
       { "code": "index-unavailable", "exit": 2, "when": "the LanceDB index is absent — run `brain index rebuild` first" },
       { "code": "broker-unreachable", "exit": 2, "when": "the egress broker socket is unreachable" },
+      { "code": "embedding-retryable", "exit": 4, "when": "a query embed hit a provider-retryable failure (rate limit/quota/timeout/transport); envelope carries retryable:true (+retryAfterMs when known). Exit 4 per the §2.5 cap — retryability lives on the flag, not a code the exit set does not define (query.ts convention)" },
+      { "code": "embedding-failed", "exit": 4, "when": "a query embed failed non-retryably (provider validation/auth or egress refusal)" },
       { "code": "internal", "exit": 4, "when": "unexpected internal failure" }
     ],
     "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
@@ -330,7 +354,13 @@ tools/retrieval-eval.ts was reachable only from vitest; brain index eval
 | `index eval` | `cli-contract/index-eval.schema.json` | Tier-0 audited read (`run.readonly`) — the graduation eval gate (acceptance-thresholds.md §retrieval) |
 ```
 
-- [ ] **Step 5: Regenerate + gate**
+- [ ] **Step 5: Teach the Phase-5 lint gates the new row** — `tools/contract-lint.test.ts` hard-codes the Phase-5 world and fails Task 2 as-is; three edits, mirroring the Phase-2/3/4 gate policy already in the file (see its NB comments near the Phase-2/Phase-4 blocks):
+
+1. Add `"index eval"` to the Phase-5 inventory array in `"the Phase-5 command set matches the plan Task 5.0 inventory"` (~line 1408), and retitle it to reflect the open inventory (e.g. "the Phase-5 command set matches the delivered inventory (Task 5.0 + index eval)").
+2. Replace `"every Phase-5 row is implemented:true AND has an existing schema (Task 5.0 flips the delivered set)"` (~line 1400) with the delivered-set pattern: assert schema presence for EVERY Phase-5 row (already covered by the preceding test), and assert `implemented:true` only for the originally delivered five (`graduation audit|migrate|scan`, `quarantine inspect|resolve`). Add the NB comment the other phases carry: schema presence is the durable gate, not a temporal implementation-status assertion — Task 3 flips `index eval` to `implemented:true`.
+3. Leave the `"every Phase-5 schema is well-formed..."` test untouched — the new schema must pass it as-is (x-atlas-contract mirrors the registry row; exitCodes ⊆ the §2.5 set incl. 4+5; examples validate).
+
+- [ ] **Step 6: Regenerate + gate**
 
 ```bash
 pnpm run contract:write
@@ -338,12 +368,12 @@ node tools/gen-cli-contract.ts --check
 cd tools && npx vitest run && cd ..
 ```
 
-Expected: generator writes `commands-overview.md`; `--check` and contract-lint green (an `implemented:false` row only requires membership consistency; the schema already exists).
+Expected: generator writes `commands-overview.md`; `--check` green; contract-lint green WITH the Step-5 edits (the untouched gates would reject an `implemented:false` Phase-5 row and an inventory of six).
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add docs/specs/cli-contract docs/specs/retrieval-index-contract.md
+git add docs/specs/cli-contract docs/specs/retrieval-index-contract.md tools/contract-lint.test.ts
 git commit -m "feat(contract): index eval — registry row + schema + fixture line (implemented:false until the handler lands)"
 ```
 
@@ -354,11 +384,11 @@ git commit -m "feat(contract): index eval — registry row + schema + fixture li
 **Files:**
 - Create: `apps/cli/src/commands/index-eval.ts`
 - Create: `apps/cli/test/index-eval.cli.test.ts`
-- Modify: `apps/cli/src/main.ts` (composition-root import)
+- Modify: `apps/cli/src/commands/index.ts` (registration barrel)
 - Modify: `docs/specs/cli-contract/commands.json` (flip `implemented: true`)
 
 **Interfaces:**
-- Consumes: `runRetrievalEval` + eval types from `@atlas/lancedb-index` (Task 1); `makeRetrieveSeam(deps): Promise<(q: {text, k?, filters?}) => Promise<RetrievalResult>>` from `../retrieval/wiring.js` (existing; `RetrievalResult.items: RankedItem[]`, `RankedItem.noteId: string`, `RetrievalResult.degraded: boolean`); `openMigratedStore(ctx)` (existing); `runReadAudit(ctx, "run.readonly", "index eval", store, { strictBackup: true })` (existing); `EgressClient.connect(socketPath)` + `new ModelsClient(invoke, onReceipt)` (existing, exact shape below mirrors `enrich.ts:56-64`).
+- Consumes: `runRetrievalEval` + eval types from `@atlas/lancedb-index` (Task 1); `makeRetrieveSeam(deps): Promise<(q: {text, k?, filters?}) => Promise<RetrievalResult>>` from `../retrieval/wiring.js` (existing; `RetrievalResult.items: RankedItem[]`, `RankedItem.noteId: string`, `RetrievalResult.degraded: boolean`); `openMigratedStore(ctx)` (existing); `runReadAudit(ctx, "run.readonly", "index eval", store, { strictBackup: true, runId })` (existing — `runId` correlates the audit event with the seam's egress capability, the query.ts pattern); `QueryEmbedError` from `../retrieval/layers.js` (the embed path's typed failure); `EgressClient.connect(socketPath)` + `new ModelsClient(invoke, onReceipt)` (existing, exact shape below mirrors `enrich.ts:56-64`).
 - Produces: the `index eval` command emitting the Task 2 schema; exported `parseIndexEvalArgs` and `loadEvalSet` for tests.
 
 - [ ] **Step 1: Write the failing tests** — `apps/cli/test/index-eval.cli.test.ts`:
@@ -484,6 +514,9 @@ Expected: FAIL — `Cannot find module '../src/commands/index-eval.js'`.
  * Tier-0 audited read: ONE terminal `run.readonly` audit event for the whole eval run
  * (per-query egress embeds are capability-bound to this run; receipts are not persisted
  * — the egress broker's own budget/audit applies). No ledger business row, no mutation.
+ * ONE run id: the invocation ULID (`ctx.runId`) binds the egress embed capability AND
+ * anchors the audit event, so logs, broker per-run records, and the run.readonly event
+ * join on a single id (the query.ts pattern; handlers.ts documents RunContext.runId).
  */
 import { readFileSync } from "node:fs";
 import {
@@ -494,11 +527,11 @@ import {
 } from "@atlas/lancedb-index";
 import { ModelsClient } from "@atlas/models";
 import { EgressClient } from "@atlas/broker";
-import { newRunId } from "@atlas/contracts";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { openMigratedStore } from "./store-open.js";
 import { makeRetrieveSeam } from "../retrieval/wiring.js";
+import { QueryEmbedError } from "../retrieval/layers.js";
 import { runReadAudit } from "../audit/readonly.js";
 
 export interface ParsedIndexEvalArgs {
@@ -650,7 +683,7 @@ async function indexEvalCmd(ctx: RunContext): Promise<number> {
 
   try {
     const { queries, labels } = loadEvalSet(p.queriesPath, p.labelsPath, noteExists);
-    const runId = newRunId();
+    const runId = ctx.runId; // ONE id: egress capability + audit event + logs (query.ts pattern)
     const indexingCfg = {
       chunker_version: cfg.indexing.chunker_version,
       embedding_model: cfg.indexing.embedding_model,
@@ -669,19 +702,36 @@ async function indexEvalCmd(ctx: RunContext): Promise<number> {
     });
 
     let degradedQueries = 0;
-    const result = await runRetrievalEval({
-      queries,
-      labels,
-      k: p.k,
-      retrieve: async (text) => {
-        const r = await retrieveSeam({ text, k: p.k });
-        if (r.degraded) degradedQueries++;
-        return r.items.map((i) => i.noteId);
-      },
-    });
+    let result: RetrievalEvalResult;
+    try {
+      result = await runRetrievalEval({
+        queries,
+        labels,
+        k: p.k,
+        retrieve: async (text) => {
+          const r = await retrieveSeam({ text, k: p.k });
+          if (r.degraded) degradedQueries++;
+          return r.items.map((i) => i.noteId);
+        },
+      });
+    } catch (e) {
+      // Typed embed failures surface as the contract's embedding-* codes (query.ts
+      // convention): §2.5 caps exits at 6, so retryability rides the envelope flag.
+      if (e instanceof QueryEmbedError) {
+        throw new CliError({
+          code: e.code,
+          message: e.message,
+          exitCode: EXIT.INTERNAL,
+          retryable: e.retryable,
+          ...(e.retryAfterMs !== undefined ? { retryAfterMs: e.retryAfterMs } : {}),
+          cause: e,
+        });
+      }
+      throw e;
+    }
 
     const out = evalOutput(result, { minRecall: p.minRecall, minMrr: p.minMrr }, degradedQueries);
-    const audit = await runReadAudit(ctx, "run.readonly", "index eval", store, { strictBackup: true });
+    const audit = await runReadAudit(ctx, "run.readonly", "index eval", store, { strictBackup: true, runId });
     ctx.log.info("index.eval", {
       queries: out.queries,
       recallAt10: out.metrics.recallAt10,
@@ -710,10 +760,10 @@ export { indexEvalCmd };
 
 > Adjust two details against the codebase while implementing, keeping behavior identical: (1) the exact `EgressClient` close method name (`close()` per `index-ops.ts:146`); (2) if `CliError.usage` renders the code `usage` differently, keep the house form. If `makeRetrieveSeam`'s `RetrieveSeamDeps` requires fields this omits, thread them from `cfg` exactly as `enrich.ts:68` does.
 
-- [ ] **Step 4: Register at the composition root** — in `apps/cli/src/main.ts`, add next to the existing command-module imports (grep `commands/index-ops.js` for the block):
+- [ ] **Step 4: Register in the command barrel** — in `apps/cli/src/commands/index.ts` (the registration barrel `main.ts` imports before dispatch), add next to the existing side-effect imports (grep `./index-ops.js` for the block):
 
 ```ts
-import "./commands/index-eval.js";
+import "./index-eval.js";
 ```
 
 - [ ] **Step 5: Flip the registry flag** — in `docs/specs/cli-contract/commands.json`, set the `index eval` row's `"implemented": true`, then:
@@ -749,14 +799,14 @@ one run.readonly audit event per eval run; exit 1 below threshold."
 
 ## Task 4: Author the graduation eval set (vault repo — separate branch + PR)
 
-The eval set lives in the **vault** (D-B): `~/Code/Vaults/main-vault/00_System/retrieval-eval/`. Work happens on a branch of `stark-2nd-brain`, PR'd like any vault change. **It labels the *graduated* corpus, so do this after the Task 5 migrate preview exists** (label ids must be the post-migration canonical note ids from the migrate plan's `idMap` — ids may have been disambiguated/renamed).
+The eval set lives in the **vault** (D-B): `~/Code/Vaults/main-vault/00_System/retrieval-eval/`. Work happens on a branch of `stark-2nd-brain`, PR'd like any vault change. **It labels the *graduated* corpus, so do this after Task 5 Step 0's label-preview pass exists** (label ids must be the post-migration canonical note ids from that preview's `idMap` — ids may have been disambiguated/renamed). **The vault PR must MERGE and local main-vault must sync BEFORE the real drive's Step 1** — the drive's clone (Step 3) must already carry `00_System/retrieval-eval/`, and the Step-10 HEAD assert must not see a mid-drive merge.
 
 **Files (vault repo):**
 - Create: `00_System/retrieval-eval/queries.json`
 - Create: `00_System/retrieval-eval/labels.json`
 - Create: `00_System/retrieval-eval/README.md`
 
-- [ ] **Step 1: Derive the candidate pool.** From the Task 5 migrate-preview JSON, list the graduated note ids per type. Select ≥ 30 notes covering the taxonomy, minimum per type where the vault has them: 4× `team`, 4× `repo`, 4× `person`, 4× `project`, 3× `meeting`, 3× `memory`, 3× `conversation`, 2× `tool`, 3× loose (`research`/`personal`).
+- [ ] **Step 1: Derive the candidate pool.** From Task 5 Step 0's `label-preview.json`, list the graduated note ids per type. Select ≥ 30 notes covering the taxonomy, minimum per type where the vault has them: 4× `team`, 4× `repo`, 4× `person`, 4× `project`, 3× `meeting`, 3× `memory`, 3× `conversation`, 2× `tool`, 3× loose (`research`/`personal`).
 
 - [ ] **Step 2: Write queries with eval hygiene** — one query per selected note (multi-label where genuinely multiple notes answer). Mix retrieval modes deliberately, ~equal thirds:
   - **exact/alias** — the note's title or a declared alias verbatim (exercises identity short-circuits + FTS);
@@ -793,7 +843,7 @@ The eval set lives in the **vault** (D-B): `~/Code/Vaults/main-vault/00_System/r
 
 (The two entries above are format examples — Step 2 produces the full ≥ 30-query set; verify each label id against the migrate preview, do not guess.)
 
-`README.md`: three lines — what the set is, the `brain index eval --queries ... --labels ...` invocation, and the never-delete/supersede rule.
+`README.md`: three lines — what the set is, the invocation (spelled explicitly: `node ~/Code/21Stark/atlas/apps/cli/dist/bin.js index eval --queries ... --labels ...` — bare `brain` on this host is the Go 2nd-brain CLI, not atlas), and the never-delete/supersede rule.
 
 - [ ] **Step 4: Validate shape locally** (id-existence is enforced by `index eval` itself at run time):
 
@@ -816,69 +866,132 @@ Expected: `ok: <n> queries` with n ≥ 30.
 
 ## Task 5: The live drive — full-corpus graduation → rebuild → index → eval (operator-gated)
 
-Operational runbook; no code changes expected (any bug found becomes its own issue/PR, per the altitude rule). Requires Tasks 1–3 merged; Task 4 labels are finalized against this task's migrate preview (Steps 1–4 can run before Task 4 completes; Step 8 needs it).
+Operational runbook; no code changes expected (any bug found becomes its own issue/PR, per the altitude rule). Requires Tasks 1–3 merged.
 
-**Drive root layout** mirrors the 07-16 drive (`~/Code/Vaults/atlas-graduation-2026-07-16/` is the worked example — copy its `work/brain.config.yaml`/`drive/brain.config.yaml` and rewrite the paths):
+**Ordering (kills the Task-4 circularity):** the eval set must already be IN main-vault when the real drive clones it, and its labels need a migrate preview — so the drive is TWO passes: **Step 0** (a disposable label-preview pass → Task 4 authored → vault PR merged → main-vault synced), then **Steps 1–10** (the real drive, whose Step-1 HEAD-before already includes the eval-set commit, whose Step-3 clone carries `00_System/retrieval-eval/`, and whose Step-10 HEAD assert holds with zero exceptions).
+
+**Drive root layout** mirrors the 07-16 drive (`~/Code/Vaults/atlas-graduation-2026-07-16/` is the worked example — copy its `work/brain.config.yaml`/`drive/brain.config.yaml` and rewrite the paths; its `keys/`, `egress/`, `approver/`, `custody/` dirs are the worked example for key/custody/approver enrollment):
 
 ```bash
 export ROOT=~/Code/Vaults/atlas-graduation-2026-07-18   # date of execution
+export COPY="$ROOT/grad-copy"                           # the graduated copy (Step 3's scan creates it)
 mkdir -p "$ROOT"
+# Bare `brain` on PATH is the Go 2nd-brain CLI (~/go/bin/brain), NOT this repo's CLI.
+# Define the atlas CLI for this shell (zsh function — an env var would not word-split);
+# re-declare it in any new shell mid-drive. dist/bin.js is the entry (dist/index.js is inert).
+brain() { node "$HOME/Code/21Stark/atlas/apps/cli/dist/bin.js" "$@"; }
 ```
 
-- [ ] **Step 1: Preconditions.**
+**Two configs, two working dirs** (the runbook's cwd column is load-bearing — config is cwd-resolved): **Steps 0 and 3–5 run from `$ROOT/work`** (scan/migrate take explicit `--source/--copy`; the work `.atlas` holds scan state). **Steps 6–9 run from `$ROOT/drive`**, whose config's `vault.path` MUST point at `$COPY` (07-16 cloned the copy to a separate `drive-vault/`; pointing straight at `$COPY` is equally valid — what matters is that projections and the index are built from the graduated corpus the eval labels name) with fresh `sqlite`/`lancedb` state under `$ROOT/drive/.atlas`.
+
+- [ ] **Step 0: Label-preview pass + eval-set merge.** Build the CLI first, then run a disposable scan + preview solely to produce the idMap Task 4 needs:
 
 ```bash
-git -C ~/Code/Vaults/main-vault rev-parse HEAD | tee "$ROOT/main-vault-head-before"
+/opt/homebrew/bin/pnpm -C ~/Code/21Stark/atlas -r build
+cd "$ROOT/work"
+brain graduation scan --source ~/Code/Vaults/main-vault --copy "$ROOT/preview-copy"
+brain graduation audit
+brain graduation migrate --json > "$ROOT/label-preview.json"   # its idMap = Task 4's label source
+```
+
+Then: author Task 4 from `label-preview.json`'s idMap (vault branch + PR on `stark-2nd-brain`), **merge it, sync local main-vault** (hub-sync/pull) so `00_System/retrieval-eval/` is in the working tree and HEAD, and `rm -rf "$ROOT/preview-copy"` — nothing from this pass is reused. (The eval-set commit adds non-note JSON under `00_System/`, so the real drive's Step-4 idMap must equal this one — Step 4 diffs them as a sanity check.)
+
+- [ ] **Step 1: Preconditions** (only AFTER the Task-4 merge is synced into local main-vault):
+
+```bash
+test -d ~/Code/Vaults/main-vault/00_System/retrieval-eval || { echo "eval set missing — finish Step 0"; }
+git -C ~/Code/Vaults/main-vault rev-parse HEAD | tee "$ROOT/main-vault-head-before"   # includes the eval-set commit
 git -C ~/Code/21Stark/atlas log --oneline -1     # on main, includes Tasks 1-3
 /opt/homebrew/bin/pnpm -C ~/Code/21Stark/atlas -r build
 ```
 
-- [ ] **Step 2: Start the brokers** (production mode: `testMode=false`, operator-enrolled `approval-verify.pub`, real Gemini credential held only by `atlas-egress`) via `provisioning/bin/broker-launcher.sh` + `provisioning/bin/egress-launcher.sh`, per `provisioning/README.md` and the 07-16 drive's env. Verify both sockets respond (`brain doctor`).
-
-- [ ] **Step 3: Graduation scan + audit on a fresh copy.**
+- [ ] **Step 2: Start the brokers** (production mode: `testMode=false`, operator-enrolled `approval-verify.pub` in `$ROOT/keys`, real Gemini credential held ONLY by the egress daemon). The fixed-path launchers (`provisioning/bin/*-launcher.sh`) exec installed binaries under `/usr/local/lib/atlas` with OS-level socket paths — for a drive-root-scoped run, start the daemons directly with the env spelled out (what the 07-16 drive did; key/approver enrollment per `provisioning/README.md`, worked example in the 07-16 root):
 
 ```bash
-brain graduation scan --source ~/Code/Vaults/main-vault    # expect gate: clean (ruleset v2); triage any new finding — do NOT weaken rules mid-drive
-brain graduation audit                                      # expect: ~206+ notes, treeHashUnchanged: true
+cd ~/Code/21Stark/atlas
+ATLAS_BROKER_SOCKET="$ROOT/broker.sock" \
+ATLAS_BROKER_KEYS_DIR="$ROOT/keys" \
+ATLAS_AUDIT_ANCHOR_PATH="$ROOT/anchor" \
+ATLAS_VAULT_REPO_DIR="$COPY" \
+  node packages/broker/dist/bin/atlas-broker.js > "$ROOT/broker.log" 2>&1 &
+# ATLAS_TEST_MODE deliberately NOT set (D20) — the production broker hard-rejects the test signer.
+# $COPY is created by Step 3's scan; the broker opens the repo on first ref op (Step 5), not at startup.
+
+ATLAS_EGRESS_SOCKET="$ROOT/egress.sock" \
+ATLAS_EGRESS_KEYS_DIR="$ROOT/egress/keys" \
+ATLAS_EGRESS_CAPABILITY_KEY="$ROOT/egress/shared/egress-capability.key" \
+ATLAS_EGRESS_QUARANTINE_PUBKEY="$ROOT/egress/shared/quarantine.pub" \
+ATLAS_EGRESS_QUARANTINE_SPOOL="$ROOT/egress/spool" \
+ATLAS_EGRESS_BUDGET_STATE="$ROOT/egress/budget-state.json" \
+  node packages/broker/dist/bin/atlas-egress.js > "$ROOT/egress.log" 2>&1 &
+# The Gemini credential is the ONLY key in the egress-only keys dir, read at startup from
+# $ROOT/egress/keys/atlas.gemini.key (bin/atlas-egress.ts — the path is keysDir-joined, not an env var).
 ```
 
-- [ ] **Step 4: Migrate preview — the #151 acceptance readout.**
+Verify BOTH daemons directly — `brain doctor` probes NEITHER socket in a drive env:
+
+```bash
+test -S "$ROOT/broker.sock" && test -S "$ROOT/egress.sock" && echo sockets-up
+grep "atlas-broker listening" "$ROOT/broker.log"    # the "(testMode=false)" suffix proves production mode
+grep "atlas-egress listening" "$ROOT/egress.log"
+```
+
+(The first egress exercise is Step 6's `index rebuild` — a dead egress daemon fails fast there as `broker-unreachable`.)
+
+- [ ] **Step 3: Graduation scan + audit on a fresh copy** (from `$ROOT/work`; the clone now carries the merged eval set).
+
+```bash
+cd "$ROOT/work"
+brain graduation scan --source ~/Code/Vaults/main-vault --copy "$COPY"   # expect gate: clean (ruleset v2); triage any new finding — do NOT weaken rules mid-drive
+brain graduation audit                                                    # expect: ~206+ notes, treeHashUnchanged: true
+```
+
+- [ ] **Step 4: Migrate preview — the #151 acceptance readout** (from `$ROOT/work`).
 
 ```bash
 brain graduation migrate --json > "$ROOT/migrate-preview.json"
 ```
 
-Expected: `unknown-type` refusals **= 0**; quarantines only `detected-credential`; renames/link-flattening per the open-type-system plan. **Record the counts on #151.** The preview's idMap feeds Task 4's labels.
+Expected: `unknown-type` refusals **= 0**; quarantines only `detected-credential`; renames/link-flattening per the open-type-system plan; **its idMap equals Step 0's `label-preview.json` idMap** (diff them — a mismatch means the vault changed between passes; refresh Task 4's labels before proceeding). **Record the counts on #151.**
 
-- [ ] **Step 5: Operator-gated apply.** `brain graduation migrate --apply --export-challenge` → **STOP: Aryeh signs the challenge out-of-band** (production authorizer, D20) → `--authorization <file>` → expect `mode: applied`, exit 0; `readVault()` over the graduated copy reports **zero errors** (the open-type-system reader-compatibility gate, live).
-
-- [ ] **Step 6: Build the derived state + THE SEARCH INDEX.**
+- [ ] **Step 5: Operator-gated apply** (from `$ROOT/work`; both commands spelled in full — `--authorization` without `--apply` would silently run a preview):
 
 ```bash
-brain db rebuild --json   | tee "$ROOT/db-rebuild-1.json"     # projections from the graduated copy
+brain graduation migrate --apply --export-challenge > "$ROOT/challenge.json"   # emits the challenge JSON; exits 6 (action-required) BY DESIGN
+# STOP: Aryeh signs $ROOT/challenge.json out-of-band (production authorizer, D20) → $ROOT/authorization.json
+brain graduation migrate --apply --authorization "$ROOT/authorization.json"    # expect: mode: applied, exit 0
+```
+
+Then `readVault()` over the graduated copy reports **zero errors** (the open-type-system reader-compatibility gate, live).
+
+- [ ] **Step 6: Build the derived state + THE SEARCH INDEX** (from `$ROOT/drive` — its config's `vault.path` points at `$COPY`, so projections and the index come from the graduated corpus).
+
+```bash
+cd "$ROOT/drive"
+brain db rebuild --json    | tee "$ROOT/db-rebuild-1.json"    # projections from the graduated copy
 brain index rebuild --json | tee "$ROOT/index-rebuild-1.json" # chunk → embed → write → verify → activate, full corpus
-brain index status --json  | tee "$ROOT/index-status.json"    # expect: 0 stale, 0 missing (empty title-only stubs report benign `empty`)
+brain index status --json  | tee "$ROOT/index-status.json"    # expect: 0 stale; `missing` equals the count of empty title-only stubs (never activated by design — the activate empty-note policy); there is no `empty` status
 brain index verify --json  | tee "$ROOT/index-verify.json"    # expect: consistent
 ```
 
 Expected: `notesIndexed` ≈ the migrated count; note `chunksWritten` and `durationMs` (observe chunks/s against the §scale 50/s figure — record, don't gate; the formal gate is the synthetic scale bench, #60).
 
-- [ ] **Step 7: Rebuild-consistency slice (#60).** Run `brain db rebuild` a second time and byte-compare the projection dump (`brain db status --json` + a `sqlite3 .dump` diff of projection tables); run `brain index rebuild` a second time and assert the same `notesIndexed`/`chunksWritten` and an `index verify` pass — the chunk-ID set is deterministic by contract §1 (embedding vector bytes may differ; identity, not bytes, is the index's determinism guarantee).
+- [ ] **Step 7: Rebuild-consistency slice (#60)** (from `$ROOT/drive`). Run `brain db rebuild` a second time and compare **deterministic SELECTs**, not a raw `.dump` (which is guaranteed to differ: `vault_schema_migrations.applied_at` is wall-clock, and a `db rebuild` wipes activation fences that only the subsequent `index rebuild` restores): diff ordered SELECTs of the rebuild-owned columns of `notes` (excluding `active_generation`/`active_generation_id`) plus `note_identity_keys` and `note_links`, and `brain db status --json` counts. Then run `brain index rebuild` a second time and assert the same `notesIndexed`/`chunksWritten` and an `index verify` pass — the chunk-ID set is deterministic by contract §1 (embedding vector bytes may differ; identity, not bytes, is the index's determinism guarantee). **Order is load-bearing:** the second `db rebuild` must be followed by the second `index rebuild` before Step 8, or the wiped fences leave the index unreadable.
 
-- [ ] **Step 8: The eval gate.**
+- [ ] **Step 8: The eval gate** (from `$ROOT/drive`).
 
 ```bash
 brain index eval \
-  --queries "$ROOT/COPY/00_System/retrieval-eval/queries.json" \
-  --labels  "$ROOT/COPY/00_System/retrieval-eval/labels.json" \
+  --queries "$COPY/00_System/retrieval-eval/queries.json" \
+  --labels  "$COPY/00_System/retrieval-eval/labels.json" \
   --json | tee "$ROOT/index-eval-1.json"
 ```
 
-(`COPY` = the graduated copy path from Step 3's scan state; the eval set graduated along with the vault.) Expected: exit 0, `pass: true`, recall@10 ≥ 0.85 AND MRR ≥ 0.7.
+(The eval set genuinely graduated along with the vault — Step 0 merged it into main-vault BEFORE Step 3's clone, so the copy carries it.) Expected: exit 0, `pass: true`, recall@10 ≥ 0.85 AND MRR ≥ 0.7.
 
 **If below threshold:** tune **config-owned** values only — `retrieval.rrf.k` within [1,1000], `retrieval.rrf.weights.{fts,vector}` within bounds (vector > 0), `--k` stays 10 for the gate — in the drive's `brain.config.yaml`, then re-run `brain index eval` (weights are query-time; **no re-embed needed**). If FTS quality is the culprit, `retrieval.fts.enabled: false` selects the §6 vector-only fallback (expect `degradedQueries = queries`). Record every tuning iteration's JSON in `$ROOT`. Never touch phase code to pass the gate; a genuine engine defect becomes an issue + its own PR.
 
-- [ ] **Step 9: Query smoke — the #151 acceptance sentence.**
+- [ ] **Step 9: Query smoke — the #151 acceptance sentence** (from `$ROOT/drive`).
 
 ```bash
 brain query "who runs the Cloud team" --json          # expect: team-cloud surfaced, grounded answer
@@ -899,7 +1012,7 @@ Post on #151: preview counts, applied result, eval metrics, query answers → cl
 ## Verification (plan-level)
 
 1. `pnpm -r build && pnpm -r test && node tools/gen-cli-contract.ts --check` green on `main` after Tasks 1–3.
-2. `brain index eval` on the drive copy: exit 0, recall@10 ≥ 0.85, MRR ≥ 0.7 (artifacts in `$ROOT`).
+2. `brain index eval` on the drive copy (the Task-5 `brain()` function — `node apps/cli/dist/bin.js`): exit 0, recall@10 ≥ 0.85, MRR ≥ 0.7 (artifacts in `$ROOT`).
 3. `brain query "who runs the Cloud team"` answers from `team-cloud` (#151 acceptance).
 4. main-vault HEAD unchanged across the drive.
 5. #151 closed with the recorded run; #60 updated.
@@ -913,4 +1026,4 @@ Post on #151: preview counts, applied result, eval metrics, query answers → cl
 
 ## Rollback
 
-- Tasks 1–3 revert cleanly (one registry row, one schema, one fixture line, two new modules, import-path changes). Index state on the copy is disposable derived state — delete `lancedb.dir` wholesale. The drive root is a copy; main-vault is untouched by construction. The vault eval set is additive.
+- Tasks 1–3 revert cleanly (one registry row, one schema, one fixture line, the two Phase-5 lint-gate edits, two new modules, one barrel import, import-path + fixture-URL changes). Index state on the copy is disposable derived state — delete `lancedb.dir` wholesale. The drive root is a copy; main-vault is untouched by construction (the eval set lands via its own reviewed vault PR BEFORE the drive, not during it). The vault eval set is additive.
