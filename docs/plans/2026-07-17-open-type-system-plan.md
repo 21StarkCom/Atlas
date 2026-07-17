@@ -339,7 +339,7 @@ function inferType(d: Doc): TypeResult {
 In `planBootstrapMigration`, replace the refusal loop (the `for (const d of docs)` block that pushes `unsupported-schema-version` and `unknown-type`) with a total build of `migrable`:
 
 ```typescript
-  const refused: RefusalEntry[] = []; // retained in the shape; now always empty for shape reasons
+  const refused: RefusalEntry[] = []; // retained in the shape; now always empty
   const migrable: { doc: Doc; type: { value: string; source: NoteOutcome["type"]["source"] } }[] = [];
   for (const d of docs) {
     const t = inferType(d);
