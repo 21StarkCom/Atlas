@@ -29,6 +29,14 @@ export interface GraduationScanState {
    * Optional so pre-Task-5 sidecars read back cleanly.
    */
   readonly credentialPaths?: readonly string[];
+  /**
+   * How many findings are HISTORY-ONLY (git-history commits, no working-tree file). Apply scrubs the
+   * working tree ONLY, and the copy retains its full `.git` history, so a history-only credential
+   * would leak into the graduated vault. Any non-zero count makes `graduation migrate` hard-fail
+   * (scan-gate-open) even when `credentialPaths` records the working-tree handshake. Optional so
+   * pre-Task-5 sidecars read back cleanly (absent ⇒ 0 ⇒ governed by the credentialPaths check).
+   */
+  readonly historyCredentialCount?: number;
 }
 
 /** The scan-state sidecar path (next to the ledger DB, in a `graduation/` subdir). */

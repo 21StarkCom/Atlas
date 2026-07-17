@@ -130,3 +130,37 @@ describe("full-taxonomy reader-compat gate (Task 5.4, #151)", () => {
     expect(snap.errors.filter((e) => e.kind === "identity-collision")).toEqual([]);
   });
 });
+
+/**
+ * The serializer must QUOTE ambiguous managed scalars: a numeric-looking `type: "42"` (guards
+ * fixture's `MalformedType.md`, from input `type: 42`) has to serialize QUOTED so YAML re-parses it
+ * as a STRING — an unquoted `type: 42` re-parses as a NUMBER and the strict reader's `type: z.string()`
+ * rejects it (`invalid-frontmatter`). This gate FAILS if the serializer ever emits scalars raw.
+ */
+describe("guards fixture reader-compat: ambiguous managed scalars stay strings (#151)", () => {
+  let gRoot: string;
+  let gCopy: string;
+  beforeEach(() => {
+    gRoot = mkdtempSync(join(tmpdir(), "atlas-guards-reader-"));
+    gCopy = join(gRoot, "copy");
+    cpSync(join(FIXTURES, "guards", "input"), gCopy, { recursive: true });
+  });
+  afterEach(() => rmSync(gRoot, { recursive: true, force: true }));
+
+  it("the applied guards copy passes readVault() with ZERO errors — numeric `type: 42` survives as a string", async () => {
+    const plan = planBootstrapMigration(readTree(gCopy), { bootstrapTimestamp: TS });
+    applyBootstrapMigration(gCopy, plan, OPTS);
+
+    // Proof the fix is what's under test: the numeric-looking type serialized QUOTED on disk, so a
+    // re-parse yields the STRING "42" (an unquoted `type: 42` would be a number → reader rejects).
+    const malformed = readFileSync(join(gCopy, "MalformedType.md"), "utf8");
+    expect(malformed).toContain('type: "42"');
+    const { frontmatter } = splitFrontmatter(malformed);
+    const fm = parseYaml(frontmatter!) as Record<string, unknown>;
+    expect(fm.type).toBe("42"); // STRING, not number 42
+
+    const snap = await readVault(cfgFor(gCopy));
+    expect(snap.errors, `unexpected reader errors: ${JSON.stringify(snap.errors)}`).toEqual([]);
+    expect(snap.notes.length).toBe(4); // every guard note parsed (none dropped on an invalid-frontmatter)
+  });
+});

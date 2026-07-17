@@ -1,6 +1,6 @@
 ---
 id: 42-malformed-type-note
-type: 42
+type: "42"
 schema_version: 1
 title: Malformed Type Note
 created: 2026-07-12T00:00:00Z

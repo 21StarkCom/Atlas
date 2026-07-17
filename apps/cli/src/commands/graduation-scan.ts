@@ -83,8 +83,11 @@ async function graduationScan(ctx: RunContext): Promise<number> {
     // `graduation migrate` can SKIP + quarantine exactly these instead of hard-failing a blocked
     // gate; deterministic + deduped (history-only hits have no working-tree path to skip).
     const credentialPaths = [...new Set(wt.hits.map((h) => h.file))].sort();
+    // History-only findings (in past commits, no working-tree file). Apply scrubs only the working
+    // tree, so any non-zero count makes migrate hard-fail even with the credentialPaths handshake.
+    const historyCredentialCount = findings.filter((f) => f.location === "history").length;
     // Persist the scan-state gate the downstream (flag-free) graduation commands read.
-    writeScanState(scanStatePath(ledgerDbPath(ctx)), { copy, copyHead, gate, scannedAt: new Date().toISOString(), findingCount: findings.length, credentialPaths });
+    writeScanState(scanStatePath(ledgerDbPath(ctx)), { copy, copyHead, gate, scannedAt: new Date().toISOString(), findingCount: findings.length, credentialPaths, historyCredentialCount });
 
     const out = {
       command: "graduation scan",

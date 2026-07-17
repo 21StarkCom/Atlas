@@ -67,9 +67,9 @@ export function readOriginalInputs(copyDir: string): MigrationInputFile[] {
  * disk), then the preserved unknown frontmatter (verbatim original order), then the body with
  * wikilinks applied. A blank line always separates the frontmatter block from the body.
  *
- * YAML-safe: array/object managed values (aliases/tags/related/source) are emitted via `yamlStringify`;
- * scalars (id/type/schema_version/title/created/updated/status/confidence/classification/
- * declaredSensitivity) stay inline.
+ * YAML-safe: EVERY managed value — scalars AND array/object values (aliases/tags/related/source) —
+ * is emitted via `yamlStringify`, so ambiguous scalars are quoted (a numeric/boolean-looking
+ * `type`/`title` stays a STRING on re-parse; a raw `type: 42` would be rejected by the strict reader).
  *
  * EVERY linkRewrite is applied (`from` → `to`), across all three resolutions: a `rewritten` link
  * becomes a canonical `[[id|display]]` wikilink (it resolves); a `flattened-unresolved`/
@@ -82,9 +82,10 @@ export function serializeMigratedNote(originalRaw: string, outcome: NoteOutcome)
   let fm = "---\n";
   for (const k of MANAGED_FRONTMATTER) {
     if (!(k in im)) continue;
-    const v = im[k];
-    if (Array.isArray(v) || (v !== null && typeof v === "object")) fm += yamlStringify({ [k]: v });
-    else fm += `${k}: ${String(v)}\n`;
+    // ALL managed values route through `yamlStringify` so ambiguous scalars are quoted (e.g. a
+    // numeric-looking `type: "42"` / boolean-looking `title: "true"` stay STRINGS on re-parse).
+    // A raw `${k}: ${String(v)}` would emit `type: 42`, which the strict reader rejects as a number.
+    fm += yamlStringify({ [k]: im[k] });
   }
   if (outcome.preservedFrontmatter && outcome.preservedFrontmatter.length > 0 && frontmatter !== null) {
     const orig = parseYaml(frontmatter) as Record<string, unknown>;

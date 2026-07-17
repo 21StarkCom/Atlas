@@ -70,7 +70,7 @@ function seedCleanGate(): string {
  * clean note. Passing `credentialPaths` records the Task-5.1 handshake (migrate proceeds, quarantining
  * exactly those paths); omitting it models a pre-Task-5 sidecar (migrate must hard-fail).
  */
-function seedBlockedGate(credentialPaths?: readonly string[]): string {
+function seedBlockedGate(credentialPaths?: readonly string[], historyCredentialCount = 0): string {
   const copy = join(root, "grad-copy");
   mkdirSync(join(copy, "People"), { recursive: true });
   mkdirSync(join(copy, "Secrets"), { recursive: true });
@@ -84,8 +84,9 @@ function seedBlockedGate(credentialPaths?: readonly string[]): string {
   execFileSync("git", ["-C", copy, "commit", "-q", "-m", "seed"]);
   const copyHead = execFileSync("git", ["-C", copy, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   writeScanState(scanStatePath(join(cwd, ".atlas", "atlas.db")), {
-    copy, copyHead, gate: "blocked", scannedAt: "2026-07-16T00:00:00Z", findingCount: 1,
+    copy, copyHead, gate: "blocked", scannedAt: "2026-07-16T00:00:00Z", findingCount: 1 + historyCredentialCount,
     ...(credentialPaths ? { credentialPaths } : {}),
+    ...(historyCredentialCount ? { historyCredentialCount } : {}),
   });
   return copy;
 }
@@ -178,5 +179,16 @@ describe("brain graduation migrate (preview + gates)", () => {
     const r = await cli(["graduation", "migrate", "--json"]);
     expect(r.code).toBe(2);
     expect(JSON.parse(r.out).code).toBe("scan-gate-open");
+  });
+
+  it("blocked gate with a HISTORY-ONLY credential ⇒ scan-gate-open (exit 2), even with credentialPaths", async () => {
+    // A working-tree credential (recorded in credentialPaths, deletable by apply) AND a history-only
+    // credential (in a past commit apply never scrubs). The handshake must NOT unblock migrate here.
+    seedBlockedGate(["Secrets/creds.md"], 1);
+    const r = await cli(["graduation", "migrate", "--json"]);
+    expect(r.code).toBe(2);
+    const out = JSON.parse(r.out);
+    expect(out.code).toBe("scan-gate-open");
+    expect(out.message).toMatch(/history-only/);
   });
 });

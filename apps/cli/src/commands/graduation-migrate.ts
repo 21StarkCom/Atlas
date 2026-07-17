@@ -55,6 +55,11 @@ function resolveCopy(ctx: RunContext): { copy: string; head: string; bootstrapTi
   // blocked gate with NO recorded paths (pre-Task-5 sidecar) still hard-fails — backward-compatible.
   const credentialPaths = [...(state.credentialPaths ?? [])];
   if (state.gate !== "clean" && credentialPaths.length === 0) throw new CliError({ code: "scan-gate-open", message: `the graduation scan gate is ${state.gate}; resolve findings before migrating`, hint: "Resolve the quarantined findings and re-scan.", exitCode: EXIT.CONFIG });
+  // HISTORY-ONLY credentials live in past commits, which apply NEVER scrubs — it mutates only
+  // working-tree files (the ones credentialPaths records + deletes) and the copy keeps its full
+  // `.git` history. A blocked gate with ANY history-only finding therefore still hard-fails: the
+  // working-tree handshake can't cover a secret buried in history. (Absent ⇒ 0 ⇒ pre-Task-5 state.)
+  if (state.gate !== "clean" && (state.historyCredentialCount ?? 0) > 0) throw new CliError({ code: "scan-gate-open", message: `the graduation scan found ${state.historyCredentialCount} history-only credential finding(s); apply scrubs only the working tree, so migration cannot proceed`, hint: "Purge the credentials from git history (e.g. git filter-repo) and re-scan.", exitCode: EXIT.CONFIG });
   if (!existsSync(state.copy)) throw new CliError({ code: "config-invalid", message: `the scanned copy no longer exists at ${state.copy}`, hint: "Re-run `brain graduation scan`.", exitCode: EXIT.CONFIG });
   const head = execFileSync("git", ["-C", state.copy, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   // §6.1 fallback timestamp: the copy HEAD's committer date (deterministic; git-per-note dates layer on later).
