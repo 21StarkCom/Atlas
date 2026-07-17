@@ -47,6 +47,17 @@ git -C ~/Code/21Stark/atlas switch -c feat/open-type-system origin/main 2>/dev/n
 git -C ~/Code/21Stark/atlas branch --show-current   # MUST print feat/open-type-system
 ```
 
+Then run the dependency preflight (fail-fast — Task 1 immediately invokes `tsc`/`vitest`):
+
+```bash
+node -v | grep -qE 'v(2[4-9]|[3-9][0-9])' || { echo 'Node 24+ required'; exit 1; }
+command -v /opt/homebrew/bin/pnpm >/dev/null || { echo 'pnpm missing'; exit 1; }
+test -x node_modules/.bin/tsc && test -x node_modules/.bin/vitest \
+  || /opt/homebrew/bin/pnpm install --frozen-lockfile   # populate node_modules on a clean checkout
+test -x node_modules/.bin/tsc && test -x node_modules/.bin/vitest \
+  || { echo 'tsc/vitest binaries missing after install'; exit 1; }
+```
+
 All Task 1-5 commits land on this branch; never commit on `main`.
 
 ---
@@ -340,16 +351,23 @@ Delete the now-unused `refusedPaths` set and the `supportedMax` refusal check. K
 
 - [ ] **Step 5: Point the audit at the registry**
 
-In `apps/cli/src/graduation/audit.ts`, replace line 21 and its use:
+In `apps/cli/src/graduation/audit.ts`, replace the `GRADUATION_KNOWN_TYPES` definition (line 21) with a registry-derived one — no `isRegisteredType` import (the open rule needs no membership test):
 
 ```typescript
-import { isRegisteredType } from "@atlas/contracts";
-// GRADUATION_KNOWN_TYPES is retained ONLY for back-compat exports; the audit now
-// treats any registered OR asserted type as known (open system). An "unknown-type"
-// inventory entry is emitted only for a genuinely empty/absent type.
+import { STRICT_TYPES, LOOSE_TYPES } from "@atlas/contracts";
+
+/** Back-compat export, now DERIVED from the registry (open system). */
+export const GRADUATION_KNOWN_TYPES: readonly string[] = [...STRICT_TYPES, ...LOOSE_TYPES];
 ```
 
-Update the `const known = new Set<string>(GRADUATION_KNOWN_TYPES)` usage (line ~72) so a note is `unknown-type` only when its asserted type is empty/absent (not when it is merely unregistered): replace the membership test with `type !== "" ` acceptance — a note with any non-empty `type` is known; keep the `missing-type` category for absent types.
+Then replace the `const known = new Set<string>(GRADUATION_KNOWN_TYPES)` usage (line ~72) and every `known.has(type)` membership test with the open rule — any non-empty asserted type is known; only a genuinely empty/absent type is inventoried:
+
+```typescript
+// Open system: registration no longer gates the audit. Any non-empty asserted type
+// is "known" (the migrator keeps unknown types as loose, never refused); only an
+// empty/absent type falls through to the `missing-type` category.
+const isKnown = (type: string): boolean => type.trim() !== "";
+```
 
 - [ ] **Step 6: Run the new + existing migrate tests**
 
@@ -405,6 +423,17 @@ describe("graduation migrate — open type system (identity + links)", () => {
     expect(ids).toEqual(["repo-dup", "repo-dup-2"]);
   });
 
+  it("a suffix never collides with an existing explicit id (reserve-all-first)", () => {
+    const plan = planBootstrapMigration([
+      note("a/dup.md", "id: repo-dup\ntype: repo\ntitle: Dup A"),
+      note("b/dup.md", "id: repo-dup\ntype: repo\ntitle: Dup B"),
+      note("c/two.md", "id: repo-dup-2\ntype: repo\ntitle: Two"),
+    ], { bootstrapTimestamp: TS });
+    expect(plan.quarantined).toEqual([]);
+    const ids = plan.notes.map((n) => n.newId).sort();
+    expect(ids).toEqual(["repo-dup", "repo-dup-2", "repo-dup-3"]);
+  });
+
   it("a note with an unresolved wikilink migrates with the link flattened (no incompatible-link quarantine)", () => {
     const plan = planBootstrapMigration([
       note("x/a.md", "id: note-a\ntype: note\ntitle: A", "See [[Nonexistent Target]] here.\n"),
@@ -444,9 +473,13 @@ In `planBootstrapMigration` Pass 1, replace the `duplicate-identity` quarantine 
   // from the title (that would produce `repo-dup-b`, breaking the numeric-suffix rule).
   // `assigned` is the shared reservation set also consulted by Pass-2 derivation.
   const supersededExplicit = new Map<string, string>(); // path → its disambiguated explicit id
+  // Phase A: reserve EVERY distinct explicit id FIRST, so a later-allocated suffix can
+  // never collide with some other note's bare explicit id (e.g. an existing `repo-dup-2`).
+  for (const id of explicitById.keys()) assigned.add(id);
+  // Phase B: for each shared id the first owner (sorted path) keeps the bare id; each
+  // later owner gets the next free numeric suffix against the COMPLETE reservation set.
   for (const [id, paths] of explicitById) {
     const sorted = [...paths].sort();
-    assigned.add(id); // first owner keeps the bare id
     let n = 2;
     for (const p of sorted.slice(1)) {
       let candidate = `${id}-${n}`;
@@ -560,11 +593,11 @@ describe("graduation migrate — strict field-fill + normalized report", () => {
     expect(rep?.filled).toEqual(expect.arrayContaining(["status", "confidence", "classification", "source"]));
   });
 
-  it("declaredSensitivity derives from classification: public→public, else internal", () => {
+  it("declaredSensitivity derives from classification, failing up: public→public, personal→confidential", () => {
     const pub = planBootstrapMigration([note("a.md", "id: note-a\ntype: note\ntitle: A\nclassification: public")], { bootstrapTimestamp: TS });
     expect(pub.notes[0]!.initializedFrontmatter.declaredSensitivity).toBe("public");
-    const inter = planBootstrapMigration([note("b.md", "id: note-b\ntype: note\ntitle: B\nclassification: personal")], { bootstrapTimestamp: TS });
-    expect(inter.notes[0]!.initializedFrontmatter.declaredSensitivity).toBe("internal");
+    const conf = planBootstrapMigration([note("b.md", "id: note-b\ntype: note\ntitle: B\nclassification: personal")], { bootstrapTimestamp: TS });
+    expect(conf.notes[0]!.initializedFrontmatter.declaredSensitivity).toBe("confidential");
   });
 
   it("a loose 'research' note is NOT force-filled with strict base fields", () => {
@@ -580,6 +613,18 @@ describe("graduation migrate — strict field-fill + normalized report", () => {
     expect(fm.confidence).toBe("medium"); // whitespace → default
     const rep = plan.normalized.find((n) => n.path === "Repos/m.md");
     expect(rep?.coerced).toEqual(expect.arrayContaining(["aliases", "status", "confidence"]));
+  });
+
+  it("strict confidential/restricted classifications are PRESERVED, not downgraded", () => {
+    const plan = planBootstrapMigration([
+      note("Repos/r.md", "id: repo-r\ntype: repo\ntitle: R\nclassification: restricted"),
+      note("Repos/c.md", "id: repo-c\ntype: repo\ntitle: C\nclassification: confidential"),
+    ], { bootstrapTimestamp: TS });
+    const r = plan.notes.find((n) => n.newId === "repo-r")!.initializedFrontmatter;
+    expect(r.classification).toBe("restricted");
+    expect(r.declaredSensitivity).toBe("restricted");
+    const c = plan.notes.find((n) => n.newId === "repo-c")!.initializedFrontmatter;
+    expect(c.declaredSensitivity).toBe("confidential");
   });
 });
 ```
@@ -633,15 +678,26 @@ Replace the `initialized` object build with a tier-aware version using the regis
     // the strict reader always receives a well-formed note. Driven off the required
     // set so no field (e.g. `source`) can be silently omitted.
     if (def.tier === "strict") {
-      const ENUM = { status: ["active", "archived", "draft"], confidence: ["low", "medium", "high"], classification: ["public", "internal", "personal"] } as const;
-      const DEFAULT: Record<string, string> = { status: "active", confidence: "medium", classification: "internal", source: doc.path };
-      for (const k of ["status", "confidence", "classification", "source"] as const) {
+      const ENUM = { status: ["active", "archived", "draft"], confidence: ["low", "medium", "high"] } as const;
+      const DEFAULT: Record<string, string> = { status: "active", confidence: "medium", source: doc.path };
+      for (const k of ["status", "confidence", "source"] as const) {
         const raw = doc.fm[k];
         if (raw === undefined) { initialized[k] = DEFAULT[k]; filled.push(k); }
         else if (typeof raw !== "string" || raw.trim() === "" || (k in ENUM && !ENUM[k as keyof typeof ENUM].includes(raw.trim() as never))) {
           initialized[k] = DEFAULT[k]; coerced.push(k);
         } else initialized[k] = raw.trim();
       }
+      // classification is handled apart from the enum loop: recognized values —
+      // INCLUDING `confidential`/`restricted` — are preserved; a non-empty malformed
+      // value fails UP to `confidential`, never down to `internal` (no silent
+      // downgrade). Absent → `internal` floor. declaredSensitivity is then re-derived
+      // from this coerced value below.
+      const RECOGNIZED_CLASS = ["public", "internal", "personal", "confidential", "restricted"];
+      const rawClass = doc.fm.classification;
+      if (rawClass === undefined) { initialized.classification = "internal"; filled.push("classification"); }
+      else if (typeof rawClass !== "string" || rawClass.trim() === "" || !RECOGNIZED_CLASS.includes(rawClass.trim().toLowerCase())) {
+        initialized.classification = "confidential"; coerced.push("classification"); // fail up
+      } else initialized.classification = rawClass.trim().toLowerCase();
       for (const k of ["aliases", "tags", "related"] as const) {
         const raw = doc.fm[k];
         if (raw === undefined) { initialized[k] = []; filled.push(k); }
@@ -702,7 +758,8 @@ git commit -m "feat(graduation): strict base-field judgement defaults + classifi
 **Files:**
 - Modify: `docs/specs/fixtures/bootstrap-migration/*` (update expectations for total behavior)
 - Create: `docs/specs/fixtures/bootstrap-migration/full-taxonomy/` (a fixture exercising all 11 types + one unknown)
-- Test: existing migrate/apply fixture tests
+- Modify: `apps/cli/test/graduation-fixtures.test.ts` (wire the full-taxonomy fixture into the loop)
+- Create: `apps/cli/test/full-taxonomy-reader.test.ts` (the reader-compatibility gate)
 
 **Interfaces:**
 - Consumes: everything from Tasks 1-4.
@@ -733,8 +790,9 @@ Expected: PASS.
 - [ ] **Step 5: Commit the fixtures**
 
 ```bash
-git add docs/specs/fixtures/bootstrap-migration
-git commit -m "test(graduation): fixtures for total open-type ingestion incl. full-taxonomy (#151)"
+git add docs/specs/fixtures/bootstrap-migration apps/cli/test
+git status --short apps/cli/test    # MUST be empty after add — every fixture-test + reader-gate edit staged
+git commit -m "test(graduation): fixtures + reader-compat gate for total open-type ingestion (#151)"
 ```
 
 - [ ] **Step 6: Live real-vault acceptance (the gate)**
@@ -744,22 +802,39 @@ With the production broker running against a fresh graduation copy (see the 2026
 ```bash
 cd <graduation-work-dir>
 ATLAS_TEST_MODE=1 ATLAS_CUSTODY_TEST_DIR=<custody> \
-  node ~/Code/21Stark/atlas/apps/cli/dist/bin.js graduation scan --source ~/Code/Vaults/main-vault --copy <copy> --json
+  node ~/Code/21Stark/atlas/apps/cli/dist/bin.js graduation scan --source ~/Code/Vaults/main-vault --copy <copy> --json > scan.json
 ATLAS_TEST_MODE=1 ATLAS_CUSTODY_TEST_DIR=<custody> \
-  node ~/Code/21Stark/atlas/apps/cli/dist/bin.js graduation migrate --json | python3 -c "import json,sys; d=json.load(sys.stdin); print('refused', len(d['refused']), '| migrating', len(d['notes']), '| quarantined', len(d['quarantined']), '| normalized', len(d['normalized']))"
+  node ~/Code/21Stark/atlas/apps/cli/dist/bin.js graduation migrate --json > preview.json
+ATLAS_TEST_MODE=1 ATLAS_CUSTODY_TEST_DIR=<custody> \
+  node ~/Code/21Stark/atlas/apps/cli/dist/bin.js graduation migrate --apply --out <migrated-copy> --json > applied.json
+# Strict-reader gate: the graduated vault MUST rebuild with zero errors.
+node ~/Code/21Stark/atlas/apps/cli/dist/bin.js vault validate --source <migrated-copy> --json > reader.json
 ```
 
-Then APPLY the plan and run the strict reader over the result — the migrate summary alone can hide notes missing `source` or carrying malformed fields:
+Then run a FAIL-FAST conservation check over the captured JSON — the migrate summary alone can hide a silently omitted note:
 
 ```bash
-ATLAS_TEST_MODE=1 ATLAS_CUSTODY_TEST_DIR=<custody> \
-  node ~/Code/21Stark/atlas/apps/cli/dist/bin.js graduation migrate --apply --out <migrated-copy> --json
-# Strict-reader gate: the graduated vault MUST rebuild with zero errors.
-node ~/Code/21Stark/atlas/apps/cli/dist/bin.js vault validate --source <migrated-copy> --json \
-  | python3 -c "import json,sys; d=json.load(sys.stdin); assert not d['errors'], d['errors']; print('reader OK', d.get('noteCount'))"
+python3 - <<'PY'
+import json
+scan = json.load(open("scan.json")); prev = json.load(open("preview.json"))
+appl = json.load(open("applied.json")); rdr = json.load(open("reader.json"))
+scanned = len(scan["notes"])
+written = len(appl["notes"])
+quar = len(prev["quarantined"])
+assert prev["refused"] == [], prev["refused"]
+assert all(q["category"] == "detected-credential" for q in prev["quarantined"]), prev["quarantined"]
+assert not rdr["errors"], rdr["errors"]
+assert scanned == written + quar, f"conservation FAILED: scanned={scanned} written={written} quarantined={quar}"
+# path-set conservation: every scanned path is written or credential-quarantined
+qpaths = {q["path"] for q in prev["quarantined"]}
+wpaths = {n["path"] for n in appl["notes"]}
+missing = {n["path"] for n in scan["notes"]} - wpaths - qpaths
+assert not missing, f"unexplained omissions: {sorted(missing)}"
+print(f"OK refused=0 written={written} quarantined={quar} reader-errors=0 scanned={scanned}")
+PY
 ```
 
-Expected: `refused 0`, `migrating` ≈ full vault (200+), `quarantined` = only secret-bearing notes, reader errors `0`, and exact conservation — `scanned == written + credential-quarantines` with no unexplained omissions. Record the numbers in a comment on #151.
+Expected: the check prints `OK`, `written` ≈ full vault (200+), `quarantined` = only secret-bearing notes, and exact count + path-set conservation holds. Paste the printed line into a comment on #151.
 
 - [ ] **Step 7: Open the PR + post the live result**
 
