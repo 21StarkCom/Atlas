@@ -1,6 +1,6 @@
 /**
  * `retrieval-eval.test` (LIVE) — the Task 3.6 end-to-end acceptance: the eval harness
- * (`tools/retrieval-eval.ts`) run against the `source-heavy` fixture vault through the
+ * (`@atlas/lancedb-index`'s `src/eval.ts`) run against the `source-heavy` fixture vault through the
  * REAL Task 3.3 retriever under LIVE embeddings, asserting the graduation thresholds
  * (acceptance-thresholds.md §retrieval: recall@10 ≥ 0.85, MRR ≥ 0.7).
  *
@@ -8,7 +8,7 @@
  * provisioned host (egress broker daemon + Gemini credentials) with an INDEXED vault.
  * Point it at that vault with `ATLAS_EVAL_VAULT=/abs/path/to/vault` (already migrated +
  * `brain index rebuild`-ed). CI runs the offline metric-math test
- * (`tools/retrieval-eval.test.ts`) instead; this is the nightly/graduation path.
+ * (`packages/lancedb-index/test/eval.test.ts`) instead; this is the nightly/graduation path.
  *
  * The retriever is wired through the shipped `brain query <text> --no-answer --json`
  * command — the real retrieve → fuse path — so the eval scores exactly what production
@@ -18,7 +18,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { runRetrievalEval, type EvalQuerySet, type EvalLabelSet } from "../../../tools/retrieval-eval.js";
+import { runRetrievalEval, type EvalQuerySet, type EvalLabelSet } from "@atlas/lancedb-index";
 
 const LIVE = process.env.ATLAS_LIVE_GEMINI === "1";
 const REPO_ROOT = join(import.meta.dirname, "..", "..", "..");

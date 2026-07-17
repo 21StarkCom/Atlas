@@ -7,7 +7,7 @@
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { runRetrievalEval, type EvalQuerySet, type EvalLabelSet } from "./retrieval-eval.js";
+import { runRetrievalEval, type EvalQuerySet, type EvalLabelSet } from "../src/eval.js";
 
 /** A stubbed retriever from a fixed `text → ranked note ids` map. */
 function stubRetriever(map: Record<string, string[]>): (text: string) => Promise<readonly string[]> {
@@ -69,8 +69,8 @@ describe("runRetrievalEval — metric math (Task 3.6)", () => {
   });
 
   it("the labeled fixture set is internally consistent", () => {
-    const qset = JSON.parse(readFileSync(new URL("../fixtures/retrieval-eval/queries.json", import.meta.url), "utf8")) as EvalQuerySet;
-    const lset = JSON.parse(readFileSync(new URL("../fixtures/retrieval-eval/labels.json", import.meta.url), "utf8")) as EvalLabelSet;
+    const qset = JSON.parse(readFileSync(new URL("../../../fixtures/retrieval-eval/queries.json", import.meta.url), "utf8")) as EvalQuerySet;
+    const lset = JSON.parse(readFileSync(new URL("../../../fixtures/retrieval-eval/labels.json", import.meta.url), "utf8")) as EvalLabelSet;
 
     expect(qset.version).toBe(lset.version); // versioned in lockstep
     expect(qset.queries.length).toBeGreaterThan(0);
