@@ -21,7 +21,7 @@
 - Commits authored `Aryeh Stark <aryeh@21stark.com>` (per-repo git config already set).
 - Branch + PR for everything; every review finding lands on the PR. Merge to `main` once CI green (no canary).
 - Graduation stays DETERMINISTIC: pure function of input vault + scan-state + config, no wall-clock, no per-note LLM/egress calls. Byte-exact fixtures under `docs/specs/fixtures/bootstrap-migration/` remain the contract.
-- **Secret boundary (in-run, revised):** a detected credential still quarantines and is never written to the graduated vault. This plan **does** touch the scan/state seam: `graduation scan` persists the set of credential-bearing paths into scan state, and `graduation migrate` consumes it — skipping exactly those paths and emitting one `detected-credential` quarantine entry per skipped path. The scan *engine* (`graduation/scan.ts` detection rules) is unchanged; only the persisted state shape + the migrate/scan-gate handshake change. (Operator-approved scope expansion, 2026-07-17.)
+- **Secret boundary (in-run, revised):** a detected credential still quarantines and is never written to the graduated vault. The existing scan engine **already AEAD-quarantines each offending file** — it removes the plaintext from the working-tree copy at scan time (`graduation-scan.ts` `~:67-79`), so a credential-bearing note is physically absent from `COPY` before migrate runs. This plan adds only the *bookkeeping* seam: `graduation scan` additionally persists the set of credential-bearing paths (`credentialPaths`) into scan state, and `graduation migrate` consumes it — recording one `detected-credential` quarantine entry per such path so the report is complete and conservation balances. The scan *engine* + its AEAD quarantine are unchanged; only the persisted state shape + the migrate/scan-gate handshake change. Because the plaintext is already gone from the copy, migrate "skips" nothing on disk — it never sees those files in its input; it only accounts for them in the report. (Operator-approved scope expansion, 2026-07-17.)
 - Do NOT modify the spec-locked mutation-policy table (`policies/mutation-policy.ts`, `workflow-risk-contract.md`) — out of scope (spec non-goal).
 - Exit codes unchanged: `0` ok · `1` validation · `2` config · `3` secret-scan · `4` internal · `5` usage · `6` action-required (apply/rollback authorization).
 
@@ -407,16 +407,15 @@ function inferType(d: Doc): TypeResult {
 }
 ```
 
-Replace the refusal loop (`~:163-177`) with a total `migrable` build — no `unknown-type`/`unsupported-schema-version` refusals; keep `supportedMax` for Task 4's coercion reporting, sourced from `SCHEMA_VERSION`:
+Replace the refusal loop (`~:163-177`) with a total `migrable` build — no `unknown-type`/`unsupported-schema-version` refusals:
 
 ```typescript
   const refused: RefusalEntry[] = []; // retained in the shape; now always empty
-  const supportedMax = opts.supportedSchemaMax ?? SCHEMA_VERSION;
   const migrable: { doc: Doc; type: TypeResult }[] = [];
   for (const d of docs) migrable.push({ doc: d, type: inferType(d) });
 ```
 
-Delete the now-unused `refusedPaths` set, the `unsupported-schema-version` refusal check, and `DEFAULT_SCHEMA_MAX` (replaced by `SCHEMA_VERSION`). Remove any now-unused imports.
+Delete the now-unused `refusedPaths` set, the `unsupported-schema-version` refusal check, `DEFAULT_SCHEMA_MAX`, **and** the now-dead `supportedMax`/`opts.supportedSchemaMax` local (Task 4 no longer consumes it — it compares each note's `schema_version` directly against the contracts-owned `SCHEMA_VERSION` via the `track()` helper, so there is no separate max to thread through). Drop `supportedSchemaMax` from the options type. Remove any now-unused imports.
 
 - [ ] **Step 5: Point the audit at the registry (open rule + real back-compat export)**
 
@@ -485,7 +484,7 @@ git commit -m "feat(graduation): open type gate — any type ingests via resolve
 
 **Interfaces:**
 - Consumes: the total `migrable` set (Task 2).
-- Produces: `planBootstrapMigration` returns `quarantined` populated ONLY by the secret path (Task-2/5 credential dispositions). Duplicate explicit ids are numeric-suffix-disambiguated. **Filename-slug collisions** (reader-fatal) are resolved by a deterministic **file rename** recorded on the outcome; apply performs the rename + rewrites inbound links. Unresolved/ambiguous wikilinks are **flattened to display text** — `LinkRewrite.resolution` gains `"flattened-unresolved"|"flattened-ambiguous"`, and apply rewrites the body so no `[[…]]` survives. `QuarantineEntry` keeps `detected-credential` (the only remaining category).
+- Produces: `planBootstrapMigration` returns `quarantined` populated ONLY by the secret path (Task-2/5 credential dispositions). Duplicate explicit ids are numeric-suffix-disambiguated. **Filename-slug collisions** (reader-fatal) are resolved by a deterministic **file rename** recorded on the outcome; apply performs the rename + rewrites inbound links. Unresolved/ambiguous wikilinks are **flattened to display text** — `LinkRewrite.resolution` gains `"flattened-unresolved"|"flattened-ambiguous"`, and apply rewrites the body so no *unresolved/ambiguous* `[[…]]` survives (a resolvable `rewritten` link stays a canonical wikilink). `QuarantineEntry` keeps `detected-credential` (the only remaining category).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -572,27 +571,41 @@ Delete the `dupIdPaths` skip set. In Pass 2 use `supersededExplicit.get(doc.path
 
 - [ ] **Step 4: Detect filename-slug collisions → deterministic rename (the reader-fatal case)**
 
-The strict reader collides on **filename slug + aliases** (`reader.ts` `detectIdentityCollisions`), NOT id. Add a pass over `migrable` computing each note's slug (`stem(doc.path)`); for any slug owned by >1 path, the first (sorted-path) owner keeps the file, each later owner is renamed to `${slug}-${type.value}` (then numeric-suffixed if that too collides), recorded as `newPath` on the outcome and in a plan-level `renames: { from: string; to: string }[]`. Record the rename in `normalized[]` (Task 4) as a coercion. Also fold each note's declared `aliases` into the slug-ownership set so an alias never re-introduces a collision (drop/renumber a losing alias claim).
+The strict reader collides on a shared **normalized identity key**, where each note owns its **filename slug** (`stem(doc.path)`) **plus each declared alias** (`reader.ts` `detectIdentityCollisions` + `normalizeIdentityKey`), NOT its id. A collision can therefore be slug↔slug, slug↔alias, or alias↔alias. Build one ownership map over BOTH kinds and resolve each collision by its kind — a **slug** loser is fixed by renaming the file (only a rename changes a slug); an **alias** loser is fixed by dropping that alias:
 
 ```typescript
-  // slug = basename without .md; the reader's identity namespace.
-  const slugOwners = new Map<string, string[]>();
-  for (const { doc } of migrable) { const s = stem(doc.path); (slugOwners.get(s) ?? slugOwners.set(s, []).get(s)!).push(doc.path); }
-  const renames = new Map<string, string>(); // original path → renamed path
-  const takenSlugs = new Set<string>(slugOwners.keys());
-  for (const [slug, paths] of slugOwners) {
-    if (paths.length < 2) continue;
-    for (const p of [...paths].sort().slice(1)) {
-      const t = migrable.find((m) => m.doc.path === p)!.type.value;
-      let base = `${slug}-${t}`, n = 2, cand = base;
-      while (takenSlugs.has(cand)) cand = `${base}-${n++}`;
-      takenSlugs.add(cand);
-      renames.set(p, p.slice(0, p.lastIndexOf("/") + 1) + cand + ".md");
+  const norm = (s: string) => s.trim().toLowerCase();
+  // identity namespace = slug + aliases, matching the reader.
+  type Claim = { path: string; kind: "slug" | "alias"; alias?: string };
+  const owners = new Map<string, Claim[]>();
+  const claim = (key: string, c: Claim) => { const a = owners.get(key) ?? []; a.push(c); owners.set(key, a); };
+  for (const { doc } of migrable) {
+    claim(norm(stem(doc.path)), { path: doc.path, kind: "slug" });
+    const al = Array.isArray(doc.fm.aliases) ? doc.fm.aliases : [];
+    for (const a of al) if (typeof a === "string" && a.trim() !== "") claim(norm(a), { path: doc.path, kind: "alias", alias: a });
+  }
+  const renames = new Map<string, string>();          // original path → renamed path (slug losers)
+  const aliasDrops = new Map<string, Set<string>>();   // path → aliases to drop (alias losers)
+  const taken = new Set<string>(owners.keys());
+  for (const [key, claims] of owners) {
+    if (claims.length < 2) continue;
+    // deterministic winner: sort by (path, kind) so the first claim keeps the key.
+    const sorted = [...claims].sort((x, y) => x.path.localeCompare(y.path) || x.kind.localeCompare(y.kind));
+    for (const loser of sorted.slice(1)) {
+      if (loser.kind === "slug") {
+        const t = migrable.find((m) => m.doc.path === loser.path)!.type.value;
+        let base = `${stem(loser.path)}-${t}`, n = 2, cand = norm(base);
+        while (taken.has(cand)) cand = norm(`${base}-${n++}`);
+        taken.add(cand);
+        renames.set(loser.path, loser.path.slice(0, loser.path.lastIndexOf("/") + 1) + cand + ".md");
+      } else {
+        (aliasDrops.get(loser.path) ?? aliasDrops.set(loser.path, new Set()).get(loser.path)!).add(loser.alias!);
+      }
     }
   }
 ```
 
-Set `outcome.newPath = renames.get(doc.path) ?? doc.path` when building each outcome, and return `renames` (as an array) on the plan.
+Set `outcome.newPath = renames.get(doc.path) ?? doc.path` when building each outcome; return `renames` (as an array) on the plan; and thread `aliasDrops` into Task 4's `aliases` fill (a dropped alias is excluded from the emitted list and recorded `coerced: ["aliases"]`). Record both the rename and any alias drop in `normalized[]`.
 
 - [ ] **Step 5: Flatten unresolved/ambiguous links (planner records; apply rewrites body)**
 
@@ -606,9 +619,9 @@ Remove `for (const p of [...ambiguousAlias].sort()) quarantined.push({ path: p, 
 
 In `apps/cli/src/graduation/migrate-apply.ts`:
 - **Renames:** before writing each note, if `outcome.newPath !== outcome.path`, write to `newPath` and record the rename in the checkpoint journal so rollback restores the original path. Rewrite every inbound wikilink/target that referenced the old slug to the new slug (the plan supplies `renames`; apply rewrites bodies + any frontmatter `related`/link fields).
-- **Flatten + rewrite:** change the link-rewrite loop (currently `if (r.resolution === "rewritten")` only, `~:68`) to also apply `flattened-unresolved`/`flattened-ambiguous`: replace `r.from` with `r.to` in the body for ALL three resolutions. Assert post-condition: the emitted body contains no `[[`.
+- **Flatten + rewrite:** change the link-rewrite loop (currently `if (r.resolution === "rewritten")` only, `~:68`) to also apply `flattened-unresolved`/`flattened-ambiguous`: replace `r.from` with `r.to` in the body for ALL three resolutions. A `rewritten` link legitimately stays a canonical wikilink (it resolves); only `flattened-*` links leave no wikilink behind. Assert the correct post-condition: **no *flattened-sourced* `[[…]]` remains** — i.e. for every `linkRewrite` with a `flattened-*` resolution, its `from` string no longer appears in the emitted body (do NOT assert the absence of all `[[`, which would wrongly flag valid rewritten links).
 
-Add apply-level tests (`apps/cli/test/migrate-apply.*.test.ts` or the reader gate in Task 5) proving on disk: the renamed file exists at `newPath`, the old path is gone, inbound links point at the new slug, and no `[[` remains.
+Add apply-level tests (`apps/cli/test/migrate-apply.*.test.ts` or the reader gate in Task 5) proving on disk: the renamed file exists at `newPath`, the old path is gone, inbound links point at the new slug, every flattened link's original `[[…]]` is gone, and `readVault()` reports no `broken-link`/`ambiguous-link`.
 
 - [ ] **Step 8: Update the JSON schema + tools contract-lint for the new resolutions/renames**
 
@@ -773,13 +786,19 @@ Replace the `initialized` build (`~:269-277`). Assign the always-managed fields 
       put("source", rawSrc, srcOk ? rawSrc : ["manual"]);
       for (const k of ["aliases", "tags", "related"]) {
         const raw = doc.fm[k];
-        put(k, raw, Array.isArray(raw) ? raw : []);
+        let val = Array.isArray(raw) ? raw : [];
+        // aliases losing an identity-collision (Task 3) are dropped here + recorded coerced.
+        if (k === "aliases") { const drop = aliasDrops.get(doc.path); if (drop) val = val.filter((a) => typeof a === "string" && !drop.has(a)); }
+        put(k, raw, val);
       }
-      put("declaredSensitivity", undefined, classificationToSensitivity(initialized.classification as string));
+      // declaredSensitivity flows through put() against its ORIGINAL value, so an existing
+      // value that we re-derive is recorded as coerced (never silently replaced).
+      put("declaredSensitivity", doc.fm.declaredSensitivity, classificationToSensitivity(initialized.classification as string));
     } else {
-      // loose: still derive declaredSensitivity from any asserted classification, but no strict fill.
-      initialized.declaredSensitivity = classificationToSensitivity(typeof doc.fm.classification === "string" ? doc.fm.classification : undefined);
+      // loose: still derive declaredSensitivity, but through put() (tracked) — no strict fill.
+      put("declaredSensitivity", doc.fm.declaredSensitivity, classificationToSensitivity(typeof doc.fm.classification === "string" ? doc.fm.classification : undefined));
     }
+    if ((renames.get(doc.path) ?? doc.path) !== doc.path) coerced.push("path"); // Task 3 rename recorded as a coercion
 
     if (filled.length || coerced.length) {
       normalized.push({
@@ -839,11 +858,11 @@ git commit -m "feat(graduation): schema-valid strict field-fill + total normaliz
 
 - [ ] **Step 1: Persist per-path credential dispositions (scan) + consume them (migrate)**
 
-In `apps/cli/src/graduation/scan.ts` + `graduation-scan.ts`: extend the persisted scan state with `credentialPaths: string[]` (the working-tree paths whose files carry ≥1 finding). The detection engine is unchanged; only the persisted state gains this field. Keep the existing `gate`/exit-3 behavior for a *bare* `graduation scan` invocation.
+In `apps/cli/src/graduation/scan.ts` + `graduation-scan.ts`: extend the persisted scan state with `credentialPaths: string[]` (the working-tree paths whose files the engine AEAD-quarantined — the plaintext is already removed from the copy). The detection engine + its AEAD quarantine are unchanged; only the persisted state gains this field. Keep the existing `gate`/exit-3 behavior for a *bare* `graduation scan` invocation.
 
-In `apps/cli/src/commands/graduation-migrate.ts`: when reading scan state, instead of hard-failing on `gate: blocked` **when credential dispositions exist**, pass `credentialPaths` into `planBootstrapMigration` (new opt `credentialPaths?: string[]`). The planner excludes those paths from `migrable` and emits one `quarantined: { path, category: "detected-credential" }` per excluded path. A blocked gate with *no* recorded credential paths (older state) still errors `scan-gate-open` (exit 2) — backward-compatible.
+In `apps/cli/src/commands/graduation-migrate.ts`: when reading scan state, instead of hard-failing on `gate: blocked` **when credential dispositions exist**, pass `credentialPaths` into `planBootstrapMigration` (new opt `credentialPaths?: string[]`). Those paths are already absent from the copy the planner scans, so the planner simply emits one `quarantined: { path, category: "detected-credential" }` per recorded path (report-only — there is no file to skip or delete). A blocked gate with *no* recorded credential paths (older state) still errors `scan-gate-open` (exit 2) — backward-compatible.
 
-Add unit tests: a two-note input where one path is in `credentialPaths` → that note is quarantined `detected-credential`, the other migrates, and `scanned == migrated + quarantined`.
+Add unit tests: a two-note input where one path is in `credentialPaths` (and the corresponding file is absent, mimicking post-AEAD state) → that path is reported `detected-credential`, the other migrates, and `scanned == migrated + quarantined` (exact).
 
 - [ ] **Step 2: Identify + regenerate drifted fixtures**
 
@@ -885,8 +904,11 @@ WORK=$(mktemp -d); COPY="$WORK/copy"; CUSTODY="$WORK/custody"
 BIN=~/Code/21Stark/atlas/apps/cli/dist/bin.js
 export ATLAS_CUSTODY_TEST_DIR="$CUSTODY"          # custody seam only; NOT test-mode for the broker
 
-# 1. scan → persists gate + credentialPaths into scan state; exit 3 only aborts if we treat it fatally.
-node "$BIN" graduation scan --source ~/Code/Vaults/main-vault --copy "$COPY" --json > "$WORK/scan.json" || true
+# 1. scan → persists gate + credentialPaths + AEAD-quarantines credential files out of COPY.
+#    Exit 0 (clean) or 3 (credentials found → expected, state still valid) are OK; abort on 2/4/anything else.
+set +e; node "$BIN" graduation scan --source ~/Code/Vaults/main-vault --copy "$COPY" --json > "$WORK/scan.json"; SCAN_RC=$?; set -e
+case "$SCAN_RC" in 0|3) : ;; *) echo "scan failed rc=$SCAN_RC" >&2; exit "$SCAN_RC";; esac
+node -e 'JSON.parse(require("fs").readFileSync(process.argv[1]))' "$WORK/scan.json"   # scan.json must be valid JSON
 # 2. preview (no mutation) — credential paths become detected-credential quarantines, everything else migrates.
 node "$BIN" graduation migrate --json > "$WORK/preview.json"
 # 3. authorize + apply IN PLACE on the copy (no --out flag exists).
@@ -904,22 +926,27 @@ Then a FAIL-FAST conservation check over the REAL field shapes (scan has no `not
 python3 - "$WORK" <<'PY'
 import json, sys, pathlib
 W = pathlib.Path(sys.argv[1])
-scan = json.load(open(W/"scan.json")); prev = json.load(open(W/"preview.json"))
+prev = json.load(open(W/"preview.json"))
 appl = json.load(open(W/"applied.json")); rdr = json.load(open(W/"reader.json"))
+# scan AEAD-removed credential files from COPY, so COPY's .md set is exactly the migrable inputs.
 inputs = {str(p.relative_to(W/"copy")) for p in (W/"copy").rglob("*.md")}
-written = {n["path"] if "newPath" not in n else n["newPath"] for n in appl["notes"]}
-quar = {q["path"] for q in prev["quarantined"]}
+# each migrated note is keyed by its ORIGINAL input path (renames carry it in `path`; `newPath` is the dest).
+migrated = {n["path"] for n in appl["notes"]}
+quar = {q["path"] for q in prev["quarantined"]}          # detected-credential paths (absent from COPY)
 assert prev["refused"] == [], prev["refused"]
 assert all(q["category"] == "detected-credential" for q in prev["quarantined"]), prev["quarantined"]
 assert not rdr.get("findings") and not rdr.get("errors"), rdr        # validate: zero reader errors
-missing = {q for q in inputs} - {n["path"] for n in appl["notes"]} - quar
-# note: renamed notes appear under newPath; conservation is by original input path membership
-assert len(appl["notes"]) + len(quar) >= len(inputs) - 5, (len(appl["notes"]), len(quar), len(inputs))
+# HARD conservation: every COPY input migrates (total ingestion), and no stray notes appear.
+missing = inputs - migrated
+assert missing == set(), f"notes omitted from migration: {sorted(missing)}"
+extra = migrated - inputs
+assert extra == set(), f"migrated notes not in COPY inputs: {sorted(extra)}"
+assert len(appl["notes"]) == len(inputs), (len(appl["notes"]), len(inputs))
 print(f"OK refused=0 migrated={len(appl['notes'])} credential-quarantined={len(quar)} reader-errors=0 inputs={len(inputs)}")
 PY
 ```
 
-Expected: `OK`, `migrated` ≈ full vault (200+), `credential-quarantined` = only secret-bearing notes, reader errors = 0. Paste the printed line into a comment on #151. If `scripts/sign-graduation-challenge.js` does not exist, implement the signing per the broker runbook BEFORE this step (it is a prerequisite, not a placeholder).
+Expected: `OK`, `migrated` == every non-credential note in COPY (≈ full vault, 200+), `credential-quarantined` = only secret-bearing notes, reader errors = 0. The check FAILS (nonzero exit) on any omitted or stray note. Paste the printed line into a comment on #151. If `scripts/sign-graduation-challenge.js` does not exist, implement the signing per the broker runbook BEFORE this step (it is a prerequisite, not a placeholder).
 
 - [ ] **Step 8: Push + post the live result**
 
