@@ -34,7 +34,9 @@ The plan's Task 5 runbook was written from the 07-16 worked example and was fact
 
 ## Retrieval quality: FTS is immature → vector-only gate config (#156)
 
-The gate could only be passed on the contract's **§6 vector-only fallback** (`retrieval.fts.enabled: false`). Every FTS-weighted RRF config *collapsed* recall to ~0.49 — the LanceDB FTS layer surfaces bad lexical matches that RRF fuses in. Vector-only (recall 0.878 / MRR 0.784) is the only stable pass; vector-weighted hybrid (`vec=2`) also passes but with a thin MRR 0.718 margin. Tracked as **#156** — until it's resolved, `retrieval.fts.enabled: false` is the known-good default for a drive. Only config-owned values were tuned (query-time; no re-embed).
+> **UPDATE 2026-07-18 — RESOLVED by #159.** The root cause was that **no FTS index was ever built**: `fullTextSearch` brute-force-scanned with LanceDB's default (no-stem, no-stop-word) tokenizer, so common terms flooded top-K. #159 builds a real inverted index with an English analyzer (stemming + stop-word removal + ASCII folding) at rebuild/repair. The **default hybrid config now scores recall 0.911 / MRR 0.830** — FTS participating, no fallback. `retrieval.fts.enabled: false` is **no longer** the recommended default; hybrid is. The account below is the drive-time (pre-fix) state.
+
+At drive time, the gate could only be passed on the contract's **§6 vector-only fallback** (`retrieval.fts.enabled: false`). Every FTS-weighted RRF config *collapsed* recall to ~0.49 — the brute-force FTS layer surfaced bad lexical matches that RRF fused in. Vector-only (recall 0.878 / MRR 0.784) was the only stable pass; vector-weighted hybrid (`vec=2`) also passed but with a thin MRR 0.718 margin. Only config-owned values were tuned (query-time; no re-embed). Tracked and fixed as **#156 → #159**.
 
 ## Divergences from the plan's code listings (already shipped correctly)
 
