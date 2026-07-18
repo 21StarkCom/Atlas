@@ -270,11 +270,24 @@ only surviving statistical layer. `weight[fts]` may be `0` (a way to disable FTS
 by the `retrieval.fts.enabled` switch). Retrieval eval (recall@10 ≥ 0.85, MRR ≥ 0.7 — §2.5) tunes the
 weights on the copy without touching phase code (§Phase-3 risks).
 
-## 6. LanceDB FTS-maturity fallback (decision — recorded before Task 3.3)
+## 6. LanceDB FTS index + maturity fallback (decision — updated 2026-07-18)
 
-**Decision.** If LanceDB's native full-text-search quality or stability blocks (its FTS is younger
-than its vector index), the hybrid retriever **degrades to vector + id/alias with RRF** — the FTS
-layer is dropped from the fusion set `L`, and fusion runs over the vector layer alone while the
+**FTS inverted index (updated per #156).** The `search_chunks.text` column is indexed with a real
+LanceDB inverted index built with an **English analyzer** — the `SEARCH_FTS_ANALYZER` constant in
+`packages/lancedb-index/src/fts.ts`: `simple` base tokenizer + stemming + stop-word removal + ASCII
+folding. `ensureFtsIndex` runs at the end of every `index rebuild` / `index repair` convergence, over
+the freshly written rows. Without it, `fullTextSearch` falls back to a brute-force scan with LanceDB's
+default (no-stem, no-stop-word) tokenizer, which floods top-K with chunks that merely contain a common
+query term — on the 2026-07-17 full-corpus drive that dragged the default hybrid config below the gate
+(recall 0.878 / MRR 0.673). With the analyzer index the same config scores **recall 0.911 / MRR 0.830**,
+and the FTS layer is the strongest contributor rather than a liability. The analyzer is a single
+documented v1 constant, not a config knob: LanceDB applies the index's stored analyzer to the query
+too, so index and query tokenization cannot drift. Query tokenization is unchanged in `search.ts` — the
+index is transparent to the retrieval code.
+
+**Maturity-fallback decision.** If LanceDB's native full-text-search quality or stability blocks (its
+FTS is younger than its vector index), the hybrid retriever **degrades to vector + id/alias with RRF** —
+the FTS layer is dropped from the fusion set `L`, and fusion runs over the vector layer alone while the
 exact-id / slug / unique-alias short-circuits (§5) continue unchanged. RRF still applies (it simply
 fuses one statistical layer), so the scoring formula, weights, and precedence are untouched.
 

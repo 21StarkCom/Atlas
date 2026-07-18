@@ -28,6 +28,7 @@ import type { ParsedNote, VaultSnapshot } from "@atlas/contracts";
 import {
   computeStaleness,
   embedderFromClient,
+  ensureFtsIndex,
   indexRebuild,
   indexRepair,
   indexVerify,
@@ -174,7 +175,11 @@ export async function rebuildIndexFromVault(ctx: RunContext, db: SqliteDatabase,
   const { embed, close } = await buildEmbedder(ctx, cfg, runId);
   try {
     const notes = await readNotes(ctx);
-    return await indexRebuild({ config: cfg, table, store: new GenerationRepo(db), embed, lockLocation: dir, notes: () => notes });
+    const report = await indexRebuild({ config: cfg, table, store: new GenerationRepo(db), embed, lockLocation: dir, notes: () => notes });
+    // Rebuild the `text` FTS inverted index over the freshly written rows so the FTS
+    // retrieval layer scores on stemmed content terms, not stop words (§6, #156).
+    await ensureFtsIndex(table);
+    return report;
   } finally {
     close();
   }
@@ -285,6 +290,8 @@ async function indexRepairCmd(ctx: RunContext): Promise<number> {
       const started = Date.now();
       const notes = await readNotes(ctx);
       const report = await indexRepair(indexDeps(ctx, cfg, store, table, embed, notes));
+      // Re-derive the `text` FTS index to cover any newly written rows (§6, #156).
+      await ensureFtsIndex(table);
       const durationMs = Date.now() - started;
 
       const out = {
