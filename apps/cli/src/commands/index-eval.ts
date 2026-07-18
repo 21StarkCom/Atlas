@@ -188,6 +188,20 @@ async function indexEvalCmd(ctx: RunContext): Promise<number> {
   const noteExists = (noteId: string): boolean =>
     store.db.prepare(`SELECT 1 FROM notes WHERE note_id = ?`).get(noteId) !== undefined;
 
+  // Validate the eval set BEFORE connecting the egress broker (#157). Loading needs
+  // only the store (already open) — not the broker — so a local file error (bad JSON,
+  // version, duplicate/empty/unknown label id) fails `eval-set-invalid` (exit 1) up
+  // front, instead of being masked by a `broker-unreachable` when authoring a set with
+  // no daemon running. The retrieval that actually needs egress runs strictly after.
+  let queries: EvalQuerySet["queries"];
+  let labels: EvalLabelSet["labels"];
+  try {
+    ({ queries, labels } = loadEvalSet(p.queriesPath, p.labelsPath, noteExists));
+  } catch (e) {
+    store.close();
+    throw e;
+  }
+
   let egress: EgressClient;
   try {
     egress = await EgressClient.connect(cfg.broker.egress_socket_path);
@@ -204,7 +218,6 @@ async function indexEvalCmd(ctx: RunContext): Promise<number> {
   const models = new ModelsClient((params, signal) => egress.invoke(params, signal), () => {});
 
   try {
-    const { queries, labels } = loadEvalSet(p.queriesPath, p.labelsPath, noteExists);
     const runId = ctx.runId; // ONE id: egress capability + audit event + logs (query.ts pattern)
     const indexingCfg = {
       chunker_version: cfg.indexing.chunker_version,
