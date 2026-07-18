@@ -123,10 +123,14 @@ entitlements; the blob path needs none), access-controlled
 - `contracts` (`audit.ts` registry entry, `authorization.ts` response
   signature), `broker` (`crypto.ts` verify dispatch, `keys.ts` registry
   load, `authorize.ts` D20 set), `tools/test-signer.ts` (`--alg p256`), and
-  `security-broker-contract.md` §7.2/§8.1/§9.2 prose all change together in
-  the SP-3 implementation; the §7.5 machine-readable `authzContract` block
-  (ops, drift codes, exit codes) is **unchanged**, so `contract-lint` and the
-  privileged-op bijection are unaffected.
+  `security-broker-contract.md` §7.2/§7.3/§7.4/§8.1/§9.2/§10 prose all
+  change together in the SP-3 implementation (every Ed25519-pinned sentence
+  in the authorization path is reworded alg-neutrally). In the §7.5
+  machine-readable `authzContract` block the **ops, drift codes, and exit
+  codes are unchanged** — so `contract-lint`'s privileged-op bijection and
+  catalog checks are unaffected — while its four "Ed25519 signature
+  verifies…" `verificationSteps` strings are reworded alg-neutrally (the
+  lint requires the steps be non-empty, not any particular text).
 - The error catalog gains **no new codes**: wrong prefix for the enrolled
   signer, malformed body, or failed ECDSA verify are all
   `authz.signature_invalid`; unknown/revoked/unpermitted signers keep their
