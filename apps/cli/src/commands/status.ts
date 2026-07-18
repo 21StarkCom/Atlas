@@ -14,73 +14,22 @@
  * → 0002, quarantine → later) are read defensively as zero, so `status` is correct
  * at every migration frontier.
  */
-import { watermarkHealth, type SqliteDatabase } from "@atlas/sqlite-store";
 import { BrokerClient } from "@atlas/broker";
+import { openReadonlyLedger } from "@atlas/sqlite-store";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { openMigratedStore } from "./store-open.js";
+import { ledgerDbPath } from "./backup-config.js";
 import { runReadAudit } from "../audit/readonly.js";
-import { verifyAuditAnchor, type AuditChainProbe } from "../audit/anchor-check.js";
+import { resolveAnchorProbe, type AuditChainProbe, type AnchorProbe } from "../audit/anchor-check.js";
+import { deriveSnapshot, captureConsistent, type SnapshotShape } from "../health/snapshot.js";
 
-/** The terminal workflow states (§2.5) — every OTHER state counts as an open run. */
-const TERMINAL_STATES: ReadonlySet<string> = new Set([
-  "finalized",
-  "rejected",
-  "rolled-back",
-  "failed",
-  "cancelled",
-]);
-
-interface StatusOutput {
+interface StatusOutput extends SnapshotShape {
   command: "status";
-  openRuns: Record<string, number>;
-  jobs: { queued: number; failed: number };
-  quarantineCount: number;
-  backup: { watermarkSeq: number; coveredSeq: number; healthy: boolean };
-  audit: { headSeq: number; head: string; anchorOk: boolean; anchorSource: "git" | "sqlite-only" };
 }
 
 function parseArgs(argv: string[]): void {
   for (const a of argv) throw CliError.usage(`unknown flag/argument for \`status\`: ${a}`);
-}
-
-function tableExists(db: SqliteDatabase, name: string): boolean {
-  return db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(name) !== undefined;
-}
-
-/**
- * The count of quarantined notes. The `notes` projection carries a `quarantined`
- * flag from `0001_core` (dictionary §), so the D12 summary reports the real count
- * rather than a placeholder. Guarded by `tableExists` so a pre-migration DB (no
- * `notes` table yet) reports 0 instead of throwing.
- */
-function quarantineCount(db: SqliteDatabase): number {
-  if (!tableExists(db, "notes")) return 0;
-  const r = db.prepare(`SELECT COUNT(*) AS n FROM notes WHERE quarantined = 1`).get() as { n: number };
-  return r.n;
-}
-
-/** Non-terminal `agent_runs` grouped by state; `{}` when there are none. */
-function openRuns(db: SqliteDatabase): Record<string, number> {
-  const rows = db.prepare(`SELECT status, COUNT(*) AS n FROM agent_runs GROUP BY status`).all() as {
-    status: string;
-    n: number;
-  }[];
-  const out: Record<string, number> = {};
-  for (const r of rows) {
-    if (!TERMINAL_STATES.has(r.status)) out[r.status] = r.n;
-  }
-  return out;
-}
-
-/** Queued/failed jobs — 0/0 until the `0002_jobs` migration lands (Phase 2). */
-function jobCounts(db: SqliteDatabase): { queued: number; failed: number } {
-  if (!tableExists(db, "jobs")) return { queued: 0, failed: 0 };
-  const q = db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE state IN ('pending','ready','running')`).get() as {
-    n: number;
-  };
-  const f = db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE state = 'failed'`).get() as { n: number };
-  return { queued: q.n, failed: f.n };
 }
 
 async function status(ctx: RunContext): Promise<number> {
@@ -92,45 +41,52 @@ async function status(ctx: RunContext): Promise<number> {
   const store = openMigratedStore(ctx);
 
   try {
-    const wm = watermarkHealth(store.db);
-    // Verify the ACTUAL audit ref via the broker's read-only interface (round-3
-    // finding 1), falling back to the SQLite-only structural check if the broker
-    // is unreachable. Connected best-effort — a down broker never fails `status`.
+    // Open the read-only ledger handle FIRST — BEFORE holding any broker socket — so a
+    // missing/unmigrated ledger throws here with no connected client to leak (round-4
+    // finding: `openReadonlyLedger` must not run after `connect()` outside a cleanup
+    // scope). The broker connect + `ledger.close()`/`probe.close()` then live in one
+    // try/finally, so any throw (connect, capture, derive) releases BOTH. Snapshot
+    // through this read-only ledger handle — the EXACT shared `ReadonlyLedger`
+    // `watch`'s attach uses (no ad-hoc `{db}` wrapper). The migrated `store` is
+    // retained only for the audit append below.
+    const ledger = openReadonlyLedger(ledgerDbPath(ctx));
     let probe: BrokerClient | null = null;
+    let resolved: AnchorProbe = { kind: "unreachable" };
+    let snap: SnapshotShape;
     try {
-      probe = await BrokerClient.connect(ctx.config.config.broker.socket_path);
-    } catch {
-      probe = null;
-    }
-    let anchor;
-    try {
-      anchor = await verifyAuditAnchor(store.db, ctx.config.config.git.audit_anchor_path, ctx.env, probe as AuditChainProbe | null);
+      // Best-effort broker connect (round-3 finding 1; Phase 1 Task 1) — a down broker
+      // degrades to `sqlite-only` and never fails `status`.
+      try {
+        probe = await BrokerClient.connect(ctx.config.config.broker.socket_path);
+      } catch {
+        probe = null;
+      }
+      // Route through the SINGLE shared consistency protocol (Phase 1 Task 1) — the
+      // SAME `captureConsistent` helper `watch`'s attach uses — instead of a private
+      // resolve-then-transaction path. It resolves the async broker probe OUTSIDE any
+      // transaction, then runs the synchronous SQLite derivation inside one brief read
+      // transaction, re-checking `data_version` first and retrying (bounded) if the
+      // ledger moved under the probe. On a stable read it collapses to exactly the
+      // pre-refactor one-liner, so `status`'s golden is unchanged. `probeFn` writes the
+      // resolved probe into `resolved` so the synchronous `deriveSnapshot` reads a
+      // consistent value.
+      const result = await captureConsistent(
+        ledger,
+        async () => (resolved = await resolveAnchorProbe(probe as AuditChainProbe | null, ctx.env)),
+        (conn) =>
+          deriveSnapshot({
+            conn,
+            anchorPath: ctx.config.config.git.audit_anchor_path,
+            env: ctx.env,
+            probe: resolved,
+          }),
+      );
+      snap = result.captured;
     } finally {
+      ledger.close();
       probe?.close();
     }
-    const out: StatusOutput = {
-      command: "status",
-      openRuns: openRuns(store.db),
-      jobs: jobCounts(store.db),
-      quarantineCount: quarantineCount(store.db),
-      backup: {
-        // The subsystem uses −1 as the "nothing covered" sentinel; the committed
-        // schema requires seq/coveredSeq ≥ 0, so clamp for the summary surface.
-        watermarkSeq: Math.max(0, wm.seq),
-        coveredSeq: Math.max(0, wm.coveredSeq),
-        healthy: wm.healthy,
-      },
-      audit: {
-        headSeq: anchor.headSeq,
-        head: anchor.head,
-        anchorOk: anchor.ok,
-        // Surface WHICH chain was verified: a bare anchorOk:true hides that the
-        // authoritative protected ref may never have been checked (broker down →
-        // "sqlite-only"). A viewer must be able to distinguish a fully-verified
-        // "git" verdict from a degraded structural-only one.
-        anchorSource: anchor.source,
-      },
-    };
+    const out: StatusOutput = { command: "status", ...snap };
 
     // Best-effort Tier-0 audit — reuse THIS store so we don't open a second handle.
     const audit = await runReadAudit(ctx, "run.readonly", "status", store);

@@ -24,6 +24,7 @@ import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import _Ajv2020 from "ajv/dist/2020.js";
 import {
+  badRequestRefusal,
   BrokerClient,
   BrokerService,
   generateEd25519,
@@ -467,5 +468,247 @@ describe("phase-1 exit surface (inspect / doctor / status + audit wiring)", () =
     await cli(c, ["doctor", "--json"], { ATLAS_PROVISIONED: "1" });
     expect(auditCount(c, "run.readonly")).toBe(beforeRo);
     expect(auditCount(c, "run.projection")).toBe(beforeProj);
+  });
+});
+
+/**
+ * Byte-identity regression goldens for `status --json` and `doctor --json` across
+ * the THREE broker states the Phase-1 anchor-probe refactor (#176) must leave
+ * unchanged: a REACHABLE-and-answering broker (the `git`-verified verdict), a
+ * broker that is DOWN before connect (`unreachable`), and a broker that CONNECTS
+ * but whose chain-status RPC FAILS — both an ordinary transport failure AND a
+ * `broker.bad_request` protocol refusal. The pre-refactor code degraded every
+ * non-answered outcome to the SAME `sqlite-only` verdict; these compare the FULL
+ * command output (not selected fields) so any drift in that mapping — a degraded
+ * path leaking a different shape, or `protocol-error` diverging from a failed RPC
+ * on the `status`/`doctor` surface — fails loudly.
+ *
+ * `status` is fully deterministic on a FRESH 0-event ledger (no volatile git SHA:
+ * the audit head is empty), so its whole envelope is asserted against an inline
+ * golden. `doctor` mixes host-variant checks (sandbox/encrypted-volume differ
+ * macOS↔Linux), so its guard is: (a) the command is byte-identical across two
+ * back-to-back runs (it takes no run + mutates nothing, so any nondeterminism is a
+ * real regression), and (b) the refactor-touched `audit-anchor` check equals an
+ * explicit golden in each broker state.
+ */
+describe("phase-1 status/doctor byte-identity regression goldens (anchor-probe refactor #176)", () => {
+  /** Patch the broker client's chain-status RPC to reject, for the failed-RPC states. */
+  function patchChainStatus(reject: () => never): () => void {
+    const proto = BrokerClient.prototype as unknown as { getAuditChainStatus: () => Promise<unknown> };
+    const original = proto.getAuditChainStatus;
+    proto.getAuditChainStatus = () => Promise.reject((reject as unknown as () => unknown)());
+    return () => {
+      proto.getAuditChainStatus = original;
+    };
+  }
+
+  /** A transport-classified failure (a connected socket whose RPC then errors). */
+  function transportError(): never {
+    const e = new Error("injected RPC failure") as NodeJS.ErrnoException;
+    e.code = "ECONNRESET";
+    throw e;
+  }
+
+  const auditAnchorCheck = (out: { checks: { id: string }[] }): unknown =>
+    out.checks.find((x) => x.id === "audit-anchor");
+
+  // ---- status --json — full-envelope goldens -----------------------------
+
+  const STATUS_HEALTHY = {
+    command: "status",
+    openRuns: {},
+    jobs: { queued: 0, failed: 0 },
+    quarantineCount: 0,
+    backup: { watermarkSeq: 0, coveredSeq: 0, healthy: true },
+    audit: { headSeq: 0, head: "", anchorOk: true, anchorSource: "git" },
+  };
+  // The three degraded broker states collapse to ONE identical sqlite-only summary
+  // (status carries no verdict detail, so transport-fail == bad_request == down).
+  const STATUS_DEGRADED = {
+    ...STATUS_HEALTHY,
+    audit: { headSeq: 0, head: "", anchorOk: true, anchorSource: "sqlite-only" },
+  };
+  // COMPLETE raw stdout goldens — `emitJson` is `JSON.stringify(obj) + "\n"`, so
+  // asserting the raw string (not a parsed-object toEqual) also pins KEY ORDER and
+  // catches any unrelated-envelope drift a structural compare would miss.
+  const STATUS_HEALTHY_RAW = `${JSON.stringify(STATUS_HEALTHY)}\n`;
+  const STATUS_DEGRADED_RAW = `${JSON.stringify(STATUS_DEGRADED)}\n`;
+
+  it("status --json is byte-identical to the git-verified golden when the broker answers", async () => {
+    const r = await cli(c, ["status", "--json"]);
+    expect(r.code).toBe(0);
+    assertSchema("status", JSON.parse(r.out));
+    expect(r.out).toBe(STATUS_HEALTHY_RAW);
+  });
+
+  it("status --json degrades to the SAME sqlite-only golden when the broker is unreachable", async () => {
+    await c.server.close();
+    const r = await cli(c, ["status", "--json"]);
+    expect(r.code).toBe(0);
+    expect(r.out).toBe(STATUS_DEGRADED_RAW);
+    // Restart so afterEach's close() has a live server to tear down cleanly.
+    c.server = await startBrokerServer(c.service, c.server.socketPath);
+  });
+
+  // A failed RPC and a broker.bad_request refusal both degrade `status` to the SAME
+  // sqlite-only golden (status carries no verdict detail). Each runs on its OWN fresh
+  // 0-event ledger — a single prior status would commit a `run.readonly` and move the
+  // sqlite head — so byte-identity across the two is asserted transitively via the
+  // shared STATUS_DEGRADED golden.
+  it("status --json degrades to the sqlite-only golden on a failed RPC (transport, connected-but-errors)", async () => {
+    const restore = patchChainStatus(transportError);
+    try {
+      const r = await cli(c, ["status", "--json"]);
+      expect(r.code).toBe(0);
+      expect(r.out).toBe(STATUS_DEGRADED_RAW);
+    } finally {
+      restore();
+    }
+  });
+
+  it("status --json degrades to the SAME sqlite-only golden on a broker.bad_request refusal (protocol-error, not fatal here)", async () => {
+    // The broker-owned `broker.bad_request` (protocol-error) — which ONLY `watch`
+    // treats as fatal — degrades `status` exactly like a failed RPC. Pinned to a
+    // refusal `@atlas/broker` itself mints (the drift guard), not a hand-built literal.
+    const restore = patchChainStatus(() => {
+      throw badRequestRefusal("injected malformed success");
+    });
+    try {
+      const r = await cli(c, ["status", "--json"]);
+      expect(r.code).toBe(0);
+      expect(r.out).toBe(STATUS_DEGRADED_RAW);
+    } finally {
+      restore();
+    }
+  });
+
+  // ---- doctor --json — determinism + audit-anchor check goldens ----------
+
+  const ANCHOR_TITLE = "Audit-head anchor check";
+
+  /**
+   * Build the COMPLETE expected raw `doctor --json` output for a degraded broker
+   * state: the healthy-baseline raw output with ONLY the `audit-anchor` check
+   * replaced. `doctor` mixes host-variant checks (sandbox/encrypted-volume differ
+   * macOS↔Linux) so a literal inline golden is not portable — but relative to a
+   * same-host healthy baseline the ENTIRE envelope (key order included) must be
+   * byte-identical except the one check the broker state changes. The faithfulness
+   * guard proves `JSON.stringify(JSON.parse(raw))` reproduces the raw bytes, so the
+   * substitution cannot silently normalize away a drift it should catch.
+   */
+  function doctorRawWithAnchor(
+    baselineRaw: string,
+    anchor: Record<string, unknown>,
+    expected: { status: string; provisioning?: Record<string, unknown> },
+  ): string {
+    expect(`${JSON.stringify(JSON.parse(baselineRaw))}\n`).toBe(baselineRaw); // faithfulness guard
+    const obj = JSON.parse(baselineRaw) as { status: string; checks: { id: string }[] };
+    const i = obj.checks.findIndex((x) => x.id === "audit-anchor");
+    expect(i).toBeGreaterThanOrEqual(0);
+    obj.checks[i] = anchor as unknown as { id: string };
+    // The aggregate verdict legitimately moves with the substituted check(s) — the
+    // EXPECTED movement is declared explicitly, everything else must be byte-stable.
+    obj.status = expected.status;
+    if (expected.provisioning !== undefined) {
+      const p = obj.checks.findIndex((x) => x.id === "provisioning-presence");
+      expect(p).toBeGreaterThanOrEqual(0);
+      obj.checks[p] = expected.provisioning as unknown as { id: string };
+    }
+    return `${JSON.stringify(obj)}\n`;
+  }
+
+  it("doctor --json is byte-identical across two back-to-back runs (no run, no mutation)", async () => {
+    const r1 = await cli(c, ["doctor", "--json"], { ATLAS_PROVISIONED: "1" });
+    const r2 = await cli(c, ["doctor", "--json"], { ATLAS_PROVISIONED: "1" });
+    expect(r1.code).toBe(r2.code);
+    // Full-output determinism: any per-run drift the refactor could introduce fails here.
+    expect(r1.out).toBe(r2.out);
+  });
+
+  it("doctor --json audit-anchor check equals the git-verified golden when the broker answers", async () => {
+    const r = await cli(c, ["doctor", "--json"], { ATLAS_PROVISIONED: "1" });
+    assertSchema("doctor", JSON.parse(r.out));
+    expect(auditAnchorCheck(JSON.parse(r.out))).toEqual({
+      id: "audit-anchor",
+      title: ANCHOR_TITLE,
+      status: "ok",
+    });
+  });
+
+  it("doctor --json audit-anchor check degrades (sqlite-only) with the broker-unavailable reason — full raw envelope vs the healthy baseline", async () => {
+    const baseline = await cli(c, ["doctor", "--json"], { ATLAS_PROVISIONED: "1" });
+    await c.server.close();
+    const r = await cli(c, ["doctor", "--json"], { ATLAS_PROVISIONED: "1" });
+    expect(r.out).toBe(
+      doctorRawWithAnchor(
+        baseline.out,
+        {
+          id: "audit-anchor",
+          title: ANCHOR_TITLE,
+          status: "degraded",
+          detail: "git ref unverified (broker unavailable)",
+        },
+        {
+          // Closing the server also removes the socket ARTIFACT, so the (artifact-only)
+          // provisioning check legitimately flips — declared explicitly here.
+          status: "action-required",
+          provisioning: {
+            id: "provisioning-presence",
+            title: "Provisioning presence",
+            status: "action-required",
+            detail: `incomplete provisioning: broker socket ${c.server.socketPath} absent (is the broker daemon running?)`,
+          },
+        },
+      ),
+    );
+    c.server = await startBrokerServer(c.service, c.server.socketPath);
+  });
+
+  it("doctor --json audit-anchor check reports the failed-RPC reason (transport) verbatim — full raw envelope vs the healthy baseline", async () => {
+    const baseline = await cli(c, ["doctor", "--json"], { ATLAS_PROVISIONED: "1" });
+    const restore = patchChainStatus(transportError);
+    try {
+      const r = await cli(c, ["doctor", "--json"], { ATLAS_PROVISIONED: "1" });
+      expect(r.out).toBe(
+        doctorRawWithAnchor(
+          baseline.out,
+          {
+            id: "audit-anchor",
+            title: ANCHOR_TITLE,
+            status: "degraded",
+            detail: "git ref unverified (broker RPC failed: injected RPC failure)",
+          },
+          { status: "degraded" },
+        ),
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  it("doctor --json audit-anchor check reports the broker.bad_request refusal reason (protocol-error, degraded not fatal) — full raw envelope vs the healthy baseline", async () => {
+    const baseline = await cli(c, ["doctor", "--json"], { ATLAS_PROVISIONED: "1" });
+    const restore = patchChainStatus(() => {
+      throw badRequestRefusal("injected malformed success");
+    });
+    try {
+      const r = await cli(c, ["doctor", "--json"], { ATLAS_PROVISIONED: "1" });
+      // On `doctor` a protocol-error degrades exactly like a failed RPC (only `watch`
+      // goes fatal) — the refusal message rides the same `broker RPC failed:` reason.
+      expect(r.out).toBe(
+        doctorRawWithAnchor(
+          baseline.out,
+          {
+            id: "audit-anchor",
+            title: ANCHOR_TITLE,
+            status: "degraded",
+            detail: "git ref unverified (broker RPC failed: injected malformed success)",
+          },
+          { status: "degraded" },
+        ),
+      );
+    } finally {
+      restore();
+    }
   });
 });

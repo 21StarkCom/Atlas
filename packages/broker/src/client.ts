@@ -16,6 +16,7 @@ import {
 } from "@atlas/contracts";
 import { BrokerRefusal, type RefusalCode } from "./errors.js";
 import {
+  badRequestRefusal,
   encodeAuditEvent,
   encodeFrame,
   FrameDecoder,
@@ -91,9 +92,13 @@ export class BrokerClient {
         // resolve a typed call with arbitrary data (round-3 finding 5).
         const validated = validateResult(p.method, res.result);
         if (validated === null) {
+          // Route through the broker-owned `broker.bad_request` authority — the CLI's
+          // anchor probe pins `protocol-error` to this exact refusal, so the code
+          // literal must be minted in ONE place (`badRequestRefusal`), never copied
+          // here where a broker-side rename would silently drift the real anchor-RPC
+          // malformed-success refusal into the "unreachable" bucket.
           p.reject(
-            new BrokerRefusal(
-              "broker.bad_request",
+            badRequestRefusal(
               `malformed success result for "${p.method}" — rejecting rather than resolving with garbage`,
             ),
           );

@@ -107,6 +107,8 @@ export {
   validateRequest,
   validateResponse,
   validateResult,
+  isBadRequestRefusal,
+  badRequestRefusal,
   BROKER_METHODS,
   type BrokerMethod,
   type BrokerRequest,

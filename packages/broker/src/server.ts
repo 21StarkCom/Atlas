@@ -17,6 +17,7 @@ import {
   encodeFrame,
   FrameDecoder,
   validateRequest,
+  badRequestRefusal,
   type BrokerMethod,
   type BrokerResponse,
   type WireSignedAuditEvent,
@@ -118,7 +119,7 @@ export async function startBrokerServer(
         // serialized SERVICE-WIDE by the BrokerService mutation lock.
         queue = queue.then(async () => {
           if (parse.kind === "bad") {
-            const refusal = new BrokerRefusal("broker.bad_request", parse.message);
+            const refusal = badRequestRefusal(parse.message);
             socket.write(encodeFrame({ id: parse.id, ...refusal.toWire() }));
             return;
           }

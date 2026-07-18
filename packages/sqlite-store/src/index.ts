@@ -5,8 +5,16 @@
  * transactional projection rebuild, the post-restore rebuild hook registry, and
  * `db verify`.
  */
-export { openConnection } from "./connection.js";
-export type { SqliteConfig, SqliteDatabase } from "./connection.js";
+export { openConnection, openReadonlyLedger, ledgerSchemaState, captureLedgerIdentity } from "./connection.js";
+// TEST-ONLY: the inter-open race-injection seam + attempt counter (see
+// `test/readonly-open.test.ts`). Production code never imports these.
+export {
+  __setReadonlyInterOpenHook,
+  __setReadonlyPostDbOpenHook,
+  __setReadonlyVerifyWindowHook,
+  __lastOpenAttempts,
+} from "./connection.js";
+export type { SqliteConfig, SqliteDatabase, LedgerIdentity, ReadonlyLedger } from "./connection.js";
 
 export {
   bootstrapMigrationsTable,

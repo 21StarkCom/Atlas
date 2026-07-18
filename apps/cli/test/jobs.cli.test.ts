@@ -130,6 +130,51 @@ describe("jobs.cli", () => {
     expect(obj.pagination).toEqual({ limit: 50, offset: 0, total: 0, hasMore: false });
   });
 
+  it("`jobs list` on a SEEDED row is the additive-only projection (exact serialized object + key order)", async () => {
+    // Seed exactly one pending job with a PINNED clock so `updatedAt`/`nextRunAt`
+    // are deterministic and the whole serialized object can be asserted verbatim.
+    const FIXED = "2026-07-18T12:00:00.000Z";
+    const store = openJobsStore({ path: join(cwd, ".atlas", "atlas.db") });
+    try {
+      bindEnqueueContext(store.db, { now: () => FIXED, nextJobId: () => "job-seed", defaultMaxAttempts: 5 });
+      store.db.transaction(() => enqueue(store.db, { workflow: "reverify", idempotencyKey: "seed-list", payload: { x: 1 } }))();
+    } finally {
+      store.close();
+    }
+
+    const { code, out } = await cli(["jobs", "list", "--json"]);
+    expect(code, out).toBe(0);
+    const obj = JSON.parse(out);
+    assertSchema("jobs-list", obj);
+    expect(obj.jobs.length).toBe(1);
+
+    // Exact KEY ORDER — proves `updatedAt` is the ONLY new field, APPENDED, and no
+    // pre-existing field moved (a pending job has `nextRunAt`, no `lastError`).
+    // `Object.keys` reflects JSON serialization order for string keys.
+    expect(Object.keys(obj.jobs[0])).toEqual([
+      "jobId",
+      "workflow",
+      "state",
+      "attempts",
+      "maxAttempts",
+      "nextRunAt",
+      "updatedAt",
+    ]);
+
+    // Exact serialized VALUES — the additive `updatedAt` carries the row's
+    // last-mutation time; every prior field is byte-for-byte what it was pre-change.
+    expect(obj.jobs[0]).toEqual({
+      jobId: "job-seed",
+      workflow: "reverify",
+      state: "pending",
+      attempts: 0,
+      maxAttempts: 5,
+      updatedAt: FIXED,
+      nextRunAt: FIXED,
+    });
+    expect(obj.pagination).toEqual({ limit: 50, offset: 0, total: 1, hasMore: false });
+  });
+
   it("`jobs retry --all` on an empty queue is a schema-valid no-op batch (exit 0)", async () => {
     const { code, out } = await cli(["jobs", "retry", "--all", "--json"]);
     expect(code).toBe(0);

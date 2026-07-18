@@ -13,6 +13,30 @@ import {
   IntendedEffectSchema,
   RunManifestSchema,
 } from "@atlas/contracts";
+import { BrokerRefusal } from "./errors.js";
+
+/**
+ * The single authority for "did the broker refuse this request as a malformed
+ * correlated result?" — the `broker.bad_request` discriminant, owned INSIDE the
+ * package that throws it. The CLI (and its tests) consume this predicate so the
+ * `"broker.bad_request"` code literal never leaves `@atlas/broker`; a broker-side
+ * rename updates one place and every consumer follows. This is the drift guard the
+ * anchor probe's `protocol-error` classification pins against.
+ */
+export function isBadRequestRefusal(err: unknown): err is BrokerRefusal {
+  return err instanceof BrokerRefusal && err.code === "broker.bad_request";
+}
+
+/**
+ * Construct the broker's canonical `broker.bad_request` refusal — the SINGLE place
+ * the code literal is minted. The server (`server.ts`) builds every malformed-frame
+ * refusal through this, and drift tests obtain the refusal from HERE rather than
+ * copying the literal, so a broker-side rename updates one place and both the server
+ * and every consuming test follow. Pairs with {@link isBadRequestRefusal}.
+ */
+export function badRequestRefusal(message: string): BrokerRefusal {
+  return new BrokerRefusal("broker.bad_request", message);
+}
 
 /** The methods the broker exposes over IPC. */
 export type BrokerMethod =
