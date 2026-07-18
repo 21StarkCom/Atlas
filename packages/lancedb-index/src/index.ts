@@ -78,6 +78,10 @@ export {
   searchLayers,
 } from "./search.js";
 
+// The `text` FTS inverted index (English analyzer) — built at rebuild/repair so the
+// FTS layer scores on content terms, not stop words (retrieval-index-contract §6, #156).
+export { SEARCH_FTS_ANALYZER, ensureFtsIndex } from "./fts.js";
+
 export {
   type ActivationStore,
   type Embedder,

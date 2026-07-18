@@ -11,16 +11,22 @@
  * pending compaction (§2).
  *
  * ## FTS-maturity fallback — ISOLATED HERE (contract §6, review hint)
- * LanceDB's full-text search is younger than its vector index, so it can be
- * absent (no inverted index yet) or unstable. Per §6 the hybrid retriever degrades
- * to **vector-only** RRF when FTS is unavailable, and **no other module knows
- * whether FTS participated** — the whole decision lives in {@link searchLayers}:
+ * LanceDB's full-text search is younger than its vector index, so a query can be
+ * unstable/unsupported. Per §6 the hybrid retriever degrades to **vector-only** RRF
+ * when FTS fails, and **no other module knows whether FTS participated** — the whole
+ * decision lives in {@link searchLayers}:
  *   - the config switch `retrieval.fts.enabled === false` drops the layer up front;
- *   - a thrown FTS query (immaturity: no FTS index, unsupported, transient) is
- *     CAUGHT here and also drops the layer.
+ *   - a thrown FTS query (unsupported / transient) is CAUGHT here and drops the layer.
  * Either way `fts` comes back `null` and `degraded === true`; the caller fuses over
  * the vector layer alone (the config's strictly-positive vector weight guarantees
  * fusion still scores — §5/§6). The vector layer never degrades.
+ *
+ * NOTE — a MISSING inverted index does NOT throw: `fullTextSearch` brute-force-scans
+ * with LanceDB's default (no-stem, no-stop-word) tokenizer and returns rows, so the
+ * layer PARTICIPATES with degraded QUALITY rather than degrading to null. That is the
+ * exact failure #156 fixed by building a real analyzer index (`fts.ts` `ensureFtsIndex`,
+ * run at every rebuild/repair). A pre-#156 table (rows, no FTS index) stays actively
+ * degraded — brute-forced, not fenced — until its next `index rebuild`/`repair`.
  *
  * D14: consumes only `@atlas/contracts` DTOs (via `./writer.js` types) + LanceDB;
  * no `apps/cli` import, no config LITERALS — the caller passes the config-owned
@@ -275,9 +281,11 @@ async function vectorLayer(table: SearchTable, filter: string, input: SearchLaye
 /**
  * Attempt the FTS layer. Returns the ranked hits, or `null` to DEGRADE (contract
  * §6) — this is the sole place the FTS-maturity decision is made. A thrown query
- * (no inverted index yet / unsupported / transient) is caught and mapped to `null`
- * so the hybrid retriever silently continues vector-only; the error never escapes
- * this module (isolation guarantee).
+ * (unsupported / transient) is caught and mapped to `null` so the hybrid retriever
+ * silently continues vector-only; the error never escapes this module (isolation
+ * guarantee). A MISSING inverted index does NOT throw — it brute-force-scans (see the
+ * module header); `ensureFtsIndex` (`fts.ts`) builds the analyzer index so this layer
+ * scores on stemmed content terms, not the default tokenizer's stop-word flood (#156).
  */
 async function ftsLayer(table: SearchTable, filter: string, input: SearchLayersInput): Promise<ChunkHit[] | null> {
   try {
