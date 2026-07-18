@@ -13,7 +13,7 @@
       "items": {
         "type": "object",
         "unevaluatedProperties": false,
-        "required": ["jobId", "workflow", "state", "attempts", "maxAttempts"],
+        "required": ["jobId", "workflow", "state", "attempts", "maxAttempts", "updatedAt"],
         "properties": {
           "jobId": { "type": "string", "minLength": 1 },
           "workflow": { "type": "string", "minLength": 1 },
@@ -21,7 +21,8 @@
           "attempts": { "type": "integer", "minimum": 0 },
           "maxAttempts": { "type": "integer", "minimum": 1 },
           "nextRunAt": { "type": "string", "description": "RFC-3339 next-eligible time (backoff); absent for terminal jobs." },
-          "lastError": { "type": "string", "description": "Stable classification of the last failure (allowlisted metadata)." }
+          "lastError": { "type": "string", "description": "Stable classification of the last failure (allowlisted metadata)." },
+          "updatedAt": { "type": "string", "description": "RFC-3339 UTC time of the last job-row mutation (shared with the watch `job` event's JobListRow shape)." }
         }
       }
     },
@@ -41,7 +42,7 @@
     {
       "command": "jobs list",
       "jobs": [
-        { "jobId": "job-1", "workflow": "capture", "state": "failed", "attempts": 3, "maxAttempts": 5, "nextRunAt": "2026-07-13T10:05:00.000Z", "lastError": "transient" }
+        { "jobId": "job-1", "workflow": "capture", "state": "failed", "attempts": 3, "maxAttempts": 5, "nextRunAt": "2026-07-13T10:05:00.000Z", "lastError": "transient", "updatedAt": "2026-07-13T10:00:00.000Z" }
       ],
       "pagination": { "limit": 50, "offset": 0, "total": 1, "hasMore": false }
     }

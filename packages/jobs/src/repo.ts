@@ -715,15 +715,102 @@ function finalizeActiveAttempt(
   if (changes !== 1) throw new StaleAttemptError(jobId, attempt, changes);
 }
 
-/** A row in the `jobs list` projection. */
+/**
+ * A row in the `jobs list` projection — the SSOT shape `watch`'s `job` event reuses
+ * FIELD-FOR-FIELD (no second transformation downstream). `nextRunAt`/`lastError` are
+ * OPTIONAL and OMITTED when null (the plan's shared jobs/watch contract + the
+ * `jobs-list.schema.json` shape), so a terminal job simply lacks `nextRunAt` rather
+ * than carrying `null`. The single {@link projectJobListRow} owns that omission, so
+ * neither `jobs list` nor `watch` re-derives the shape.
+ */
 export interface JobListRow {
   jobId: string;
   workflow: string;
   state: JobState;
   attempts: number;
   maxAttempts: number;
-  nextRunAt: string | null;
-  lastError: string | null;
+  /** RFC-3339 next-eligible time (backoff); ABSENT for terminal jobs (null ⇒ omitted). */
+  nextRunAt?: string;
+  /** Stable classification of the last failure; ABSENT when there is none (null ⇒ omitted). */
+  lastError?: string;
+  /**
+   * RFC-3339 UTC time of the last row mutation (shared with the `watch` `job` event).
+   * The ONE additive field of this change — APPENDED after every pre-existing field
+   * (including the optionals) so the serialized shape is solely additive with
+   * existing fields unmoved.
+   */
+  updatedAt: string;
+}
+
+/**
+ * The raw `jobs`-row shape the sole SELECT/JOIN/filter builder returns, before the
+ * shared {@link projectJobListRow} maps it to the public {@link JobListRow}. The
+ * latest attempt's `error_code` is folded in via a correlated subquery so the
+ * projector is a PURE row mapping (no second db call), keeping one owner for both
+ * the SQL and the shape.
+ */
+export interface JobsRawRow {
+  job_id: string;
+  workflow: string;
+  state: JobState;
+  attempts: number;
+  max_attempts: number;
+  next_run_at: string | null;
+  updated_at: string;
+  last_error: string | null;
+}
+
+/**
+ * Map one raw `jobs` row to the public {@link JobListRow} — the SINGLE projector.
+ * It OWNS the omission of null optionals: `next_run_at`/`last_error` become the
+ * `nextRunAt`/`lastError` keys only when non-null (absent otherwise), so the output
+ * is the final serialized shape and a downstream consumer (`jobs list`, `watch`)
+ * never re-transforms it. Key order matches the `jobs list --json` golden
+ * (…maxAttempts, nextRunAt?, lastError?, updatedAt) — the additive `updatedAt` is
+ * APPENDED so every pre-existing field keeps its position.
+ */
+export function projectJobListRow(row: JobsRawRow): JobListRow {
+  return {
+    jobId: row.job_id,
+    workflow: row.workflow,
+    state: row.state,
+    attempts: row.attempts,
+    maxAttempts: row.max_attempts,
+    ...(row.next_run_at !== null ? { nextRunAt: row.next_run_at } : {}),
+    ...(row.last_error !== null ? { lastError: row.last_error } : {}),
+    updatedAt: row.updated_at,
+  };
+}
+
+/**
+ * The SOLE `jobs list` raw-row query — owns the one SELECT / correlated join /
+ * optional `state` filter / stable `(created_at DESC, job_id DESC)` order.
+ * Pagination is an OPTIONAL `LIMIT/OFFSET` tail applied iff `opts.limit` is set,
+ * so the paginated {@link listJobs} and the unpaginated {@link listAllJobs} share
+ * one statement and cannot fork their SELECT/filter/order.
+ */
+function jobListRawQuery(
+  db: SqliteDatabase,
+  opts: { state?: JobState; limit?: number; offset?: number } = {},
+): JobsRawRow[] {
+  const where = opts.state ? `WHERE j.state = @state` : ``;
+  const paginate = opts.limit !== undefined ? `LIMIT @limit OFFSET @offset` : ``;
+  const params: Record<string, unknown> = {};
+  if (opts.state) params.state = opts.state;
+  if (opts.limit !== undefined) {
+    params.limit = opts.limit;
+    params.offset = opts.offset ?? 0;
+  }
+  return db
+    .prepare(
+      `SELECT j.job_id, j.workflow, j.state, j.attempts, j.max_attempts, j.next_run_at, j.updated_at,
+              (SELECT a.error_code FROM job_attempts a
+                WHERE a.job_id = j.job_id AND a.error_code IS NOT NULL
+                ORDER BY a.attempt_no DESC LIMIT 1) AS last_error
+         FROM jobs j ${where}
+         ORDER BY j.created_at DESC, j.job_id DESC ${paginate}`,
+    )
+    .all(params) as JobsRawRow[];
 }
 
 /**
@@ -731,7 +818,8 @@ export interface JobListRow {
  * `(created_at DESC, job_id DESC)` — the `jobs-list.schema.json` `x-atlas-contract`
  * ordering (`sortKey: createdAt`, `direction: desc`, `tieBreaker: jobId`). `job_id`
  * (the PK) is unique so a same-timestamp tie is fully resolved, keeping pagination
- * deterministic across pages.
+ * deterministic across pages. Rows flow through the shared {@link jobListRawQuery}
+ * builder + {@link projectJobListRow} projector.
  */
 export function listJobs(
   db: SqliteDatabase,
@@ -741,31 +829,23 @@ export function listJobs(
   const total = (
     db.prepare(`SELECT COUNT(*) AS n FROM jobs ${where}`).get(opts.state ? { state: opts.state } : {}) as { n: number }
   ).n;
-  const rows = db
-    .prepare(
-      `SELECT job_id, workflow, state, attempts, max_attempts, next_run_at FROM jobs ${where}
-        ORDER BY created_at DESC, job_id DESC LIMIT @limit OFFSET @offset`,
-    )
-    .all({ ...(opts.state ? { state: opts.state } : {}), limit: opts.limit, offset: opts.offset }) as {
-    job_id: string;
-    workflow: string;
-    state: JobState;
-    attempts: number;
-    max_attempts: number;
-    next_run_at: string | null;
-  }[];
-  return {
-    total,
-    rows: rows.map((r) => ({
-      jobId: r.job_id,
-      workflow: r.workflow,
-      state: r.state,
-      attempts: r.attempts,
-      maxAttempts: r.max_attempts,
-      nextRunAt: r.next_run_at,
-      lastError: lastError(db, r.job_id),
-    })),
-  };
+  const rows = jobListRawQuery(db, {
+    ...(opts.state ? { state: opts.state } : {}),
+    limit: opts.limit,
+    offset: opts.offset,
+  }).map(projectJobListRow);
+  return { total, rows };
+}
+
+/**
+ * Unpaginated full-table read (`watch`'s job-diff source): EVERY job in ONE
+ * transactionally consistent snapshot (§4 scale 10²–10³), not a 500-capped page.
+ * Same {@link jobListRawQuery} builder as {@link listJobs} (no limit/offset), so
+ * the two readers cannot fork; a single `db.transaction` guarantees a consistent
+ * read across the whole table.
+ */
+export function listAllJobs(db: SqliteDatabase): JobListRow[] {
+  return db.transaction(() => jobListRawQuery(db).map(projectJobListRow))();
 }
 
 /** Ids of jobs in a given state, deterministic `(next_run_at, job_id)` order (bulk selectors). */

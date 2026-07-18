@@ -34,6 +34,7 @@ import { ledgerDbPath, backupConfig } from "./backup-config.js";
 import { quarantineDir, quarantineStoreFromContext } from "../quarantine/config.js";
 import { isBundleFilename, isTempFilename, validateBundleStructure } from "../quarantine/store.js";
 import { verifyAuditAnchor, type AuditChainProbe } from "../audit/anchor-check.js";
+import { probeDaemon, isReachable } from "../health/probe.js";
 
 type CheckStatus = "ok" | "warning" | "degraded" | "action-required";
 
@@ -320,12 +321,19 @@ async function checkAuditAnchor(ctx: RunContext): Promise<Check> {
   }
   // Connect the broker best-effort: it is the AUTHORITATIVE read-only interface to
   // the actual `refs/audit/runs` + WORM anchor (round-3 finding 1). If it is
-  // unreachable the check degrades to the SQLite-only fallback (flagged so).
+  // unreachable the check degrades to the SQLite-only fallback (flagged so). The
+  // LIVENESS decision routes through the SHARED typed daemon probe (`probeDaemon`/
+  // `isReachable`) — the same seam `watch` and `assertReadAuditReady` consume — so
+  // the three reachability verdicts cannot drift (Task #178). Only after a clean
+  // probe do we open the real client; a connect that STILL fails (daemon died in
+  // the gap) degrades identically.
   let probe: BrokerClient | null = null;
-  try {
-    probe = await BrokerClient.connect(ctx.config.config.broker.socket_path);
-  } catch {
-    probe = null;
+  if (isReachable(await probeDaemon(ctx.config.config.broker.socket_path))) {
+    try {
+      probe = await BrokerClient.connect(ctx.config.config.broker.socket_path);
+    } catch {
+      probe = null;
+    }
   }
   try {
     const r = await verifyAuditAnchor(store.db, ctx.config.config.git.audit_anchor_path, ctx.env, probe as AuditChainProbe | null);
@@ -364,7 +372,14 @@ function checkProvisioning(ctx: RunContext): Check {
 
   const missing: string[] = [];
 
-  // Broker identity/socket: the daemon must be listening.
+  // Broker identity/socket: the provisioned socket ARTIFACT must be present. This is a
+  // PROVISIONING-presence probe (did `setup.sh` create the socket?), NOT a liveness
+  // probe — deliberately an `existsSync` artifact check, so `doctor`'s provisioning
+  // verdict + diagnostic stay byte-identical to their pre-Phase-1 form. Broker
+  // LIVENESS is a separate concern already covered by `checkAuditAnchor` (the
+  // reachability seam that connects the daemon) and by the shared `probeDaemon`
+  // consumers (`assertReadAuditReady`); duplicating it here would change this check's
+  // behavior and diagnostics for no gain (round-4 finding).
   const socket = ctx.config.config.broker.socket_path;
   if (!existsSync(socket)) missing.push(`broker socket ${socket} absent (is the broker daemon running?)`);
 
@@ -662,4 +677,4 @@ async function doctor(ctx: RunContext): Promise<number> {
 
 registerCommand("doctor", doctor);
 
-export { doctor, checkQuarantineSecurity };
+export { doctor, checkQuarantineSecurity, checkProvisioning };

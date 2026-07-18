@@ -87,6 +87,13 @@ Six phases done; the full-corpus live drive is done (2026-07-17: 210 notes gradu
 
 **Live-drive gotchas** (from [`docs/retros/2026-07-18-search-index-live-drive-retro.md`](docs/retros/2026-07-18-search-index-live-drive-retro.md), the authoritative source): a drive broker needs its **own** fresh clone of the graduation copy + fresh anchor (grad-copy carries graduation's `refs/audit/runs`, so a fresh ledger's seq 0 collides); commit the migration before cloning and `git rm -r .bootstrap-backup`; a fresh ledger needs `db migrate` before `db rebuild`; export `ATLAS_EGRESS_CAPABILITY_KEY` for every mint-bearing command (`index rebuild`/`index eval`/`query`); the apply challenge nonce has a short TTL — sign + apply promptly.
 
+**Process gotchas (from the 2026-07-18 SP-1 step-1 run — 12h for one step; don't repeat):**
+- **pnpm pin:** `packageManager` was pinned to **11.12.0, a broken release** — every `pnpm -r test` exited 127/1. Now pinned **11.15.0**. If pnpm misbehaves, check the pin *first*; the global shim at `~/Library/pnpm/.pnpm/**/@pnpm/exe/pnpm` has also been observed literally blank.
+- **Reviewer must prove it can run the suite before round 1.** A review harness that can't execute `pnpm -r test` reviews blind and never converges (5 rounds → `max_rounds_unresolved`, ~2h lost). Broken harness ⇒ abort and fix, never "review on `tsc --noEmit` only".
+- **Hard cap: 2 review rounds per step.** Round 3 = escalate to Aryeh with the open findings, not another pass.
+- **Ceremony tier:** this repo is a real product Aryeh wants (decided 2026-07-18), but process stays lean — spec *or* plan review, not spec→spec-review→plan→plan-review chains; decompose to phases (~6 issues), not tasks (26).
+- **Lead-agent 900s timeout with zero files ⇒ kill and relaunch immediately**, don't wait it out.
+
 ## Pointers (SSOT)
 
 - **Design SSOT:** [`docs/specs/2026-07-11-atlas-v1-design.md`](docs/specs/2026-07-11-atlas-v1-design.md) (V1 capability + architecture; the "In V1 / Out of V1" list is normative).

@@ -22,12 +22,104 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { AuditAnchorSchema, SignedEnvelopeSchema, type SignedEnvelope } from "@atlas/contracts";
-import { verifyEnvelope, parsePublicKeyFlexible, type AuditChainStatus } from "@atlas/broker";
+import { verifyEnvelope, parsePublicKeyFlexible, isBadRequestRefusal, type AuditChainStatus } from "@atlas/broker";
 import type { SqliteDatabase } from "@atlas/sqlite-store";
+import { isTransportError } from "../health/socket-errors.js";
 
 /** The read-only broker interface this check consults (structural — a `BrokerClient` satisfies it). */
 export interface AuditChainProbe {
   getAuditChainStatus(): Promise<AuditChainStatus>;
+}
+
+/**
+ * The typed, TOTAL outcome of the async broker chain-status probe — resolved to a
+ * plain value BEFORE any SQLite transaction so a synchronous derivation can
+ * consume it (console watch SP-1, Phase 1 Task 1). Classified against the ACTUAL
+ * broker contract (`packages/broker/src/protocol.ts`):
+ *  - `unreachable`     — broker null, a transport/socket error, the RPC timeout,
+ *                        or ANY other unexpected throw (fail-safe to degrade).
+ *                        `cause` carries the thrown message when it came from a
+ *                        FAILED RPC (undefined only when the broker was `null`), so
+ *                        the degraded verdict reproduces the pre-refactor reason
+ *                        byte-for-byte (behavior/JSON parity — `doctor` exposes it).
+ *  - `answered`        — a correlated, well-formed `AuditChainStatus`.
+ *  - `protocol-error`  — a `broker.bad_request` refusal (the ONLY fatal outcome,
+ *                        matched via `@atlas/broker`'s `isBadRequestRefusal`;
+ *                        `detail` = the refusal code, `cause` = the thrown message).
+ *                        Only `watch` treats it as fatal; `status`/`doctor` degrade
+ *                        it exactly like a failed RPC (same legacy reason string).
+ */
+export type AnchorProbe =
+  | { readonly kind: "unreachable"; readonly cause?: string }
+  | { readonly kind: "answered"; readonly status: AuditChainStatus }
+  | { readonly kind: "protocol-error"; readonly detail: string; readonly cause: string };
+
+/** The thrown value's message, matching the legacy `e instanceof Error ? e.message : String(e)`. */
+function throwMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+/** Default bound (ms) on the chain-status RPC — an ignored/hung frame degrades, never stalls. */
+const DEFAULT_PROBE_TIMEOUT_MS = 2000;
+
+/** Resolve the RPC timeout from `ATLAS_WATCH_PROBE_TIMEOUT_MS` (default 2000ms). */
+function probeTimeoutMs(env: NodeJS.ProcessEnv): number {
+  const raw = env.ATLAS_WATCH_PROBE_TIMEOUT_MS;
+  const n = raw !== undefined && raw !== "" ? Number(raw) : Number.NaN;
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_PROBE_TIMEOUT_MS;
+}
+
+/** Race a promise against a timeout that rejects; the timer never keeps the process alive. */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`audit chain-status probe timed out after ${ms}ms`)), ms);
+    (timer as { unref?: () => void }).unref?.();
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e as Error);
+      },
+    );
+  });
+}
+
+/**
+ * Resolve the broker chain-status probe to a typed, TOTAL {@link AnchorProbe} — the
+ * ONLY async part of the anchor check. The RPC is wrapped in a bounded timeout so an
+ * ignored/uncorrelated frame (which never resolves) cannot hang a caller. Every
+ * non-answered, non-`broker.bad_request` outcome degrades to `unreachable`; only a
+ * `broker.bad_request` refusal is `protocol-error`. This resolver holds NO
+ * transaction and touches NO SQLite — the caller runs {@link deriveAnchorVerdict}
+ * synchronously against the resolved value.
+ */
+export async function resolveAnchorProbe(
+  broker: AuditChainProbe | null,
+  env: NodeJS.ProcessEnv,
+): Promise<AnchorProbe> {
+  if (broker === null) return { kind: "unreachable" };
+  try {
+    const status = await withTimeout(broker.getAuditChainStatus(), probeTimeoutMs(env));
+    return { kind: "answered", status };
+  } catch (e) {
+    // Single-authority socket taxonomy: classify EXPLICITLY through the shared
+    // predicates before degrading, so this and the daemon probe cannot drift.
+    //  1. The malformed-correlated-result refusal is the sole protocol fault. Its
+    //     code is owned by `@atlas/broker` — the CLI never re-declares the literal.
+    if (isBadRequestRefusal(e)) return { kind: "protocol-error", detail: e.code, cause: throwMessage(e) };
+    //  2. An ordinary transport/socket failure — the shared `isTransportError` set
+    //     (the SAME list the daemon probe consumes) — degrades to unreachable. The
+    //     thrown message rides on `cause` so the degraded reason stays byte-identical
+    //     to the pre-refactor `broker RPC failed: <message>` (doctor exposes it).
+    if (isTransportError(e)) return { kind: "unreachable", cause: throwMessage(e) };
+    //  3. The RPC timeout (an anchor-probe-specific concern, layered here, not in
+    //     the socket set) or ANY other unexpected throw also degrade — the resolver
+    //     is total, so `status` never regresses from its catch-all degradation.
+    return { kind: "unreachable", cause: throwMessage(e) };
+  }
 }
 
 /** The outcome of {@link verifyAuditAnchor}. */
@@ -96,17 +188,27 @@ export async function verifyAuditAnchor(
   env: NodeJS.ProcessEnv,
   broker: AuditChainProbe | null,
 ): Promise<AnchorCheckResult> {
-  const live = liveAudit(db);
+  return deriveAnchorVerdict(db, anchorPath, env, await resolveAnchorProbe(broker, env));
+}
 
-  if (broker !== null) {
-    let git: AuditChainStatus;
-    try {
-      git = await broker.getAuditChainStatus();
-    } catch (e) {
-      // Broker present but the RPC failed — cannot verify the ref; degrade to the
-      // SQLite-only fallback rather than falsely reporting healthy.
-      return sqliteOnlyResult(db, anchorPath, env, `git ref unverified (broker RPC failed: ${e instanceof Error ? e.message : String(e)})`);
-    }
+/**
+ * The SYNCHRONOUS verdict: run the existing SQLite cross-check against an
+ * already-resolved {@link AnchorProbe} (console watch SP-1, Phase 1 Task 1). Safe
+ * to call inside a `better-sqlite3` read transaction (no `await`). Maps BOTH
+ * `unreachable` and `protocol-error` to the existing `sqliteOnlyResult` — so
+ * `status`/`doctor` degraded behavior is byte-identical to the pre-refactor
+ * catch-all. Only `watch` inspects `probe.kind === "protocol-error"` (to go fatal);
+ * it never reaches this verdict for that case.
+ */
+export function deriveAnchorVerdict(
+  db: SqliteDatabase,
+  anchorPath: string,
+  env: NodeJS.ProcessEnv,
+  probe: AnchorProbe,
+): AnchorCheckResult {
+  if (probe.kind === "answered") {
+    const git = probe.status;
+    const live = liveAudit(db);
     const base = { headSeq: git.count, head: git.head, source: "git" as const };
     if (!git.ok) {
       return { ok: false, ...base, detail: `git audit chain: ${git.detail ?? "verification failed"}` };
@@ -128,7 +230,19 @@ export async function verifyAuditAnchor(
     return { ok: true, ...base };
   }
 
-  return sqliteOnlyResult(db, anchorPath, env, "git ref unverified (broker unavailable)");
+  // Both `unreachable` and `protocol-error` degrade to the SQLite-only fallback —
+  // the git ref could not be verified either way. Reproduce the PRE-REFACTOR reason
+  // exactly (behavior/JSON parity — `doctor` surfaces this detail):
+  //   - a `null` broker → "broker unavailable" (legacy line);
+  //   - ANY failed RPC (transport / timeout / unexpected throw / `broker.bad_request`
+  //     refusal) → "broker RPC failed: <thrown message>", preserving the message the
+  //     legacy `catch (e)` retained (a bad_request refusal was, pre-refactor, just
+  //     another thrown RPC error — its message flows through `cause`).
+  const reason =
+    probe.kind === "unreachable" && probe.cause === undefined
+      ? "git ref unverified (broker unavailable)"
+      : `git ref unverified (broker RPC failed: ${probe.cause})`;
+  return sqliteOnlyResult(db, anchorPath, env, reason);
 }
 
 /**

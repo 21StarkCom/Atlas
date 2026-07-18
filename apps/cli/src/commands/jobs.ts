@@ -28,7 +28,6 @@ import {
   type JobsDeps,
   type JobRunReport,
   type JobState,
-  type JobListRow,
 } from "@atlas/jobs";
 import type { Store } from "@atlas/sqlite-store";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
@@ -271,27 +270,17 @@ function parseListArgs(argv: string[]): { state?: JobState; limit: number; offse
   return state !== undefined ? { state, limit, offset } : { limit, offset };
 }
 
-function jobListJson(r: JobListRow): Record<string, unknown> {
-  const out: Record<string, unknown> = {
-    jobId: r.jobId,
-    workflow: r.workflow,
-    state: r.state,
-    attempts: r.attempts,
-    maxAttempts: r.maxAttempts,
-  };
-  if (r.nextRunAt !== null) out.nextRunAt = r.nextRunAt;
-  if (r.lastError !== null) out.lastError = r.lastError;
-  return out;
-}
-
 function jobsList(ctx: RunContext): number {
   const { state, limit, offset } = parseListArgs(ctx.argv);
   const store = openJobsCommandStore(ctx);
   try {
     const { rows, total } = listJobs(store.db, state !== undefined ? { state, limit, offset } : { limit, offset });
+    // No second shape transformation (Phase 1 Task 2 finding): `projectJobListRow`
+    // already owns null-optional omission, so the projected rows ARE the final
+    // `jobs list --json` shape — the SAME field-for-field rows `watch` reuses.
     const out = {
       command: "jobs list",
-      jobs: rows.map(jobListJson),
+      jobs: rows,
       pagination: { limit, offset, total, hasMore: offset + rows.length < total },
     };
     if (ctx.output.mode === "json") emitJson(out);

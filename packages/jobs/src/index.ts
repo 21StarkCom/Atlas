@@ -14,6 +14,8 @@ export {
   bindEnqueueContext,
   readSnapshot,
   listJobs,
+  listAllJobs,
+  projectJobListRow,
   jobIdsInStates,
   jobState,
   cancelJob,
@@ -50,6 +52,7 @@ export type {
   CancelOutcome,
   RetryOutcome,
   JobListRow,
+  JobsRawRow,
   JobEffect,
   FinalizeResult,
 } from "./repo.js";

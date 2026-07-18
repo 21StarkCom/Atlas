@@ -68,6 +68,15 @@ import type { RunContext } from "../handlers.js";
 import { backupConfig } from "../commands/backup-config.js";
 import { openMigratedStore } from "../commands/store-open.js";
 
+// Re-export the shared daemon reachability probe (Phase 1 Task 3) so consumers of
+// the read-audit surface reach it here. `doctor`/`assertReadAuditReady` map its
+// typed outcome through `isReachable` (behavior unchanged); Phase 4's watch
+// heartbeat maps a `fault` to a `watch.error`. Connect/close only — no bytes.
+export { probeDaemon, isReachable, type DaemonProbe } from "../health/probe.js";
+// `assertReadAuditReady` below CONSUMES the typed probe (not just re-exports it) so
+// its broker-reachability logic is the SAME single authority as every other caller.
+import { probeDaemon, isReachable } from "../health/probe.js";
+
 /** The two read-class terminal audit kinds this module anchors (plan §2.5). */
 export type ReadonlyRunKind = "run.readonly" | "run.projection";
 
@@ -259,20 +268,21 @@ export async function assertReadAuditReady(ctx: RunContext, store: Store): Promi
   }
 
   // Broker reachability: a projection run cannot degrade, so an unreachable broker
-  // is a hard error here rather than a mutation with no audit event.
-  let probe: BrokerClient;
-  try {
-    probe = await BrokerClient.connect(ctx.config.config.broker.socket_path);
-  } catch (e) {
+  // is a hard error here rather than a mutation with no audit event. Classified
+  // through the SHARED typed daemon probe (`isReachable`) — connect/close only, no
+  // bytes — so this reachability check is the same authority the daemon/anchor
+  // probes use (behavior unchanged: reachable ⇒ proceed, anything else ⇒ throw).
+  const socket = ctx.config.config.broker.socket_path;
+  const daemon = await probeDaemon(socket);
+  if (!isReachable(daemon)) {
+    const why = daemon.status === "fault" ? `${daemon.code}: ${daemon.message}` : daemon.code;
     throw new CliError({
       code: "broker-unreachable",
-      message: `the broker is unreachable at ${ctx.config.config.broker.socket_path}: ${e instanceof Error ? e.message : String(e)}`,
+      message: `the broker is unreachable at ${socket}: ${why}`,
       hint: "Start the broker daemon before `db rebuild` (a projection rebuild must record exactly one run.projection).",
       exitCode: EXIT.INTERNAL,
-      cause: e,
     });
   }
-  probe.close();
 }
 
 /** Extra wiring a `run.projection` / audited-read run threads through {@link runReadAudit}. */
