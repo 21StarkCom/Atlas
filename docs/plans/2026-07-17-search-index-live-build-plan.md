@@ -866,6 +866,8 @@ Expected: `ok: <n> queries` with n ≥ 30.
 
 ## Task 5: The live drive — full-corpus graduation → rebuild → index → eval (operator-gated)
 
+> **⚠️ EXECUTED 2026-07-17 — read the retro first.** This runbook was written from the 07-16 example and got six operational facts wrong (broker vault-repo/anchor separation, `.bootstrap-backup` removal, `db migrate` ordering, capability-key env, broker-after-scan, nonce TTL) that each blocked the real drive. The **corrected steps + results** are in [`../retros/2026-07-18-search-index-live-drive-retro.md`](../retros/2026-07-18-search-index-live-drive-retro.md); follow that for any re-run. The gate passed on the §6 vector-only config (FTS immaturity — #156).
+
 Operational runbook; no code changes expected (any bug found becomes its own issue/PR, per the altitude rule). Requires Tasks 1–3 merged.
 
 **Ordering (kills the Task-4 circularity):** the eval set must already be IN main-vault when the real drive clones it, and its labels need a migrate preview — so the drive is TWO passes: **Step 0** (a disposable label-preview pass → Task 4 authored → vault PR merged → main-vault synced), then **Steps 1–10** (the real drive, whose Step-1 HEAD-before already includes the eval-set commit, whose Step-3 clone carries `00_System/retrieval-eval/`, and whose Step-10 HEAD assert holds with zero exceptions).
