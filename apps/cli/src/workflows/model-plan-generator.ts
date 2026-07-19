@@ -8,7 +8,7 @@
  * models client (the credential + network live INSIDE the egress broker; this never touches either).
  */
 import { SCHEMA_REGISTRY, type ChangePlan } from "@atlas/contracts";
-import type { EgressCapability } from "@atlas/broker";
+import { PROMPT_REFS, type EgressCapability } from "@atlas/broker";
 import type { PlanGenerationInput } from "./synthesis.js";
 
 /** The minimal `generateObject` surface the generator needs (a `ModelsClient`). */
@@ -29,6 +29,15 @@ export interface PlanGeneratorDeps {
   /** The prompt ref (a stable id, never the prompt body — it lives broker-side). */
   readonly promptRef?: string;
 }
+
+/**
+ * The per-CALL output cap for plan generation. Distinct from the per-RUN egress
+ * ceiling: the egress budget projects `input + maxTokens` per call, so passing the
+ * run ceiling here made every projection exceed the ceiling by construction —
+ * `enrich` was structurally refused (#210, layer 2). 4096 fits Gemini 3.5's
+ * thinking spend (~1k tokens, billed inside `maxOutputTokens`) plus a ChangePlan.
+ */
+export const PLAN_GENERATION_MAX_TOKENS = 4096;
 
 /** Serialize the grounded plan input the model receives (packed retrieval context + instruction). */
 function planInput(input: PlanGenerationInput): string {
@@ -52,7 +61,10 @@ export function makeModelPlanGenerator(deps: PlanGeneratorDeps): (input: PlanGen
     return deps.models.generateObject<ChangePlan>(
       {
         model: deps.model,
-        prompt: { ref: deps.promptRef ?? "synthesis-plan" },
+        // The default MUST come from the broker's PROMPT_REFS SSOT — a hand-typed
+        // ref here shipped unregistered and killed every synthesis command at the
+        // first live daemon (#210).
+        prompt: { ref: deps.promptRef ?? PROMPT_REFS.synthesisPlan },
         input: planInput(input),
         schema: SCHEMA_REGISTRY.ChangePlan,
         schemaId: "ChangePlan",

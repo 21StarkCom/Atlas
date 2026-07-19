@@ -176,6 +176,10 @@ export interface IndexedOutcome extends OutcomeBase {
   readonly chunkCount: number;
   /** Superseded chunks retired for this note after activation (§3 step 6). */
   readonly retiredChunks: number;
+  /** Present iff the generation's chunks were already durably complete in LanceDB
+   * and only the SQLite fence was re-pointed — no embed spend (repair action
+   * `re-activated`). */
+  readonly reattached?: true;
 }
 
 /** The note's target generation was already active and complete — a no-op pass. */
@@ -355,6 +359,26 @@ export async function indexNote(note: ParsedNote, deps: IndexDeps): Promise<Inde
       }
       return { kind: "unchanged", noteId: note.id, generationId: gen, chunkCount: chunks.length };
     }
+  }
+
+  // Re-attach: the target generation is already durably COMPLETE in LanceDB but
+  // the fence does not point at it (fence lost — e.g. an older-backup restore or a
+  // pre-#212 projection rebuild). Activate without re-embedding. Fail-closed by
+  // construction: any config/content drift changes `gen`, whose chunks will NOT be
+  // present, so this path can never mask a genuine invalidation. Same double-verify
+  // pattern as the fast path: probe outside the lock, recheck inside (a concurrent
+  // compaction may have reclaimed the rows between the two).
+  if (await verifyComplete(table, gen, expectedChunkIds)) {
+    const reattachOutcome = await lock.runExclusive(async (): Promise<IndexOutcome | null> => {
+      if (!(await verifyComplete(table, gen, expectedChunkIds))) return null; // compacted since — fall through to embed
+      const activated = store.activateGeneration(note.id, gen, note.contentHash, configKey);
+      if (!activated) return { kind: "superseded", noteId: note.id, generationId: gen };
+      if (hooks.afterActivate) await hooks.afterActivate();
+      if (hooks.beforeRetire) await hooks.beforeRetire();
+      const retiredChunks = await retireSupersededGenerations(table, note.id, gen);
+      return { kind: "indexed", noteId: note.id, generationId: gen, chunkCount: chunks.length, retiredChunks, reattached: true };
+    });
+    if (reattachOutcome !== null) return reattachOutcome;
   }
 
   // (2) Embed — batched, through the egress broker (D7 dims applied CLI-side).

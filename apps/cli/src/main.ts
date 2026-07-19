@@ -255,10 +255,28 @@ function fail(
   stderr: NodeJS.WritableStream,
   log?: Logger,
 ): ExitCode {
+  // The LOCAL log carries the cause (bounded), or an `internal` failure is
+  // undiagnosable — #210 shipped four dead commands whose root cause appeared in
+  // no log. The stdout envelope stays cause-free (errors/envelope.ts: `cause` is
+  // never serialized); this is diagnostics, not surface.
+  //
+  // The MESSAGE is logged only for the sanitized seam-error families whose text is
+  // constructed (codes/counts/paths), never quoted from content: broker/egress
+  // refusals and provider errors. A foreign error's message routinely embeds vault
+  // or model content (DanglingLinkError quotes link text; parse errors quote
+  // frontmatter) and the diag logger's §2.5 redaction is key-based — free text
+  // would bypass it into a durable, unscanned sink. For those, name-only.
+  const cause = err.cause;
+  const causeName = cause instanceof Error ? cause.name : cause !== undefined ? typeof cause : undefined;
+  const SANITIZED_CAUSE_NAMES = new Set(["BrokerRefusal", "EgressRefusal", "ProviderCallError", "SecretDetectedError", "CliError", "ConfigError"]);
+  const causeMessage =
+    cause instanceof Error && SANITIZED_CAUSE_NAMES.has(cause.name) ? cause.message.slice(0, 300) : undefined;
   log?.error("command.error", {
     code: err.code,
     exitCode: err.exitCode,
     retryable: err.retryable,
+    ...(causeName !== undefined ? { causeName } : {}),
+    ...(causeMessage !== undefined ? { causeMessage } : {}),
   });
   if (output.mode === "json") {
     // JSON emitter path (allowed stdout writer).

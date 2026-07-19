@@ -10,7 +10,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { z } from "zod";
-import { GeminiAdapter, ProviderCallError, type Transport } from "../src/index.js";
+import { GeminiAdapter, PROMPT_REFS, ProviderCallError, type Transport } from "../src/index.js";
 import type { GenerateTextRequest, EmbedRequest, GenerateObjectRequest } from "../src/index.js";
 
 const MODEL = "gemini-3.5-flash";
@@ -254,6 +254,29 @@ describe("GeminiAdapter — prompt.ref resolution (finding #2)", () => {
     const s = adapter.serialize("generateObject", { model: MODEL, prompt: { ref: "prompts/classify@1" }, input: "x", schemaId: "T" } as GenerateObjectRequest);
     const raw = Buffer.from(s.bytes).toString("utf8");
     expect(raw).toContain("source-classification");
+  });
+
+  it("serializes the synthesis-plan ref against the DEFAULT registry (#210 regression)", () => {
+    const adapter = new GeminiAdapter({ apiKey: "k" });
+    const s = adapter.serialize("generateObject", { model: MODEL, prompt: { ref: PROMPT_REFS.synthesisPlan }, input: "{}", schemaId: "ChangePlan" } as GenerateObjectRequest);
+    const raw = Buffer.from(s.bytes).toString("utf8");
+    expect(raw).toContain("synthesis-plan step");
+  });
+
+  it("releases the candidate finishReason on generateText and counts thought tokens as output (#211)", () => {
+    const adapter = new GeminiAdapter({ apiKey: "k" });
+    const json = {
+      candidates: [{ content: { parts: [{ text: "cut answ" }] }, finishReason: "MAX_TOKENS" }],
+      usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 40, thoughtsTokenCount: 980 },
+    };
+    const parsed = adapter.parse("generateText", textReq, Buffer.from(JSON.stringify(json)));
+    expect(parsed.result).toMatchObject({ text: "cut answ", finishReason: "MAX_TOKENS" });
+    // Thinking tokens are billed output — receipts/cost must include them (D19).
+    expect(parsed.usage).toEqual({ inputTokens: 100, outputTokens: 1020 });
+    // Absent finishReason / thoughts stay absent-compatible (older fixtures).
+    const plain = adapter.parse("generateText", textReq, Buffer.from(JSON.stringify(textCandidate("ok"))));
+    expect((plain.result as { finishReason?: string }).finishReason).toBeUndefined();
+    expect(plain.usage).toEqual({ inputTokens: 10, outputTokens: 5 });
   });
 
   it("FAILS CLOSED on an unknown prompt reference — before any transport", () => {

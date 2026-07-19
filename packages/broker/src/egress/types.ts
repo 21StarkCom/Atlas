@@ -69,7 +69,15 @@ export type EmbedRequest = z.infer<typeof EmbedRequestSchema>;
 // ---------------------------------------------------------------------------
 
 export const GenerateTextResultSchema = z
-  .object({ text: z.string(), usage: UsageSchema, model: z.string().min(1) })
+  .object({
+    text: z.string(),
+    usage: UsageSchema,
+    model: z.string().min(1),
+    // Provider finish reason (e.g. "STOP", "MAX_TOKENS"), released so callers can
+    // detect truncation instead of treating a cut fragment as a complete answer
+    // (#211). Optional: absent when the provider omitted it (and in older fixtures).
+    finishReason: z.string().min(1).optional(),
+  })
   .strict();
 export type GenerateTextResult = z.infer<typeof GenerateTextResultSchema>;
 

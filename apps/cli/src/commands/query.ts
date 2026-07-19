@@ -92,7 +92,7 @@ import {
   type GenerateTextResult,
   type ModelCallReceipt,
 } from "@atlas/models";
-import { EgressClient, BrokerClient } from "@atlas/broker";
+import { EgressClient, BrokerClient, PROMPT_REFS } from "@atlas/broker";
 import {
   assertBackupHealthy,
   BackupUnhealthyError,
@@ -128,10 +128,14 @@ import { packContext } from "../retrieval/pack.js";
 
 /** Token budget for the packed context handed to the grounded-answer step. */
 const PACK_TOKEN_BUDGET = 6000;
-/** `maxTokens` for the grounded-answer generation (required positive int). */
-const GENERATION_MAX_TOKENS = 1024;
-/** The versioned egress prompt for grounded synthesis (broker prompt-registry key). */
-const ANSWER_PROMPT_REF = "prompts/synthesize@1";
+/** `maxTokens` for the grounded-answer generation (required positive int).
+ * Gemini 3.5 spends its THINKING tokens inside `maxOutputTokens` (live-measured
+ * ~1000-1100 thought tokens per grounded answer), so the cap must fit thinking +
+ * answer. 1024 truncated every answer at MAX_TOKENS (#211); 4096 verified live:
+ * finishReason STOP with a complete cited answer. */
+const GENERATION_MAX_TOKENS = 4096;
+/** The versioned egress prompt for grounded synthesis (broker PROMPT_REFS SSOT). */
+const ANSWER_PROMPT_REF = PROMPT_REFS.synthesize;
 
 /** Per-run egress ceilings (D19). Generous — the per-run budget is a compromise
  * bound, not a quota; the payload scan + capability enforce the real limits. */
@@ -205,6 +209,8 @@ interface QueryOutput {
   readonly mode: "answered" | "retrieval-only";
   readonly query: string;
   readonly answer?: string;
+  /** Present iff answered AND the provider cut the answer (finishReason != STOP). */
+  readonly truncated?: true;
   readonly modelCalls?: number;
   readonly items: QueryItemOutput[];
   readonly layersUsed: RetrievalResult["layersUsed"];
@@ -296,11 +302,15 @@ export async function executeQuery(deps: QueryExecDeps): Promise<QueryExecResult
   // under a falsely-lower classification.
   let answer: string | undefined;
   let generationCalls = 0;
+  let truncated = false;
   if (args.answer) {
     const declared = effectiveSensitivity(deps.baseSensitivity, pack.notes);
     const gen = await deps.generate(buildAnswerInput(args.text, pack), declared);
     answer = gen.text;
     generationCalls = 1;
+    // A non-STOP finish means the provider cut the answer (MAX_TOKENS etc.) —
+    // surface it instead of releasing a fragment as a complete answer (#211).
+    truncated = gen.finishReason !== undefined && gen.finishReason !== "STOP";
   }
 
   // Citations: which retrieved notes the answer cites. A citation is an EXACT
@@ -323,6 +333,7 @@ export async function executeQuery(deps: QueryExecDeps): Promise<QueryExecResult
     mode: args.answer ? "answered" : "retrieval-only",
     query: args.text,
     ...(answer !== undefined ? { answer, modelCalls: generationCalls } : {}),
+    ...(truncated ? { truncated: true as const } : {}),
     items,
     layersUsed: result.layersUsed,
     retrievalRunId: result.retrievalRunId,
@@ -807,11 +818,14 @@ async function query(ctx: RunContext): Promise<number> {
   }
 }
 
-/** The human-mode summary line (the single render path). */
-function renderHuman(ctx: RunContext, out: QueryOutput): void {
+/** The human-mode summary line (the single render path). Exported for the test suite. */
+export function renderHuman(ctx: RunContext, out: QueryOutput): void {
   if (out.mode === "answered") {
+    const truncationWarning = out.truncated
+      ? `\n[warning] the answer was truncated by the provider (finish != STOP) — retry, or narrow the question`
+      : "";
     ctx.render(
-      `${out.answer ?? ""}\n\n— ${out.items.length} note(s) retrieved (${out.layersUsed.join(", ") || "none"}${out.degraded ? ", degraded" : ""}); run ${out.retrievalRunId}`,
+      `${out.answer ?? ""}${truncationWarning}\n\n— ${out.items.length} note(s) retrieved (${out.layersUsed.join(", ") || "none"}${out.degraded ? ", degraded" : ""}); run ${out.retrievalRunId}`,
     );
   } else {
     const top = out.items.slice(0, 5).map((i) => `${i.noteId} (${i.score.toFixed(4)})`).join(", ");
