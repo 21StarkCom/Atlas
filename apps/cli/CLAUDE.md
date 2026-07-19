@@ -42,7 +42,6 @@ Repo constitution: [`../../CLAUDE.md`](../../CLAUDE.md). Design SSOT: [`../../do
 ## Gotchas & sharp edges
 
 - **Egress-bearing commands need `ATLAS_EGRESS_CAPABILITY_KEY` exported** — `query`, `index rebuild`/`repair`/`eval` mint capabilities against the same secret the egress daemon verifies; a missing/mismatched key surfaces as a broker refusal. Live-drive gotcha; see the runbook below.
-- **`jobs list` does NOT use the shared pagination contract.** `commands/jobs.ts` parses `--limit`/`--offset` with bare `Number()` (`:260`/`:265`) + inline range checks — so `jobs list --offset 1e2` and an out-of-range offset behave differently from `source list`/`note *`/`evidence review`, which route through the strict `commands/pagination.ts` (`INT_LEXICAL_RE`, `assertOffsetInRange`: `offset ≥ total` ⇒ exit 5, never a silent empty page). **Unresolved divergence** — should route through `pagination.ts`.
 - **`sniffOutputFlags` mirrors `parseArgv`'s global-flag spelling** — a non-fallible second copy run *before* the fallible parse so a usage error still honours `--json`. A new global flag must land in **both** or the pre-parse-error path won't honour it.
 - **`--idempotency-key` is parsed-but-unused by some commands** (`enrich`/`reconcile`/`graduation migrate` consume flag+value but don't thread it); `jobs`/`source add`/`ingest` DO honour it via the persisted caller-idempotency layer.
 - **`coerceLike` passes bad env-override values through** to let the schema reject them with a clear message (`ATLAS_INDEXING_DIMENSIONS=foo` fails as a schema error, not silent coercion). Nested keys resolve longest-known-prefix-first; array overrides split on commas.
@@ -64,7 +63,6 @@ Repo constitution: [`../../CLAUDE.md`](../../CLAUDE.md). Design SSOT: [`../../do
 
 - **#60** — graduation E2E (automatable half shipped in #142): still owed are workflow-runs + purge live on the migrated copy, `tools/scale-bench.ts` (5k/50k), the ingest→index auto-hook. Exercises `graduation migrate`/workflow/purge/index commands end-to-end; real-copy apply stays human-gated (D20 — test signer rejected outside `ATLAS_TEST_MODE`).
 - **#65** — ledger/backup hardening residuals from the #23 review (touches `db backup`/`db restore` custody + `--force-unblock`; and the `recordIntegration`-without-`repo` ancestry residual above).
-- **jobs-list pagination divergence** (above) — route `jobs list` through `pagination.ts`.
 - `synthesis/integrate.ts` general-advance seam is unwired; `ops/index.ts` `CreateRelationship` executor is deferred (`EXECUTABLE_OPS` = claims/evidence trio only).
 
 ## Live-drive runbook (from [`2026-07-18-search-index-live-drive-retro.md`](../../docs/retros/2026-07-18-search-index-live-drive-retro.md) — authoritative over any plan)

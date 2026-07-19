@@ -31,6 +31,7 @@ import {
 } from "@atlas/jobs";
 import type { Store } from "@atlas/sqlite-store";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
+import { assertOffsetInRange, parseLimit, parseOffset } from "./pagination.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { openJobsCommandStore } from "./store-open.js";
 import { installTestJobHandler } from "./jobs-test-handler.js";
@@ -256,13 +257,12 @@ function parseListArgs(argv: string[]): { state?: JobState; limit: number; offse
       if (!JOB_STATES.includes(v as JobState)) throw CliError.usage(`\`jobs list\`: unknown --state ${v}`);
       state = v as JobState;
     } else if (a === "--limit") {
-      limit = Number(need());
-      if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
-        throw CliError.usage(`\`jobs list\`: --limit must be an integer in [1, 500]`);
-      }
+      // The SSOT pagination contract (Phase 6 fix-forward, SP-1 plan Task 6.2):
+      // strict lexical parse — `--limit 1e2`/`0x10`/`""` are usage errors here
+      // exactly as in `source list`/`note *`, never silently coerced by Number().
+      limit = parseLimit("jobs list", need());
     } else if (a === "--offset") {
-      offset = Number(need());
-      if (!Number.isInteger(offset) || offset < 0) throw CliError.usage(`\`jobs list\`: --offset must be an integer ≥ 0`);
+      offset = parseOffset("jobs list", need());
     } else {
       throw CliError.usage(`\`jobs list\`: unknown flag/argument ${a}`);
     }
@@ -275,6 +275,9 @@ function jobsList(ctx: RunContext): number {
   const store = openJobsCommandStore(ctx);
   try {
     const { rows, total } = listJobs(store.db, state !== undefined ? { state, limit, offset } : { limit, offset });
+    // Out-of-range offsets are usage errors (exit 5), never a silent empty page —
+    // the same contract every other paginated read enforces.
+    assertOffsetInRange("jobs list", offset, total);
     // No second shape transformation (Phase 1 Task 2 finding): `projectJobListRow`
     // already owns null-optional omission, so the projected rows ARE the final
     // `jobs list --json` shape — the SAME field-for-field rows `watch` reuses.
