@@ -24,6 +24,7 @@ Folder-per-type: `adr/` `specs/` `plans/` `retros/`. The CLI contract lives in `
 | `specs/2026-07-16-open-type-system-spec.md` + `plans/2026-07-17-open-type-system-plan.md` | open type system (#151 → landed #152, fix #153) | **supersedes** bootstrap-migration's `unknown-type`/`unsupported-schema-version` refusals |
 | `plans/2026-07-17-search-index-live-build-plan.md` | full-corpus index + `index eval` gate (#155) | **Task 5 runbook superseded by the retro** (below) |
 | `retros/2026-07-18-search-index-live-drive-retro.md` | authoritative live-drive gotcha source | six runbook corrections; FTS #156 → resolved #159 |
+| `specs/2026-07-19-live-vault-adoption-sync-spec.md` + `plans/2026-07-19-live-vault-adoption-sync-plan.md` | live-vault adoption (60-A) + continuous `brain sync` (60-B) — #60 | plan §0 is the **normative OQ#5 divergence policy** (REJECT halt + operator-authorized `sync reset`); decomposed into phase issues #263–#268 |
 
 For the spec → implementing-package map, use plan **§7** (`atlas-v1-implementation-2026-07-12.md`), not a copy here.
 
