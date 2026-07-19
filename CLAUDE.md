@@ -25,6 +25,7 @@ This file is the constitution — read it, then reach for the directory's own `C
 | [`provisioning/CLAUDE.md`](provisioning/CLAUDE.md) | The one human-led, `sudo`-requiring step: OS identities, groups, key custody, WORM anchor, sockets, sandbox prerequisites. |
 | [`docs/CLAUDE.md`](docs/CLAUDE.md) | The doc map + conventions — where each spec/plan/ADR/retro lives and which are generated. |
 | [`fixtures/CLAUDE.md`](fixtures/CLAUDE.md) | The committed test corpus — which fixture exercises what, which tests consume it. |
+| [`console/CLAUDE.md`](console/CLAUDE.md) | Atlas Console (SP-2) — a SwiftUI macOS app, **outside the pnpm workspace** (its own `swift build`/`swift test`). Pure read-face over `brain watch --json` + privileged-flow driver; opens no broker socket, imports no atlas internal package. |
 
 Public face + runbook: [`README.md`](README.md) and [`docs/install.md`](docs/install.md) (provision → verify).
 
