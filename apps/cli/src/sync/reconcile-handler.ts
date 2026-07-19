@@ -39,7 +39,7 @@
 import * as lancedb from "@lancedb/lancedb";
 import { z } from "zod";
 import type { ParsedNote } from "@atlas/contracts";
-import { indexNotes, openSearchTable, type IndexDeps, type ReconcileReport } from "@atlas/lancedb-index";
+import { ensureFtsIndex, indexNotes, openSearchTable, type IndexDeps, type ReconcileReport } from "@atlas/lancedb-index";
 import { openRepo } from "@atlas/git";
 import type { JobHandler, JobHandlerContext, JobHandlerResult } from "@atlas/jobs";
 import type { JobHandlerDeps } from "../commands/job-handlers.js";
@@ -112,7 +112,18 @@ async function runScopedReconcile(deps: JobHandlerDeps, noteIds: string[]): Prom
       lockLocation: dir,
       notes: scopedNotesProvider(resolve, noteIds),
     };
-    return await indexNotes(indexDeps, noteIds);
+    const report = await indexNotes(indexDeps, noteIds);
+    // Re-derive the `text` FTS inverted index over the freshly written rows, exactly as
+    // `index rebuild`/`repair` do at the end of their convergence. This is REQUIRED, not
+    // cosmetic: a missing/stale analyzer index does NOT throw — LanceDB silently
+    // brute-force-scans with the default no-stem/no-stop-word tokenizer, so the FTS layer
+    // keeps PARTICIPATING at degraded quality and floods top-K with common-term matches
+    // (issue #156 — the bug that dragged the default hybrid to 0.878/0.673 on the
+    // 2026-07-17 drive). Without this, every note a sync cycle absorbs would be served
+    // from a stale inverted index. `ensureFtsIndex` is idempotent (`replace: true`) and
+    // no-ops on a zero-row table.
+    await ensureFtsIndex(table);
+    return report;
   } finally {
     close();
   }
