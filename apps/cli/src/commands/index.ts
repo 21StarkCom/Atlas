@@ -44,3 +44,4 @@ import "./index-eval.js";
 import "./evidence-review.js";
 import "./evidence-retry.js";
 import "./evidence-resolve.js";
+import "./watch.js";
