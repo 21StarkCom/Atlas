@@ -143,27 +143,6 @@ export class BrokerGit {
   }
 
   /**
-   * The per-path change STATUSES for `commit` relative to its first parent (root
-   * commit ⇒ every path as `A`). Statuses are git's one-letter codes (`A` add,
-   * `M` modify, `D` delete, `R`/`C` rename/copy — score suffix stripped); rename
-   * and copy lines carry two paths and BOTH are reported under the same status,
-   * so an add-only policy rejects the whole rename rather than missing its
-   * source. Used by the note-add capture scope (additions-only).
-   */
-  async changedPathStatuses(commit: string): Promise<{ status: string; path: string }[]> {
-    const out = await runGit(this.dir, [
-      "diff-tree",
-      "--no-commit-id",
-      "--name-status",
-      "-z",
-      "-r",
-      "--root",
-      commit,
-    ]);
-    return parseNameStatusZ(out);
-  }
-
-  /**
    * The UNION of per-path change statuses across EVERY commit reachable from
    * `commit` when canonical is unborn (no base). Uses `git log … -m` so EVERY
    * commit in the new history is inspected — including each parent of a merge

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "atlas://cli-contract/note-add.schema.json",
   "title": "brain note add — --json success output",
-  "description": "Deterministic Tier-1 ingest of a PRE-AUTHORED vault note that APPLIES immediately (#262) — no preview mode. Funnels through addNote: scan-before-persist (secret detection ⇒ exit 3, quarantined, nothing persisted), vault-reader frontmatter validation, id/alias/path collision refusal against the current projections, then broker Tier-1 CAS integration under the additions-only \"note\" scope (the commit may only ADD *.md files outside sources/). Unlike source add (immutable blob + manifest stub), the file itself lands at <dest>/<basename> and is projected + indexed as first-class vault content.",
+  "description": "Deterministic Tier-1 ingest of a PRE-AUTHORED vault note that APPLIES immediately (#262) — no preview mode. Funnels through addNote: scan-before-persist (secret detection ⇒ exit 3, quarantined, nothing persisted), vault-reader frontmatter validation, id/alias/path collision refusal against the current projections, then broker Tier-1 CAS integration under the additions-only \"note\" scope (the commit may only ADD *.md files outside sources/). Unlike source add (immutable blob + manifest stub), the file itself lands at <dest>/<basename> on canonical as first-class vault content; it becomes projection-visible and retrievable after the next `db rebuild` + `index rebuild` (there is no ingest→index auto-hook yet — #60).",
   "type": "object",
   "unevaluatedProperties": false,
   "required": ["command", "noteId", "path", "contentHash", "runId", "canonicalSha"],
@@ -50,13 +50,14 @@
     "locks": [
       { "scope": "canonical-integration", "mode": "exclusive" }
     ],
-    "exitCodes": [0, 1, 2, 3, 4, 5],
+    "exitCodes": [0, 1, 2, 3, 4, 5, 6],
     "errorCodes": [
       { "code": "usage", "exit": 5, "when": "missing <path> or --dest" },
       { "code": "validation-error", "exit": 1, "when": "the note fails normalization, frontmatter validation, or collides with an existing id/alias/path" },
       { "code": "secret-detected", "exit": 3, "when": "the secret scanner flagged the bytes; note quarantined, nothing persisted" },
       { "code": "locked:canonical-integration", "exit": 2, "when": "an integration holds the lock", "retryable": true },
       { "code": "backup-unhealthy", "exit": 2, "when": "ledger-writing is blocked pending a verified backup" },
+      { "code": "idempotency-in-progress", "exit": 6, "when": "a concurrent run holds the same --idempotency-key slot (key-accepting)", "retryable": true },
       { "code": "internal", "exit": 4, "when": "unexpected internal failure" }
     ],
     "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"

@@ -83,10 +83,14 @@ export function deriveDestPath(dest: string, inputPath: string): string {
   if (segments.some((s) => s === "" || s === "." || s === "..")) {
     throw new NoteAddRejectedError("bad-dest", `--dest must not contain empty/./.. segments, got ${dest}`);
   }
-  if (segments[0] === "sources") {
+  // Case-INSENSITIVE, matching the broker's enforcement (isNoteAddAllowedPath):
+  // on a case-insensitive filesystem `Sources/`/`​.GIT/` resolve to the real
+  // dirs, so a case-sensitive advisory check here would let them through to a
+  // stray write + an opaque broker refusal (exit 4) instead of this clean exit-1.
+  if (segments[0]!.toLowerCase() === "sources") {
     throw new NoteAddRejectedError("bad-dest", "sources/ is the capture-only namespace; pick a content folder");
   }
-  if (segments.some((s) => s === ".git")) {
+  if (segments.some((s) => s.toLowerCase() === ".git")) {
     throw new NoteAddRejectedError("bad-dest", "--dest must not touch .git");
   }
   const file = basename(inputPath);
