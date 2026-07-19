@@ -33,7 +33,7 @@ Every task's requirements implicitly include this section. Values copied verbati
 
 ### Decision: **REJECT** (fail-closed halt) as the automatic policy, with an operator-authorized **RESET-via-tree-reconcile** recovery command (`sync reset`).
 
-On detecting a non-ancestral or unresolvable cursor, `sync` **halts before computing any diff**, advances nothing, exits **`2`** with error code `diverged:non-ancestral` or `diverged:cursor-unreachable`, and `sync status` surfaces the condition in a `divergence` field. Re-convergence is never automatic — it is an operator-triggered, broker-authorized, audited `sync reset` that diffs Atlas's absorbed **tree** against the current upstream **tree** (not history), archiving vanished notes and capturing present ones through the unchanged scan pipeline, then re-baselines the cursor to head.
+On detecting a non-ancestral or unresolvable cursor, `sync` **halts before computing any diff**, advances nothing, exits **`2`** with error code `diverged:non-ancestral` or `diverged:cursor-unreachable`, and `sync status` surfaces the condition in a `divergence` field. Re-convergence is never automatic — it requires an operator-triggered, broker-authorized `sync reset` (detailed below).
 
 ### Why REJECT over RESET-automatic and RECONCILE-automatic
 
