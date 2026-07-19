@@ -605,6 +605,11 @@ Reuse `reconcileIndex`'s lock-threading (`activate.ts:444-465`) and `indexNote`'
 
 > **PREREQUISITE — PR #216.** This phase assumes #216 (job-handler registry population + job-kind completeness gate) has landed. This worktree's base predates it (verified: no `job-handlers.ts`, `JOB_HANDLERS = {}`, no job-kind completeness gate). **Before starting Phase 3, rebase this work onto a `main` that includes #216.** If #216 is unavailable, the fallback is to register directly via the existing `registerJobHandler("index:reconcile", handler)` at barrel import (`apps/cli/src/commands/jobs.ts:48-53`) and add the completeness gate here — but do not duplicate #216; coordinate.
 
+> **AS-BUILT (2026-07-20, PR for #265) — three corrections to the sketches below.** The Task-3.1 code/test listings were written against an imagined API and do **not** compile against the real tree; the shipped handler follows their *intent*, not their letter.
+> 1. **`deps.notes` is a `ParsedNote` provider, not fences.** `IndexDeps.notes` is `() => ParsedNote[]` (re-embedding needs the note BODY) and `indexNotes` infers a REMOVAL from a requested id being **absent** from `deps.notes()`. `noteFencesForNotes` is **not** an `IndexDeps` field at all — it is the `computeStaleness`/`indexVerify` input. Shipped: `scopedNotesProvider(resolveAtRef(repo, config.git.canonical_ref, config.vault.note_globs), noteIds)`.
+> 2. **`JobHandlerResult` has no `kind` field.** The union (`runner.ts:226-237`) discriminates on the **presence of `commit`**; the content-addressed arm is simply `{}`. `{ kind: "content-addressed", summary: report }` does not typecheck. Shipped: `return {}` (no `commit`, no `sideEffectId` ⇒ attempt records NULL).
+> 3. **Registry shape is #216's, not `registerJobHandler`.** Handlers are built **per-drain** via `buildJobHandlers(deps: JobHandlerDeps)`; the shipped factory is `buildIndexReconcileHandler(deps, seams?)` with the heavy reconcile behind an injectable seam (mirroring `buildReverifyHandler`) so validation/result-shaping is unit-testable without egress/LanceDB. #216 was **adopted by cherry-pick** onto this branch (it was an open draft on a stale base, blocked only by an unrelated flaky macOS test in `lancedb-index`).
+
 **Deployable slice:** `index:reconcile` is a real production job kind whose handler calls `indexNotes`, registered and covered by the completeness gate; idempotent enqueue keyed by the run's `refs/atlas/main` OID; lock deferral on `jobs-runner`.
 
 **Files:**
@@ -618,7 +623,7 @@ Reuse `reconcileIndex`'s lock-threading (`activate.ts:444-465`) and `indexNote`'
 
 ### Task 3.1 — `index:reconcile` handler body
 
-- [ ] **Step 1: Write the failing test** — `apps/cli/test/index-reconcile-handler.test.ts`
+- [x] **Step 1: Write the failing test** — `apps/cli/test/index-reconcile-handler.test.ts`
 
 ```ts
 import { describe, it, expect } from "vitest";
@@ -645,8 +650,8 @@ describe("index:reconcile handler", () => {
 });
 ```
 
-- [ ] **Step 2: Run — expect FAIL.**
-- [ ] **Step 3: Implement** — `apps/cli/src/sync/reconcile-handler.ts`:
+- [x] **Step 2: Run — expect FAIL.**
+- [x] **Step 3: Implement** — `apps/cli/src/sync/reconcile-handler.ts`:
 
 ```ts
 import { z } from "zod";
@@ -669,12 +674,12 @@ export function makeIndexReconcileHandler(buildDeps: (payloadNoteIds: string[]) 
 ```
 Match the exact `JobHandlerResult` discriminated union (`runner.ts:226-237`) — reindex is derived/disposable state, so use the content-addressed arm (no `commit(tx)`). `buildDeps` assembles `IndexDeps` (config/table/store/embed/lock) the same way `jobs run`'s drain builds `JobsDeps` (`jobs.ts:301-328`) — the egress capability mint for embedding rides the existing model-call path.
 
-- [ ] **Step 4: Run — expect PASS.**
-- [ ] **Step 5: Commit** — `feat(sync): index:reconcile job handler calling indexNotes`
+- [x] **Step 4: Run — expect PASS.**
+- [x] **Step 5: Commit** — `feat(sync): index:reconcile job handler calling indexNotes`
 
 ### Task 3.2 — Register the handler + completeness gate
 
-- [ ] **Step 1: Write the failing test** — `apps/cli/test/index-reconcile-handler.test.ts` (append)
+- [x] **Step 1: Write the failing test** — `apps/cli/test/index-reconcile-handler.test.ts` (append)
 
 ```ts
 it("index:reconcile is registered in the production handler map (no test env gate)", async () => {
@@ -685,14 +690,14 @@ it("index:reconcile is registered in the production handler map (no test env gat
 ```
 Plus, if #216's completeness gate exists, add `index:reconcile` to its expected-kinds set so the gate covers it.
 
-- [ ] **Step 2: Run — expect FAIL** (unregistered).
-- [ ] **Step 3: Implement** — register `index:reconcile` at barrel import via the #216 registry (or `registerJobHandler("index:reconcile", makeIndexReconcileHandler(...))` at `jobs.ts` import in the fallback). Add it to the completeness gate's known-kinds list. **Note in the commit body:** this is the first real production job handler — before it, `JOB_HANDLERS` was effectively empty and every enqueued job failed `internal` when drained (the pre-existing breakage the spec calls out).
-- [ ] **Step 4: Run — expect PASS.** Also run the completeness gate: `pnpm --filter @atlas/cli test` (the registration/completeness suite).
-- [ ] **Step 5: Commit** — `feat(sync): register index:reconcile production handler (first real job kind)`
+- [x] **Step 2: Run — expect FAIL** (unregistered).
+- [x] **Step 3: Implement** — register `index:reconcile` at barrel import via the #216 registry (or `registerJobHandler("index:reconcile", makeIndexReconcileHandler(...))` at `jobs.ts` import in the fallback). Add it to the completeness gate's known-kinds list. **Note in the commit body:** this is the first real production job handler — before it, `JOB_HANDLERS` was effectively empty and every enqueued job failed `internal` when drained (the pre-existing breakage the spec calls out).
+- [x] **Step 4: Run — expect PASS.** Also run the completeness gate: `pnpm --filter @atlas/cli test` (the registration/completeness suite).
+- [x] **Step 5: Commit** — `feat(sync): register index:reconcile production handler (first real job kind)`
 
 ### Task 3.3 — Idempotent enqueue + lock deferral
 
-- [ ] **Step 1: Write the failing tests** — `apps/cli/test/index-reconcile-enqueue.test.ts`
+- [x] **Step 1: Write the failing tests** — `apps/cli/test/index-reconcile-enqueue.test.ts`
 
 ```ts
 describe("index:reconcile enqueue", () => {
@@ -712,10 +717,10 @@ describe("index:reconcile enqueue", () => {
 });
 ```
 
-- [ ] **Step 2: Run — expect first test PASS** (ON CONFLICT DO NOTHING already gives this — `repo.ts:227-243`); it locks the behavior in as a regression. Lock-deferral test drives the existing `jobs run` lock path.
-- [ ] **Step 3: (only if red) wire the enqueue** so the sync cycle passes `idempotencyKey = <run's refs/atlas/main OID>`. (This is consumed in Phase 4; here we just prove the primitive.)
-- [ ] **Step 4: Run — expect PASS.**
-- [ ] **Step 5: Commit** — `test(sync): idempotent index:reconcile enqueue + lock deferral`
+- [x] **Step 2: Run — expect first test PASS** (ON CONFLICT DO NOTHING already gives this — `repo.ts:227-243`); it locks the behavior in as a regression. Lock-deferral test drives the existing `jobs run` lock path.
+- [x] **Step 3: (only if red) wire the enqueue** so the sync cycle passes `idempotencyKey = <run's refs/atlas/main OID>`. (This is consumed in Phase 4; here we just prove the primitive.)
+- [x] **Step 4: Run — expect PASS.**
+- [x] **Step 5: Commit** — `test(sync): idempotent index:reconcile enqueue + lock deferral`
 
 **Verification (Phase 3):** Enqueue and drain `index:reconcile` with `ATLAS_TEST_JOB_HANDLER` unset; assert it completes (not `internal`) — the regression on the empty-registry breakage. Idempotent enqueue yields one row; holding `jobs-runner` defers the drain.
 
