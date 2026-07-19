@@ -151,6 +151,20 @@ describe("pagination helper (unit)", () => {
   });
 });
 
+describe("jobs list routes through the shared pagination contract (SP-1 Phase 6 fix-forward)", () => {
+  it("the handler source consumes parseLimit/parseOffset/assertOffsetInRange — no bare Number() pagination", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const src = readFileSync(join(import.meta.dirname, "..", "src", "commands", "jobs.ts"), "utf8");
+    expect(src).toMatch(/parseLimit\("jobs list"/);
+    expect(src).toMatch(/parseOffset\("jobs list"/);
+    expect(src).toMatch(/assertOffsetInRange\("jobs list"/);
+    // The old divergence: a bare Number() on the pagination values.
+    expect(src).not.toMatch(/limit = Number\(/);
+    expect(src).not.toMatch(/offset = Number\(/);
+  });
+});
+
 describe("deterministic ordering + unique tie-breaker", () => {
   it("source list: ties on capturedAt broken by contentId (ascending), stable across offset", async () => {
     (await cli(["db", "migrate", "--json"])).code;

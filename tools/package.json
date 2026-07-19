@@ -18,6 +18,7 @@
     "@types/node": "catalog:",
     "ajv": "catalog:",
     "typescript": "catalog:",
-    "vitest": "catalog:"
+    "vitest": "catalog:",
+    "@atlas/sqlite-store": "workspace:*"
   }
 }
