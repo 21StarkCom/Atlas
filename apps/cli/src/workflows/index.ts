@@ -117,6 +117,7 @@ export {
 
 export {
   makeModelPlanGenerator,
+  PLAN_GENERATION_MAX_TOKENS,
   type PlanGeneratorDeps,
   type PlanModelsClient,
 } from "./model-plan-generator.js";

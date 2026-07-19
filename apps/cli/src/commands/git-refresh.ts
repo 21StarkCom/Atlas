@@ -16,7 +16,7 @@ import { registerCommand, type RunContext } from "../handlers.js";
 import { openWorkflowStore } from "../workflows/index.js";
 import { readAgentRunStatus } from "../workflows/checkpoints.js";
 import { makeRetrieveSeam } from "../retrieval/wiring.js";
-import { makeModelPlanGenerator, refreshRun, type SynthesisRefreshDeps } from "../workflows/index.js";
+import { makeModelPlanGenerator, PLAN_GENERATION_MAX_TOKENS, refreshRun, type SynthesisRefreshDeps } from "../workflows/index.js";
 import { makeStoreValidationVault } from "../validation/store-vault.js";
 import { readRunInput } from "../workflows/synthesis.js";
 import { readVault } from "../vault/reader.js";
@@ -93,7 +93,7 @@ async function gitRefresh(ctx: RunContext): Promise<number> {
       const generatePlan = makeModelPlanGenerator({
         models,
         model: cfg.models.generation_model,
-        maxTokens: EGRESS.maxTokens,
+        maxTokens: PLAN_GENERATION_MAX_TOKENS,
         mintCapability: (correlationId) => mintEgressCapability({ runId: correlationId }, { operation: "generateObject", model: cfg.models.generation_model, maxBytes: EGRESS.maxBytes, maxTokens: EGRESS.maxTokens, costCeiling: EGRESS.costCeiling, allowedSensitivity: cfg.policies.default_sensitivity } satisfies EgressLimits),
       });
       const deps: SynthesisRefreshDeps = {

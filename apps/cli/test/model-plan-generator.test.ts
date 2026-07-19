@@ -6,7 +6,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import type { ChangePlan } from "@atlas/contracts";
-import type { EgressCapability } from "@atlas/broker";
+import { PROMPT_REFS, type EgressCapability } from "@atlas/broker";
 import { makeModelPlanGenerator, type PlanModelsClient } from "../src/workflows/model-plan-generator.js";
 import type { PlanGenerationInput } from "../src/workflows/synthesis.js";
 
@@ -39,7 +39,7 @@ describe("makeModelPlanGenerator (Task 4.11)", () => {
     // The request carries the schema registry id + the grounded input (instruction + context).
     const req = generateObject.mock.calls[0]![0];
     expect(req.schemaId).toBe("ChangePlan");
-    expect(req.prompt.ref).toBe("synthesis-plan");
+    expect(req.prompt.ref).toBe(PROMPT_REFS.synthesisPlan);
     const grounded = JSON.parse(req.input);
     expect(grounded.instruction).toBe("add a log entry");
     expect(grounded.retrievalRunId).toBe("ret-1");

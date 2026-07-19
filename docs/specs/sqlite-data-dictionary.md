@@ -92,7 +92,12 @@ CREATE TABLE db_schema_migrations (
 ## 2. Core vault projections — `0001_core`
 
 These four are **vault projections** (rebuildable from Markdown; `atlas db rebuild` replaces them in one
-transaction).
+transaction). **Exception inside `notes`:** the two generation-fence columns
+(`active_generation`, `active_generation_id`) are **activation state** owned by
+`Store.activateGeneration`/`tombstoneGeneration` (retrieval-index-contract §2), not a projection of
+Markdown — a rebuild **preserves** them for every surviving `note_id` (#212; wiping them forced a
+full-corpus re-embed and blanked retrieval until `index repair`). A note whose content changed keeps
+its fence pointing at the old generation — the normal `stale` state repair re-embeds.
 
 ### `notes` — `0001_core` (vault projection)
 

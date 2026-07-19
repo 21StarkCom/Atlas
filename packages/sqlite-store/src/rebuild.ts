@@ -183,6 +183,22 @@ export function rebuildProjections(
     // predecessors here makes the subsequent core/provenance cleanup FK-safe.
     for (const step of preClearSteps) step(db);
 
+    // The generation fence columns (`active_generation`, `active_generation_id`)
+    // are ACTIVATION state owned solely by activateGeneration/tombstoneGeneration
+    // (retrieval-index-contract §2) — NOT a projection of Markdown. Wiping them in
+    // a projection replace forced a full-corpus re-embed and blanked retrieval
+    // until `index repair` (#212). Snapshot before the clear, re-apply after the
+    // reinserts, same transaction. A note whose content changed keeps a fence
+    // pointing at its old generation — exactly the normal `stale` state repair
+    // re-embeds; a deleted note's UPDATE misses (no row) and its generation is
+    // reclaimed by the next reconcile's orphan compaction.
+    const fences = db
+      .prepare(
+        `SELECT note_id, active_generation, active_generation_id FROM notes
+          WHERE active_generation_id IS NOT NULL OR active_generation <> 0`,
+      )
+      .all() as { note_id: string; active_generation: number; active_generation_id: string | null }[];
+
     repo.clearAll();
     options.failpoint?.("after-clear");
 
@@ -278,6 +294,14 @@ export function rebuildProjections(
     // fold that throws rolls the whole rebuild back — the old projection stays
     // readable (dictionary §8).
     for (const fold of projectionFolds) fold(snapshot, db);
+
+    // Restore the generation fences for surviving note_ids (see the snapshot above).
+    // Both columns move in ONE statement — retrieval must never observe the pair
+    // disagreeing (retrieval-index-contract §2).
+    const restoreFence = db.prepare(
+      `UPDATE notes SET active_generation = ?, active_generation_id = ? WHERE note_id = ?`,
+    );
+    for (const f of fences) restoreFence.run(f.active_generation, f.active_generation_id, f.note_id);
 
     options.failpoint?.("after-insert");
   });

@@ -384,21 +384,45 @@ export class GeminiAdapter implements ProviderAdapter {
     if (text === null) throw new ProviderCallError(providerError("validation", { message: "no candidate text in response" }));
     const model = request.model;
     if (operation === "generateText") {
-      return { result: { text, usage: extractUsage(json), model } as GenerateTextResult, usage: extractUsage(json), model };
+      // Release the provider finish reason (#211): a MAX_TOKENS cut used to release
+      // as a successful answer, and thinking-token spend made that the common case.
+      const finishReason = extractFinishReason(json);
+      const result: GenerateTextResult = {
+        text,
+        usage: extractUsage(json),
+        model,
+        ...(finishReason !== undefined ? { finishReason } : {}),
+      };
+      return { result, usage: extractUsage(json), model };
     }
     // generateObject
+    const objFinish = extractFinishReason(json);
     let parsed: unknown;
     try {
       parsed = JSON.parse(text);
     } catch {
-      throw new ProviderCallError(providerError("validation", { message: "model output was not valid JSON (malformed/truncated)" }));
+      // Name a MAX_TOKENS cut explicitly — an output-cap truncation is otherwise
+      // indistinguishable from model garbage (the #210 "no root-cause signal" class).
+      const why = objFinish === "MAX_TOKENS"
+        ? "model output truncated at maxOutputTokens (finishReason MAX_TOKENS) — raise the per-call maxTokens"
+        : "model output was not valid JSON (malformed/truncated)";
+      throw new ProviderCallError(providerError("validation", { message: why }));
     }
     if (schema === undefined) {
       throw new ProviderCallError(providerError("validation", { message: "generateObject requires a schema" }));
     }
     const res = schema.safeParse(parsed);
     if (!res.success) {
-      throw new ProviderCallError(providerError("validation", { message: `model output failed schema: ${res.error.message}` }));
+      // Issue CODES + PATHS only — NEVER zod's `error.message`, which embeds the raw
+      // received value (e.g. enum mismatches). This parse runs BEFORE the ADR-0001
+      // released-bytes scan, so interpolating the value would put unscanned
+      // model-output bytes into an error message that crosses the seam.
+      const issues = res.error.issues
+        .slice(0, 5)
+        .map((i) => `${i.code}@${i.path.join(".") || "$"}`)
+        .join(", ");
+      const finishNote = objFinish !== undefined && objFinish !== "STOP" ? ` (finishReason ${objFinish})` : "";
+      throw new ProviderCallError(providerError("validation", { message: `model output failed schema: ${issues}${finishNote}` }));
     }
     return { result: res.data, usage: extractUsage(json), model };
   }
@@ -598,12 +622,22 @@ function extractText(json: unknown): string | null {
   return text.length > 0 ? text : null;
 }
 
+/** Extract the first candidate's provider finish reason, if present. */
+function extractFinishReason(json: unknown): string | undefined {
+  const fr = (json as { candidates?: { finishReason?: unknown }[] }).candidates?.[0]?.finishReason;
+  return typeof fr === "string" && fr.length > 0 ? fr : undefined;
+}
+
 /** Extract token usage from the `usageMetadata`, defaulting missing counts to 0. */
 function extractUsage(json: unknown): Usage {
-  const m = (json as { usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number } }).usageMetadata;
+  const m = (json as { usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; thoughtsTokenCount?: number } }).usageMetadata;
   const inputTokens = m?.promptTokenCount ?? 0;
   const outputTokens = m?.candidatesTokenCount;
-  return outputTokens !== undefined ? { inputTokens, outputTokens } : { inputTokens };
+  // Thinking tokens are BILLED output (Gemini 3.5 spends them inside maxOutputTokens);
+  // excluding them under-charged receipts/cost/budget ~25x on thinking-heavy calls,
+  // defeating D19's conservative-pricing intent (#211).
+  const thoughtTokens = m?.thoughtsTokenCount ?? 0;
+  return outputTokens !== undefined ? { inputTokens, outputTokens: outputTokens + thoughtTokens } : { inputTokens };
 }
 
 function isAbortError(err: unknown): boolean {

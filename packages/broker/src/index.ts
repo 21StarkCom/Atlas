@@ -191,6 +191,7 @@ export { DEFAULT_SCHEMA_REGISTRY, resolveSchema } from "./egress/schema-registry
 export {
   DEFAULT_PROMPT_REGISTRY,
   MapPromptRegistry,
+  PROMPT_REFS,
   resolvePromptOrThrow,
   type PromptRegistry,
   type ResolvedPrompt,

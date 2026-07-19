@@ -45,7 +45,7 @@ import {
 } from "@atlas/lancedb-index";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { makePhase2Harness, type Phase2Harness } from "./e2e/phase2-support.js";
-import { executeQuery, parseQueryArgs, recordFailedTransmissions, type QueryExecDeps } from "../src/commands/query.js";
+import { executeQuery, parseQueryArgs, recordFailedTransmissions, renderHuman, type QueryExecDeps } from "../src/commands/query.js";
 import { recordReadonlyRun, runReadAudit } from "../src/audit/readonly.js";
 import type { IdentityResolver, NoteMeta, RetrievalDeps } from "../src/retrieval/layers.js";
 
@@ -57,7 +57,7 @@ const NOW = (): string => "2026-07-14T00:00:00.000Z";
 /** A deterministic embed+generate adapter (no network): embed returns a fixed unit
  * vector `[1,0,0]` (so vector search resolves the note indexed at `[1,0,0]`), and
  * generateText returns an answer that cites `[[alpha]]`. Every model is priced. */
-function fakeEmbedGenAdapter(answer: string): ProviderAdapter {
+function fakeEmbedGenAdapter(answer: string, finishReason?: string): ProviderAdapter {
   const usage: Usage = { inputTokens: 8, outputTokens: 4 };
   return {
     provider: "gemini",
@@ -71,7 +71,11 @@ function fakeEmbedGenAdapter(answer: string): ProviderAdapter {
         return { result: { vectors: r.texts.map(() => vec), dimensions: r.dimensions, usage, model: r.model }, usage, model: r.model };
       }
       const g = req as { model: string };
-      return { result: { text: answer, usage, model: g.model }, usage, model: g.model };
+      return {
+        result: { text: answer, usage, model: g.model, ...(finishReason !== undefined ? { finishReason } : {}) },
+        usage,
+        model: g.model,
+      };
     },
     costMicros: (_m, u) => u.inputTokens + (u.outputTokens ?? 0) + 1,
   };
@@ -262,6 +266,51 @@ describe("query.audit-readonly — audited Tier-0 read (Task 3.4)", () => {
     expect(h.git(["rev-parse", "refs/heads/main"])).toBe(canonicalBefore);
     expect(h.git(["status", "--porcelain"])).toBe("");
     expect(readdirSync(h.worktreesPath)).toHaveLength(0);
+  });
+
+  it("human render appends the truncation warning iff truncated (#211)", () => {
+    const rendered: string[] = [];
+    const fakeCtx = { render: (s: string) => { rendered.push(s); } } as unknown as Parameters<typeof renderHuman>[0];
+    const base = {
+      command: "query" as const, mode: "answered" as const, query: "q",
+      answer: "cut answ [[alpha", modelCalls: 1, items: [], layersUsed: [], retrievalRunId: "r", degraded: false,
+    };
+    renderHuman(fakeCtx, { ...base, truncated: true } as Parameters<typeof renderHuman>[1]);
+    expect(rendered[0]).toContain("[warning] the answer was truncated");
+    renderHuman(fakeCtx, base as Parameters<typeof renderHuman>[1]);
+    expect(rendered[1]).not.toContain("[warning]");
+  });
+
+  it("a non-STOP finish surfaces `truncated: true`; STOP/absent stays clean (#211)", async () => {
+    const cut = new EgressService({ adapter: fakeEmbedGenAdapter("cut answ [[alpha", "MAX_TOKENS"), quarantine: memQuarantine(), capabilitySecret: h.capabilitySecret });
+    const { models } = modelsOver(cut);
+    const runId = newRunId();
+    const exec = await executeQuery({
+      runId,
+      args: parseQueryArgs(["meridian"]),
+      retrieval: retrievalDeps(models, runId),
+      generate: generateWith(models, runId),
+      getReceipts: () => [],
+      packBudget: 6000,
+      baseSensitivity: "internal",
+      now: NOW,
+    });
+    expect(exec.output.truncated).toBe(true);
+
+    const clean = new EgressService({ adapter: fakeEmbedGenAdapter("done [[alpha]].", "STOP"), quarantine: memQuarantine(), capabilitySecret: h.capabilitySecret });
+    const { models: models2 } = modelsOver(clean);
+    const runId2 = newRunId();
+    const exec2 = await executeQuery({
+      runId: runId2,
+      args: parseQueryArgs(["meridian"]),
+      retrieval: retrievalDeps(models2, runId2),
+      generate: generateWith(models2, runId2),
+      getReceipts: () => [],
+      packBudget: 6000,
+      baseSensitivity: "internal",
+      now: NOW,
+    });
+    expect(exec2.output.truncated).toBeUndefined();
   });
 
   it("--no-answer STILL records the embed model_call (every provider call accounted), and no generation row", async () => {

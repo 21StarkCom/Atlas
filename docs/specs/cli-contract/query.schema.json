@@ -13,7 +13,7 @@
     },
     {
       "if": { "properties": { "mode": { "const": "retrieval-only" } } },
-      "then": { "not": { "anyOf": [{ "required": ["answer"] }, { "required": ["modelCalls"] }] } }
+      "then": { "not": { "anyOf": [{ "required": ["answer"] }, { "required": ["modelCalls"] }, { "required": ["truncated"] }] } }
     }
   ],
   "properties": {
@@ -21,6 +21,7 @@
     "mode": { "enum": ["answered", "retrieval-only"], "description": "`answered` (default) generates and returns an answer (and records a model_calls row); `retrieval-only` (--no-answer) skips generation entirely — no `answer`, no `modelCalls`, no model_calls ledger side effect." },
     "query": { "type": "string", "minLength": 1, "description": "The verbatim query text." },
     "answer": { "type": "string", "description": "The generated answer, grounded in the packed context and citing note ids. Present iff mode=answered; may be empty when no context met the retrieval threshold. Absent in retrieval-only mode." },
+    "truncated": { "const": true, "description": "Present (always `true`) iff mode=answered AND the provider cut the answer short (finish reason other than STOP, e.g. MAX_TOKENS) — the `answer` is a fragment, not a complete grounded answer. Absent when the answer completed normally or in retrieval-only mode." },
     "modelCalls": { "type": "integer", "minimum": 1, "description": "Number of model_calls ledger rows recorded by the generation step. Present iff mode=answered; absent in retrieval-only mode (generation is skipped, so no model_calls row is written)." },
     "items": {
       "type": "array",

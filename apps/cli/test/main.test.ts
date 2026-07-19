@@ -244,6 +244,40 @@ describe("runCli", () => {
     expect(JSON.parse(out.text).code).toBe("not-implemented");
   });
 
+  it("logs a SANITIZED cause message locally, name-only for foreign errors, nothing on stdout (#210)", async () => {
+    // Sanitized seam family (allowlisted by name): message reaches the local log.
+    const { code, out } = await run(["status", "--json"], {}, {
+      status: async () => {
+        const e = new Error("run r1: 0+213824 tokens exceeds maxTokens 200000");
+        e.name = "EgressRefusal";
+        throw e;
+      },
+    });
+    expect(code).toBe(EXIT.INTERNAL);
+    // The envelope hides the cause (no raw detail crosses the surface)…
+    expect(out).not.toContain("exceeds maxTokens");
+    expect(JSON.parse(out).code).toBe("internal");
+    // …but the local diag log carries it — an `internal` without a logged cause is
+    // undiagnosable (#210 shipped four dead commands with zero root-cause signal).
+    const logText = readFileSync(join(cwd, ".atlas", "logs", "atlas.log"), "utf8");
+    const seamLine = logText.split("\n").find((l) => l.includes("command.error"));
+    expect(seamLine).toContain("EgressRefusal");
+    expect(seamLine).toContain("exceeds maxTokens");
+
+    // Foreign error: its message may quote vault/model content — the log gets the
+    // NAME only (the §2.5 key-based redaction cannot scrub free text).
+    const second = await run(["status", "--json"], {}, {
+      status: async () => {
+        throw new Error("dangling link [[secret-note-content]]");
+      },
+    });
+    expect(second.code).toBe(EXIT.INTERNAL);
+    const lines = readFileSync(join(cwd, ".atlas", "logs", "atlas.log"), "utf8").split("\n").filter((l) => l.includes("command.error"));
+    const foreignLine = lines[lines.length - 1]!;
+    expect(foreignLine).toContain('"causeName":"Error"');
+    expect(foreignLine).not.toContain("secret-note-content");
+  });
+
   it("wires config-derived locks + logs (a handler can withLock and log)", async () => {
     const { code } = await run(["status"], {}, {
       status: async (ctx) => {

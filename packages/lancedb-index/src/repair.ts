@@ -97,7 +97,13 @@ export async function indexRepair(deps: IndexDeps): Promise<IndexRepairReport> {
   for (const o of report.outcomes) {
     switch (o.kind) {
       case "indexed":
-        repaired.push({ noteId: o.noteId, action: "re-embedded", generationId: o.generationId as unknown as string });
+        // A re-attach converged by re-pointing the fence at chunks already durably
+        // present — no embed spend (`re-activated`, index-repair.schema.json).
+        repaired.push({
+          noteId: o.noteId,
+          action: o.reattached === true ? "re-activated" : "re-embedded",
+          generationId: o.generationId as unknown as string,
+        });
         break;
       case "empty":
         // A formerly-indexed note that lost all prose was tombstoned + its orphaned
