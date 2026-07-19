@@ -401,6 +401,14 @@
       "idempotency": "none",
       "privilege": "shared",
       "implemented": true
+    },
+    {
+      "name": "watch",
+      "schemaRef": "docs/specs/cli-contract/watch.schema.json",
+      "phase": 6,
+      "idempotency": "none",
+      "privilege": "shared",
+      "implemented": false
     }
   ]
 }
