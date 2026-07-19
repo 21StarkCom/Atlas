@@ -23,7 +23,6 @@ import { readGitOp, readAgentRunStatus } from "../workflows/checkpoints.js";
 import { foldProvenanceFromCanonical } from "../ingest/manifests.js";
 import { ledgerDbPath, backupConfig, resolvePath } from "./backup-config.js";
 
-const CANONICAL_REF = "refs/heads/main";
 const ZERO = "0".repeat(40);
 const ROLLBACKABLE = new Set(["integrated", "reindexed", "finalized"]);
 
@@ -46,6 +45,7 @@ function parseArgs(argv: string[]): Parsed {
 
 async function gitRollback(ctx: RunContext): Promise<number> {
   const p = parseArgs(ctx.argv);
+  const CANONICAL_REF = ctx.config.config.git.canonical_ref;
   const vaultPath = resolvePath(ctx, ctx.config.config.vault.path);
   const repo = openRepo(vaultPath);
   const store = openWorkflowStore({ path: ledgerDbPath(ctx) });

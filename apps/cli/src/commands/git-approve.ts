@@ -39,7 +39,7 @@ function parseArgs(argv: string[]): Parsed {
 
 async function gitApprove(ctx: RunContext): Promise<number> {
   const p = parseArgs(ctx.argv);
-  const canonicalRef = "refs/heads/main";
+  const canonicalRef = ctx.config.config.git.canonical_ref;
   const repo = openRepo(resolvePath(ctx, ctx.config.config.vault.path));
   const store = openWorkflowStore({ path: ledgerDbPath(ctx) });
   const connectBroker = async (): Promise<BrokerClient> => {

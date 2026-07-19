@@ -199,8 +199,6 @@ export async function previewSynthesis(
 
 // ── apply path (Task 4.5, slice B): plan → worktree → agent commit → tier branch ─
 
-/** The default canonical protected ref a synthesis run fast-forwards. */
-const DEFAULT_CANONICAL_REF = "refs/heads/main";
 /** The all-zero placeholder for an unborn canonical ref. */
 const ZERO_OID = "0".repeat(40);
 
@@ -238,8 +236,8 @@ export interface SynthesisApplyDeps extends SynthesisPlanDeps {
   hasNote?(noteId: string): boolean;
   /** `git.worktrees_path` — where the ephemeral agent worktree is created. */
   readonly worktreesPath: string;
-  /** The canonical protected ref (default {@link DEFAULT_CANONICAL_REF}). */
-  readonly canonicalRef?: string;
+  /** The canonical protected ref (config `git.canonical_ref`, threaded by the caller). */
+  readonly canonicalRef: string;
   /** Max attempts across CAS-miss rebases (default 3). */
   readonly maxAttempts?: number;
   readonly now?: () => string;
@@ -300,7 +298,7 @@ export async function applySynthesis(
   deps: SynthesisApplyDeps,
 ): Promise<SynthesisApplyResult> {
   const now = deps.now ?? rfc3339MsNow;
-  const canonicalRef = deps.canonicalRef ?? DEFAULT_CANONICAL_REF;
+  const canonicalRef = deps.canonicalRef;
   const maxAttempts = Math.max(1, deps.maxAttempts ?? 3);
 
   let lastCasError: unknown = null;

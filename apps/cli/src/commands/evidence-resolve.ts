@@ -30,7 +30,6 @@ import { backupConfig, ledgerDbPath, resolvePath } from "./backup-config.js";
 import type { ChangePlan } from "@atlas/contracts";
 import type { RetrievalResult } from "../retrieval/layers.js";
 
-const CANONICAL_REF = "refs/heads/main";
 
 interface Parsed { ref: string }
 function parseArgs(argv: string[]): Parsed {
@@ -158,7 +157,7 @@ async function evidenceResolve(ctx: RunContext): Promise<number> {
         guard: new GeneratedArtifactGuard(quarantineStoreFromContext(ctx)),
         foldProjections: async () => {},
         worktreesPath: resolvePath(ctx, cfg.git.worktrees_path),
-        canonicalRef: CANONICAL_REF,
+        canonicalRef: cfg.git.canonical_ref,
         now: () => new Date().toISOString(),
         resolveRendition: (h) => {
           try {

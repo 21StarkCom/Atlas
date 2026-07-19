@@ -24,7 +24,6 @@ import { riskConfigFrom } from "../policies/risk.js";
 import { quarantineStoreFromContext } from "../quarantine/config.js";
 import { backupConfig, ledgerDbPath, resolvePath } from "./backup-config.js";
 
-const CANONICAL_REF = "refs/heads/main";
 const PACK_BUDGET = 6000;
 const EGRESS = { maxBytes: 1_000_000, maxTokens: 200_000, costCeiling: 1_000_000 } as const;
 const SYNTHESIS_KINDS = new Set(["enrich", "reconcile", "maintain"]);
@@ -107,7 +106,7 @@ async function gitRefresh(ctx: RunContext): Promise<number> {
         store, broker: brokerClient, backup: backupConfig(ctx), repo: openRepo(resolvePath(ctx, cfg.vault.path)),
         guard: new GeneratedArtifactGuard(quarantineStoreFromContext(ctx)),
         worktreesPath: resolvePath(ctx, cfg.git.worktrees_path),
-        canonicalRef: CANONICAL_REF,
+        canonicalRef: cfg.git.canonical_ref,
       };
 
       const res = await refreshRun(p.runId, kind, input, deps);

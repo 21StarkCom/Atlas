@@ -50,6 +50,7 @@ import { migration0008IndexConfigRevision } from "../../migrations/0008_index_co
 import { migration0009RunSupersessions } from "../../migrations/0009_run_supersessions.js";
 import { migration0010TrustState } from "../../migrations/0010_trust_state.js";
 import { migration0011RunInputs } from "../../migrations/0011_run_inputs.js";
+import { migration0012SyncCursors } from "../../migrations/0012_sync_cursors.js";
 
 /**
  * The schema-migration heads THIS binary understands (§8 compatibility check). A
@@ -78,6 +79,8 @@ const KNOWN_SCHEMA_HEADS: Set<string> = new Set([
   migration0010TrustState.id,
   // The Task 4.11 run-input record (registered by the workflows layer, for `git refresh`): same rationale.
   migration0011RunInputs.id,
+  // The 60-A per-source sync cursor (registered by the CLI at store-open): same rationale.
+  migration0012SyncCursors.id,
 ]);
 
 /**

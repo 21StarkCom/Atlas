@@ -75,9 +75,18 @@ export function defaultAnchorPath(): string {
   return platform() === "darwin" ? "/usr/local/var/atlas/audit-anchor" : "/var/lib/atlas/audit-anchor";
 }
 
+/**
+ * The single canonical-ref fallback (§3.1). The SOLE definition of the canonical
+ * protected ref's default value — the CLI config default (`git.canonical_ref`) and
+ * {@link DEFAULT_PROTECTED_REFS} both consume THIS constant, so the fallback lives
+ * in exactly one place (60-A task 1.2a). Live-vault adoption overrides `canonical`
+ * per config via `protectedRefsFor` (apps/cli); `audit`/`trust` are never overridable.
+ */
+export const DEFAULT_CANONICAL_REF = "refs/heads/main";
+
 /** The default protected-ref set (§3.1). */
 export const DEFAULT_PROTECTED_REFS: ProtectedRefs = {
-  canonical: "refs/heads/main",
+  canonical: DEFAULT_CANONICAL_REF,
   audit: "refs/audit/runs",
   trust: "refs/trust/ledger",
 };

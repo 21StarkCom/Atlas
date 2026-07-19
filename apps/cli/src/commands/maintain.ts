@@ -24,7 +24,6 @@ import { riskConfigFrom } from "../policies/risk.js";
 import { quarantineStoreFromContext } from "../quarantine/config.js";
 import { backupConfig, ledgerDbPath, resolvePath } from "./backup-config.js";
 
-const CANONICAL_REF = "refs/heads/main";
 const PACK_BUDGET = 6000;
 const EGRESS = { maxBytes: 1_000_000, maxTokens: 200_000, costCeiling: 1_000_000 } as const;
 
@@ -131,7 +130,7 @@ async function maintain(ctx: RunContext): Promise<number> {
           guard: new GeneratedArtifactGuard(quarantineStoreFromContext(ctx)),
           foldProjections: async () => {},
           worktreesPath: resolvePath(ctx, cfg.git.worktrees_path),
-          canonicalRef: CANONICAL_REF,
+          canonicalRef: cfg.git.canonical_ref,
           now: () => new Date().toISOString(),
         };
         const res = await applySynthesis("maintain", { target: issue.noteId, instruction: instructionFor(issue) }, deps);

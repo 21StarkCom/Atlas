@@ -18,7 +18,6 @@ import { readAgentRunStatus, readGitOp } from "./checkpoints.js";
 import { CliError, EXIT } from "../errors/envelope.js";
 import { decideApprove, canReject } from "./approve.js";
 
-const DEFAULT_CANONICAL_REF = "refs/heads/main";
 const ZERO_OID = "0".repeat(40);
 
 function rfc3339MsNow(): string {
@@ -35,7 +34,8 @@ export interface ApproveDeps {
   readonly integrate: RunIntegrator;
   /** Re-derive projections from the immutable canonical commit (post-integration). */
   foldProjections(canonicalRef: string): Promise<void>;
-  readonly canonicalRef?: string;
+  /** The canonical protected ref (config `git.canonical_ref`, threaded by the caller). */
+  readonly canonicalRef: string;
   readonly now?: () => string;
 }
 
@@ -62,7 +62,7 @@ function runOperation(store: Store, runId: string): string {
  */
 export async function approveRun(runId: string, deps: ApproveDeps): Promise<ApproveOutcome> {
   const now = deps.now ?? rfc3339MsNow;
-  const canonicalRef = deps.canonicalRef ?? DEFAULT_CANONICAL_REF;
+  const canonicalRef = deps.canonicalRef;
   const db = deps.store.db;
 
   const state = readAgentRunStatus(db, runId);
