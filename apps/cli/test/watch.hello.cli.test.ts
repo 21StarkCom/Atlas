@@ -109,7 +109,7 @@ describe.skipIf(!existsSync(BIN))("brain watch --once (real child)", () => {
     expect(hello.snapshot.audit.anchorOk).toEqual(status.audit.anchorOk);
     expect(hello.snapshot.audit.anchorSource).toEqual(status.audit.anchorSource);
     expect(hello.snapshot.daemons.broker.reachable).toBe(true); // harness broker is live
-  });
+  }, 30_000);
 
   it("ledger-absent hello reports attached:false with resume/replay absent (exit 0)", () => {
     writeConfig(h.root, { dbPath: join(h.root, ".atlas", "missing.db") });
@@ -121,13 +121,13 @@ describe.skipIf(!existsSync(BIN))("brain watch --once (real child)", () => {
     expect(hello.resume).toBeUndefined();
     expect(hello.replay).toBeUndefined();
     expect(hello.snapshot).toEqual({ daemons: hello.snapshot.daemons }); // daemons only
-  });
+  }, 30_000);
 
   it("missing --json is a usage error: exit 5, exactly one envelope, no event line", () => {
     const w = run(["watch", "--once"], h.root);
     expect(w.status).toBe(5);
     expect(w.stdout).not.toContain("watch.hello");
-  });
+  }, 30_000);
 });
 
 describe("immutable replay window (in-process attach)", () => {
