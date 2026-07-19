@@ -22,6 +22,7 @@ import type { JobHandlerDeps } from "../src/commands/job-handlers.ts";
 import { RETENTION_WORKFLOWS } from "../src/retention/jobs.ts";
 import { REMEDIATION_WORKFLOW } from "../src/trust/revoke.ts";
 import { REVERIFY_WORKFLOW } from "../src/workflows/reverify.ts";
+import { INDEX_RECONCILE_WORKFLOW } from "../src/sync/reconcile-handler.ts";
 
 /**
  * Handlers resolve their dependencies lazily INSIDE the closure, so building the
@@ -35,7 +36,7 @@ describe("job handler registry completeness", () => {
     // PRODUCTION_WORKFLOWS is the union the registry promises to cover. Assert it
     // against the enqueue-side constants so a new workflow cannot be added to one
     // side alone.
-    const enqueueable = [...RETENTION_WORKFLOWS, REMEDIATION_WORKFLOW, REVERIFY_WORKFLOW];
+    const enqueueable = [...RETENTION_WORKFLOWS, REMEDIATION_WORKFLOW, REVERIFY_WORKFLOW, INDEX_RECONCILE_WORKFLOW];
     expect([...PRODUCTION_WORKFLOWS].sort()).toEqual([...enqueueable].sort());
   });
 

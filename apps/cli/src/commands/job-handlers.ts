@@ -33,6 +33,7 @@ import { REMEDIATION_WORKFLOW } from "../trust/revoke.js";
 import { buildRemediationHandler } from "../trust/remediation.js";
 import { REVERIFY_WORKFLOW } from "../workflows/reverify.js";
 import { buildReverifyHandler } from "../workflows/reverify-handler.js";
+import { INDEX_RECONCILE_WORKFLOW, buildIndexReconcileHandler } from "../sync/reconcile-handler.js";
 
 /** Everything a production job handler may need, resolved lazily per execution. */
 export interface JobHandlerDeps {
@@ -48,6 +49,7 @@ export const PRODUCTION_WORKFLOWS = [
   ...RETENTION_WORKFLOWS,
   REMEDIATION_WORKFLOW,
   REVERIFY_WORKFLOW,
+  INDEX_RECONCILE_WORKFLOW,
 ] as const;
 
 export type ProductionWorkflow = (typeof PRODUCTION_WORKFLOWS)[number];
@@ -62,5 +64,6 @@ export function buildJobHandlers(deps: JobHandlerDeps): Record<string, JobHandle
     ...buildRetentionHandlers(deps),
     [REMEDIATION_WORKFLOW]: buildRemediationHandler(deps),
     [REVERIFY_WORKFLOW]: buildReverifyHandler(deps),
+    [INDEX_RECONCILE_WORKFLOW]: buildIndexReconcileHandler(deps),
   };
 }
