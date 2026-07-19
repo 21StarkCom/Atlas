@@ -14,6 +14,14 @@ public struct SpawnRequest: Sendable {
     public let stdin: Data?
     /// One-shot runs only; nil = no timeout (streams end via exit/terminate).
     public let timeout: Duration?
+    /// The CLI command this launch invokes (`"query"`, `"watch"`, …) — the redaction key the logging
+    /// decorator uses for `ArgvClassifier`. Each request self-describes its command, so one shared
+    /// `LoggingProcessRunner` can wrap the sole `SystemProcessRunner` and still sanitize per-command.
+    /// nil ⇒ the logger fails closed (redact every operand).
+    public let command: String?
+    /// The bound command schema for argv sanitization, resolved from the `ContractBundle` by the
+    /// caller that builds the request. nil ⇒ `ArgvClassifier` fails closed (redact every operand).
+    public let commandSchema: Data?
 
     public init(
         executable: [String],
@@ -21,7 +29,9 @@ public struct SpawnRequest: Sendable {
         cwd: URL,
         environment: [String: String],
         stdin: Data? = nil,
-        timeout: Duration? = nil
+        timeout: Duration? = nil,
+        command: String? = nil,
+        commandSchema: Data? = nil
     ) {
         self.executable = executable
         self.arguments = arguments
@@ -29,6 +39,8 @@ public struct SpawnRequest: Sendable {
         self.environment = environment
         self.stdin = stdin
         self.timeout = timeout
+        self.command = command
+        self.commandSchema = commandSchema
     }
 }
 

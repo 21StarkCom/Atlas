@@ -148,7 +148,9 @@ public enum BinaryResolution {
             arguments: ["db", "status", "--json"],
             cwd: bundle.checkoutRoot,
             environment: probeEnv,
-            timeout: probeTimeout
+            timeout: probeTimeout,
+            command: "db status",
+            commandSchema: bundle.schema(for: "db status")
         )
         let result: SpawnResult
         do {
@@ -215,7 +217,7 @@ public enum BinaryResolution {
     private static func probeSigner(path: String, cwd: URL, env: [String: String], runner: ProcessRunner, probeTimeout: Duration) async throws {
         // `atlas-signer pubkey` prints the SPKI PEM with no SE access — exit 0. Probe from the bound
         // checkout root, matching the brain probe, so a Finder-launched Console does not depend on cwd.
-        let req = SpawnRequest(executable: [path], arguments: ["pubkey"], cwd: cwd, environment: env, timeout: probeTimeout)
+        let req = SpawnRequest(executable: [path], arguments: ["pubkey"], cwd: cwd, environment: env, timeout: probeTimeout, command: "atlas-signer pubkey")
         let result: SpawnResult
         do {
             result = try await runner.run(req)
