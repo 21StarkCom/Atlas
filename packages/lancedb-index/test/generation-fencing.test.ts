@@ -628,7 +628,15 @@ describe("the REQUIRED table-scoped lock serializes uncoordinated + cross-proces
     // index is never corrupted (no partial/mixed LIVE state). genOld may linger as an
     // ORPHAN (if OLD wrote its chunks then lost the CAS) — that is fine: retrieval
     // fences it out and compaction reclaims it later; a superseded pass never retires.
-    expect([a.kind, b.kind].sort()).toEqual(["indexed", "superseded"].sort());
+    //
+    // BOTH lock orderings are legal and must be accepted — asserting one of them is a
+    // flaky over-constraint (it reddens under load; see the note below):
+    //   - NEW first ⇒ OLD's CAS finds a superseded config revision ⇒ `superseded`;
+    //   - OLD first ⇒ OLD activates, then NEW's CAS legitimately wins ⇒ `indexed`.
+    // What is INVARIANT (and is what this suite actually guards) is that the NEWER
+    // config always ends up live, which the end-state assertions below pin exactly.
+    expect(a.kind).toBe("indexed"); // the newer config always converges live
+    expect(["indexed", "superseded"]).toContain(b.kind); // older: won-then-superseded, or lost the CAS
     expect(store.generation.activeGenerationId(note.id)).toBe(genNew);
     expect(await verifyComplete(table, genNew, chunkIdsOf(note, NEW_CFG))).toBe(true);
     // The REAL retrieval filter serves ONLY the live generation — never the orphan.
