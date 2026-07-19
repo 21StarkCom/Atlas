@@ -86,3 +86,6 @@ contains backticked words. The text after the em dash is descriptive only.
 `quarantine inspect` — privileged: inspect quarantined items.
 `quarantine resolve` — privileged: resolve a quarantined item.
 `index eval` — retrieval-quality eval (recall@10 / MRR) against a labeled query set; the graduation gate.
+
+# Console enablement (Phase 6)
+`watch` — long-lived NDJSON stream of jobs, model calls, ledger appends, backup watermark, daemon health.

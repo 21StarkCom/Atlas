@@ -1956,6 +1956,60 @@ describe("Phase-5 graduation/quarantine schema contracts (wing findings R2 — n
   });
 });
 
+describe("Phase-6 console enablement (SP-1 contracts gate)", () => {
+  const phase6 = registry.commands.filter((c) => c.phase === 6);
+
+  it("the Phase-6 command set is exactly `watch` (shared, none-idempotent), landed with the harness widening", () => {
+    expect(phase6.map((c) => c.name)).toEqual(["watch"]);
+    const r = phase6[0]!;
+    expect(r.privilege).toBe("shared");
+    expect(r.idempotency).toBe("none");
+    expect(existsSync(join(root, r.schemaRef)), `watch schema ${r.schemaRef}`).toBe(true);
+  });
+
+  // NB: no implemented:false assertion — the Phase-5 flip lands in a later SP-1
+  // step; the durable gate is schema presence + row binding (Phase-3/4/5 policy).
+  it("watch.schema.json is a compilable 8-member event-line union whose x-atlas-contract matches the registry row", () => {
+    const r = phase6[0]!;
+    const schema = JSON.parse(readFileSync(join(root, r.schemaRef), "utf8"));
+    const c = schema["x-atlas-contract"];
+    expect(c, "watch x-atlas-contract").toBeTruthy();
+    expect(c.command).toBe(r.name);
+    expect(c.phase).toBe(6);
+    expect(c.privilege).toBe(r.privilege);
+    expect(c.idempotency).toBe(r.idempotency);
+    // read-only-ness rides executionClass (the registry has no "readonly" privilege);
+    // plain read, NOT audited-read (spec §5.1 — watch emits no run.readonly)
+    expect(c.executionClass).toBe("read");
+    // strict exit subset for a long-lived stream (§10.1): no 1/3/6/7 paths exist
+    expect(c.exitCodes).toEqual([0, 2, 4, 5]);
+    for (const code of c.exitCodes as number[]) {
+      expect(EXIT_CODES.includes(code as (typeof EXIT_CODES)[number]), `watch exit ${code}`).toBe(true);
+    }
+    expect(c.errorEnvelopeRef).toBe("docs/specs/cli-contract/error-envelope.schema.json");
+    // read-only enforcement is pinned in prohibitedEffects (§5.2)
+    const pe = (c.prohibitedEffects as string[]).join(" ");
+    for (const needle of [/readonly:true/, /no Atlas lock/i, /no git/i, /no network egress/i]) {
+      expect(pe, `prohibitedEffects pin ${needle}`).toMatch(needle);
+    }
+    expect(c.locks).toEqual([]);
+    expect(c.sideEffects).toEqual([]);
+    // a line-union schema, not a command-output object: 8 members, one per event type
+    expect(Array.isArray(schema.oneOf)).toBe(true);
+    expect(schema.oneOf).toHaveLength(8);
+    // the schema compiles and each bundled example validates against it
+    const ajv = new Ajv2020({ strict: false, allErrors: true });
+    const validate = ajv.compile(schema);
+    for (const ex of schema.examples ?? []) {
+      expect(validate(ex), `watch example: ${JSON.stringify(validate.errors)}`).toBe(true);
+    }
+    // one example per event type, covering the whole taxonomy (§6)
+    const EVENTS = ["watch.hello", "watch.heartbeat", "watch.error", "job", "model_call", "audit", "backup", "daemon"];
+    const seen = new Set((schema.examples as { event: string }[]).map((e) => e.event));
+    expect([...seen].sort()).toEqual([...EVENTS].sort());
+  });
+});
+
 describe("generator determinism", () => {
   it("renderOverview is a pure function of the registry", () => {
     expect(renderOverview(registry)).toEqual(renderOverview(loadRegistry(root)));

@@ -14,7 +14,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const PHASES = [0, 1, 2, 3, 4, 5] as const;
+export const PHASES = [0, 1, 2, 3, 4, 5, 6] as const;
 export type Phase = (typeof PHASES)[number];
 
 export const IDEMPOTENCY = ["key-accepting", "intrinsic", "none"] as const;
@@ -327,7 +327,7 @@ export function validateRegistry(reg: Registry): string[] {
     prev = row.name;
 
     if (!(PHASES as readonly number[]).includes(row.phase)) {
-      errors.push(`${where}: invalid phase ${JSON.stringify(row.phase)} (expected 0..5)`);
+      errors.push(`${where}: invalid phase ${JSON.stringify(row.phase)} (expected 0..6)`);
     }
     if (!(IDEMPOTENCY as readonly string[]).includes(row.idempotency)) {
       errors.push(`${where}: invalid idempotency ${JSON.stringify(row.idempotency)}`);
