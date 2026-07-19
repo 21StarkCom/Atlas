@@ -42,15 +42,42 @@ export async function readVault(cfg: AtlasConfig): Promise<VaultSnapshot> {
       continue;
     }
 
-    const { frontmatter, body } = splitFrontmatter(raw);
-    const fm = parseFrontmatter(frontmatter);
-    if (!fm.ok) {
-      errors.push({ path: rel, kind: fm.kind, message: fm.message });
+    const parsed = parseNote(rel, raw);
+    if (!parsed.ok) {
+      errors.push(parsed.error);
       continue;
     }
+    notes.push(parsed.note);
+  }
 
-    const links = extractWikiLinks(body);
-    notes.push({
+  errors.push(...detectDuplicateIds(notes));
+  errors.push(...detectIdentityCollisions(notes));
+  errors.push(...resolveLinks(notes));
+
+  return { notes, errors };
+}
+
+/**
+ * Parse one note's raw bytes into a `ParsedNote`, or a typed `VaultError` on bad
+ * frontmatter. `rel` is the vault-relative POSIX path (the projection `file_path`
+ * and the slug source); `raw` is the full file bytes (the `contentHash` preimage,
+ * frontmatter included). The SINGLE note-parse rule — shared by {@link readVault}
+ * (working tree) and `sync/resolve-at-ref.ts` (a git blob at a ref), so a note
+ * parses byte-identically whichever surface it comes from.
+ */
+export function parseNote(
+  rel: string,
+  raw: string,
+): { ok: true; note: ParsedNote } | { ok: false; error: VaultError } {
+  const { frontmatter, body } = splitFrontmatter(raw);
+  const fm = parseFrontmatter(frontmatter);
+  if (!fm.ok) {
+    return { ok: false, error: { path: rel, kind: fm.kind, message: fm.message } };
+  }
+  const links = extractWikiLinks(body);
+  return {
+    ok: true,
+    note: {
       id: fm.frontmatter.id,
       path: rel,
       type: fm.frontmatter.type,
@@ -66,14 +93,8 @@ export async function readVault(cfg: AtlasConfig): Promise<VaultSnapshot> {
       sections: buildSectionTree(body),
       contentHash: `sha256:${createHash("sha256").update(raw, "utf8").digest("hex")}`,
       raw,
-    });
-  }
-
-  errors.push(...detectDuplicateIds(notes));
-  errors.push(...detectIdentityCollisions(notes));
-  errors.push(...resolveLinks(notes));
-
-  return { notes, errors };
+    },
+  };
 }
 
 /**
