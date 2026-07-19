@@ -655,7 +655,7 @@ struct ReadCommandExecutor {
 
 ### P6-Task-2 — Banners, badges, empty states, challenge-display modal
 
-Backup-unhealthy + restore banners, quarantine badge, evidence-retry badge, daemon-down indicators, "service not installed" empty state (→ PR #206 runbook), watch-retry banner (attempt/next-retry/last-code), watch-failed terminal state. The challenge-display modal renders the full §interfaces §7 display set — `op`, `runId`/`targetCommit` when present, `canonicalBaseCommit`, every `intendedEffect` field, `expiresAt`, and the SHA-256 of `signingPayload` — from the frozen in-memory representation, **control-character-safe**: every field quoted, C0/C1/ANSI/RTL-override bytes made visible, every committed value shown **in full** (an over-long value made inspectable, never silently truncated), with no raw control byte reaching the view or its accessibility label.
+Backup-unhealthy + restore banners, quarantine badge, evidence-retry badge, daemon-down indicators, "service not installed" empty state (→ PR #206 runbook), watch-retry banner (attempt/next-retry/last-code), watch-failed terminal state. The challenge-display modal renders the full §7 display set — `op`, `runId`/`targetCommit` when present, `canonicalBaseCommit`, every `intendedEffect` field, `expiresAt`, and the SHA-256 of `signingPayload` — from the frozen in-memory representation, **control-character-safe**: every field quoted, C0/C1/ANSI/RTL-override bytes made visible, every committed value shown **in full** (an over-long value made inspectable, never silently truncated), with no raw control byte reaching the view or its accessibility label.
 
 **Interfaces:**
 ```swift
@@ -700,7 +700,7 @@ enum AppPhase { case probing, blocked(reason: String, path: String, remediation:
 
 ### P6-Task-5 — Live-drive checklist + retro
 
-Execute the 10-step manual E2E against a real install, capturing evidence in `docs/retros/2026-07-19-console-live-drive-retro.md` — the evidence for intent criteria 2, 3, 4, 6.
+Execute the 10-step manual E2E against a real install, capturing evidence in `docs/retros/2026-07-19-console-live-drive-retro.md` — the evidence for intent criteria 2–3.
 
 **Live-drive checklist (run in order; pass = every expected observation seen; any deviation fails at that step number):**
 
