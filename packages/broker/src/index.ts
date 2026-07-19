@@ -36,6 +36,8 @@ export {
 export {
   ProtectedRefWriter,
   isCaptureAllowedPath,
+  isNoteAddAllowedPath,
+  type CaptureScope,
   type ProtectedRefs,
   type RefAdvanceRequest,
   type RefAdvanceResult,

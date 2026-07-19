@@ -19,6 +19,56 @@ const execFileAsync = promisify(execFile);
 /** The all-zeros object id: as a CAS old-value it means "the ref must not exist". */
 export const ZERO_OID = "0".repeat(40);
 
+/**
+ * Parse NUL-delimited `git … --name-status -z` output into `{ status, path }`
+ * entries. The `-z` form is the ONLY safe one for a path-policy gate: it never
+ * C-quotes non-ASCII paths (so a Hebrew note name is not mangled into a
+ * `"…"`-wrapped string that fails a suffix check) and never collapses embedded
+ * whitespace/tabs. The stream is a flat run of NUL-terminated fields:
+ *   `<status>\0<path>\0`               for A/M/D/T
+ *   `<status>\0<oldpath>\0<newpath>\0` for R.../C... (score suffix on status)
+ * A rename/copy contributes BOTH paths under its status letter, so an
+ * additions-only policy sees (and rejects) the rename SOURCE, not just its
+ * destination. Any trailing partial record (no terminating NUL) is DROPPED as a
+ * fault rather than parsed fail-open — the caller's policy check then sees a
+ * complete, faithful set or nothing.
+ */
+function parseNameStatusZ(out: string): { status: string; path: string }[] {
+  if (out.length === 0) return [];
+  // Split on NUL; a well-formed stream ends with a NUL so the final element is "".
+  const fields = out.split("\0");
+  if (fields[fields.length - 1] === "") fields.pop();
+  const entries: { status: string; path: string }[] = [];
+  let i = 0;
+  while (i < fields.length) {
+    const raw = fields[i++]!;
+    const status = raw.charAt(0);
+    const isRenameOrCopy = status === "R" || status === "C";
+    const wanted = isRenameOrCopy ? 2 : 1;
+    // Require the full record; a truncated tail is not silently accepted.
+    if (i + wanted > fields.length) break;
+    for (let k = 0; k < wanted; k++) {
+      const p = fields[i++]!;
+      if (p.length > 0) entries.push({ status, path: p });
+    }
+  }
+  return entries;
+}
+
+/** De-duplicate `{status, path}` entries (union across a multi-commit range). */
+function dedupeStatuses(entries: { status: string; path: string }[]): { status: string; path: string }[] {
+  const seen = new Set<string>();
+  const out: { status: string; path: string }[] = [];
+  for (const e of entries) {
+    const key = `${e.status}\t${e.path}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(e);
+    }
+  }
+  return out;
+}
+
 /** Raised when a broker `git` subprocess exits non-zero. */
 export class BrokerGitError extends Error {
   constructor(
@@ -90,6 +140,30 @@ export class BrokerGit {
       commit,
     ]);
     return out.length === 0 ? [] : out.split("\n").map((l) => l.trim()).filter(Boolean);
+  }
+
+  /**
+   * The UNION of per-path change statuses across EVERY commit reachable from
+   * `commit` when canonical is unborn (no base). Uses `git log … -m` so EVERY
+   * commit in the new history is inspected — including each parent of a merge
+   * commit — closing the hole where an unborn-canonical capture was scope-checked
+   * on the tip alone (a multi-commit chain, or a merge tip that `diff-tree`
+   * reports as empty, would otherwise install an unchecked tree).
+   */
+  async changedPathStatusesFromRoot(commit: string): Promise<{ status: string; path: string }[]> {
+    const out = await runGit(this.dir, ["log", "--name-status", "-z", "--format=", "-m", commit]);
+    return dedupeStatuses(parseNameStatusZ(out));
+  }
+
+  /**
+   * The UNION of per-path change statuses across EVERY commit in `base..commit`
+   * (each vs its first parent, `-m` for merges) — the name-status analogue of
+   * {@link changedPathsInRange}, so a modify/delete introduced by an earlier
+   * commit of a multi-commit range is caught even if the tip only adds.
+   */
+  async changedPathStatusesInRange(base: string, commit: string): Promise<{ status: string; path: string }[]> {
+    const out = await runGit(this.dir, ["log", "--name-status", "-z", "--format=", "-m", `${base}..${commit}`]);
+    return dedupeStatuses(parseNameStatusZ(out));
   }
 
   /**

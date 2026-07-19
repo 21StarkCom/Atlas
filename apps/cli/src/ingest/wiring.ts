@@ -8,7 +8,7 @@
  * (DEFECT #1). The broker-side integration seam signs the `run.integrated` event —
  * the CLI never holds the audit-attestation key (DEFECT #2).
  */
-import { BrokerClient } from "@atlas/broker";
+import { BrokerClient, type CaptureScope } from "@atlas/broker";
 import { PrePersistenceGuard } from "@atlas/scan";
 import { openRepo } from "@atlas/git";
 import { CliError, EXIT } from "../errors/envelope.js";
@@ -47,18 +47,21 @@ export function probeStore(ctx: RunContext): (() => ReturnType<typeof openMigrat
  * of the seam; both `connectBrokerIntegration` (daemon socket) and the Phase-2 E2E
  * harness drive it, so the E2E exercises the real wiring rather than a duplicate.
  */
-export function brokerSignedIntegration(client: BrokerClient): CaptureIntegration {
+export function brokerSignedIntegration(client: BrokerClient, scope: CaptureScope = "sources"): CaptureIntegration {
   const integrate = makeBrokerSignedCaptureIntegrator({
     // The UNSIGNED `run.integrated` event is threaded through with its NATURAL type
     // (`Omit<AuditEvent, "prevAuditHead">`) straight to the capture RPC — no
     // `SignedAuditEvent` masquerade (round-3 finding #6). The broker fills
-    // `prevAuditHead` + signs it internally under its protected-ref lock.
+    // `prevAuditHead` + signs it internally under its protected-ref lock. The
+    // declared `scope` selects which broker-enforced path policy applies
+    // (`"sources"`: sources/** + manifest; `"note"`: additions-only *.md, #262).
     integrateSourceCapture: (r) =>
       client.signAndIntegrateSourceCapture({
         captureCommit: r.captureCommit,
         expectedBase: r.expectedBase,
         manifest: r.manifest,
         event: r.event,
+        scope,
       }),
   });
   return {
@@ -74,7 +77,7 @@ export function brokerSignedIntegration(client: BrokerClient): CaptureIntegratio
  * typed `broker-unreachable` CliError so an applied capture fails clearly rather
  * than silently.
  */
-export async function connectBrokerIntegration(ctx: RunContext): Promise<CaptureIntegration> {
+export async function connectBrokerIntegration(ctx: RunContext, scope: CaptureScope = "sources"): Promise<CaptureIntegration> {
   let client: BrokerClient;
   try {
     client = await BrokerClient.connect(ctx.config.config.broker.socket_path);
@@ -87,15 +90,15 @@ export async function connectBrokerIntegration(ctx: RunContext): Promise<Capture
       cause: e,
     });
   }
-  return brokerSignedIntegration(client);
+  return brokerSignedIntegration(client, scope);
 }
 
 /** Assemble the {@link CaptureDeps} for an applied capture. */
-export function buildCaptureDeps(ctx: RunContext, command: string, idempotencyKey?: string): CaptureDeps {
+export function buildCaptureDeps(ctx: RunContext, command: string, idempotencyKey?: string, scope: CaptureScope = "sources"): CaptureDeps {
   return {
     openStore: () => openWorkflowStore({ path: ledgerDbPath(ctx) }),
     repo: openRepo(ctx.config.config.vault.path),
-    connectIntegration: () => connectBrokerIntegration(ctx),
+    connectIntegration: () => connectBrokerIntegration(ctx, scope),
     backup: backupConfig(ctx),
     worktreesPath: resolvePath(ctx, ctx.config.config.git.worktrees_path),
     command,

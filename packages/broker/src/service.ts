@@ -209,6 +209,7 @@ export class BrokerService {
         expectedBase: r.expectedBase,
         manifest: r.manifest,
         auditEvent: signed,
+        ...(r.scope !== undefined ? { scope: r.scope } : {}),
       });
       await this.refreshCanonicalTip();
       return res;

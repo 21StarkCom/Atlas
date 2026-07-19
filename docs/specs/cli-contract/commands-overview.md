@@ -4,7 +4,7 @@
 
 # Atlas — CLI command surface (generated overview)
 
-Registry version: **1** · Commands: **51**
+Registry version: **1** · Commands: **52**
 
 | Phase | Command | Idempotency | Privilege | Implemented | Schema |
 |---|---|---|---|---|---|
@@ -24,6 +24,7 @@ Registry version: **1** · Commands: **51**
 | 2 | `jobs list` | none | shared | yes | `docs/specs/cli-contract/jobs-list.schema.json` |
 | 2 | `jobs retry` | key-accepting | shared | yes | `docs/specs/cli-contract/jobs-retry.schema.json` |
 | 2 | `jobs run` | key-accepting | shared | yes | `docs/specs/cli-contract/jobs-run.schema.json` |
+| 2 | `note add` | key-accepting | shared | yes | `docs/specs/cli-contract/note-add.schema.json` |
 | 2 | `note history` | none | shared | yes | `docs/specs/cli-contract/note-history.schema.json` |
 | 2 | `note related` | none | shared | yes | `docs/specs/cli-contract/note-related.schema.json` |
 | 2 | `note show` | none | shared | yes | `docs/specs/cli-contract/note-show.schema.json` |

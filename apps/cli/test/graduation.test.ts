@@ -117,8 +117,8 @@ describe("graduation audit category inventory (Task 5.2)", () => {
     expect(categories["unknown-type"]).toEqual([]);
   });
 
-  it("GRADUATION_KNOWN_TYPES is back-compat-exported, now DERIVED from the full 14-name contracts registry (#151)", () => {
-    expect(GRADUATION_KNOWN_TYPES.length).toBe(14);
+  it("GRADUATION_KNOWN_TYPES is back-compat-exported, now DERIVED from the full 15-name contracts registry (#151)", () => {
+    expect(GRADUATION_KNOWN_TYPES.length).toBe(15);
     expect(new Set(GRADUATION_KNOWN_TYPES)).toEqual(new Set([...STRICT_TYPES, ...LOOSE_TYPES]));
   });
 });

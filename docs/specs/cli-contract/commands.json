@@ -275,6 +275,14 @@
       "implemented": true
     },
     {
+      "name": "note add",
+      "schemaRef": "docs/specs/cli-contract/note-add.schema.json",
+      "phase": 2,
+      "idempotency": "key-accepting",
+      "privilege": "shared",
+      "implemented": true
+    },
+    {
       "name": "note history",
       "schemaRef": "docs/specs/cli-contract/note-history.schema.json",
       "phase": 2,

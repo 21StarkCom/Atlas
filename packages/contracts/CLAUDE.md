@@ -116,7 +116,7 @@ see guardrails). `private`, `version 0.0.0`, ESM, single export `.` → `dist/` 
   models only the re-anchor-to-`valid` transition. Status-only outcomes (`stale`/`pending`/
   `failed`, no re-anchor) are **deferred to Phase 4** — add them before the verification workflow
   lands.
-- **type-registry is open**: 14 registered types (11 strict + 3 loose); an unknown type resolves
+- **type-registry is open**: 15 registered types (12 strict + 3 loose); an unknown type resolves
   to a loose def keeping its asserted name (door open for a future type). Kept honest by an
   **unconditional CI drift test** against `test/fixtures/vault-taxonomy.json`, plus an optional
   live check against `main-vault/00_System/Vault Schema.md`.
@@ -142,7 +142,7 @@ Landed early and stayed remarkably stable — most later PRs only *append*.
 - **#91** — one `run.*` kind added to `audit.ts` (Tier-3 review-loop regeneration).
 - **#139** — `evidence.retry_enqueued` added to `LEDGER_EVENT_KINDS`.
 - **#152** (open type system, over #151) — `type-registry.ts` + `vault-taxonomy.json` +
-  `type-registry.test.ts`. Contracts became the taxonomy authority (14 registered types).
+  `type-registry.test.ts`. Contracts became the taxonomy authority (15 registered types).
 
 ## Open items
 

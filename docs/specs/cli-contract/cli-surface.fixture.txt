@@ -38,6 +38,7 @@ contains backticked words. The text after the em dash is descriptive only.
 `jobs cancel` — cancel pending/claimed/running jobs.
 
 # Notes (Phase 2)
+`note add` — deterministic Tier-1 authored-note ingest; applies immediately.
 `note show` — show a note by id or slug.
 `note related` — paginated related-notes traversal.
 `note history` — paginated note change history.
