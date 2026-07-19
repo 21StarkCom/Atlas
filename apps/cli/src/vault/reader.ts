@@ -17,6 +17,7 @@ import type { ParsedNote, VaultError, VaultSnapshot, WikiLink } from "@atlas/con
 import { splitFrontmatter, extractWikiLinks, buildSectionTree } from "../markdown/parse.js";
 import { parseFrontmatter } from "./frontmatter.js";
 import { normalizeIdentityKey } from "./identity.js";
+import { matchesNoteGlobs } from "./note-matcher.js";
 
 /**
  * Read + parse the vault named by `cfg.vault.path`. Returns every successfully
@@ -26,7 +27,7 @@ import { normalizeIdentityKey } from "./identity.js";
  */
 export async function readVault(cfg: AtlasConfig): Promise<VaultSnapshot> {
   const root = cfg.vault.path;
-  const files = (await enumerateMarkdown(root)).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const files = (await enumerateNotes(root, cfg.vault.note_globs ?? ["**/*.md"])).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 
   const notes: ParsedNote[] = [];
   const errors: VaultError[] = [];
@@ -75,8 +76,13 @@ export async function readVault(cfg: AtlasConfig): Promise<VaultSnapshot> {
   return { notes, errors };
 }
 
-/** Recursively collect `.md` files under `root`, skipping dotted dirs (`.git`, …). */
-async function enumerateMarkdown(root: string): Promise<string[]> {
+/**
+ * Recursively collect note files under `root`, skipping dotted dirs (`.git`, …).
+ * A file is a note iff its vault-relative POSIX path matches {@link
+ * matchesNoteGlobs} for the configured `note_globs` — the single discovery filter
+ * (60-A task 1.1), replacing the former hardcoded `.md` suffix check.
+ */
+async function enumerateNotes(root: string, globs: readonly string[]): Promise<string[]> {
   const out: string[] = [];
   async function walk(dir: string): Promise<void> {
     const entries = await readdir(dir, { withFileTypes: true });
@@ -85,7 +91,7 @@ async function enumerateMarkdown(root: string): Promise<string[]> {
       const abs = join(dir, entry.name);
       if (entry.isDirectory()) {
         await walk(abs);
-      } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".md")) {
+      } else if (entry.isFile() && matchesNoteGlobs(toPosix(relative(root, abs)), globs)) {
         out.push(abs);
       }
     }

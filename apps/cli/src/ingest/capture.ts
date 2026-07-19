@@ -72,9 +72,6 @@ import {
 } from "./manifests.js";
 import { readFileSync } from "node:fs";
 
-/** The default canonical protected ref the capture fast-forwards. */
-export const DEFAULT_CANONICAL_REF = "refs/heads/main";
-
 /** The result `captureSource` returns (plan Task 2.6 / source-add.schema.json). */
 export interface CaptureResult {
   readonly contentId: ContentId;
@@ -109,8 +106,8 @@ export interface CaptureDeps {
   readonly backup: LedgerBackupConfig;
   /** `git.worktrees_path` — where the ephemeral agent worktree is created. */
   readonly worktreesPath: string;
-  /** The canonical protected ref (default {@link DEFAULT_CANONICAL_REF}). */
-  readonly canonicalRef?: string;
+  /** The canonical protected ref (config `git.canonical_ref`, threaded by the caller). */
+  readonly canonicalRef: string;
   /** The registry command name (`"source add"` / `"ingest"`) for idempotency scoping. */
   readonly command: string;
   /** The caller `--idempotency-key`; a fresh key is minted per invocation when absent. */
@@ -363,7 +360,7 @@ export async function captureSource(req: {
 }): Promise<CaptureResult> {
   const { path, guard, deps } = req;
   const now = deps.now ?? rfc3339Ms;
-  const canonicalRef = deps.canonicalRef ?? DEFAULT_CANONICAL_REF;
+  const canonicalRef = deps.canonicalRef;
 
   // ── Step 0: PREFLIGHT (DEFECT #1) — before ANY mutating dependency.
   const norm = await preflight(path, guard);

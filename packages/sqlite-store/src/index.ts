@@ -70,7 +70,7 @@ export {
 export { verify, checkQueryPlans } from "./verify.js";
 export type { VerifyReport, InvariantViolation, QueryPlanViolation } from "./verify.js";
 
-export { openStore, registerGenerationMigration } from "./store.js";
+export { openStore, registerGenerationMigration, registerSyncCursorsMigration } from "./store.js";
 export type { Store, Clock } from "./store.js";
 
 export { ProjectionRepo } from "./repos/projections.js";
@@ -156,6 +156,7 @@ export { migration0009RunSupersessions, RUN_SUPERSESSIONS_DDL } from "../migrati
 // Feature migration (Task 4.8 trust projection) — registered by the workflows layer at store-open.
 export { migration0010TrustState, TRUST_STATE_DDL } from "../migrations/0010_trust_state.js";
 export { migration0011RunInputs, RUN_INPUTS_DDL } from "../migrations/0011_run_inputs.js";
+export { migration0012SyncCursors, SYNC_CURSORS_DDL } from "../migrations/0012_sync_cursors.js";
 
 export { ProvenanceRepo, captureId } from "./repos/provenance.js";
 export type {

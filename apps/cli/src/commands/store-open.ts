@@ -12,7 +12,7 @@
  * otherwise returns the open store WITHOUT migrating.
  */
 import { existsSync } from "node:fs";
-import { openStore, registerGenerationMigration, type Store } from "@atlas/sqlite-store";
+import { openStore, registerGenerationMigration, registerSyncCursorsMigration, type Store } from "@atlas/sqlite-store";
 import { registerJobsMigration } from "@atlas/jobs";
 import { CliError, EXIT } from "../errors/envelope.js";
 import { ledgerDbPath } from "./backup-config.js";
@@ -42,6 +42,10 @@ export function registerFeatureMigrations(store: Store): void {
   // index_config_revisions") — the package tests masked it by registering the
   // migration themselves. Found on the 2026-07-16 live drive.
   registerGenerationMigration(store);
+  // `0012_sync_cursors` (60-A vault-sync adoption). Registered here so a real
+  // `db migrate` applies the per-source sync cursor through the one checksum-guarded
+  // runner; the adopt-vault bootstrap seeds the zero-state row afterward.
+  registerSyncCursorsMigration(store);
 }
 
 /** The core migration whose presence proves the ledger has been migrated. */

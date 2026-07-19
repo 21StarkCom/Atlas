@@ -66,6 +66,7 @@ export {
   deriveSignerRegistryFromKeyFiles,
   loadAttestationKey,
   defaultAnchorPath,
+  DEFAULT_CANONICAL_REF,
   DEFAULT_PROTECTED_REFS,
   DEFAULT_ATTESTATION_SIGNER_ID,
   DEFAULT_APPROVER_SIGNER_ID,

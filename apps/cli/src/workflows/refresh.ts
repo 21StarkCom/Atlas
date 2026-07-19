@@ -43,7 +43,6 @@ import { CliError, EXIT } from "../errors/envelope.js";
 import { gitOpId, gitOpUpsert, readAgentRunStatus, readGitOp, sha256Canonical } from "./checkpoints.js";
 import { planSynthesis, type SynthesisKind, type SynthesisPlanDeps, type WorkflowInput } from "./synthesis.js";
 
-const DEFAULT_CANONICAL_REF = "refs/heads/main";
 const ZERO_OID = "0".repeat(40);
 
 function rfc3339MsNow(): string {
@@ -59,7 +58,8 @@ export interface SynthesisRefreshDeps extends SynthesisPlanDeps {
   /** Scans every persisted refresh artifact (ChangePlan, applied text, commit, manifest). */
   readonly guard: GeneratedArtifactGuard;
   readonly worktreesPath: string;
-  readonly canonicalRef?: string;
+  /** The canonical protected ref (config `git.canonical_ref`, threaded by the caller). */
+  readonly canonicalRef: string;
   readonly now?: () => string;
 }
 
@@ -141,7 +141,7 @@ export async function refreshRun(
   deps: SynthesisRefreshDeps,
 ): Promise<RefreshResult> {
   const now = deps.now ?? rfc3339MsNow;
-  const canonicalRef = deps.canonicalRef ?? DEFAULT_CANONICAL_REF;
+  const canonicalRef = deps.canonicalRef;
   const db = deps.store.db;
 
   // 1. The run must be at the review gate.

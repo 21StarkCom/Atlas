@@ -10,6 +10,12 @@
  * restrictive FK or orphan ledger history. A crash mid-rebuild (the injectable
  * failpoint) rolls the transaction back, leaving the old projection readable.
  *
+ * AUTHORITATIVE, NON-DERIVED tables `db rebuild` must NEVER touch (they are not
+ * rebuildable from canonical Markdown; recovered only from the encrypted backup):
+ * `jobs`/`job_attempts` (the durable queue) and `sync_cursors` (the 60-A per-source
+ * vault-sync cursor). None of these appears in `ProjectionRepo.clearAll` or in any
+ * pre-clear/fold step, so a rebuild leaves each row byte-identical.
+ *
  * The post-restore hook registry lets later phases register additional rebuild
  * steps (Task 1.7 registers the projection rebuild; Phase 3 registers the index
  * rebuild) that a `db restore` runs after the ledger tables are restored.

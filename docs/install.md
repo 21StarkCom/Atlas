@@ -249,6 +249,41 @@ brain query "who runs the Cloud team"
 
 **Populating the vault.** `db rebuild` reads whatever valid Markdown is at `vault.path`. To onboard an existing real vault instead of hand-authoring notes, use the graduation path — `graduation scan` → `graduation audit` → `graduation migrate --apply` (byte-exact, deterministic, fail-closed; [`specs/bootstrap-migration.md`](specs/bootstrap-migration.md), fixtures authoritative over prose). `graduation migrate --apply` is broker-authorized (`--export-challenge` → sign → `--authorization <path>`, security-broker-contract §7.5); `--yes` never authorizes. For the exact real-vault drive, follow the retro runbook, **not** the search-index plan (§7 below).
 
+### 5.4 Adopting a live vault for continuous sync (60-A)
+
+**Do not run this section until Phases 1–4 of the `live-vault-adoption-sync` plan (#263–#266) are installed and `brain sync --dry-run` passes on a throwaway clone.** The adoption bootstrap is one-time and idempotent; the first real `brain sync` immediately follows.
+
+After graduation, run the provisioning bootstrap to create the `refs/atlas/main` baseline commit, lock the namespace to the broker, migrate the DB to include `sync_cursors`, and seed the zero-state cursor:
+
+```bash
+# Requires: root, provisioned host, brain binary built, apps/cli/dist/sync/seed-cli.js built.
+sudo provisioning/adopt-vault.sh \
+  --config /path/to/config-dir \
+  --source-id main-vault \
+  --vault /path/to/vault-repo \
+  [--upstream-ref refs/heads/main]    # default: refs/heads/main
+  [--canonical-ref refs/atlas/main]   # default: refs/atlas/main
+```
+
+What the script does (idempotent — safe to re-run):
+
+1. **Creates `refs/atlas/main`** at a broker-attributed empty-tree baseline commit (deterministic epoch timestamp; never at `refs/heads/main`).
+2. **Locks `.git/refs/atlas/`** — `chown atlas-broker:atlas-broker` + `chmod 0700`. Enforces OQ#2: only the broker can write `refs/atlas/*` going forward. (ATLAS_PROVISIONED=1 only.)
+3. **OQ#2 adversarial gate** — proves `atlas-agent` is denied write on `refs/atlas/main`, broker is not. Halts on failure. (ATLAS_PROVISIONED=1 only.)
+4. **`brain db migrate`** — applies `0012_sync_cursors` (and any outstanding migrations).
+5. **Seeds `sync_cursors`** — inserts the zero-state row via `node dist/sync/seed-cli.js` (INSERT OR IGNORE, so re-running never clobbers an advanced cursor).
+6. **Validates** — `refs/atlas/main` resolves, upstream ref is unchanged, re-seeding is a no-op, config `git.canonical_ref` matches.
+
+**Config requirement:** set `git.canonical_ref: refs/atlas/main` in `brain.config.yaml` before adoption. A config with the default routes Atlas writes onto the live upstream.
+
+**Packed-refs caveat (60-F):** `git pack-refs` by a non-broker user can pack `refs/atlas/main` into `.git/packed-refs`, bypassing the per-directory ACL. Restrict `gc`/`pack-refs` to `atlas-broker` until the bare-mirror variant (60-F) ships.
+
+**Activation sequencing:**
+```
+adoption bootstrap  →  brain sync --dry-run (throwaway clone)  →  brain sync
+```
+Do NOT run `brain sync` until all of Phases 1–4 are installed; a premature sync against an un-adopted vault will fail cleanly (canonical ref not found), but a partially-adopted state can leave the cursor unseeded.
+
 ### Daemon requirements at a glance
 
 | Command | broker | egress + `ATLAS_EGRESS_CAPABILITY_KEY` |

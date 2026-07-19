@@ -26,6 +26,7 @@ import { migration0003Provenance } from "../migrations/0003_provenance.js";
 import { migration0004Claims } from "../migrations/0004_claims.js";
 import { migration0005LedgerFinalize } from "../migrations/0005_ledger_finalize.js";
 import { migration0008IndexConfigRevision } from "../migrations/0008_index_config_revision.js";
+import { migration0012SyncCursors } from "../migrations/0012_sync_cursors.js";
 // Side-effect imports: register the retained-PR-A projection folds into the
 // rebuild pipeline (§2.7 / §4.1) so `rebuildProjections`/`db rebuild` reproduce
 // the provenance + claims projections from canonical Markdown. Provenance is
@@ -169,4 +170,18 @@ export function openStore(cfg: SqliteConfig, clock: Clock = rfc3339Now): Store {
  */
 export function registerGenerationMigration(store: Store): void {
   store.registerMigration(migration0008IndexConfigRevision);
+}
+
+/**
+ * Register the vault-sync-owned `0012_sync_cursors` migration on a `Store`
+ * (60-A adoption). Call at STORE-OPEN, BEFORE {@link Store.migrate}, so the
+ * per-source sync cursor table is applied through the checksum-guarded runner —
+ * never ad-hoc during a command. Like `registerGenerationMigration`, this is a
+ * FEATURE migration (NOT in `openStore`'s default retained set), so the
+ * `db.migrate-ownership` fresh-DB diff stays exactly the §2.7 core set. Its schema
+ * head is already declared in the backup compatibility set (same-package import),
+ * so no `registerKnownSchemaHead` call is needed here.
+ */
+export function registerSyncCursorsMigration(store: Store): void {
+  store.registerMigration(migration0012SyncCursors);
 }

@@ -37,7 +37,7 @@ async function gitReject(ctx: RunContext): Promise<number> {
       throw new CliError({ code: "broker-unreachable", message: `the broker is unreachable at ${ctx.config.config.broker.socket_path}`, hint: "Start the broker daemon before rejecting.", exitCode: EXIT.CONFIG, cause: e });
     }
     try {
-      const deps: ApproveDeps = { store, broker: client, backup: backupConfig(ctx), repo, integrate: async () => { throw new Error("reject does not integrate"); }, foldProjections: async () => {}, canonicalRef: "refs/heads/main" };
+      const deps: ApproveDeps = { store, broker: client, backup: backupConfig(ctx), repo, integrate: async () => { throw new Error("reject does not integrate"); }, foldProjections: async () => {}, canonicalRef: ctx.config.config.git.canonical_ref };
       await rejectRun(runId, "rejected at review", deps);
       const out = { command: "git reject", runId, state: "rejected" as const, worktreeRemoved: true, retainedCommit: committed.commitSha };
       if (ctx.output.mode === "json") emitJson(out);

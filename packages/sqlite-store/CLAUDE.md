@@ -11,6 +11,7 @@
 
 - **Projections** (`notes`, `note_identity_keys`, `note_links`, `vault_schema_migrations`, + provenance/claims tables) are deterministically **rebuildable from canonical Markdown** — delete-and-reinsert on `db rebuild`.
 - **Ledger** tables (`agent_runs`, `audit_events`, `audit_intents`, `backup_watermark`, `model_calls`, …) are **primary state `db rebuild` never touches** — recovered only from the encrypted backup.
+- **Authoritative non-derived** tables that are neither projections nor ledger: **`sync_cursors`** (`0012`) — the per-source adoption cursor. `last_absorbed_oid`/`cycle_seq` are primary sync state; `db rebuild` never touches them. Seeded once at adoption via `seedSyncCursor` (`INSERT OR IGNORE`); advanced only by the sync engine.
 - The two classes reference each other **only by scalar historical id — no cross-class FK** — so a projection rebuild can never violate a restrictive FK or orphan ledger history.
 
 ## Key files (real paths)
@@ -39,6 +40,7 @@
 | `0007_job_cancellations` | **in `@atlas/jobs`** | jobs | no |
 | `0008_index_config_revision` | `0008_*.ts` (this pkg) | `registerGenerationMigration` | no |
 | `0009_run_supersessions` · `0010_trust_state` · `0011_run_inputs` | this pkg | CLI `registerWorkflowMigrations` (`apps/cli/src/workflows/idempotency.ts`) | no |
+| `0012_sync_cursors` | `0012_sync_cursors.ts` (this pkg) | `registerSyncCursorsMigration` (CLI `store-open.ts`) | no |
 
 - **Feature-migration files live here but are registered elsewhere.** `0006/0009/0010/0011` sit in `migrations/` but are registered by the CLI workflows layer; `0008` by `registerGenerationMigration`. Keeping them out of `openStore`'s default set keeps the `db.migrate-ownership` fresh-DB diff exactly the §2.7 core set.
 - **Gap tolerance is load-bearing, not cosmetic.** `0003`/`0004` are retained PR-A and land BEFORE `0002_jobs` (PR-B). A DB can have `0003` applied while `0002` is first registered later; the runner still applies `0002` in id order. **Do not renumber to "fix" gaps.**

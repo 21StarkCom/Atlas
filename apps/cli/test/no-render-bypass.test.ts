@@ -18,6 +18,7 @@ const ALLOWED = new Set([
   "render/safe.ts", // the terminal-safe renderer
   "render/progress.ts", // progress lines — but only via render(); kept allowed for stream writes
   "errors/envelope.ts", // the JSON error-envelope emitter
+  "sync/seed-cli.ts", // standalone subprocess CLI entry point (its own output channel, like bin.ts → main.ts)
 ]);
 
 /** Banned direct-output patterns. */
@@ -56,6 +57,7 @@ describe("no-render-bypass", () => {
       "errors/envelope.ts",
       "render/progress.ts",
       "render/safe.ts",
+      "sync/seed-cli.ts",
     ]);
   });
 });

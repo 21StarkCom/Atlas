@@ -8,7 +8,7 @@
  * (DEFECT #1). The broker-side integration seam signs the `run.integrated` event —
  * the CLI never holds the audit-attestation key (DEFECT #2).
  */
-import { BrokerClient, type CaptureScope } from "@atlas/broker";
+import { BrokerClient, type CaptureScope, DEFAULT_CANONICAL_REF } from "@atlas/broker";
 import { PrePersistenceGuard } from "@atlas/scan";
 import { openRepo } from "@atlas/git";
 import { CliError, EXIT } from "../errors/envelope.js";
@@ -101,6 +101,7 @@ export function buildCaptureDeps(ctx: RunContext, command: string, idempotencyKe
     connectIntegration: () => connectBrokerIntegration(ctx, scope),
     backup: backupConfig(ctx),
     worktreesPath: resolvePath(ctx, ctx.config.config.git.worktrees_path),
+    canonicalRef: ctx.config.config.git.canonical_ref ?? DEFAULT_CANONICAL_REF,
     command,
     ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
   };
