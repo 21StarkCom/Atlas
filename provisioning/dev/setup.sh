@@ -35,8 +35,12 @@ ensure_dir "$ATLAS_KEYS_DIR/agent"        "$ATLAS_AGENT_USER" "$ATLAS_AGENT_USER
 # broker keys
 gen_ed25519 "$ATLAS_KEYS_DIR/atlas-broker/audit-attestation" "atlas-broker" "atlas-broker"
 run "chmod 0600 '$ATLAS_KEYS_DIR/atlas-broker/audit-attestation.key'"
-# audit-attestation public is also agent-readable by design → publish a group-readable copy
-ensure_dir "$ATLAS_KEYS_DIR/shared" "atlas-broker" "$ATLAS_GROUP" 0750
+# audit-attestation public is also agent-readable by design → publish a group-readable copy.
+# The shared dir is owned by atlas-egress: it must traverse it to reach the cross-identity
+# artifacts (3b) it reads as OWNER — egress is deliberately NOT in atlas-git (D18), so
+# any other owner locks it out entirely (observed live 2026-07-19: egress crash-looped
+# EACCES on egress-capability.key behind an atlas-broker-owned 0750 dir).
+ensure_dir "$ATLAS_KEYS_DIR/shared" "atlas-egress" "$ATLAS_GROUP" 0750
 run "cp -f '$ATLAS_KEYS_DIR/atlas-broker/audit-attestation.pub' '$ATLAS_KEYS_DIR/shared/audit-attestation.pub'"
 run "chown atlas-broker:$ATLAS_GROUP '$ATLAS_KEYS_DIR/shared/audit-attestation.pub'"
 run "chmod 0644 '$ATLAS_KEYS_DIR/shared/audit-attestation.pub'"
