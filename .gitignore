@@ -2,6 +2,8 @@ node_modules/
 dist/
 *.tsbuildinfo
 coverage/
+# tools/build-artifact.sh output (installed by provisioning/install-artifact.sh)
+dist-artifact/
 .DS_Store
 *.log
 .scratch/

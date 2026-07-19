@@ -16,7 +16,8 @@ dirs). Nothing else in the build does. Review the scripts, then run the commands
 | `dev/setup.sh` · `dev/teardown.sh` | dev host provision / reverse |
 | `ci/setup.sh` | CI provision + sudoers drop-in (D1) |
 | `bin/broker-launcher.sh` · `bin/egress-launcher.sh` | fixed-path privileged launchers (D16) |
-| `install-artifact.sh` | hash-verified install of the privileged binaries (D16) |
+| `install-artifact.sh` | hash-verified install of the privileged binaries (D16) — built by `tools/build-artifact.sh` |
+| `macos/services.sh` · `macos/com.atlas.{broker,egress}.plist` | launchd system services (KeepAlive, per-identity UserName, logs in `/usr/local/var/log/atlas/`) |
 | `profiles/agent.sb` · `macos/agent-pf.conf` | macOS agent sandbox + per-UID no-egress (D17) |
 | `linux/netns.sh` · `linux/agent-cgroup.sh` | Linux agent no-egress netns + cgroup (D17) |
 
@@ -38,7 +39,12 @@ sudo pfctl -e   # if pf isn't already enabled
 # 4. Put your real Gemini key in the egress-only credential (replaces the placeholder):
 sudo -u atlas-egress tee /usr/local/etc/atlas/keys/atlas-egress/atlas.gemini.key < /path/to/gemini.key >/dev/null
 
-# 5. Enable the provisioning-gated test suites:
+# 5. Build + install the daemon binaries, then run them as launchd services:
+tools/build-artifact.sh
+sudo provisioning/install-artifact.sh dist-artifact
+sudo provisioning/macos/services.sh install     # status | uninstall also available
+
+# 6. Enable the provisioning-gated test suites:
 export ATLAS_PROVISIONED=1
 ```
 

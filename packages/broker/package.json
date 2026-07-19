@@ -28,6 +28,7 @@
   "devDependencies": {
     "@atlas/testing": "workspace:*",
     "@types/node": "catalog:",
+    "esbuild": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"
   }

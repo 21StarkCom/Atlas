@@ -20,6 +20,7 @@ Throwaway tooling here earns its keep or graduates: the retrieval-eval harness (
 | `gen-failpoints.ts` (194 lines) | Task 4.11 crash-recovery failpoint generator (#127). Reads the `stateTable` from `recovery-state-machine.md`, emits `failpoints.generated.md` (29 rows), same `--check`/`--write` discipline. Import-guarded (side-effect-free import). |
 | `contract-lint.test.ts` (1968 lines / 99 KB) | The **mega-gate** — de-facto contract regression suite, not just a lint. Runs under vitest. Executes real DDL against `node:sqlite` `DatabaseSync`. |
 | `test-signer.ts` (63 lines) | Fixture authorization signer (Task 1.6, D20). |
+| `build-artifact.sh` | Builds the privileged daemon artifact for `provisioning/install-artifact.sh` (D16): esbuild-bundles `@atlas/broker`'s two bins into single-file CJS executables + sha256 manifests in `dist-artifact/` (gitignored). CJS because the extension-less artifacts resolve module type from the nearest package.json — the install dir has none. |
 | `provisioning-acl.test.ts` (92 lines) | Non-sudo ACL-matrix contract for `provisioning/keys.acl.json` (Task 1.0/#16). |
 | `cli-schemas.test.ts` (98 lines) | Task 0.5/#14: schemas are valid draft-2020-12, validate their embedded `examples`, cover every Phase-1 row. |
 
