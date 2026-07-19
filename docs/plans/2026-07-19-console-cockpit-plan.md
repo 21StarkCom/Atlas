@@ -46,7 +46,7 @@ The plan is six phases, each landing behind the CI Swift compile job (`macos-15`
 
 ### P1-Task-1 — Package skeleton, module graph, CI compile/assemble job
 
-Create `console/Package.swift` (swift-tools 6.0) with library targets `ConsoleCore` and `ConsoleUI` (depends on `ConsoleCore`) and executable target `AtlasConsole` (depends on `ConsoleUI`), plus test targets `ConsoleCoreTests`, `ConsoleUITests`. `console/` lives outside the pnpm workspace globs. **The `.app` bundle is assembled by an explicit script, not by xcodebuild** — a SwiftPM executable has no application target/scheme that emits a launchable bundle. `console/scripts/assemble-app.sh` (`set -euo pipefail`; first `cd "$(dirname "$0")/.."` to its own package root so SwiftPM runs from `console/` regardless of caller cwd): `swift build -c release` → create `console/.build/AtlasConsole.app/Contents/{MacOS,Resources}` → copy the built `AtlasConsole` binary into `Contents/MacOS/` → install `console/Resources/Info.plist` (`CFBundleIdentifier=com.atlas.console`, `CFBundleExecutable=AtlasConsole`, `LSMinimumSystemVersion=15.0`) into `Contents/` + write `PkgInfo` (`APPL????`) → `codesign --force --sign - console/.build/AtlasConsole.app` (ad-hoc, matching the build-from-source posture). The bundle path `console/.build/AtlasConsole.app` is the XCUI-launchable artifact. Add `.github/workflows/console-ci.yml`: `macos-15`, Swift 6, every step under `working-directory: console` — `swift build` → `swift test` → `scripts/assemble-app.sh`.
+Create `console/Package.swift` (swift-tools 6.0) with library targets `ConsoleCore` and `ConsoleUI` (depends on `ConsoleCore`) and executable target `AtlasConsole` (depends on `ConsoleUI`), plus test targets `ConsoleCoreTests`, `ConsoleUITests`. `console/` lives outside the pnpm workspace globs. **The `.app` bundle is assembled by an explicit script, not by xcodebuild** — a SwiftPM executable has no application target/scheme that emits a launchable bundle. `console/scripts/assemble-app.sh` (`set -euo pipefail`; first `cd "$(dirname "$0")/.."` to its own package root so SwiftPM runs from `console/` regardless of caller cwd): `swift build -c release` → create `.build/AtlasConsole.app/Contents/{MacOS,Resources}` → copy the built `AtlasConsole` binary into `Contents/MacOS/` → install `Resources/Info.plist` (`CFBundleIdentifier=com.atlas.console`, `CFBundleExecutable=AtlasConsole`, `LSMinimumSystemVersion=15.0`) into `Contents/` + write `PkgInfo` (`APPL????`) → `codesign --force --sign - .build/AtlasConsole.app` (ad-hoc, matching the build-from-source posture). The bundle path `console/.build/AtlasConsole.app` is the XCUI-launchable artifact. Add `.github/workflows/console-ci.yml`: `macos-15`, Swift 6, every step under `working-directory: console` — `swift build` → `swift test` → `scripts/assemble-app.sh`.
 
 **Interfaces:**
 ```
@@ -59,7 +59,7 @@ console/.build/AtlasConsole.app               # assembled output (gitignored)
 .github/workflows/console-ci.yml              # macos-15: build → test → assemble-app.sh
 ```
 
-**Test:** `ModuleAcyclicityTests` — asserts the dependency graph is exactly `ConsoleCore ← ConsoleUI ← AtlasConsole` with **no** library→executable back-edge (parses the resolved package dump). `AppBundleIdentityTests` — runs `assemble-app.sh`, then asserts the assembled bundle exists at the declared path, its `Info.plist` carries `CFBundleIdentifier=com.atlas.console`, the executable bit is set on `Contents/MacOS/AtlasConsole`, and `codesign --verify` passes.
+**Test:** `ModuleAcyclicityTests` — asserts the dependency graph is exactly `ConsoleCore ← ConsoleUI ← AtlasConsole` with **no** library→executable back-edge (parses the resolved package dump). `AppBundleIdentityTests` — runs `assemble-app.sh` **from both the repo root and `console/`**, then asserts the assembled bundle exists at the declared path, its `Info.plist` carries `CFBundleIdentifier=com.atlas.console`, the executable bit is set on `Contents/MacOS/AtlasConsole`, and `codesign --verify` passes.
 
 ### P1-Task-2 — Spawn primitive (`ProcessRunner`)
 
@@ -126,7 +126,7 @@ struct ValidationError { let path: String; let reason: String }
 
 ### P1-Task-5 — Contract-bundle resolution + binary path resolution + probe
 
-Resolve `brain`/`atlas-signer` by the first-hit-wins order (settings → env var → repo-layout default), then **bind the contract bundle from the resolved binary's own checkout** (walk up from the executable for `docs/specs/cli-contract/commands.json`) — never from an independently-set `atlasRoot`. If the source that hit fails its probe or no bundle is discoverable, enter a **blocking error state** naming the failing path + remediation; no fallthrough.
+Resolve `brain`/`atlas-signer` by the first-hit-wins order (settings → env var → repo-layout default), then **bind the contract bundle from the atlas checkout that supplies the CLI entry point** — for the repo-layout launcher (`node <atlasRoot>/apps/cli/dist/bin.js`) walk up from `dist/bin.js` for `docs/specs/cli-contract/commands.json`, **never** the launch executable (which may be `node`, outside the checkout); a standalone in-checkout `brain` binary is itself the anchor — never an independently-set `atlasRoot`. If the source that hit fails its probe or no bundle is discoverable, enter a **blocking error state** naming the failing path + remediation; no fallthrough.
 
 - `brain` probe = spawn `brain db status --json` (a `pure` command — no ledger row) and require exit 0 + schema-valid output. Never probe with an audited read.
 - `signer` probe = `atlas-signer pubkey` (no SE access, prints SPKI PEM) exit 0.
@@ -141,7 +141,7 @@ enum BinaryKind { case brain, signer }
 struct ResolutionInputs {
   let atlasRoot: String?; let brainPathOverride: String?; let signerPathOverride: String?
 }
-struct ResolvedBinary { let launch: [String]; let baseEnv: [String: String]; let bundle: ContractBundle }
+struct ResolvedBinary { let launch: [String]; let contractAnchor: URL; let baseEnv: [String: String]; let bundle: ContractBundle }   // launch = argv (may be node + bin.js); contractAnchor = the atlas checkout entry, resolved separately
 struct BinaryResolution {
   static func resolve(_ kind: BinaryKind, inputs: ResolutionInputs, env: [String:String],
                       runner: ProcessRunner) async throws -> ResolvedBinary   // throws BlockingResolutionError(path, remediation)
@@ -151,12 +151,12 @@ struct ContractBundle {
   func schema(for command: String) -> Data?         // per-command *.schema.json bytes
   var watchSchema: Data { get }                      // watch.schema.json
   var errorEnvelopeSchema: Data { get }              // error-envelope.schema.json (feeds ErrorEnvelopeParser; walked by SchemaKeywordCoverageTests)
-  static func resolve(fromBinary executable: URL) throws -> ContractBundle    // walk up for commands.json
+  static func resolve(fromAnchor anchor: URL) throws -> ContractBundle    // walk up from the atlas CLI entry (dist/bin.js) / checkout — never the launch executable
 }
 struct CommandRow { let name, phase, privilege, executionClass, idempotency: String; let implemented: Bool }
 ```
 
-**Test:** `ContractBundleResolutionTests` — a fixture checkout layout; bundle resolves from the binary's own tree; a binary whose tree has no `commands.json` throws the blocking mismatch error. `PathResolutionProbeTests` (test-plan #12) — each source hit for both executables; missing/non-exec/probe-fail ⇒ blocking error naming the path, no fallthrough; `brain` probe uses `db status` (asserts no audited-read spawn), signer probe uses `pubkey`.
+**Test:** `ContractBundleResolutionTests` — a fixture checkout layout; a repo-layout wrapper (`node …/dist/bin.js`) binds the bundle at `dist/bin.js` (not the `node` launcher path) and probes green; an anchor whose tree has no `commands.json` throws the blocking mismatch error. `PathResolutionProbeTests` (test-plan #12) — each source hit for both executables; missing/non-exec/probe-fail ⇒ blocking error naming the path, no fallthrough; `brain` probe uses `db status` (asserts no audited-read spawn), signer probe uses `pubkey`.
 
 ### P1-Task-6 — `SignerContractValidator`
 
@@ -269,13 +269,13 @@ enum StreamItem { case event(WatchEvent); case terminalEnvelope(ErrorEnvelope) }
 
 ### P2-Task-5 — Observability logger + argv sanitization
 
-An `os.Logger` (subsystem `com.atlas.console`) wrapper every spawn routes through. Argv is logged under an **allowlist**: binary path, command/subcommand tokens, flag names, enumerated flag values, and structural/ID operands (`jobId`, note `id`, `--limit`, `--since-seq`, `--poll-ms`, `--heartbeat-seconds`, `--config <path>`) logged intact; user-supplied free-text operands (the `query` positional — the one such operand in the V1 set) replaced with `<redacted:query len=NN>`; the egress key rides env and is redacted. The free-text redaction set is a fixed per-command map. `brain` stderr is captured (never swallowed) for surfacing on error surfaces; info for state transitions, error for probe/spawn/decode failures.
+An `os.Logger` (subsystem `com.atlas.console`) wrapper every spawn routes through. Argv is logged under an **allowlist**: binary path, command/subcommand tokens, flag names, enumerated flag values, and structural/ID operands (`jobId`, note `id`, `--limit`, `--since-seq`, `--poll-ms`, `--heartbeat-seconds`, `--config <path>`) logged intact; user-supplied free-text operands (the `query` positional — the one such operand in the V1 set) replaced with `<redacted:query len=NN>`; the egress key rides env and is redacted. The free-text redaction set is Console-owned by **semantic operand name only** — each name's concrete argv position or flag is resolved from the bound command schema at runtime, never a hardcoded index. `brain` stderr is captured (never swallowed) for surfacing on error surfaces; info for state transitions, error for probe/spawn/decode failures.
 
 **Interfaces:**
 ```swift
 struct ArgvClassifier {
-  static let freeTextOperands: [String: [Int]]   // command → positional indices to redact; e.g. "query": [0]
-  static func sanitize(command: String, argv: [String]) -> [String]
+  static let sensitiveOperands: [String: Set<String>]   // command → semantic operand NAMES to redact; e.g. "query": ["query"]. Position/flag resolved from the schema, never a hardcoded index.
+  static func sanitize(command: String, argv: [String], schema: Data) -> [String]   // resolves each name's argv position/flag from the command schema
 }
 struct ConsoleLog {
   static func spawn(command: String, argv: [String], exitCode: Int32?)   // sanitized; env key never logged
@@ -283,7 +283,7 @@ struct ConsoleLog {
 }
 ```
 
-**Test:** `ArgvSanitizationTests` (test-plan #19) — `brain query "<sensitive>"` logs the operand as `<redacted:query len=NN>` while structural argv/flags/IDs log intact; a probe/spawn/decode failure logs at `error`; `brain` stderr is captured on the result, never dropped.
+**Test:** `ArgvSanitizationTests` (test-plan #19) — `brain query "<sensitive>"` logs the operand as `<redacted:query len=NN>` while structural argv/flags/IDs log intact; every sensitive operand **name** resolves to a unique argv position via the command schema, and a mapped name absent from that schema fails the test (stale-mapping guard); a probe/spawn/decode failure logs at `error`; `brain` stderr is captured on the result, never dropped.
 
 **Risks.** Chunk-equals-line decoding that passes fixture-string tests but fails on the live pipe — mitigated by the real-pipe integration test (P2-Task-4) that could only pass because framing lives in `NDJSONFramer`, not in the spawn layer.
 
@@ -445,7 +445,8 @@ Spawn `brain watch --json --poll-ms <effective> --heartbeat-seconds <effective> 
 - **Clean detach** — exit 0 (EPIPE/SIGTERM/SIGINT): no restart, no error surface.
 - **Non-retryable fault** — exit **5** (usage), exit **2** (config/vault/lock), or exit **4** with a `StreamItem.terminalEnvelope` carrying `retryable:false`: terminal "watch failed" state naming exit + `code`/`hint`; zero restarts.
 - **Retryable fault** — exit **4** with `retryable:true`, or a dropped stream with no envelope: restart under backoff.
-- **Backoff** — 500 ms initial, ×2, cap 30 s, ±20 % jitter; `retryAfterMs` (when present) is a floor; delay **and** consecutive-failure counter both reset on the next successful `hello`.
+- **Contract mismatch** — a framing or strict-decode failure on a stream line (surfaced from P2 while the child is still alive): the supervisor **terminates the child and awaits its exit**, then enters a terminal `contract-mismatch` state naming the offending stage (framing/decode) — never an indefinite wait on `completion()`; zero restarts.
+- **Backoff** — 500 ms initial, ×2, cap 30 s, ±20 % jitter; `retryAfterMs` (when present) is a floor; delay **and** consecutive-failure counter reset **only on a proven-healthy run** — a `hello` *followed by* its first attached `heartbeat` (a sustained stream), never on a bare `hello` — so a watcher that repeatedly emits `hello` then immediately faults keeps incrementing the counter and reaches the terminal cap.
 - **Terminal cap** — `WATCH_MAX_CONSECUTIVE_FAILURES = 6` counts consecutive failed runs **including the initial failed run** (≤ 5 respawns); the 6th failure spawns no further attempt and enters the terminal state.
 - **User-visible retry state** — attempt count, next-retry time, last exit/`code` surfaced as a banner; the next `hello` re-baselines and clears it.
 
@@ -460,13 +461,13 @@ actor WatchSupervisor {
   init(runner: ProcessRunner, binary: ResolvedBinary, policy: BackoffPolicy)
   func run(resumeArg: ResumeArg, pollMs: Int, heartbeatSeconds: Int) async   // spawn → classify → backoff/terminal loop; the resume plan is passed at run-time, never baked in at init
   func stop() async                                 // SIGTERM the live watch, await its exit, cease all respawns
-  var state: SupervisorState { get }                // .streaming | .retrying(attempt,nextAt,lastCode) | .failed(exit,code) | .detached
+  var state: SupervisorState { get }                // .streaming | .retrying(attempt,nextAt,lastCode) | .failed(exit,code) | .contractMismatch(stage) | .detached
   var events: AsyncStream<WatchEvent> { get }
 }
 enum ExitClass { case cleanDetach, nonRetryable(Int32,String), retryable(Int?) }
 ```
 
-**Test:** `WatchSupervisorTests` (test-plan #20) — a scripted spawn harness feeds exit sequences and asserts the full policy: (a) retryable delays progress 500 → ~1 s → ~2 s → … capped at 30 s within the ±20 % band; `retryAfterMs` honored as floor; (b) attempt/next-retry/last-`code` surfaced (assert the banner state); (c) a `hello` between two failures resets both delay-to-500 and counter-to-0 (assert the post-reset delay); (d) non-retryable exit 5/2 or exit 4 `retryable:false` ⇒ terminal, zero restarts; (e) six consecutive failed runs (initial + 5 respawns) ⇒ terminal, no 6th spawn; (f) clean exit 0 ⇒ no restart, no failure surface; (g) dropped stream with no envelope ⇒ retry path.
+**Test:** `WatchSupervisorTests` (test-plan #20) — a scripted spawn harness feeds exit sequences and asserts the full policy: (a) retryable delays progress 500 → ~1 s → ~2 s → … capped at 30 s within the ±20 % band; `retryAfterMs` honored as floor; (b) attempt/next-retry/last-`code` surfaced (assert the banner state); (c) a **proven-healthy** run (`hello` + its first attached heartbeat) between two failures resets both delay-to-500 and counter-to-0 (assert the post-reset delay), while six `[hello, retryable exit]` runs with no sustained heartbeat still reach the terminal cap (a bare `hello` never clears the storm counter); (d) non-retryable exit 5/2 or exit 4 `retryable:false` ⇒ terminal, zero restarts; (e) six consecutive failed runs (initial + 5 respawns) ⇒ terminal, no 6th spawn; (f) clean exit 0 ⇒ no restart, no failure surface; (g) dropped stream with no envelope ⇒ retry path; (h) a strict framing/decode failure on a line while the fixture child stays alive ⇒ the supervisor terminates + awaits the child and enters terminal `contract-mismatch` naming the stage, never hanging on `completion()`.
 
 ### P4-Task-4 — Daemon / detach transitions
 
@@ -485,7 +486,7 @@ struct TransitionRouter {
 
 ### P4-Task-5 — `AttachCoordinator` (once-hello → cursor → live spawn → checkpoint threading)
 
-The one owner of the attach/cursor sequence — the seam the pieces above deliberately do not wire themselves. Sequence: (1) spawn `brain watch --json --once`, read exactly one `hello` (exit 0); (2) derive `IncarnationKey` from `hello.ledger.path` (detached hello ⇒ skip cursor, plan live-only, re-run the sequence on the next attach hello); (3) `CursorStore.load(incarnationKey:)`; (4) `ResumePlanner.plan(mode:persistedCursor:)`; (5) spawn the live stream via `WatchSupervisor` with the planned `ResumeArg` + effective poll/heartbeat flags; (6) consume the supervisor's event stream, feeding reducers, and **checkpoint** `CursorStore` only on safe attached heartbeats — the post-replay checkpoint heartbeat and later attached heartbeats carrying `resume.auditHeadSeq` (never the pre-replay `min(n, prefix)` hello value, never a detached heartbeat). On any fresh `hello` (re-attach/re-baseline) the coordinator first calls `supervisor.stop()` (SIGTERM + await the old watch's exit, discarding its buffered events), then re-runs (2)–(4) for the new incarnation and starts a fresh `supervisor.run(...)` with the new plan — so no heartbeat can checkpoint past the prior incarnation's cursor.
+The one owner of the attach/cursor sequence — the seam the pieces above deliberately do not wire themselves. Sequence: (1) spawn `brain watch --json --once`, read exactly one `hello` (exit 0); (2) derive `IncarnationKey` from `hello.ledger.path` (detached hello ⇒ skip cursor, plan live-only, re-run the sequence on the next attach hello); (3) `CursorStore.load(incarnationKey:)`; (4) `ResumePlanner.plan(mode:persistedCursor:)`; (5) spawn the live stream via `WatchSupervisor` with the planned `ResumeArg` + effective poll/heartbeat flags; (6) consume the supervisor's event stream, feeding reducers, and **checkpoint** `CursorStore` only on safe attached heartbeats — the post-replay checkpoint heartbeat and later attached heartbeats carrying `resume.auditHeadSeq` (never the pre-replay `min(n, prefix)` hello value, never a detached heartbeat). On a fresh `hello` the coordinator always rebaselines the reducers, but stops and re-plans **only for an actual incarnation transition** — a detached→attached flip or a changed `ledger.path` (`IncarnationKey` mismatch). The generation's own startup `hello` (and any same-incarnation re-`hello`, e.g. after a supervisor retry) rebaselines in place, never tearing down the watcher. Generation lifecycle: the event consumer subscribes **first**, then the supervisor task is started and **retained without awaiting its terminal completion**, so a healthy watch streams indefinitely while its `hello`/replay/heartbeat events flow to the reducers. On a genuine transition the coordinator calls `supervisor.stop()` — SIGTERM the old watch, **await both its process exit and its run-loop task**, discard buffered events — invalidating the generation before it re-runs (2)–(4) for the new incarnation and starts a fresh `supervisor.run(...)`; so no heartbeat can checkpoint past the prior incarnation's cursor.
 
 **Interfaces:**
 ```swift
@@ -498,7 +499,7 @@ actor AttachCoordinator {
 }
 ```
 
-**Test:** `AttachResumeCheckpointFlowTests` (named integration test) — a scripted spawn harness drives: once-hello (attached, existing cursor) ⇒ live spawn carries `--since-seq <cursor>`; replay rows then checkpoint heartbeat ⇒ exactly one `CursorStore.checkpoint` at the heartbeat (never during replay); a mid-stream fresh hello with a **different** `ledger.path` ⇒ the old watch process is `stop()`ped and awaited before the new spawn, new incarnation row consulted, reducers re-baselined; a detached once-hello ⇒ live-only spawn, no cursor read, checkpointing begins only after the first attached hello.
+**Test:** `AttachResumeCheckpointFlowTests` (named integration test) — a scripted spawn harness drives: once-hello (attached, existing cursor) ⇒ live spawn carries `--since-seq <cursor>`; the live watch's **own startup `hello`** rebaselines in place and does **not** tear down the watcher (assert exactly one live spawn remains after once-hello → startup hello → replay → heartbeat); a same-incarnation re-`hello` after a supervisor retry likewise rebaselines without teardown; replay rows then checkpoint heartbeat ⇒ exactly one `CursorStore.checkpoint` at the heartbeat (never during replay); a mid-stream fresh hello with a **different** `ledger.path` ⇒ the old watch process is `stop()`ped and awaited before the new spawn, new incarnation row consulted, reducers re-baselined; a detached once-hello ⇒ live-only spawn, no cursor read, checkpointing begins only after the first attached hello.
 
 **Risks.** Infinite silent retry on a permanent fault, or terminating on a clean detach — both mitigated by the classification-before-restart gate and the full-policy `WatchSupervisorTests`. A checkpoint written from an unsafe hello/replay value — mitigated by the coordinator being the sole checkpoint writer, tested in `AttachResumeCheckpointFlowTests`.
 
