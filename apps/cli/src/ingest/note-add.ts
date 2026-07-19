@@ -161,7 +161,14 @@ export async function addNote(req: {
   }
 
   const destPath = deriveDestPath(dest, path);
+  // Read ONCE the bytes that will actually be persisted, then scan THOSE exact
+  // bytes — closing the TOCTOU window between normalize()'s own (separate) read
+  // and the persisted read. normalize() proved the file is clean markdown; this
+  // proves the specific buffer we commit is clean, so a mid-flight rewrite that
+  // slipped a secret in after normalize cannot reach canonical (quarantined,
+  // exit 3). The bytes below are the SAME buffer written to the worktree.
   const raw = readFileSync(path);
+  await guard.assertClean({ bytes: raw, origin: path, kind: "raw" });
   const text = raw.toString("utf8");
   const contentHash = createHash("sha256").update(raw).digest("hex");
 
@@ -198,9 +205,10 @@ export async function addNote(req: {
       now,
     });
 
-    assertNoIdentityCollision(store, fm.id, fm.aliases, destPath);
-
-    // ── Idempotency claim (DEFECT #4): a same-key retry replays the result.
+    // ── Idempotency claim (DEFECT #4): a same-key retry replays the recorded
+    // result BEFORE the collision check — otherwise a legitimate retry, run
+    // after the note is already visible, would fail duplicate-id/duplicate-path
+    // instead of replaying its own success (breaking the key-accepting contract).
     const key = deps.idempotencyKey ?? newRunId();
     const runId = newRunId();
     const idemReq: IdempotencyRequest = {
@@ -214,6 +222,10 @@ export async function addNote(req: {
 
     let canonicalAdvanced = false;
     try {
+      // Collision check INSIDE the try so a duplicate throw releases the just-claimed
+      // idempotency key (canonicalAdvanced is still false ⇒ the catch releases it).
+      assertNoIdentityCollision(store, fm.id, fm.aliases, destPath);
+
       const base = (await deps.repo.readRef(canonicalRef)) ?? "0000000000000000000000000000000000000000";
 
       const wdeps: WorkflowDeps = { store, broker: integration.broker, backup: deps.backup, repo: deps.repo, now };

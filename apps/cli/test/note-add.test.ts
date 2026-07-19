@@ -21,7 +21,13 @@
  *      with no second canonical advance; a FRESH key at the same dest is a
  *      duplicate rejection;
  *   6. `deriveDestPath` unit cases — absolute/`..`/`sources/`/`.git`/non-`.md`
- *      refused, nested folders accepted.
+ *      refused, nested folders accepted;
+ *   7. REGRESSION: same-key replay AFTER the note is visible in the `notes`
+ *      projection — the idempotency claim runs BEFORE the collision check, so a
+ *      legitimate retry replays instead of failing duplicate-id;
+ *   8. REGRESSION (TOCTOU): bytes swapped on disk AFTER normalize()'s clean scan
+ *      are re-scanned as the exact persisted buffer — quarantined + exit 3,
+ *      nothing reaches canonical.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
@@ -53,6 +59,34 @@ class RecordingSink implements QuarantineSink {
 /** A fresh guard whose sink never trips on clean authored notes. */
 function cleanGuard(): PrePersistenceGuard {
   return new PrePersistenceGuard(new RecordingSink());
+}
+
+/**
+ * A guard simulating a TOCTOU attacker: after the FIRST scan (normalize()'s
+ * raw-bytes pass over its own read) clears, it rewrites the on-disk file — so
+ * the bytes addNote later reads for persistence differ from the bytes normalize
+ * proved clean. Only the persisted-buffer re-scan (`guard.assertClean` on the
+ * `readFileSync` buffer) stands between the swapped-in secret and canonical.
+ */
+class RewriteAfterFirstScanGuard extends PrePersistenceGuard {
+  private fired = false;
+  constructor(
+    sink: QuarantineSink,
+    private readonly rewrite: () => void,
+  ) {
+    super(sink);
+  }
+  override async assertClean(a: {
+    readonly bytes: Uint8Array;
+    readonly origin: string;
+    readonly kind?: "raw" | "normalized";
+  }): Promise<void> {
+    await super.assertClean(a);
+    if (!this.fired) {
+      this.fired = true;
+      this.rewrite();
+    }
+  }
 }
 
 /** A schema-valid authored vault note (the vault reader's frontmatter contract). */
@@ -189,6 +223,37 @@ describeIfSandbox("note add — e2e via the in-process BrokerService (scope \"no
     },
     60_000,
   );
+
+  it(
+    "REGRESSION: same-key replay AFTER the note is visible in the projections replays — never duplicate-id",
+    async () => {
+      const input = join(h.root, "replay-after-visible.md");
+      writeFileSync(input, noteText("history-visible-2026", "Visible"), "utf8");
+      const key = "note-add-replay-after-visible-1";
+
+      const first = await addNote({ path: input, dest: "history", guard: cleanGuard(), deps: noteDeps(h, key) });
+      const headAfterFirst = h.git(["rev-parse", CANONICAL_REF]);
+      expect(first.canonicalSha).toBe(headAfterFirst);
+
+      // Make the integrated note VISIBLE to the collision check (as `db rebuild`
+      // would): a `notes` projection row now owns the id.
+      const store = h.openStore();
+      try {
+        insertProjectionMarker(store.db, "history-visible-2026");
+      } finally {
+        store.close();
+      }
+
+      // The SAME key must REPLAY the recorded result. The idempotency claim runs
+      // BEFORE the collision check, so the now-visible row cannot fail this
+      // legitimate retry as duplicate-id (the pre-fix order threw here).
+      const replay = await addNote({ path: input, dest: "history", guard: cleanGuard(), deps: noteDeps(h, key) });
+      expect(replay).toEqual(first);
+      // … and canonical did NOT advance a second time.
+      expect(h.git(["rev-parse", CANONICAL_REF])).toBe(headAfterFirst);
+    },
+    60_000,
+  );
 });
 
 // ── preflight refusals (spy deps prove NOTHING was persisted) ────────────────
@@ -268,6 +333,47 @@ describeIfSandbox("note add — preflight refusals persist NOTHING (spy mutating
 
     // 3. THE INVARIANT: no mutating dependency was ever constructed — nothing landed
     //    on canonical or any other sink.
+    expect(calls()).toEqual({ openStore: 0, connectIntegration: 0 });
+    const worktreeLeftovers = existsSync(join(base, "worktrees")) ? readdirSync(join(base, "worktrees")) : [];
+    expect(worktreeLeftovers).toEqual([]);
+  });
+
+  it("REGRESSION (TOCTOU): a secret swapped in AFTER normalize()'s clean scan is caught on the persisted buffer", async () => {
+    // A live-format AWS key assembled at runtime (never a committed literal — the repo is public).
+    const secret = "AKIA" + "A".repeat(16);
+    const input = join(base, "toctou-note.md");
+    // CLEAN at normalize() time — its raw + normalized scans both pass.
+    writeFileSync(input, noteText("history-toctou-2026", "Toctou"), "utf8");
+    const { deps, calls } = spyDeps();
+    const sink = new RecordingSink();
+    const guard = new RewriteAfterFirstScanGuard(sink, () => {
+      // The attacker's mid-flight rewrite: normalize() has already proven the
+      // ORIGINAL bytes clean; the file carries a secret when addNote reads the
+      // bytes it will actually persist.
+      writeFileSync(input, noteText("history-toctou-2026", "Toctou", `swapped-in credential: ${secret}`), "utf8");
+    });
+
+    let thrown: unknown;
+    let result: unknown;
+    try {
+      result = await addNote({ path: input, dest: "history", guard, deps });
+    } catch (e) {
+      thrown = e;
+    }
+
+    // 1. The persisted-buffer scan refused the swapped bytes with exit-3 semantics.
+    expect(result).toBeUndefined();
+    expect(thrown).toBeInstanceOf(SecretDetectedError);
+    expect((thrown as SecretDetectedError).exitCode).toBe(3);
+
+    // 2. What was quarantined is the POISONED persisted buffer, not the clean original.
+    expect(sink.entries.length).toBeGreaterThanOrEqual(1);
+    const q = sink.entries[sink.entries.length - 1]!;
+    expect(q.origin).toBe(input);
+    expect(q.findings.length).toBeGreaterThanOrEqual(1);
+    expect(Buffer.from(q.bytes).toString("utf8")).toContain(secret);
+
+    // 3. Nothing landed anywhere: no mutating dep was ever constructed.
     expect(calls()).toEqual({ openStore: 0, connectIntegration: 0 });
     const worktreeLeftovers = existsSync(join(base, "worktrees")) ? readdirSync(join(base, "worktrees")) : [];
     expect(worktreeLeftovers).toEqual([]);

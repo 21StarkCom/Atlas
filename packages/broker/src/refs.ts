@@ -154,10 +154,26 @@ export type CaptureScope = "sources" | "note";
 
 /**
  * True iff `p` may be ADDED by a `"note"`-scoped capture: a markdown file
- * outside `sources/` (the source-capture namespace stays capture-only).
+ * outside `sources/`, with no `.git` component and no traversal/absolute
+ * segment. The checks are the ENFORCEMENT boundary (the CLI's `deriveDestPath`
+ * is only advisory — a direct broker client bypasses it), so they are done here
+ * on the broker-observed committed path, case-insensitively (the vault may live
+ * on a case-insensitive filesystem where `Sources/` and `.GIT/` collide with the
+ * real dirs), and reject any git-invalid or escaping path outright.
  */
 export function isNoteAddAllowedPath(p: string): boolean {
-  return p.endsWith(".md") && !p.startsWith("sources/");
+  if (!p.endsWith(".md")) return false;
+  // Normalize separators defensively; git reports forward slashes, but a crafted
+  // commit could carry a backslash on the path.
+  const norm = p.replace(/\\/g, "/");
+  if (norm.startsWith("/")) return false; // no absolute paths
+  const segments = norm.split("/");
+  for (const seg of segments) {
+    if (seg === "" || seg === "." || seg === "..") return false; // no empty/traversal
+    if (seg.toLowerCase() === ".git") return false; // never poison the git dir
+  }
+  if (segments[0]!.toLowerCase() === "sources") return false; // capture-only namespace
+  return true;
 }
 
 /**
@@ -329,10 +345,23 @@ export class ProtectedRefWriter {
     // never modify, delete, or rename existing content.
     const scope: CaptureScope = req.scope ?? "sources";
     if (scope === "note") {
+      // Inspect EVERY commit in the new history (whole reachable set when
+      // canonical is unborn; the base..tip range otherwise), each with `-m` so a
+      // merge commit's per-parent changes are seen — a tip-only diff would miss a
+      // multi-commit chain and report a merge tip as empty.
       const entries =
         current === null
-          ? await this.git.changedPathStatuses(captureSha)
+          ? await this.git.changedPathStatusesFromRoot(captureSha)
           : await this.git.changedPathStatusesInRange(currentOrZero, captureSha);
+      // Fail closed on an empty change set: a note capture that touches nothing
+      // has no business advancing canonical, and an empty set is also the shape a
+      // silently-misparsed diff would take.
+      if (entries.length === 0) {
+        throw new BrokerRefusal(
+          "broker.capture_scope_violation",
+          "note add changed no paths (or the change set could not be read) — refusing",
+        );
+      }
       const offending = entries.filter((e) => e.status !== "A" || !isNoteAddAllowedPath(e.path));
       if (offending.length > 0) {
         throw new BrokerRefusal(
