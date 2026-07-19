@@ -109,6 +109,8 @@ sudo -u atlas-egress tee /usr/local/etc/atlas/keys/atlas-egress/atlas.gemini.key
 export ATLAS_PROVISIONED=1
 ```
 
+Two more shared artifacts are **placeholders the daemon cannot start on**: `keys/shared/quarantine-recipient.pub` must be replaced with the CLI's real X25519 public key (the daemon fails `Failed to read asymmetric key` on the empty file; the matching private key stays with the CLI, which drains the quarantine spool), and `keys/shared/egress-capability.key` must hold the real capability-MAC secret (the daemon bootstraps one itself if the file is **absent** — an empty file is not absent). Install both with `sudo install -o atlas-agent -g atlas-git -m 0644` / `-o atlas-egress -g atlas-git -m 0640` respectively.
+
 ---
 
 ## 4. Environment variables
