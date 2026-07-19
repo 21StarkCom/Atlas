@@ -86,7 +86,12 @@ run "chown atlas-egress:$ATLAS_GROUP '$ATLAS_EGRESS_STATE/budget-state.json'"
 run "chmod 0660 '$ATLAS_EGRESS_STATE/budget-state.json'"
 
 # 4) WORM audit anchor (D8): broker-owned 0600, parent 0700, OUTSIDE vault+repo
-ensure_dir "$(dirname "$ATLAS_ANCHOR")" "atlas-broker" "atlas-broker" 0700
+# The anchor's parent is SHARED state (it also holds the egress state dir on both
+# OSes) — it must stay root-owned and world-traversable or egress is locked out of
+# its own subdir (observed live 2026-07-19: EACCES mkdir quarantine-spool behind an
+# atlas-broker-owned 0700 parent). WORM protection rides on the anchor FILE's
+# 0600 + the root-only-writable dir entry, not on hiding the parent.
+ensure_dir "$(dirname "$ATLAS_ANCHOR")" "root" "$ATLAS_ROOT_GROUP" 0755
 run "touch '$ATLAS_ANCHOR'"
 run "chown atlas-broker:atlas-broker '$ATLAS_ANCHOR'"
 run "chmod 0600 '$ATLAS_ANCHOR'"
