@@ -31,6 +31,22 @@ export async function retireSupersededGenerations(
 }
 
 /**
+ * Remove EVERY chunk for a note (all generations) — reclaims a removed/archived
+ * note's rows so retrieval serves nothing for it. Used by the scoped `indexNotes`
+ * reconcile (60-B) when a requested note no longer resolves in the vault. Like the
+ * other retire helpers this touches LanceDB ONLY (never the SQLite fence); the
+ * caller clears/owns the activation fence. Idempotent — a second run deletes
+ * nothing. Returns the number of rows removed.
+ */
+export async function removeNoteGenerations(table: SearchTable, noteId: string): Promise<number> {
+  const predicate = `noteId = ${sqlQuote(noteId)}`;
+  const before = await table.countRows(predicate);
+  if (before === 0) return 0;
+  await table.delete(predicate);
+  return before;
+}
+
+/**
  * Compact orphaned/mixed generations across the whole index (reconcile sweep):
  * delete every chunk whose `generationId` is NOT one of the currently-active
  * generation ids. Because a `generationId` encodes its `noteId`, "not active"

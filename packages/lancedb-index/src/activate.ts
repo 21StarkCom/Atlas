@@ -46,7 +46,7 @@ import {
   type IndexingConfig,
 } from "./generation.js";
 import { assembleRows, verifyComplete, writeGeneration, type SearchTable } from "./writer.js";
-import { compactOrphans, retireSupersededGenerations } from "./retire.js";
+import { compactOrphans, removeNoteGenerations, retireSupersededGenerations } from "./retire.js";
 import { tableMaintenanceLock, type IndexMaintenanceLock } from "./lock.js";
 
 /**
@@ -460,34 +460,64 @@ export async function reconcileIndex(deps: IndexDeps): Promise<IndexReconcileRep
   if (deps.notes === undefined) {
     throw new Error("reconcileIndex: deps.notes is required (provides the notes to reconcile)");
   }
+  const notesProvider = deps.notes;
   const hooks = deps.hooks ?? {};
   // ONE shared lock for the whole pass — every `indexNote`'s critical section AND
-  // the final compaction serialize through it, so compaction can never snapshot the
-  // active set while a note is mid-write/activate (round-2 finding 3). The
-  // table-scoped lock also serializes against OTHER processes (round-3 finding 1).
-  const lock = resolveLock(deps);
-  // Declare the current configuration ONCE for the pass (an adoption event): a config
-  // change (upgrade or rollback) mints a new epoch, re-running under the same config
-  // is idempotent. SQLite owns the epoch; workers resolve it by config identity
-  // (round-3 findings 3 & 4).
-  deps.store.adoptConfig(indexingConfigKey(deps.config));
-  const noteDeps: IndexDeps = { ...deps, lock };
+  // the final compaction serialize through it (round-2 finding 3 / round-3 finding
+  // 1). The scoped `indexNotes` reconcile shares this exact threading.
+  return withReconcileLock(deps, async (lock, noteDeps) => {
+    // Declare the current configuration ONCE for the pass (an adoption event): a config
+    // change (upgrade or rollback) mints a new epoch, re-running under the same config
+    // is idempotent. SQLite owns the epoch; workers resolve it by config identity
+    // (round-3 findings 3 & 4).
+    deps.store.adoptConfig(indexingConfigKey(deps.config));
 
-  const notes = await deps.notes();
-  const outcomes: IndexOutcome[] = [];
-  for (const note of notes) {
-    outcomes.push(await indexNote(note, noteDeps));
-  }
-  // Sweep: compact every chunk whose generation is not SQLite-active. Retrieval
-  // already fenced these out; this reclaims their storage (§2 last paragraph). The
-  // snapshot + delete run UNDER THE LOCK as one critical section so no activation/
-  // write can add a live generation between the snapshot and the delete (finding 3).
-  const compactedChunks = await lock.runExclusive(async () => {
-    const activeIds = deps.store.activeGenerationIds();
-    if (hooks.afterCompactSnapshot) await hooks.afterCompactSnapshot();
-    return compactOrphans(deps.table, activeIds);
+    const notes = await notesProvider();
+    const outcomes: IndexOutcome[] = [];
+    for (const note of notes) {
+      outcomes.push(await indexNote(note, noteDeps));
+    }
+    // Sweep: compact every chunk whose generation is not SQLite-active. Retrieval
+    // already fenced these out; this reclaims their storage (§2 last paragraph). The
+    // snapshot + delete run UNDER THE LOCK as one critical section so no activation/
+    // write can add a live generation between the snapshot and the delete (finding 3).
+    const compactedChunks = await lock.runExclusive(async () => {
+      const activeIds = deps.store.activeGenerationIds();
+      if (hooks.afterCompactSnapshot) await hooks.afterCompactSnapshot();
+      return compactOrphans(deps.table, activeIds);
+    });
+    return { outcomes, compactedChunks };
   });
-  return { outcomes, compactedChunks };
+}
+
+/**
+ * Resolve the ONE shared maintenance lock for a reconcile pass and hand it — plus
+ * lock-threaded `noteDeps` (every `indexNote` uses the SAME lock) — to `fn`. Every
+ * per-note critical section AND the final compaction serialize through this single
+ * lock, across async workers AND processes (round-3 finding 1). Extracted so the
+ * full {@link reconcileIndex} and the scoped {@link indexNotes} (60-B) share one
+ * lock-threading code path (DRY).
+ */
+export async function withReconcileLock<T>(
+  deps: IndexDeps,
+  fn: (lock: IndexMaintenanceLock, noteDeps: IndexDeps) => Promise<T>,
+): Promise<T> {
+  const lock = resolveLock(deps);
+  return fn(lock, { ...deps, lock });
+}
+
+/**
+ * Drop EVERY chunk for a note under the shared reconcile lock — the scoped
+ * reconcile's removal path for a note that no longer resolves in the vault
+ * (archived/deleted). LanceDB-only (never the SQLite fence — the caller owns
+ * activation state); idempotent. Returns the rows removed.
+ */
+export async function removeNoteChunks(
+  deps: IndexDeps,
+  noteId: string,
+  lock: IndexMaintenanceLock,
+): Promise<number> {
+  return lock.runExclusive(() => removeNoteGenerations(deps.table, noteId));
 }
 
 // Re-export the write-path helpers the CLI orchestrator (Task 3.4/3.5) composes.

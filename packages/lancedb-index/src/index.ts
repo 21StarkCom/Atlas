@@ -102,6 +102,9 @@ export {
 
 export { type GenerationPair, distinctGenerationPairs } from "./writer.js";
 
+// Scoped reconcile (60-B Task 2.3): the O(delta) analog of reconcileIndex.
+export { indexNotes, type ReconcileReport, type ReconcileKind } from "./reconcile-notes.js";
+
 // Index maintenance ops (Task 3.5): staleness detection, SQLite↔LanceDB verify, and
 // the reconcile-backed repair/rebuild convergence (retrieval-index-contract §3/§4).
 export {

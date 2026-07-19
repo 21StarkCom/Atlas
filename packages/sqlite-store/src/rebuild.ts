@@ -42,6 +42,7 @@
 import { normalizeIdentityKey, type VaultSnapshot } from "@atlas/contracts";
 import type { SqliteDatabase } from "./connection.js";
 import { ProjectionRepo } from "./repos/projections.js";
+import { deriveAndPersistNote } from "./note-derivation.js";
 
 /** The normalization-contract version stamped into `note_identity_keys.normalizer_version`. */
 export const IDENTITY_NORMALIZER_VERSION = 1;
@@ -210,18 +211,11 @@ export function rebuildProjections(
 
     for (const note of snapshot.notes) {
       const slug = deriveSlug(note.path);
-      repo.insertNote({
-        note_id: note.id,
-        slug,
-        title: note.title,
-        type: note.type,
-        schema_version: note.schemaVersion,
-        status: note.status,
-        file_path: note.path,
-        content_hash: note.contentHash,
-        created: note.created,
-        updated: note.updated,
-      });
+      // The per-note `notes`-row derivation is the SHARED primitive (Task 2.2):
+      // the same rule the incremental `foldNotesForPaths` runs, so the two paths
+      // can never fork (guarded by `fold-rebuild-parity.test.ts`). Fence columns
+      // are untouched here — restored below from the pre-clear snapshot.
+      deriveAndPersistNote(db, note.id, note);
       report.notes++;
 
       // Deduplicate normalized identity keys PER NOTE before inserting. The

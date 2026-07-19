@@ -67,13 +67,42 @@ function indexingConfig(ctx: RunContext): IndexingConfig {
   return { chunker_version: c.chunker_version, embedding_model: c.embedding_model, dimensions: c.dimensions };
 }
 
-/** The per-note fences from SQLite `notes` (the activation authority). */
-function noteFences(store: Store): NoteFenceInput[] {
-  return (
+/** The `notes` fence columns the activation authority reads (shared by the full and
+ * scoped selects so the two can never drift in column set or order). */
+const NOTE_FENCE_SELECT = `SELECT note_id, content_hash, active_generation_id FROM notes`;
+
+type NoteFenceRow = { note_id: string; content_hash: string; active_generation_id: string | null };
+
+/** Map raw `notes` rows to the `NoteFenceInput` the index engine consumes. */
+function fenceRowsToInputs(rows: NoteFenceRow[]): NoteFenceInput[] {
+  return rows.map((r) => ({
+    noteId: r.note_id,
+    contentHash: r.content_hash,
+    activeGenerationId: r.active_generation_id,
+  }));
+}
+
+/** The per-note fences for the WHOLE corpus from SQLite `notes` (the activation
+ * authority) — the input `computeStaleness`/`indexVerify` reconcile against. */
+export function noteFences(store: Store): NoteFenceInput[] {
+  return fenceRowsToInputs(
+    store.db.prepare(`${NOTE_FENCE_SELECT} ORDER BY note_id`).all() as NoteFenceRow[],
+  );
+}
+
+/** The per-note fences for a BOUNDED set of note ids — never materializes the full
+ * corpus (the O(delta) scoped-reconcile input, 60-B). Ids absent from `notes` simply
+ * do not appear in the result (their fence is `undefined` ⇒ archived/deleted to the
+ * scoped reconcile). An empty id list is a no-op (no query, no `IN ()`). */
+export function noteFencesForNotes(store: Store, noteIds: string[]): NoteFenceInput[] {
+  const ids = [...new Set(noteIds.map(String))];
+  if (ids.length === 0) return [];
+  const placeholders = ids.map(() => "?").join(",");
+  return fenceRowsToInputs(
     store.db
-      .prepare(`SELECT note_id, content_hash, active_generation_id FROM notes ORDER BY note_id`)
-      .all() as { note_id: string; content_hash: string; active_generation_id: string | null }[]
-  ).map((r) => ({ noteId: r.note_id, contentHash: r.content_hash, activeGenerationId: r.active_generation_id }));
+      .prepare(`${NOTE_FENCE_SELECT} WHERE note_id IN (${placeholders}) ORDER BY note_id`)
+      .all(...ids) as NoteFenceRow[],
+  );
 }
 
 /** Open the LanceDB search table, or `null` when the directory/table is absent — the

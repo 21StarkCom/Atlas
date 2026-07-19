@@ -54,6 +54,11 @@ export type {
   PreClearStep,
 } from "./rebuild.js";
 
+// 60-B Task 2.2: the shared per-note derivation primitive + the incremental,
+// note-scoped `notes`-projection fold (O(delta), caller-supplied resolver).
+export { deriveAndPersistNote } from "./note-derivation.js";
+export { foldNotesForPaths } from "./fold-notes-for-paths.js";
+
 export {
   foldProvenanceManifests,
   MalformedManifestError,
