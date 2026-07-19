@@ -152,7 +152,6 @@ struct ContractBundle {
   let commands: [CommandRow]
   func schema(for command: String) -> Data?         // per-command *.schema.json bytes
   var watchSchema: Data { get }                      // watch.schema.json
-  var errorEnvelopeSchema: Data { get }              // error-envelope.schema.json — the envelope parser's source
   var errorEnvelopeSchema: Data { get }              // error-envelope.schema.json (feeds ErrorEnvelopeParser; walked by SchemaKeywordCoverageTests)
   static func resolve(fromAnchor anchor: URL) throws -> ContractBundle    // walk up from the atlas CLI entry (dist/bin.js) / checkout — never the launch executable
 }
@@ -440,7 +439,12 @@ enum EgressKeySource: String, Codable { case env, keychain }
 extension Settings {   // maps into Phase 1's dependency-free resolution input (P1-Task-5)
   func resolutionInputs() -> ResolutionInputs
 }
-struct SettingsStore { func load() -> Settings; func save(_ s: Settings) }
+struct SettingsStore {
+  func load() -> SettingsLoad          // typed: settings + how they were obtained
+  func save(_ s: Settings)
+}
+struct SettingsLoad { let settings: Settings; let notice: SettingsLoadNotice? }
+enum SettingsLoadNotice { case resetFromCorrupt }   // AppModel mirrors it into an observable, dismissible notice
 // flag emission: an absent override OMITS the flag (the CLI owns its default); a present
 // override rides --poll-ms/--heartbeat-seconds after WatchOptionPolicy validation
 ```
@@ -468,7 +472,8 @@ struct BackoffPolicy {
 }
 actor WatchSupervisor {
   init(runner: ProcessRunner, binary: ResolvedBinary, policy: BackoffPolicy)
-  func run(resumeArg: ResumeArg, pollMs: Int, heartbeatSeconds: Int) async   // spawn → classify → backoff/terminal loop; the resume plan is passed at run-time, never baked in at init
+  func run(resumeArg: ResumeArg, options: WatchOptions) async   // spawn → classify → backoff/terminal loop; resume plan passed at run-time, never baked at init
+  // WatchOptions { pollMs: Int?, heartbeatSeconds: Int? } — nil OMITS the flag (CLI owns its default), preserving the P4-Task-2 omission contract through argv construction
   func stop() async                                 // SIGTERM the live watch, await its exit, cease all respawns
   var state: SupervisorState { get }                // .streaming | .retrying(attempt,nextAt,lastCode) | .failed(exit,code) | .contractMismatch(stage) | .detached
   var events: AsyncStream<WatchEvent> { get }
@@ -577,6 +582,7 @@ Each flow runs in a per-flow temp dir (`0700`) as cwd, with `--config <atlasRoot
 | Export | spawn error / timeout / exit ∈ {1,2,4,5} / envelope `retryable:false` / missing or invalid `challenge.json` | → **Failed** (stage + code named; temp dir cleaned) |
 | Export | envelope `retryable:true` | → **Failed** with a retry affordance (operator re-initiates; no auto-loop at Export) |
 | Display | consistency-gate mismatch (op / context / canonicalization) | → **Failed** (`challenge-mismatch`) |
+| Display | operator confirms | → Sign (frozen bytes) |
 | Display | operator cancels | → Idle (cleanup) |
 | Sign | exit 0 + schema-valid response echoing the frozen challenge | → Authorize |
 | Sign | exit 1 (internal) / exit 2 (malformed or re-derivation refuse) / malformed stdout | → **Failed** (stage-named) |
@@ -597,7 +603,9 @@ enum PrivilegedFlowState {
 }
 actor PrivilegedFlow {
   init(runner: ProcessRunner, brain: ResolvedBinary, signer: ResolvedBinary,
-       router: OperationRouter, validator: SignerContractValidator, atlasRoot: URL)
+       router: OperationRouter, validator: SignerContractValidator, configRoot: URL)
+  // configRoot = the resolved brain contract anchor's checkout root (ContractBundle), NOT Settings.atlasRoot —
+  // an override/env-resolved brain with atlasRoot nil still yields a complete config (--config <configRoot>/brain.config.yaml)
   func begin(op: String, focus: FocusContext, entry: [String:String]) async
   func confirm() async                                  // Display → Sign with frozen bytes
   func cancel() async                                   // temp-dir cleanup
@@ -747,7 +755,7 @@ Execute the 10-step manual E2E against a real install, capturing evidence in `do
 **Live-drive checklist (run in order; pass = every expected observation seen; any deviation fails at that step number):**
 
 1. **Prerequisites** — provisioned install, daemons loaded (`provisioning/macos/services.sh status` shows both), enrolled SE signer (`-vN`), `brain` + `atlas-signer` + Console built from source; `brain db status --json` exits 0.
-2. **Seed state** — a vault with ≥ 1 open run, ≥ 1 queued + ≥ 1 failed job, a quarantined item; export `ATLAS_EGRESS_CAPABILITY_KEY` (or provision the Keychain item) for step 6. **Create the scratch trust fixture and record its baseline:** `brain source list --json` → pick/ingest a scratch source (`brain source show --json <id>` recorded), then `brain source trust show --json <id>` → record its exact trust state as `<baseline>` (the step-5 op and step-10 inverse are defined against this recorded value).
+2. **Seed state** — a vault with ≥ 1 open run, ≥ 1 queued + ≥ 1 failed job, a quarantined item; export `ATLAS_EGRESS_CAPABILITY_KEY` (or provision the Keychain item) for step 6. **Create the scratch trust fixture and record its baseline:** `brain source list --json` → pick/ingest a scratch source (`brain source show --json <id>` recorded), then `brain source trust show --json <id>` → record its exact trust state as `<baseline>`, **which MUST be a pre-promotion state — a source already at the promoted tier is not a valid fixture** (pick/ingest another), so step 5's `promote` is a real transition and step 10's `revoke` is its exact inverse back to `<baseline>`.
 3. **Surface parity** — launch the Console; compare each surface against a one-shot manual read (dashboard vs `brain status --json` run once by hand; jobs vs `brain jobs list --json`; audit tail vs the most recent run-space rows). Expected: field-for-field agreement; snapshot-only fields labelled "as of `<hello.at>`".
 4. **Daemon transition** — `sudo launchctl bootout system/com.atlas.egress` → indicator flips + banner within one heartbeat, no error dialog; re-bootstrap → recovers.
 5. **Privileged round trip (criterion 3)** — run `source trust promote` on the step-2 scratch source (exact operands from the recorded baseline). **From this step on, the step-10 twin-op cleanup is an unconditional `finally`: it runs on success, failure, or abort of any later step — a drive stopped at 6–9 still executes 10 before it is called failed; a cleanup failure is its own escalation, recorded in the retro.** Export → challenge display shows `op`, every `intendedEffect` field, `canonicalBaseCommit`, `expiresAt`, payload SHA-256, all quoted/full-length. Sign → exactly **one** Touch ID prompt naming the op + digest prefix. Authorize → `authz.ok`, success surface, new run-space audit row in the timeline.
@@ -764,7 +772,7 @@ Execute the 10-step manual E2E against a real install, capturing evidence in `do
 **Verification.**
 ```
 cd console && swift build
-swift test --filter 'SurfaceRenderTests|ReadCommandExecutorTests|ChallengeRenderingTests|AccessibilityAcceptanceTests|AppLaunchProbeTests|SettingsReprobeTests'
+swift test --filter 'SurfaceRenderTests|ReadCommandExecutorTests|ChallengeRenderingTests|AccessibilityAcceptanceTests|AppLaunchProbeTests|WiringOrderTests|SettingsCutoverTests|ActionSurfaceTests|ActorStateStreamTests'
 swift test                         # full suite — every named suite across all six phases, unfiltered
 node <atlasRoot>/tools/gen-cli-contract.ts --check   # atlas contract determinism unaffected by console/
 # then execute the live-drive checklist against a real install; capture the retro
