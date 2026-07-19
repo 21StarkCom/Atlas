@@ -40,7 +40,7 @@ while IFS=$'\t' read -r b entry; do
   [ -s "$OUT/$b" ] || { echo "error: esbuild did not produce $OUT/$b" >&2; exit 1; }
   # The artifact is extension-less (a unix executable): ensure the node shebang leads.
   if [ "$(head -c 2 "$OUT/$b")" != "#!" ]; then
-    printf '#!/usr/bin/env node\n%s' "$(cat "$OUT/$b")" > "$OUT/$b.tmp"
+    { printf '#!/usr/bin/env node\n'; cat "$OUT/$b"; } > "$OUT/$b.tmp"
     mv "$OUT/$b.tmp" "$OUT/$b"
   fi
   chmod 0755 "$OUT/$b"

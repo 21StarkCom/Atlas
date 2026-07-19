@@ -37,6 +37,12 @@ case "${1:-}" in
         || { echo "error: $ATLAS_INSTALL_BIN/${s#com.atlas.}-launcher.sh missing — run install-artifact.sh first" >&2; exit 1; }
     done
     ensure_dir "$LOG_DIR" "root" "$ATLAS_ROOT_GROUP" 0755
+    # launchd opens Standard{Out,Error}Path after dropping to UserName — pre-create
+    # each log file owned by its daemon identity or the daemon gets no logs.
+    for s in "${SERVICES[@]}"; do
+      u="atlas-${s#com.atlas.}"; f="$LOG_DIR/${s#com.atlas.}.log"
+      touch "$f"; chown "$u:$ATLAS_ROOT_GROUP" "$f"; chmod 0644 "$f"
+    done
     for s in "${SERVICES[@]}"; do
       step "install $s"
       rendered="$(mktemp -t atlas-plist)"
@@ -46,6 +52,12 @@ case "${1:-}" in
       rm -f "$rendered"
       trap - EXIT
       launchctl bootout "system/$s" 2>/dev/null || true
+      # bootout returns before teardown completes — wait until the job is gone
+      # (bounded) so the immediate bootstrap doesn't race a dying instance.
+      for _ in $(seq 1 50); do
+        launchctl print "system/$s" >/dev/null 2>&1 || break
+        sleep 0.1
+      done
       launchctl bootstrap system "$LAUNCHD_DIR/$s.plist"
     done
     status
