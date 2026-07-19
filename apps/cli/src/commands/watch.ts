@@ -24,7 +24,8 @@ import { runPollLoop } from "../watch/poll-loop.js";
 import { runDetachedLoop } from "../watch/detached-loop.js";
 import { diffSources } from "../watch/diff.js";
 import { emitWatchError, heartbeatTick } from "../watch/heartbeat.js";
-import { emitPostReplayHeartbeat, reattach, runReplay } from "../watch/stubs.js";
+import { emitPostReplayHeartbeat, runReplay } from "../watch/replay.js";
+import { reattach } from "../watch/reattach.js";
 import type { AttachContext, AttachedLedger, EmitLine, WatchOpts } from "../watch/types.js";
 
 /** Flag defaults + bounds (§5). */
@@ -144,6 +145,16 @@ export async function runWatch(
     return EXIT.OK;
   }
   const stopped = (): boolean => shutdown.stopRequested;
+  // The replay executes ONCE, against the first attached ledger (deferred through
+  // any detached start, §8.1); a later re-attach must NOT re-run it — the fresh
+  // incarnation's cursor is the consumer's re-baseline, not a second window.
+  let liveOpts: WatchOpts = opts;
+  const clearReplay = (): void => {
+    if (liveOpts.sinceSeq !== undefined) {
+      const { sinceSeq: _consumed, ...rest } = liveOpts;
+      liveOpts = rest;
+    }
+  };
   for (;;) {
     if (stopped()) {
       if (att.attached) att.ledger.close();
@@ -154,6 +165,7 @@ export async function runWatch(
       if (attached.replay) {
         await runReplay(attached.replay, emit);
         await emitPostReplayHeartbeat(attached, emit);
+        clearReplay();
         if (stopped()) {
           attached.ledger.close();
           return EXIT.OK;
@@ -183,11 +195,11 @@ export async function runWatch(
       // Ledger vanished / replaced / schema moved — surface it, then re-attach
       // (fresh incarnation; Phase 5 hardens the error line + reset semantics).
       await emitWatchError("ledger", "ledger-detached", `ledger changed or vanished at ${path}; re-attaching`, emit);
-      att = await reattach(path, opts, ctx);
+      att = await reattach(path, liveOpts, ctx);
       await emitHello(att, emit);
       await flushPendingDaemonFaults(att, emit);
     } else {
-      const d = runDetachedLoop(att, opts, ctx, emit);
+      const d = runDetachedLoop(att, liveOpts, ctx, emit);
       shutdown.activeStop = () => d.stop();
       let outcome: "stopped" | { attached: AttachedLedger };
       try {
@@ -240,6 +252,12 @@ async function watch(ctx: RunContext): Promise<number> {
   };
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);
+  // A pipe-close 'error' can fire on stdout BETWEEN writes (no emit in flight to
+  // adopt it); unhandled it would crash the process (exit 1). Swallow it here and
+  // stop — the next write's callback surfaces the same condition as
+  // StdoutClosedError, which maps to the clean exit 0 below (§10.1).
+  const onStdoutError = (): void => onSignal();
+  process.stdout.on("error", onStdoutError);
 
   try {
     return await runWatch(path, opts, attachCtx, emit, shutdown);
@@ -251,6 +269,7 @@ async function watch(ctx: RunContext): Promise<number> {
   } finally {
     process.removeListener("SIGINT", onSignal);
     process.removeListener("SIGTERM", onSignal);
+    process.stdout.removeListener("error", onStdoutError);
     broker?.close();
   }
 }

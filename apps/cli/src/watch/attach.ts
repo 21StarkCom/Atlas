@@ -23,6 +23,7 @@ import {
 } from "@atlas/sqlite-store";
 import { listAllJobs } from "@atlas/jobs";
 import { resolveAnchorProbe } from "../audit/anchor-check.js";
+import { CliError } from "../errors/envelope.js";
 import { probeDaemon, type DaemonProbe } from "../health/probe.js";
 import { deriveSnapshot, captureConsistent, DEFAULT_ATTACH_RETRIES } from "../health/snapshot.js";
 import {
@@ -230,6 +231,15 @@ export async function attachLedger(path: string, opts: WatchOpts, ctx: AttachCon
       },
       { retries: attachRetries(ctx.env) },
     );
+    // A broker PROTOCOL error (a `broker.bad_request` refusal — never mere
+    // unreachability, which is data and degrades to `sqlite-only`) is the one
+    // fatal probe outcome for `watch`: exit 4 with a single error envelope
+    // (§10.1). `status`/`doctor` degrade it instead — only `watch` inspects kind.
+    if (captured.probe.kind === "protocol-error") {
+      throw CliError.internal(
+        `broker protocol error during the snapshot probe (${captured.probe.detail}): ${captured.probe.cause}`,
+      );
+    }
     const { identity, dataVersion, baselines, snap, replay } = captured.captured;
     const snapshot = { ...snap, daemons: probes.daemons };
     const prefix = baselines.auditContiguousPrefix;

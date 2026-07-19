@@ -232,10 +232,22 @@ const PIPE_CLOSED_CODES = new Set(["EPIPE", "ERR_STREAM_DESTROYED", "ERR_STREAM_
 export function emitLineAwaitable(obj: unknown, stream: NodeJS.WriteStream = process.stdout): Promise<void> {
   const line = `${escapeControls(JSON.stringify(obj))}\n`;
   return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    // A write failure ALSO fires the stream's 'error' event; left unhandled that
+    // event crashes the process (uncaughtException, exit 1) before the callback
+    // path can map EPIPE to the clean exit-0 signal — so handle BOTH, settle once.
+    const onStreamError = (e: unknown): void => fail(e);
+    const settle = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      stream.removeListener("error", onStreamError);
+      fn();
+    };
     const fail = (e: unknown): void => {
       const code = (e as NodeJS.ErrnoException)?.code ?? "";
-      reject(PIPE_CLOSED_CODES.has(code) ? new StdoutClosedError(e) : (e as Error));
+      settle(() => reject(PIPE_CLOSED_CODES.has(code) ? new StdoutClosedError(e) : (e as Error)));
     };
+    stream.once("error", onStreamError);
     let needsDrain = false;
     try {
       needsDrain = !stream.write(line, (err) => {
@@ -243,14 +255,14 @@ export function emitLineAwaitable(obj: unknown, stream: NodeJS.WriteStream = pro
           fail(err);
           return;
         }
-        if (!needsDrain) resolve();
+        if (!needsDrain) settle(resolve);
       });
     } catch (e) {
       fail(e);
       return;
     }
     if (needsDrain) {
-      stream.once("drain", () => resolve());
+      stream.once("drain", () => settle(resolve));
     }
   });
 }
