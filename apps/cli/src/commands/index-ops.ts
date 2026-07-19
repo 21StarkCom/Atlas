@@ -62,7 +62,9 @@ function noFlags(cmd: string, argv: string[]): void {
   for (const a of argv) throw CliError.usage(`unknown flag/argument for \`${cmd}\`: ${a}`);
 }
 
-function indexingConfig(ctx: RunContext): IndexingConfig {
+/** The configured generation identity (D4/D7) — shared by the index commands and the
+ * `index:reconcile` job handler so the two derive the same `IndexingConfig`. */
+export function indexingConfig(ctx: RunContext): IndexingConfig {
   const c = ctx.config.config.indexing;
   return { chunker_version: c.chunker_version, embedding_model: c.embedding_model, dimensions: c.dimensions };
 }
@@ -136,9 +138,9 @@ async function readNotes(ctx: RunContext): Promise<readonly ParsedNote[]> {
   return snapshot.notes;
 }
 
-/** Build the batch {@link Embedder} over the egress broker (repair/rebuild only). Returns
- * a disposer to close the egress socket. */
-async function buildEmbedder(
+/** Build the batch {@link Embedder} over the egress broker (repair/rebuild + the
+ * `index:reconcile` job handler). Returns a disposer to close the egress socket. */
+export async function buildEmbedder(
   ctx: RunContext,
   cfg: IndexingConfig,
   runId: string,
