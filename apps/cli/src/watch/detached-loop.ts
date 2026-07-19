@@ -67,7 +67,11 @@ export function runDetachedLoop(
   emit: EmitLine,
 ): DetachedHandle {
   let resolveDone!: (v: "stopped" | { attached: AttachedLedger }) => void;
-  const done = new Promise<"stopped" | { attached: AttachedLedger }>((r) => (resolveDone = r));
+  let rejectDone!: (e: unknown) => void;
+  const done = new Promise<"stopped" | { attached: AttachedLedger }>((res, rej) => {
+    resolveDone = res;
+    rejectDone = rej;
+  });
   let finished = false;
   let lastHeartbeatAt = Date.now();
   let queue: Promise<void> = Promise.resolve();
@@ -77,6 +81,15 @@ export function runDetachedLoop(
     finished = true;
     clearInterval(timer);
     void queue.then(() => resolveDone(v));
+  };
+
+  /** A thrown attach attempt / emission is an internal fault: reject `done` (the
+   *  orchestrator maps it) rather than leaving the queue rejected and `done` pending. */
+  const fail = (e: unknown): void => {
+    if (finished) return;
+    finished = true;
+    clearInterval(timer);
+    rejectDone(e);
   };
 
   const tick = (): void => {
@@ -103,7 +116,7 @@ export function runDetachedLoop(
         await probeAndEmit(att, "broker", ctx.brokerSocket, emit);
         await probeAndEmit(att, "egress", ctx.egressSocket, emit);
       }
-    });
+    }).catch(fail);
   };
 
   // NOT unref'd — the detached loop is what keeps the stream process alive.

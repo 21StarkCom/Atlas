@@ -175,9 +175,15 @@ export async function runWatch(
         () => heartbeatTick(attached, emit),
       );
       shutdown.activeStop = () => h.stop();
-      const outcome = await h.done;
-      shutdown.activeStop = null;
-      attached.ledger.close();
+      let outcome: "stopped" | "reattach";
+      try {
+        outcome = await h.done;
+      } finally {
+        // A rejected `done` (a thrown tick/heartbeat — an internal fault) must not
+        // leak the handle or a stale stop seam; the throw maps to exit 4 upstream.
+        shutdown.activeStop = null;
+        attached.ledger.close();
+      }
       if (outcome === "stopped" || stopped()) return EXIT.OK;
       // Ledger vanished / replaced / schema moved — surface it, then re-attach
       // (fresh incarnation; Phase 5 hardens the error line + reset semantics).
@@ -188,8 +194,12 @@ export async function runWatch(
     } else {
       const d = runDetachedLoop(att, opts, ctx, emit);
       shutdown.activeStop = () => d.stop();
-      const outcome = await d.done;
-      shutdown.activeStop = null;
+      let outcome: "stopped" | { attached: AttachedLedger };
+      try {
+        outcome = await d.done;
+      } finally {
+        shutdown.activeStop = null;
+      }
       if (outcome === "stopped" || stopped()) {
         if (outcome !== "stopped" && typeof outcome === "object") outcome.attached.ledger.close();
         return EXIT.OK;

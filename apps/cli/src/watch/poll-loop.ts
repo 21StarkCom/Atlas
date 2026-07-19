@@ -35,7 +35,11 @@ export function runPollLoop(
   onHeartbeat: () => Promise<void>,
 ): PollHandle {
   let resolveDone!: (v: "stopped" | "reattach") => void;
-  const done = new Promise<"stopped" | "reattach">((r) => (resolveDone = r));
+  let rejectDone!: (e: unknown) => void;
+  const done = new Promise<"stopped" | "reattach">((res, rej) => {
+    resolveDone = res;
+    rejectDone = rej;
+  });
   let finished = false;
   let lastDataVersion = att.dataVersion;
   let lastHeartbeatAt = Date.now();
@@ -49,6 +53,15 @@ export function runPollLoop(
     clearInterval(timer);
     // Resolve AFTER the in-flight callback drains — the final line is never truncated.
     void queue.then(() => resolveDone(v));
+  };
+
+  /** A thrown callback is an internal fault: reject `done` (the orchestrator maps it)
+   *  rather than leaving the queue rejected and `done` forever pending. */
+  const fail = (e: unknown): void => {
+    if (finished) return;
+    finished = true;
+    clearInterval(timer);
+    rejectDone(e);
   };
 
   /** The identity guard: path must still name the attach-time (device, inode) + schema head. */
@@ -75,19 +88,23 @@ export function runPollLoop(
     const changed = observed !== lastDataVersion;
     if (changed) {
       lastDataVersion = observed;
-      queue = queue.then(async () => {
-        if (finished) return;
-        const outcome = await onTick(att);
-        if (outcome === "reattach") finish("reattach");
-      });
+      queue = queue
+        .then(async () => {
+          if (finished) return;
+          const outcome = await onTick(att);
+          if (outcome === "reattach") finish("reattach");
+        })
+        .catch(fail);
     }
     const due = Date.now() - lastHeartbeatAt >= opts.heartbeatSeconds * 1000;
     if (due) {
       lastHeartbeatAt = Date.now();
-      queue = queue.then(async () => {
-        if (finished) return;
-        await onHeartbeat();
-      });
+      queue = queue
+        .then(async () => {
+          if (finished) return;
+          await onHeartbeat();
+        })
+        .catch(fail);
     }
   };
 

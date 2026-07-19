@@ -285,6 +285,19 @@ describe("poll loop (in-process)", () => {
     }
   });
 
+  it("a throwing onTick rejects done (never a silently-dead queue / forever-pending stream)", async () => {
+    const a = await attached();
+    try {
+      const handle = runPollLoop(a, OPTS, async () => {
+        throw new Error("tick exploded");
+      }, async () => {});
+      seedAuditRows(0);
+      await expect(handle.done).rejects.toThrow("tick exploded");
+    } finally {
+      a.ledger.close();
+    }
+  });
+
   it("an inode swap (atomic replace) resolves done with 'reattach'", async () => {
     const a = await attached();
     try {
