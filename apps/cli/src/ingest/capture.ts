@@ -72,6 +72,9 @@ import {
 } from "./manifests.js";
 import { readFileSync } from "node:fs";
 
+/** Re-export for ingest surfaces (note-add, wiring) that import from this module. */
+export { DEFAULT_CANONICAL_REF } from "@atlas/broker";
+
 /** The result `captureSource` returns (plan Task 2.6 / source-add.schema.json). */
 export interface CaptureResult {
   readonly contentId: ContentId;
