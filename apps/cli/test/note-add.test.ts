@@ -235,11 +235,13 @@ describeIfSandbox("note add — e2e via the in-process BrokerService (scope \"no
       const headAfterFirst = h.git(["rev-parse", CANONICAL_REF]);
       expect(first.canonicalSha).toBe(headAfterFirst);
 
-      // Make the integrated note VISIBLE to the collision check (as `db rebuild`
-      // would): a `notes` projection row now owns the id.
+      // The integrated note is ALREADY visible to the collision check: addNote
+      // projects it on integrate (projectAddedNote), so a `notes` row owns the id
+      // with no manual marker or `db rebuild` needed. Confirm that directly.
       const store = h.openStore();
       try {
-        insertProjectionMarker(store.db, "history-visible-2026");
+        const row = store.db.prepare("SELECT note_id FROM notes WHERE note_id = ?").get("history-visible-2026");
+        expect(row).toBeTruthy();
       } finally {
         store.close();
       }
@@ -250,6 +252,30 @@ describeIfSandbox("note add — e2e via the in-process BrokerService (scope \"no
       const replay = await addNote({ path: input, dest: "history", guard: cleanGuard(), deps: noteDeps(h, key) });
       expect(replay).toEqual(first);
       // … and canonical did NOT advance a second time.
+      expect(h.git(["rev-parse", CANONICAL_REF])).toBe(headAfterFirst);
+    },
+    60_000,
+  );
+
+  it(
+    "REGRESSION (round2 #1): a second add with the SAME id at a DIFFERENT dest is refused — the first is PROJECTED on integrate, so the next add's collision check sees it with NO interleaving db rebuild",
+    async () => {
+      const a = join(h.root, "a.md");
+      writeFileSync(a, noteText("history-shared-id-2026", "First"), "utf8");
+      const first = await addNote({ path: a, dest: "history", guard: cleanGuard(), deps: noteDeps(h, "na-shared-1") });
+      const headAfterFirst = h.git(["rev-parse", CANONICAL_REF]);
+      expect(first.canonicalSha).toBe(headAfterFirst);
+
+      // A DIFFERENT file at a DIFFERENT dest but the SAME frontmatter id, with NO
+      // db rebuild between the two adds. Pre-fix (note add folded provenance only,
+      // never the note itself) the projection never saw the first note → this
+      // landed a second same-id note and the next db rebuild aborted on the notes
+      // PK. Now projectAddedNote made it visible, so the collision check refuses.
+      const b = join(h.root, "b.md");
+      writeFileSync(b, noteText("history-shared-id-2026", "Second"), "utf8");
+      const code = await rejectedCode(addNote({ path: b, dest: "journal", guard: cleanGuard(), deps: noteDeps(h, "na-shared-2") }));
+      expect(code).toMatch(/^duplicate-(id|identity)$/);
+      // Canonical did NOT advance for the rejected second add.
       expect(h.git(["rev-parse", CANONICAL_REF])).toBe(headAfterFirst);
     },
     60_000,
@@ -413,14 +439,18 @@ describe("deriveDestPath", () => {
     expect(codeOf(() => deriveDestPath("notes/./x", MD))).toBe("bad-dest");
   });
 
-  it("rejects the sources/ capture-only namespace", () => {
+  it("rejects the sources/ capture-only namespace (case-insensitively — matches the broker)", () => {
     expect(codeOf(() => deriveDestPath("sources", MD))).toBe("bad-dest");
     expect(codeOf(() => deriveDestPath("sources/sub", MD))).toBe("bad-dest");
+    expect(codeOf(() => deriveDestPath("Sources", MD))).toBe("bad-dest");
+    expect(codeOf(() => deriveDestPath("SOURCES/sub", MD))).toBe("bad-dest");
   });
 
-  it("rejects any .git segment", () => {
+  it("rejects any .git segment (case-insensitively — matches the broker)", () => {
     expect(codeOf(() => deriveDestPath(".git", MD))).toBe("bad-dest");
     expect(codeOf(() => deriveDestPath("notes/.git", MD))).toBe("bad-dest");
+    expect(codeOf(() => deriveDestPath(".GIT/x", MD))).toBe("bad-dest");
+    expect(codeOf(() => deriveDestPath("notes/.Git", MD))).toBe("bad-dest");
   });
 
   it("rejects backslashes and an empty dest", () => {

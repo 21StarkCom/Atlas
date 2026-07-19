@@ -24,7 +24,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { newRunId, normalizeIdentityKey, type RunManifest } from "@atlas/contracts";
-import type { Store } from "@atlas/sqlite-store";
+import { ProjectionRepo, deriveSlug, IDENTITY_NORMALIZER_VERSION, type Store } from "@atlas/sqlite-store";
 import { normalize } from "@atlas/sources";
 import { PrePersistenceGuard } from "@atlas/scan";
 import type { Repo } from "@atlas/git";
@@ -131,6 +131,53 @@ function assertNoIdentityCollision(store: Store, noteId: string, aliases: readon
         `identity key "${key}" collides with note "${hit.note_id}" (${hit.kind})`,
       );
     }
+  }
+}
+
+/**
+ * Project the just-integrated note into the `notes` + `note_identity_keys`
+ * tables, byte-identically to how {@link rebuildProjections} would (slug from the
+ * path, `sha256:`-prefixed content hash, `IDENTITY_NORMALIZER_VERSION`, slug-wins
+ * per-note key dedup). Runs in one transaction. Best-effort: a conflict/throw is
+ * swallowed — the note is on canonical and a full `db rebuild` is the source of
+ * truth; this only keeps the in-db projection current for the next collision check.
+ */
+function projectAddedNote(
+  store: Store,
+  fm: { id: string; title: string; type: string; schemaVersion: number; status: string; created: string; updated: string; aliases: readonly string[] },
+  destPath: string,
+  contentHash: string,
+): void {
+  try {
+    const repo = new ProjectionRepo(store.db);
+    const slug = deriveSlug(destPath);
+    const tx = store.db.transaction(() => {
+      repo.insertNote({
+        note_id: fm.id,
+        slug,
+        title: fm.title,
+        type: fm.type,
+        schema_version: fm.schemaVersion,
+        status: fm.status,
+        file_path: destPath,
+        content_hash: `sha256:${contentHash}`,
+        created: fm.created,
+        updated: fm.updated,
+      });
+      const seen = new Set<string>();
+      const slugKey = normalizeIdentityKey(slug);
+      seen.add(slugKey);
+      repo.insertIdentityKey({ normalized_key: slugKey, note_id: fm.id, kind: "slug", normalizer_version: IDENTITY_NORMALIZER_VERSION });
+      for (const alias of fm.aliases) {
+        const k = normalizeIdentityKey(alias);
+        if (seen.has(k)) continue;
+        seen.add(k);
+        repo.insertIdentityKey({ normalized_key: k, note_id: fm.id, kind: "alias", normalizer_version: IDENTITY_NORMALIZER_VERSION });
+      }
+    });
+    tx();
+  } catch {
+    /* best-effort — canonical + `db rebuild` are the source of truth */
   }
 }
 
@@ -299,6 +346,17 @@ export async function addNote(req: {
       canonicalAdvanced = true;
 
       await foldProvenanceFromCanonical(store, deps.repo, canonicalRef);
+      // Project the just-added note into the `notes`/`note_identity_keys` tables
+      // so (a) it is immediately id/alias-resolvable and (b) a SUBSEQUENT note
+      // add — same process or a fresh one over the same db, with no interleaving
+      // `db rebuild` — sees it in the collision check. Without this, two same-id
+      // adds before a rebuild both land and the next full rebuild aborts on the
+      // notes PK. Rows match rebuildProjections byte-for-byte (same slug, hash,
+      // normalizer version, slug-wins dedup), so the next full rebuild replaces
+      // them identically. Links are intentionally left to the full rebuild (the
+      // collision check reads only notes + identity keys); best-effort — canonical
+      // + `db rebuild` remain the source of truth if this throws.
+      projectAddedNote(store, fm, destPath, contentHash);
       await handle.checkpoint("reindexed", { indexGeneration: 1, canonicalSha: integrated.canonicalSha });
 
       const result: NoteAddResult = {
