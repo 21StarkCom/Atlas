@@ -7,7 +7,7 @@
   <key>Label</key><string>com.atlas.egress</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/lib/atlas/bin/egress-launcher.sh</string>
+    <string>@ATLAS_INSTALL_BIN@/egress-launcher.sh</string>
   </array>
   <key>UserName</key><string>atlas-egress</string>
   <key>RunAtLoad</key><true/>

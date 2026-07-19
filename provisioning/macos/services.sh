@@ -39,7 +39,12 @@ case "${1:-}" in
     ensure_dir "$LOG_DIR" "root" "$ATLAS_ROOT_GROUP" 0755
     for s in "${SERVICES[@]}"; do
       step "install $s"
-      install -m 0644 -o root -g "$ATLAS_ROOT_GROUP" "$HERE/$s.plist" "$LAUNCHD_DIR/$s.plist"
+      rendered="$(mktemp -t atlas-plist)"
+      trap 'rm -f "$rendered"' EXIT
+      sed "s|@ATLAS_INSTALL_BIN@|$ATLAS_INSTALL_BIN|g" "$HERE/$s.plist" > "$rendered"
+      install -m 0644 -o root -g "$ATLAS_ROOT_GROUP" "$rendered" "$LAUNCHD_DIR/$s.plist"
+      rm -f "$rendered"
+      trap - EXIT
       launchctl bootout "system/$s" 2>/dev/null || true
       launchctl bootstrap system "$LAUNCHD_DIR/$s.plist"
     done
@@ -49,7 +54,11 @@ case "${1:-}" in
     require_root "$@"
     for s in "${SERVICES[@]}"; do
       step "remove $s"
-      launchctl bootout "system/$s" 2>/dev/null || true
+      if launchctl print "system/$s" >/dev/null 2>&1; then
+        launchctl bootout "system/$s"
+      else
+        log "$s is already not loaded"
+      fi
       rm -f "$LAUNCHD_DIR/$s.plist"
     done
     ;;
