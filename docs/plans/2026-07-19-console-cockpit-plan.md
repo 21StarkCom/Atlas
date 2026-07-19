@@ -509,7 +509,7 @@ The one owner of the attach/cursor sequence — the seam the pieces above delibe
 actor AttachCoordinator {
   init(runner: ProcessRunner, binary: ResolvedBinary, cursors: CursorStore,
        settings: Settings, supervisor: WatchSupervisor)
-  func start() async                       // once-hello → cursor → plan → supervisor.run(resumeArg:pollMs:heartbeatSeconds:)
+  func start() async                       // once-hello → cursor → plan → supervisor.run(resumeArg:options:) — WatchOptions built from the validated optional Settings values
   func stop() async                        // supervisor.stop() → await the live watch's exit; caller awaits before any rebuild
   var events: AsyncStream<WatchEvent> { get }   // post-coordination stream the reducers consume
 }
@@ -566,7 +566,7 @@ struct OperationRouter {
 
 ### P5-Task-2 — Privileged-flow state machine + per-flow temp dir
 
-Each flow runs in a per-flow temp dir (`0700`) as cwd, with `--config <atlasRoot>/brain.config.yaml`. Flow temp dirs live under one Console-owned parent (`~/Library/Caches/com.atlas.console/flows/`), and **launch sweeps any leftover flow dirs** — an abnormal termination (crash/kill) cannot leave a signed authorization artifact behind past the next start. States: `Idle → Export → Display → Sign → Authorize → {Done | AuthorizeRetry | Retry | Failed}`.
+Each flow runs in a per-flow temp dir (`0700`) as cwd, with `--config <configRoot>/brain.config.yaml` (`configRoot` = the checkout root derived from the resolved brain contract anchor — defined once at the `PrivilegedFlow` initializer; valid even when `Settings.atlasRoot` is nil). Flow temp dirs live under one Console-owned parent (`~/Library/Caches/com.atlas.console/flows/`), and **launch sweeps any leftover flow dirs** — an abnormal termination (crash/kill) cannot leave a signed authorization artifact behind past the next start. States: `Idle → Export → Display → Sign → Authorize → {Done | AuthorizeRetry | Retry | Failed}`.
 
 - **Export** — `brain <op> --export-challenge` (exit 6) mints `<tempdir>/challenge.json`; read **once** into an immutable in-memory representation; never re-read the file.
 - **Display** — validate the exported bytes once via `SignerContractValidator`, then run the **challenge↔invocation consistency gate** before anything renders: `challenge.op` MUST equal `BoundInvocation.op`; `challenge.runId`/`targetCommit` MUST match the invocation's corresponding operands when both carry them; `payloadCanonicalization` MUST be a supported value — any mismatch is a terminal `challenge-mismatch` failure that never reaches Display. (Full cryptographic binding of displayed fields → signed bytes is the **signer's** duty per SP-3 — it re-derives `signingPayload` from the displayed fields pre-prompt and refuses exit 2 on mismatch, broker recompute as second backstop; the Console adds the cheap contextual gate, not a second crypto path.) Render every committed field from that frozen representation; user confirms.
