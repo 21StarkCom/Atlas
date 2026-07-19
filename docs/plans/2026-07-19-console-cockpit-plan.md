@@ -19,7 +19,7 @@ The plan is six phases, each landing behind the CI Swift compile job (`macos-15`
 
 - macOS 15 (Sequoia) with Xcode 16 toolchain / Swift 6; `swift build`, `swift test`, `xcodebuild` on PATH.
 - A provisioned local Atlas install: `atlas-broker` + `atlas-egress` running as launchd system services (PR #206 runbook), an enrolled SE signer (SP-3 `provisioning/enroll-signer.sh`, `-vN` id), and `brain` + `atlas-signer` built from source on the same machine.
-- Repo checkout supplying the bound contract artifacts: `docs/specs/cli-contract/commands.json`, the per-command `*.schema.json`, and `docs/specs/cli-contract/watch.schema.json` (SP-1 SSOT, with `examples`).
+- Repo checkout supplying the bound contract artifacts: `docs/specs/cli-contract/commands.json`, the per-command `*.schema.json`, `docs/specs/cli-contract/watch.schema.json` (SP-1 SSOT, with `examples`), and `docs/specs/cli-contract/error-envelope.schema.json`.
 - SP-3's `security-broker-contract.md §7.1/§7.2` (the signer challenge/response shapes, transcribed — there is no standalone `authorization-challenge.schema.json` to import).
 - **SP-2 tracking issue opened at planning start** (open-questions #9 — current open repo issues are #60, #65; neither blocks SP-2).
 
@@ -46,7 +46,7 @@ The plan is six phases, each landing behind the CI Swift compile job (`macos-15`
 
 ### P1-Task-1 — Package skeleton, module graph, CI compile/assemble job
 
-Create `console/Package.swift` (swift-tools 6.0) with library targets `ConsoleCore` and `ConsoleUI` (depends on `ConsoleCore`) and executable target `AtlasConsole` (depends on `ConsoleUI`), plus test targets `ConsoleCoreTests`, `ConsoleUITests`. `console/` lives outside the pnpm workspace globs. **The `.app` bundle is assembled by an explicit script, not by xcodebuild** — a SwiftPM executable has no application target/scheme that emits a launchable bundle. `console/scripts/assemble-app.sh` (`set -euo pipefail`): `swift build -c release` → create `console/.build/AtlasConsole.app/Contents/{MacOS,Resources}` → copy the built `AtlasConsole` binary into `Contents/MacOS/` → install `console/Resources/Info.plist` (`CFBundleIdentifier=com.atlas.console`, `CFBundleExecutable=AtlasConsole`, `LSMinimumSystemVersion=15.0`) into `Contents/` + write `PkgInfo` (`APPL????`) → `codesign --force --sign - console/.build/AtlasConsole.app` (ad-hoc, matching the build-from-source posture). The bundle path `console/.build/AtlasConsole.app` is the XCUI-launchable artifact. Add `.github/workflows/console-ci.yml`: `macos-15`, Swift 6, `swift build` → `swift test` → `console/scripts/assemble-app.sh`.
+Create `console/Package.swift` (swift-tools 6.0) with library targets `ConsoleCore` and `ConsoleUI` (depends on `ConsoleCore`) and executable target `AtlasConsole` (depends on `ConsoleUI`), plus test targets `ConsoleCoreTests`, `ConsoleUITests`. `console/` lives outside the pnpm workspace globs. **The `.app` bundle is assembled by an explicit script, not by xcodebuild** — a SwiftPM executable has no application target/scheme that emits a launchable bundle. `console/scripts/assemble-app.sh` (`set -euo pipefail`; first `cd "$(dirname "$0")/.."` to its own package root so SwiftPM runs from `console/` regardless of caller cwd): `swift build -c release` → create `console/.build/AtlasConsole.app/Contents/{MacOS,Resources}` → copy the built `AtlasConsole` binary into `Contents/MacOS/` → install `console/Resources/Info.plist` (`CFBundleIdentifier=com.atlas.console`, `CFBundleExecutable=AtlasConsole`, `LSMinimumSystemVersion=15.0`) into `Contents/` + write `PkgInfo` (`APPL????`) → `codesign --force --sign - console/.build/AtlasConsole.app` (ad-hoc, matching the build-from-source posture). The bundle path `console/.build/AtlasConsole.app` is the XCUI-launchable artifact. Add `.github/workflows/console-ci.yml`: `macos-15`, Swift 6, every step under `working-directory: console` — `swift build` → `swift test` → `scripts/assemble-app.sh`.
 
 **Interfaces:**
 ```
@@ -150,6 +150,7 @@ struct ContractBundle {
   let commands: [CommandRow]
   func schema(for command: String) -> Data?         // per-command *.schema.json bytes
   var watchSchema: Data { get }                      // watch.schema.json
+  var errorEnvelopeSchema: Data { get }              // error-envelope.schema.json (feeds ErrorEnvelopeParser; walked by SchemaKeywordCoverageTests)
   static func resolve(fromBinary executable: URL) throws -> ContractBundle    // walk up for commands.json
 }
 struct CommandRow { let name, phase, privilege, executionClass, idempotency: String; let implemented: Bool }
@@ -185,7 +186,7 @@ struct SignerContractValidator {
 ```
 cd console && swift build
 swift test --filter 'ProcessRunnerTests|StreamHandleTests|SchemaValidatorTests|SchemaKeywordCoverageTests|SchemaDecodeTests|ContractBundleResolutionTests|PathResolutionProbeTests|SignerContractValidatorTests|ModuleAcyclicityTests|AppBundleIdentityTests'
-console/scripts/assemble-app.sh                                       # .app assembles, bundle id com.atlas.console
+scripts/assemble-app.sh                                               # run from console/; .app assembles, bundle id com.atlas.console
 ```
 
 ---
@@ -259,7 +260,10 @@ struct ErrorEnvelopeParser { init(schema: Data); func parse(_ data: Data) throws
 
 Wire `SystemProcessRunner.stream` → `NDJSONFramer` → `WatchEventDecoder` and drive it through a real subprocess-pipe read path with a fixture emitter delivering NDJSON under adversarial chunking, ending with a single error-envelope line.
 
-**Interfaces:** consumes P1-Task-3 `StreamHandle.bytes`, P2-Task-2 `NDJSONFramer`, P2-Task-1 `WatchEventDecoder`. No new public type.
+**Interfaces:** consumes P1-Task-3 `StreamHandle.bytes`, P2-Task-2 `NDJSONFramer`, P2-Task-1 `WatchEventDecoder`, and P2-Task-3 `ErrorEnvelopeParser` (built from `ContractBundle.errorEnvelopeSchema`). One transport result type distinguishes an event line from the sole terminal error-envelope line — a framed line carrying no `v:1`/`event` envelope is parsed via `ErrorEnvelopeParser` (never decode-failed) and surfaced to the supervisor for retryable-vs-terminal classification:
+```swift
+enum StreamItem { case event(WatchEvent); case terminalEnvelope(ErrorEnvelope) }
+```
 
 **Test:** `TransportFramingTests` (test-plan #22) — identical NDJSON delivered with a line split across reads, multiple lines per read, a split multi-byte scalar, and a final envelope; asserts correct line buffering, UTF-8 reconstruction, event ordering, unknown-event tolerance, and recognition of the sole final envelope line.
 
@@ -345,17 +349,24 @@ Snapshot job aggregate counts carry no per-job identity, so seed a per-`jobId` s
 ```swift
 struct JobStateMap {
   mutating func seed(fromPages pages: [JobRow], buffered: [JobPayload])   // recency-merge
-  mutating func apply(_ job: JobPayload)                                   // overwrite iff updatedAt >= existing
+  mutating func apply(_ job: JobPayload) -> JobApplyResult                 // overwrite iff updatedAt >= existing; .needsReseed when jobId unseen
   var counts: JobCounts { get }                                            // {queued, failed} from map
   func contains(_ jobId: String) -> Bool
 }
+enum JobApplyResult { case applied; case needsReseed(String) }             // needsReseed carries the unseen jobId
 struct JobsListReader {   // fully-consuming paginator
   func readAll(runner: ProcessRunner, binary: ResolvedBinary) async throws -> [JobRow]  // walks offset to hasMore:false
 }
 struct JobCounts { let queued: Int; let failed: Int }
+// Sole owner of the seed/reseed protocol — the only component that drives JobsListReader:
+actor JobStateCoordinator {
+  init(reader: JobsListReader, runner: ProcessRunner, binary: ResolvedBinary)
+  func apply(_ job: JobPayload) async               // .needsReseed ⇒ buffer live events, readAll, recency-merge; never a synthetic insert
+  var counts: JobCounts { get }
+}
 ```
 
-**Test:** `CoalescingJobCountTests` (test-plan #4) — repeated `job`/`backup` for one id collapse to latest; two `audit`/`model_call` never collapse; seed a dataset **> 500 jobs** with a concurrent `job` transition during the multi-page read; assert full membership (every page consumed, deduped) and the buffered newer event wins over the stale list row (a list row never clobbers a newer streamed state).
+**Test:** `CoalescingJobCountTests` (test-plan #4) — repeated `job`/`backup` for one id collapse to latest; two `audit`/`model_call` never collapse; seed a dataset **> 500 jobs** with a concurrent `job` transition during the multi-page read; assert full membership (every page consumed, deduped) and the buffered newer event wins over the stale list row (a list row never clobbers a newer streamed state); an unseen `jobId` arriving mid-pagination drives exactly one `JobStateCoordinator` reseed (buffer → readAll → recency-merge), never a synthetic insert.
 
 ### P3-Task-4 — Resume / replay / cursor selection
 
@@ -391,19 +402,19 @@ swift test --filter 'MixedSpaceReducerTests|LiveOnlyExistingLedgerBaselineTests|
 
 ### P4-Task-1 — `ledger_cursor` SQLite store
 
-Single-writer transactional store at `~/Library/Application Support/com.atlas.console/console.sqlite` (created `0600`), one table `ledger_cursor(incarnation_key TEXT PRIMARY KEY, audit_head_seq INTEGER NOT NULL DEFAULT -1, updated_at TEXT NOT NULL)`. `incarnation_key = SHA-256(absolute ledger.path)` from the attaching `hello`. Sole owner of resume state; `checkpoint` is the post-replay heartbeat write, wrapped in a transaction; an unseen key creates a fresh row at `-1`.
+Single-writer transactional store at `~/Library/Application Support/com.atlas.console/console.sqlite`; `init` creates the `com.atlas.console` parent directory (`0700`) if absent, then the db (`0600`), one table `ledger_cursor(incarnation_key TEXT PRIMARY KEY, audit_head_seq INTEGER NOT NULL DEFAULT -1, updated_at TEXT NOT NULL)`. `incarnation_key = SHA-256(absolute ledger.path)` from the attaching `hello`. Sole owner of resume state; `checkpoint` is the post-replay heartbeat write, wrapped in a transaction; an unseen key creates a fresh row at `-1`.
 
 **Interfaces:**
 ```swift
 struct CursorStore {
-  init(path: URL) throws                                   // create 0600, migrate table
+  init(path: URL) throws                                   // create parent dir 0700 if absent, db 0600, migrate table
   func load(incarnationKey: String) throws -> Int         // -1 if unseen
   func checkpoint(incarnationKey: String, seq: Int, updatedAt: String) throws
 }
 enum IncarnationKey { static func derive(ledgerPath: String) -> String }   // SHA-256 of absolute path
 ```
 
-**Test:** `CursorStoreTests` — upsert round-trip; unseen key returns `-1`; file mode `0600`. `LiveOnlyCheckpointSurvivesRestartTests` — a live-only attach still checkpoints, so a later `resume` restart reads a `≥ 0` cursor and resumes forward with no re-replay.
+**Test:** `CursorStoreTests` — upsert round-trip; unseen key returns `-1`; file mode `0600`; a first-launch path whose parent directory is absent creates it (`0700`) before opening the db. `LiveOnlyCheckpointSurvivesRestartTests` — a live-only attach still checkpoints, so a later `resume` restart reads a `≥ 0` cursor and resumes forward with no re-replay.
 
 ### P4-Task-2 — `Settings` store (`UserDefaults`)
 
@@ -432,7 +443,7 @@ var effectiveHeartbeatSeconds: Int { settings.heartbeatSeconds ?? 30 }
 Spawn `brain watch --json --poll-ms <effective> --heartbeat-seconds <effective> [--since-seq <cursor>]` (the only periodically polling subprocess). On process exit, classify before acting:
 
 - **Clean detach** — exit 0 (EPIPE/SIGTERM/SIGINT): no restart, no error surface.
-- **Non-retryable fault** — exit **5** (usage), exit **2** (config/vault/lock), or exit **4** with final-envelope `retryable:false`: terminal "watch failed" state naming exit + `code`/`hint`; zero restarts.
+- **Non-retryable fault** — exit **5** (usage), exit **2** (config/vault/lock), or exit **4** with a `StreamItem.terminalEnvelope` carrying `retryable:false`: terminal "watch failed" state naming exit + `code`/`hint`; zero restarts.
 - **Retryable fault** — exit **4** with `retryable:true`, or a dropped stream with no envelope: restart under backoff.
 - **Backoff** — 500 ms initial, ×2, cap 30 s, ±20 % jitter; `retryAfterMs` (when present) is a floor; delay **and** consecutive-failure counter both reset on the next successful `hello`.
 - **Terminal cap** — `WATCH_MAX_CONSECUTIVE_FAILURES = 6` counts consecutive failed runs **including the initial failed run** (≤ 5 respawns); the 6th failure spawns no further attempt and enters the terminal state.
@@ -446,8 +457,9 @@ struct BackoffPolicy {
   func delay(attempt: Int, retryAfterMs: Int?, rng: inout RandomNumberGenerator) -> Int
 }
 actor WatchSupervisor {
-  init(runner: ProcessRunner, binary: ResolvedBinary, planner: ResumePlanner, policy: BackoffPolicy)
-  func run() async                                  // spawn → classify → backoff/terminal loop
+  init(runner: ProcessRunner, binary: ResolvedBinary, policy: BackoffPolicy)
+  func run(resumeArg: ResumeArg, pollMs: Int, heartbeatSeconds: Int) async   // spawn → classify → backoff/terminal loop; the resume plan is passed at run-time, never baked in at init
+  func stop() async                                 // SIGTERM the live watch, await its exit, cease all respawns
   var state: SupervisorState { get }                // .streaming | .retrying(attempt,nextAt,lastCode) | .failed(exit,code) | .detached
   var events: AsyncStream<WatchEvent> { get }
 }
@@ -473,19 +485,20 @@ struct TransitionRouter {
 
 ### P4-Task-5 — `AttachCoordinator` (once-hello → cursor → live spawn → checkpoint threading)
 
-The one owner of the attach/cursor sequence — the seam the pieces above deliberately do not wire themselves. Sequence: (1) spawn `brain watch --json --once`, read exactly one `hello` (exit 0); (2) derive `IncarnationKey` from `hello.ledger.path` (detached hello ⇒ skip cursor, plan live-only, re-run the sequence on the next attach hello); (3) `CursorStore.load(incarnationKey:)`; (4) `ResumePlanner.plan(mode:persistedCursor:)`; (5) spawn the live stream via `WatchSupervisor` with the planned `ResumeArg` + effective poll/heartbeat flags; (6) consume the supervisor's event stream, feeding reducers, and **checkpoint** `CursorStore` only on safe attached heartbeats — the post-replay checkpoint heartbeat and later attached heartbeats carrying `resume.auditHeadSeq` (never the pre-replay `min(n, prefix)` hello value, never a detached heartbeat). On any fresh `hello` (re-attach/re-baseline) the coordinator re-runs (2)–(4) for the new incarnation before resuming checkpoints.
+The one owner of the attach/cursor sequence — the seam the pieces above deliberately do not wire themselves. Sequence: (1) spawn `brain watch --json --once`, read exactly one `hello` (exit 0); (2) derive `IncarnationKey` from `hello.ledger.path` (detached hello ⇒ skip cursor, plan live-only, re-run the sequence on the next attach hello); (3) `CursorStore.load(incarnationKey:)`; (4) `ResumePlanner.plan(mode:persistedCursor:)`; (5) spawn the live stream via `WatchSupervisor` with the planned `ResumeArg` + effective poll/heartbeat flags; (6) consume the supervisor's event stream, feeding reducers, and **checkpoint** `CursorStore` only on safe attached heartbeats — the post-replay checkpoint heartbeat and later attached heartbeats carrying `resume.auditHeadSeq` (never the pre-replay `min(n, prefix)` hello value, never a detached heartbeat). On any fresh `hello` (re-attach/re-baseline) the coordinator first calls `supervisor.stop()` (SIGTERM + await the old watch's exit, discarding its buffered events), then re-runs (2)–(4) for the new incarnation and starts a fresh `supervisor.run(...)` with the new plan — so no heartbeat can checkpoint past the prior incarnation's cursor.
 
 **Interfaces:**
 ```swift
 actor AttachCoordinator {
   init(runner: ProcessRunner, binary: ResolvedBinary, cursors: CursorStore,
        settings: Settings, supervisor: WatchSupervisor)
-  func start() async                       // once-hello → cursor → plan → live spawn
+  func start() async                       // once-hello → cursor → plan → supervisor.run(resumeArg:pollMs:heartbeatSeconds:)
+  func stop() async                        // supervisor.stop() → await the live watch's exit; caller awaits before any rebuild
   var events: AsyncStream<WatchEvent> { get }   // post-coordination stream the reducers consume
 }
 ```
 
-**Test:** `AttachResumeCheckpointFlowTests` (named integration test) — a scripted spawn harness drives: once-hello (attached, existing cursor) ⇒ live spawn carries `--since-seq <cursor>`; replay rows then checkpoint heartbeat ⇒ exactly one `CursorStore.checkpoint` at the heartbeat (never during replay); a mid-stream fresh hello with a **different** `ledger.path` ⇒ new incarnation row consulted, reducers re-baselined; a detached once-hello ⇒ live-only spawn, no cursor read, checkpointing begins only after the first attached hello.
+**Test:** `AttachResumeCheckpointFlowTests` (named integration test) — a scripted spawn harness drives: once-hello (attached, existing cursor) ⇒ live spawn carries `--since-seq <cursor>`; replay rows then checkpoint heartbeat ⇒ exactly one `CursorStore.checkpoint` at the heartbeat (never during replay); a mid-stream fresh hello with a **different** `ledger.path` ⇒ the old watch process is `stop()`ped and awaited before the new spawn, new incarnation row consulted, reducers re-baselined; a detached once-hello ⇒ live-only spawn, no cursor read, checkpointing begins only after the first attached hello.
 
 **Risks.** Infinite silent retry on a permanent fault, or terminating on a clean detach — both mitigated by the classification-before-restart gate and the full-policy `WatchSupervisorTests`. A checkpoint written from an unsafe hello/replay value — mitigated by the coordinator being the sole checkpoint writer, tested in `AttachResumeCheckpointFlowTests`.
 
@@ -621,7 +634,7 @@ SwiftUI views bound to the reducers: the health cockpit (`DashboardState` — op
 **Interfaces:**
 ```swift
 struct DashboardView: View        // binds DashboardState
-struct JobsListView: View         // binds JobStateMap + JobsListReader (read-on-focus refresh)
+struct JobsListView: View         // binds JobStateCoordinator (owns JobStateMap + JobsListReader; read-on-focus refresh)
 struct AuditTimelineView: View    // binds AuditReducer.timeline; list/table primary form
 struct ModelCallFeedView: View    // live model_call feed
 // The ONE generic executor every read-on-focus surface goes through — the schema-bound
@@ -664,11 +677,11 @@ enum A11yEvent { case jobSucceeded(String), jobFailed(String), backupUnhealthy, 
                  challengeArrived, challengeExpired, watchRetrying(Int), watchFailed, busy(String), completed(String) }
 ```
 
-**Test:** `AccessibilityAcceptanceTests` (test-plan #23) — automated where the platform allows (XCUI / accessibility-audit APIs): accessible names/roles on every control; Full Keyboard Access driving the privileged flow end to end; modal focus entry + restoration; Dynamic Type large-text layout without truncation; reduced-motion honored; light/dark contrast on text and non-text indicators. The VoiceOver announcement pass (each `A11yEvent`) is the **documented manual checklist** executed on the live drive (§Live-drive checklist step 9).
+**Test:** `AccessibilityAcceptanceTests` (test-plan #23) — the in-process subset a SwiftPM `swift test` run can host without an Xcode UI-test target/scheme: accessible names/roles/traits asserted on each view's accessibility tree, no color-only encoding (redundant icon+text present), Dynamic Type large-text layout without truncation, reduced-motion honored, and light/dark contrast on text/non-text indicators — all on views instantiated in-process. The checks that genuinely need a launched app host — Full Keyboard Access driving the privileged flow end to end, modal focus entry + restoration, and the VoiceOver announcement pass (each `A11yEvent`) — are the **documented manual checklist** executed on the live drive (§Live-drive checklist step 9), since a SwiftPM package provides no XCUI host.
 
 ### P6-Task-4 — Composition root, app model, settings surface
 
-The application assembly nothing else owns: `AtlasConsoleApp` (`@main`), an `AppModel` that runs the launch sequence — load `Settings` → `BinaryResolution.resolve` both binaries (blocking "unavailable" error state on probe failure, naming path + remediation) → build `ContractBundle`-derived inventories → start `AttachCoordinator` → wire reducers, `TransitionRouter`, `PrivilegedFlow`, and `ReadCommandExecutor` into the view tree — plus navigation between the surfaces and the **settings view** (atlasRoot, path overrides, pollMs/heartbeatSeconds, egress key source, resumeMode). A settings change **re-probes** (the only re-probe trigger besides launch) and rebuilds the affected subsystems; an in-flight privileged flow blocks settings-applied restarts until it terminates.
+The application assembly nothing else owns: `AtlasConsoleApp` (`@main`), an `AppModel` that runs the launch sequence — load `Settings` → `BinaryResolution.resolve` both binaries (blocking "unavailable" error state on probe failure, naming path + remediation) → build `ContractBundle`-derived inventories → start `AttachCoordinator` → wire reducers, `TransitionRouter`, `PrivilegedFlow`, and `ReadCommandExecutor` into the view tree — plus navigation between the surfaces and the **settings view** (atlasRoot, path overrides, pollMs/heartbeatSeconds, egress key source, resumeMode). A settings change **re-probes** (the only re-probe trigger besides launch), then calls `AttachCoordinator.stop()` and awaits the old `brain watch`'s exit before launching any replacement — so exactly one watcher ever runs — and only then rebuilds the affected subsystems; an in-flight privileged flow blocks settings-applied restarts until it terminates.
 
 **Interfaces:**
 ```swift
@@ -676,13 +689,13 @@ The application assembly nothing else owns: `AtlasConsoleApp` (`@main`), an `App
 @Observable final class AppModel {
   var phase: AppPhase                              // .probing | .blocked(BlockingResolutionError) | .running
   func launch() async                              // settings → resolve+probe → coordinator → wiring
-  func applySettings(_ new: Settings) async        // save → re-probe → rebuild
+  func applySettings(_ new: Settings) async        // save → re-probe → coordinator.stop()+await → rebuild
 }
 struct SettingsView: View                          // edits Settings; Apply drives applySettings
 enum AppPhase { case probing, blocked(reason: String, path: String, remediation: String), running }
 ```
 
-**Test:** `AppLaunchProbeTests` — a failing `brain` probe lands in `.blocked` naming the path + remediation, no coordinator started; a passing probe reaches `.running` with the watch spawn observed. `SettingsReprobeTests` — `applySettings` with a changed override re-probes exactly once and rebuilds; an unchanged save does not re-probe (launch + settings change are the only probe triggers, per the cadence rule).
+**Test:** `AppLaunchProbeTests` — a failing `brain` probe lands in `.blocked` naming the path + remediation, no coordinator started; a passing probe reaches `.running` with the watch spawn observed. `SettingsReprobeTests` — `applySettings` with a changed override re-probes exactly once, awaits the old watch process's exit before rebuilding, and leaves exactly one watcher running; an unchanged save does not re-probe (launch + settings change are the only probe triggers, per the cadence rule).
 
 ### P6-Task-5 — Live-drive checklist + retro
 
@@ -735,7 +748,7 @@ Scope-proportional — Swift unit + contract tests in CI, one transport-framing 
 - **Security-critical:** challenge rendering (#17), egress-key scoping/redaction/no-persist (#18), argv sanitization (#19), privileged-flow exit-table separation (#10, #11), the exit-6-backstop routing (P5-Task-3), and the signer-validator negatives (incl. the `schemaVersion`/`payloadCanonicalization`/nested-challenge cases) — all CI-runnable with software P-256 fixtures.
 - **Structure:** `ModuleAcyclicityTests` asserts `ConsoleCore ← ConsoleUI ← AtlasConsole` has no library→executable back-edge; `AppBundleIdentityTests` asserts the assembled `.app` carries `com.atlas.console`.
 - **Transport realism:** `TransportFramingTests` (#22) drives the real subprocess-pipe read path against the raw-chunk `StreamHandle.bytes` contract (chunk-≠-line, split UTF-8 scalar) — the one integration test that catches what fixture-string tests miss, passing only because framing lives in `NDJSONFramer`, not the spawn layer.
-- **Deferred to the live drive:** the SE-exercising signing, the running-daemon transitions, the broker-restart timing (open-q #7 tuning), and the VoiceOver manual pass. Explicitly the CI parity gap; the checklist is the evidence for intent criteria 2–3.
+- **Deferred to the live drive:** the SE-exercising signing, the running-daemon transitions, the broker-restart timing (open-q #7 tuning), and the host-app-requiring accessibility checks (Full Keyboard Access end to end, modal focus restoration, the VoiceOver announcement pass) — a SwiftPM package has no XCUI host. Explicitly the CI parity gap; the checklist is the evidence for intent criteria 2–3.
 
 *No rollback section:* the Console is a laptop app a `git revert` fully undoes; the only real-world mutations happen during the live drive against the operator's scratch vault and are reverted by the checklist's step-10 twin-op cleanup. No cloud infra, shared state, or migration warrants rollback machinery.
 
