@@ -137,6 +137,11 @@ const LogsConfig = z
     dir: z.string().min(1),
     max_files: z.number().int().positive().default(10),
     max_bytes: z.number().int().positive().default(10_485_760), // 10 MiB per file
+    // The AGE half of retention-matrix row 26 ("size/age retention"): the scheduled
+    // `retention:log-rotation` job age-rotates + hard-deletes rotated logs older than
+    // this window. Size rotation (max_bytes) fires on write; this bounds a quiescent
+    // log the size trigger never reaches.
+    retention_days: z.number().int().positive().default(30),
   })
   .strict();
 
