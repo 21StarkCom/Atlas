@@ -36,15 +36,24 @@ AGENT_UID=$(id -u atlas-agent)
 sed "s/<AGENT_UID>/$AGENT_UID/" provisioning/macos/agent-pf.conf | sudo pfctl -a atlas/agent -f -
 sudo pfctl -e   # if pf isn't already enabled
 
-# 4. Put your real Gemini key in the egress-only credential (replaces the placeholder):
+# 4. Real keys: Gemini credential (replaces the placeholder) + the quarantine
+#    recipient PUBLIC key (generation commands: docs/install.md §3 — setup
+#    deliberately creates NO empty placeholder; the daemon fails closed on one):
 sudo -u atlas-egress tee /usr/local/etc/atlas/keys/atlas-egress/atlas.gemini.key < /path/to/gemini.key >/dev/null
 
-# 5. Build + install the daemon binaries, then run them as launchd services:
+# 5. Build + install the daemon binaries:
 tools/build-artifact.sh
 sudo provisioning/install-artifact.sh dist-artifact
+
+# 6. Vault repo at the launcher default — MUST exist before services start
+#    (the broker validates refs/audit/runs at startup and crash-loops without it):
+sudo git init /var/lib/atlas/vault    # or git clone <existing>
+sudo chown -R atlas-broker:atlas-git /var/lib/atlas/vault && sudo chmod -R g+rX /var/lib/atlas/vault
+
+# 7. Run them as launchd services:
 sudo provisioning/macos/services.sh install     # status | uninstall also available
 
-# 6. Enable the provisioning-gated test suites:
+# 8. Enable the provisioning-gated test suites:
 export ATLAS_PROVISIONED=1
 ```
 

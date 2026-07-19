@@ -6,12 +6,54 @@ The privilege-separated architecture means a *complete* install has two halves: 
 
 ---
 
+## 0. Fresh-machine quickstart (macOS)
+
+The whole path on one screen, in the order that works first-try (each step is detailed in the sections below; run from the repo root). Steps 3–7 need `sudo`.
+
+```bash
+# 1  build + test (Node ≥24, pnpm ≥11.15)
+pnpm install --frozen-lockfile && pnpm -r build && pnpm -r test
+
+# 2  preview, then provision the OS substrate (identities, keys, dirs, sockets)
+sudo ATLAS_DRY_RUN=1 provisioning/dev/setup.sh
+sudo provisioning/dev/setup.sh
+
+# 3  agent network denial (D17)
+AGENT_UID=$(id -u atlas-agent)
+sed "s/<AGENT_UID>/$AGENT_UID/" provisioning/macos/agent-pf.conf | sudo pfctl -a atlas/agent -f -
+sudo pfctl -e
+
+# 4  real keys: Gemini credential + quarantine recipient pub (generation: §3)
+sudo -u atlas-egress tee /usr/local/etc/atlas/keys/atlas-egress/atlas.gemini.key < /path/to/gemini.key >/dev/null
+#    …then the openssl X25519 steps in §3 for quarantine-recipient.pub
+
+# 5  daemon binaries: bundle, hash-verify, install root-owned (D16)
+tools/build-artifact.sh
+sudo provisioning/install-artifact.sh dist-artifact
+
+# 6  vault repo at the launcher default, broker-writable (BEFORE services start)
+sudo git init /var/lib/atlas/vault      # or git clone <existing>
+sudo chown -R atlas-broker:atlas-git /var/lib/atlas/vault && sudo chmod -R g+rX /var/lib/atlas/vault
+
+# 7  launchd services (RunAtLoad + KeepAlive) + verify
+sudo provisioning/macos/services.sh install
+provisioning/macos/services.sh status                 # both: loaded (pid N)
+tail -3 /usr/local/var/log/atlas/*.log                # "…listening on…" ×2
+
+# 8  first run (config → ledger → projections → index): §5
+export ATLAS_PROVISIONED=1
+```
+
+Ordering that bites if violated: **artifact before services** (`services.sh` refuses without the launchers), **vault before services** (the broker validates `refs/audit/runs` at startup and crash-loops on a missing repo), **`db migrate` before `db rebuild`** (§5.3).
+
+---
+
 ## 1. Prerequisites
 
 | Requirement | Version / note |
 |---|---|
 | **Node** | `>= 24` — the repo uses `node:sqlite` (`DatabaseSync`) which needs 24+ (`engines.node` in [`../package.json`](../package.json); CI runs **26**). |
-| **pnpm** | `>= 11` (`packageManager: pnpm@11.12.0`). Deps are pinned via `catalog:` in [`../pnpm-workspace.yaml`](../pnpm-workspace.yaml). |
+| **pnpm** | `>= 11.15` (`packageManager: pnpm@11.15.0`). **11.12.0 is a broken release** — `pnpm -r test` exits 127/1; if pnpm misbehaves check the pin first, and beware a stale/blank global shim at `~/Library/pnpm/bin/pnpm` shadowing a good Homebrew install. Deps are pinned via `catalog:` in [`../pnpm-workspace.yaml`](../pnpm-workspace.yaml). |
 | **OS** | **macOS** (Darwin, tested arm64) or **Linux** (`x86_64` / `arm64`). Any other host fails the sandbox capability probe closed (`sandbox-contract.md`). |
 | **`sudo`** | Root access — **only** for `provisioning/` (creates OS users + protected dirs). The build/test/first-run itself never needs root. |
 | **git** | The vault is a git repository; the broker is the sole writer of its protected refs. |
@@ -109,7 +151,20 @@ sudo -u atlas-egress tee /usr/local/etc/atlas/keys/atlas-egress/atlas.gemini.key
 export ATLAS_PROVISIONED=1
 ```
 
-Two more shared artifacts are **placeholders the daemon cannot start on**: `keys/shared/quarantine-recipient.pub` must be replaced with the CLI's real X25519 public key (the daemon fails `Failed to read asymmetric key` on the empty file; the matching private key stays with the CLI, which drains the quarantine spool), and `keys/shared/egress-capability.key` must hold the real capability-MAC secret (the daemon bootstraps one itself if the file is **absent** — an empty file is not absent). Install both with `sudo install -o atlas-agent -g atlas-git -m 0644` / `-o atlas-egress -g atlas-git -m 0640` respectively.
+Two more shared artifacts are **required before egress will serve**: the quarantine recipient public key and the capability-MAC secret. Setup deliberately does **not** create placeholders (empty files brick startup — the daemon treats an empty capability key as present and fails an empty pub with `Failed to read asymmetric key`; a *missing* capability key it bootstraps itself). On a fresh machine, generate the quarantine keypair and install the public half (the daemon consumes SPKI **DER**):
+
+```bash
+# X25519 quarantine keypair. PRIVATE half stays with the operator/CLI (it opens the
+# sealed spool) — keep it OUT of any repo; e.g. ~/.config/atlas/quarantine-recipient.key.
+openssl genpkey -algorithm X25519 -outform DER -out ~/.config/atlas/quarantine-recipient.key
+openssl pkey -inform DER -in ~/.config/atlas/quarantine-recipient.key -pubout -outform DER -out /tmp/quarantine-recipient.pub
+sudo install -o atlas-agent -g atlas-git -m 0644 /tmp/quarantine-recipient.pub /usr/local/etc/atlas/keys/shared/quarantine-recipient.pub && rm /tmp/quarantine-recipient.pub
+# capability-MAC secret: leave the file ABSENT — the daemon bootstraps it 0640 on
+# first start. To pin one explicitly instead:
+#   openssl rand -base64 32 | sudo install -o atlas-egress -g atlas-git -m 0640 /dev/stdin /usr/local/etc/atlas/keys/shared/egress-capability.key
+```
+
+(Migrating an existing install? Copy the previous machine's key set instead of generating — otherwise old sealed spool artifacts and any in-flight capabilities become unopenable/unverifiable.)
 
 ---
 
@@ -144,17 +199,28 @@ The schema is **strict** ([`../apps/cli/src/config/schema.ts`](../apps/cli/src/c
 
 ### 5.2 Start the daemons
 
-The broker daemon is needed for any command that appends an audit event; the egress daemon for any command that calls the provider. Start them from the installed launchers, pointing the broker at your vault repo:
+The broker daemon is needed for any command that appends an audit event; the egress daemon for any command that calls the provider.
+
+**macOS default — launchd services** (§3 "Run the daemons as services"). The broker validates `refs/audit/runs` in `ATLAS_VAULT_REPO_DIR` at startup, so the vault repo must exist at the launcher default **before** `services.sh install`, owned so the broker can write it and the `atlas-git` group can read it:
 
 ```bash
-VAULT="$PWD/vault"      # a git repo of Markdown notes; same dir as config vault.path
-git init "$VAULT"       # if new
+# fresh vault (or `git clone <existing>` instead of init):
+sudo git init /var/lib/atlas/vault
+sudo chown -R atlas-broker:atlas-git /var/lib/atlas/vault
+sudo chmod -R g+rX /var/lib/atlas/vault
 
-# broker — validates refs/audit/runs at startup, so the repo must exist first
+sudo provisioning/macos/services.sh install
+provisioning/macos/services.sh status      # both: loaded (pid N)
+tail -3 /usr/local/var/log/atlas/*.log     # "…listening on …" per daemon
+```
+
+A different vault location = add `ATLAS_VAULT_REPO_DIR` to `EnvironmentVariables` in `provisioning/macos/com.atlas.broker.plist`, then (re-)run `install`.
+
+**Foreground alternative** (Linux, or one-off debugging — dies with the terminal, no restart-on-crash):
+
+```bash
 sudo -u atlas-broker env ATLAS_VAULT_REPO_DIR="$VAULT" \
   /usr/local/lib/atlas/bin/broker-launcher.sh &
-
-# egress — sole provider-credential + outbound-network process
 sudo -u atlas-egress /usr/local/lib/atlas/bin/egress-launcher.sh &
 ```
 
@@ -230,6 +296,8 @@ Matrix: `ubuntu-latest` + `macos-15`, Node **26**, both with passwordless sudo. 
 ## 8. Troubleshooting
 
 Live-drive gotchas, cross-checked against [`retros/2026-07-18-search-index-live-drive-retro.md`](retros/2026-07-18-search-index-live-drive-retro.md) (the authoritative source; its six corrections **supersede** the search-index plan's Task-5 runbook).
+
+- **Host provisioned before 2026-07-19 and a daemon crash-loops `EACCES` / `Failed to read asymmetric key` / `budget state … unreadable/corrupt`?** Old `setup.sh` had four first-deploy lockouts (shared-keys-dir owner, anchor-parent `0700` over the egress state dir, run-dir owner vs D18, empty placeholder key/budget files). All fixed in current `main` — **re-run `sudo provisioning/dev/setup.sh`** (idempotent), delete any zero-byte `budget-state.json` / `egress-capability.key` / `quarantine-recipient.pub`, then follow §3's real-key step. Daemon-side rule of thumb: *missing* files are handled, *empty* ones fail closed.
 
 - **`broker.audit_seq_nonmonotonic: seq 0 is not the next sequence 1` at startup.** You pointed the drive broker at a graduated copy that already carries graduation's `refs/audit/runs`, so a fresh ledger (seq 0) collides. A drive broker needs its **own** vault repo + **fresh** anchor: `git clone` the grad-copy into a new `drive-vault` (clone drops custom `refs/audit/*`), point config `vault.path` **and** `ATLAS_VAULT_REPO_DIR` there, use a separate anchor.
 
