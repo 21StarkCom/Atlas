@@ -46,7 +46,7 @@ The plan is six phases, each landing behind the CI Swift compile job (`macos-15`
 
 ### P1-Task-1 — Package skeleton, module graph, CI compile/assemble job
 
-Create `console/Package.swift` (swift-tools 6.0) with library targets `ConsoleCore` and `ConsoleUI` (depends on `ConsoleCore`) and executable target `AtlasConsole` (depends on `ConsoleUI`), plus test targets `ConsoleCoreTests`, `ConsoleUITests`. `console/` lives outside the pnpm workspace globs. **The `.app` bundle is assembled by an explicit script, not by xcodebuild** — a SwiftPM executable has no application target/scheme that emits a launchable bundle. `console/scripts/assemble-app.sh` (`set -euo pipefail`; first `cd "$(dirname "$0")/.."` to its own package root so SwiftPM runs from `console/` regardless of caller cwd): `swift build -c release` → create `.build/AtlasConsole.app/Contents/{MacOS,Resources}` → copy the built `AtlasConsole` binary into `Contents/MacOS/` → install `Resources/Info.plist` (`CFBundleIdentifier=com.atlas.console`, `CFBundleExecutable=AtlasConsole`, `LSMinimumSystemVersion=15.0`) into `Contents/` + write `PkgInfo` (`APPL????`) → `codesign --force --sign - .build/AtlasConsole.app` (ad-hoc, matching the build-from-source posture). The bundle path `console/.build/AtlasConsole.app` is the XCUI-launchable artifact. Add `.github/workflows/console-ci.yml`: `macos-15`, Swift 6, every step under `working-directory: console` — `swift build` → `swift test` → `scripts/assemble-app.sh`.
+Create `console/Package.swift` (swift-tools 6.0, **`platforms: [.macOS(.v15)]`** — `LSMinimumSystemVersion` in the bundle plist does not raise SwiftPM's compilation deployment target, and Phase 6 compiles SwiftUI `App`/Observation/accessibility APIs that need it) with library targets `ConsoleCore` and `ConsoleUI` (depends on `ConsoleCore`) and executable target `AtlasConsole` (depends on `ConsoleUI`), plus test targets `ConsoleCoreTests`, `ConsoleUITests`. `console/` lives outside the pnpm workspace globs. **The `.app` bundle is assembled by an explicit script, not by xcodebuild** — a SwiftPM executable has no application target/scheme that emits a launchable bundle. `console/scripts/assemble-app.sh` (`set -euo pipefail`; first `cd "$(dirname "$0")/.."` to its own package root so SwiftPM runs from `console/` regardless of caller cwd): `swift build -c release` → create `.build/AtlasConsole.app/Contents/{MacOS,Resources}` → copy the built `AtlasConsole` binary into `Contents/MacOS/` → install `Resources/Info.plist` (`CFBundleIdentifier=com.atlas.console`, `CFBundleExecutable=AtlasConsole`, `LSMinimumSystemVersion=15.0`) into `Contents/` + write `PkgInfo` (`APPL????`) → `codesign --force --sign - .build/AtlasConsole.app` (ad-hoc, matching the build-from-source posture). The bundle path `console/.build/AtlasConsole.app` is the XCUI-launchable artifact. Add `.github/workflows/console-ci.yml`: `macos-15`, Swift 6, every step under `working-directory: console` — `swift build` → `swift test` → `scripts/assemble-app.sh`.
 
 **Interfaces:**
 ```
@@ -59,30 +59,31 @@ console/.build/AtlasConsole.app               # assembled output (gitignored)
 .github/workflows/console-ci.yml              # macos-15: build → test → assemble-app.sh
 ```
 
-**Test:** `ModuleAcyclicityTests` — asserts the dependency graph is exactly `ConsoleCore ← ConsoleUI ← AtlasConsole` with **no** library→executable back-edge (parses the resolved package dump). `AppBundleIdentityTests` — runs `assemble-app.sh` **from both the repo root and `console/`**, then asserts the assembled bundle exists at the declared path, its `Info.plist` carries `CFBundleIdentifier=com.atlas.console`, the executable bit is set on `Contents/MacOS/AtlasConsole`, and `codesign --verify` passes.
+**Test:** `ModuleAcyclicityTests` — asserts the dependency graph is exactly `ConsoleCore ← ConsoleUI ← AtlasConsole` with **no** library→executable back-edge (parses the resolved package dump) **and that the resolved package platform is `macOS 15`**. `AppBundleIdentityTests` — runs `assemble-app.sh` **from both the repo root and `console/`**, then asserts the assembled bundle exists at the declared path, its `Info.plist` carries `CFBundleIdentifier=com.atlas.console`, the executable bit is set on `Contents/MacOS/AtlasConsole`, and `codesign --verify` passes.
 
 ### P1-Task-2 — Spawn primitive (`ProcessRunner`)
 
-A single owner of subprocess launch. One-shot `run` (collect stdout/stderr/exit) and a `stream` variant returning a `StreamHandle` (P1-Task-3). Enforces the §interfaces spawn contract: caller supplies `cwd`, `environment`, and argv; the runner never mutates env except to inject what the caller passes. stdin optional (for the signer pipe).
+A single owner of subprocess launch. One-shot `run` (collect stdout/stderr/exit) and a `stream` variant returning a `StreamHandle` (P1-Task-3). Enforces the §interfaces spawn contract: caller supplies `cwd`, `environment`, and argv; the runner never mutates env except to inject what the caller passes. stdin optional (for the signer pipe). **Executable resolution:** `SpawnRequest.executable[0]` MUST be an **absolute path** — `Foundation.Process` takes a file URL and performs no shell/PATH expansion; resolution to absolute happens upstream (P1-Task-5), and the runner rejects a non-absolute token with a typed error. **Robust one-shot semantics:** `run` drains stdout and stderr **concurrently** (a child writing more than pipe capacity to either stream must not deadlock), honors `timeout` by SIGTERM→SIGKILL escalation + child reap (surfaced as a typed `SpawnTimeout` error), and supports Swift cancellation the same way. **Swift 6 concurrency:** `SpawnRequest`/`SpawnResult`/`StreamCompletion` are `Sendable`; `ProcessRunner: Sendable`; `SystemProcessRunner`'s mutable process state lives behind an actor so one runner instance is shareable across `WatchSupervisor`/`AttachCoordinator`/`PrivilegedFlow`.
 
 **Interfaces:**
 ```swift
-struct SpawnRequest {
-  let executable: [String]              // e.g. ["/path/brain"] or ["node", "<root>/apps/cli/dist/bin.js"]
+struct SpawnRequest: Sendable {
+  let executable: [String]              // [0] MUST be absolute (resolved by P1-Task-5); no PATH lookup here
   let arguments: [String]
   let cwd: URL
   let environment: [String: String]     // full env; no implicit inheritance beyond what is passed
   let stdin: Data?
+  let timeout: Duration?                // one-shot runs only; nil = no timeout (streams end via exit/terminate)
 }
-struct SpawnResult { let exitCode: Int32; let stdout: Data; let stderr: Data }
-protocol ProcessRunner {
-  func run(_ req: SpawnRequest) async throws -> SpawnResult
+struct SpawnResult: Sendable { let exitCode: Int32; let stdout: Data; let stderr: Data }
+protocol ProcessRunner: Sendable {
+  func run(_ req: SpawnRequest) async throws -> SpawnResult    // throws SpawnTimeout on expiry (child reaped)
   func stream(_ req: SpawnRequest) throws -> StreamHandle
 }
-struct SystemProcessRunner: ProcessRunner { /* Foundation.Process */ }
+struct SystemProcessRunner: ProcessRunner { /* Foundation.Process behind an actor */ }
 ```
 
-**Test:** `ProcessRunnerTests` — runs a scripted fixture executable (`/bin/sh -c`) asserting argv, `cwd`, injected env, stdin delivery, and exit-code capture round-trip; a non-zero exit is surfaced in `SpawnResult`, not thrown.
+**Test:** `ProcessRunnerTests` — runs a scripted fixture executable (`/bin/sh -c` via absolute path) asserting argv, `cwd`, injected env, stdin delivery, and exit-code capture round-trip; a non-zero exit is surfaced in `SpawnResult`, not thrown; a **hanging fixture** hits the timeout, the child is reaped, and `SpawnTimeout` is thrown; a fixture writing **more than pipe capacity to both streams** completes without deadlock; a non-absolute `executable[0]` is rejected with the typed error. A **Swift 6 strict-concurrency compile test** builds the real composition graph (one shared runner across the three actors) with complete checking enabled.
 
 ### P1-Task-3 — `StreamHandle` (raw-byte stream + exit completion)
 
@@ -128,10 +129,11 @@ struct ValidationError { let path: String; let reason: String }
 
 Resolve `brain`/`atlas-signer` by the first-hit-wins order (settings → env var → repo-layout default), then **bind the contract bundle from the atlas checkout that supplies the CLI entry point** — for the repo-layout launcher (`node <atlasRoot>/apps/cli/dist/bin.js`) walk up from `dist/bin.js` for `docs/specs/cli-contract/commands.json`, **never** the launch executable (which may be `node`, outside the checkout); a standalone in-checkout `brain` binary is itself the anchor — never an independently-set `atlasRoot`. If the source that hit fails its probe or no bundle is discoverable, enter a **blocking error state** naming the failing path + remediation; no fallthrough.
 
-- `brain` probe = spawn `brain db status --json` (a `pure` command — no ledger row) and require exit 0 + schema-valid output. Never probe with an audited read.
-- `signer` probe = `atlas-signer pubkey` (no SE access, prints SPKI PEM) exit 0.
+- `brain` probe = spawn `brain db status --json` (a `pure` command — no ledger row) and require exit 0 + schema-valid output, under a **probe timeout** (10 s; `SpawnRequest.timeout`) — a hung probe becomes the blocking error state with a timeout remediation, never an indefinite `.probing`. Never probe with an audited read.
+- `signer` probe = `atlas-signer pubkey` (no SE access, prints SPKI PEM) exit 0, same timeout.
 - Re-probe **on launch and on settings change only**.
-- Repo-layout `brain` default runs `node <atlasRoot>/apps/cli/dist/bin.js` with `ATLAS_ROOT=<atlasRoot>`; export `ATLAS_ROOT` when off the repo layout.
+- Repo-layout `brain` default runs `node <atlasRoot>/apps/cli/dist/bin.js` with `ATLAS_ROOT=<atlasRoot>`. **The bare `node` token is resolved to an absolute executable during resolution** (walk the request environment's `PATH` entries; first executable hit wins; no hit ⇒ blocking error naming `node` + the searched PATH) — `Foundation.Process` performs no PATH expansion, so `ResolvedBinary.launch[0]` is always absolute by construction. Export `ATLAS_ROOT` when off the repo layout.
+- **Signer-contract binding (V1 = same-checkout restriction):** the transcribed `SignerContractValidator` shapes (P1-Task-6) are anchored to the contract bundle's checkout. Resolution requires the resolved signer to come **from that same checkout** (the default `<atlasRoot>/console/signer` build product always does); a `signerPathOverride`/`ATLAS_SIGNER_PATH` pointing outside the bound checkout is a **blocking mismatch error** naming both paths — there is no cross-checkout signer support in V1 (no machine-readable signer contract version exists to negotiate; recorded follow-up: a signer `--contract-version` handshake would relax this).
 
 **Interfaces:**
 ```swift
@@ -156,7 +158,7 @@ struct ContractBundle {
 struct CommandRow { let name, phase, privilege, executionClass, idempotency: String; let implemented: Bool }
 ```
 
-**Test:** `ContractBundleResolutionTests` — a fixture checkout layout; a repo-layout wrapper (`node …/dist/bin.js`) binds the bundle at `dist/bin.js` (not the `node` launcher path) and probes green; an anchor whose tree has no `commands.json` throws the blocking mismatch error. `PathResolutionProbeTests` (test-plan #12) — each source hit for both executables; missing/non-exec/probe-fail ⇒ blocking error naming the path, no fallthrough; `brain` probe uses `db status` (asserts no audited-read spawn), signer probe uses `pubkey`.
+**Test:** `ContractBundleResolutionTests` — a fixture checkout layout; a repo-layout wrapper (`node …/dist/bin.js`) binds the bundle at `dist/bin.js` (not the `node` launcher path) and probes green; an anchor whose tree has no `commands.json` throws the blocking mismatch error; a signer override outside the bound checkout throws the same-checkout mismatch. `PathResolutionProbeTests` (test-plan #12) — each source hit for both executables; missing/non-exec/probe-fail ⇒ blocking error naming the path, no fallthrough; a **hanging probe** hits the 10 s timeout and yields the blocking state (never indefinite probing); `brain` probe uses `db status` (asserts no audited-read spawn), signer probe uses `pubkey`. `NodeResolutionTests` — the repo-layout default resolves `node` to an absolute path via the request PATH **with the real `SystemProcessRunner`** (not the scripted harness); no `node` on PATH ⇒ blocking error naming the searched PATH.
 
 ### P1-Task-6 — `SignerContractValidator`
 
@@ -418,33 +420,39 @@ enum IncarnationKey { static func derive(ledgerPath: String) -> String }   // SH
 
 ### P4-Task-2 — `Settings` store (`UserDefaults`)
 
-Flat settings blob in the standard suite: `atlasRoot`, `brainPathOverride?`, `signerPathOverride?`, `pollMs?` (100–10000), `heartbeatSeconds?` (5–300), `egressCapabilityKeySource ∈ {env, keychain}`, `resumeMode ∈ {resume, replayAll, liveOnly}` (default `resume`). A `null`/absent override ⇒ use the resolution order.
+Flat settings blob in the standard suite: `atlasRoot?`, `brainPathOverride?`, `signerPathOverride?`, `pollMs?`, `heartbeatSeconds?`, `egressCapabilityKeySource ∈ {env, keychain}`, `resumeMode ∈ {resume, replayAll, liveOnly}` (default `resume`). A `null`/absent override ⇒ use the resolution order. **Fresh install is deterministic:** `Settings.defaults` = every optional `nil`, `.env`, `.resume`; `load()` distinguishes an **absent** blob (⇒ defaults) from a **corrupt** blob (⇒ defaults + a surfaced "settings were reset" notice — never a crash, never invented values). `atlasRoot` is **optional**: absent means no repo-layout default exists, so with no override and no env var the launch lands in the **blocking setup state** prompting for it. **Watch option bounds are NOT hardcoded:** a `WatchOptionPolicy` derived from the bound watch schema's `x-atlas-contract` flag table owns the `pollMs`/`heartbeatSeconds` ranges for validation + UI bounds; an absent override **omits the flag** so the CLI owns its default (500/30 are display hints read from the same policy).
 
 **Interfaces:**
 ```swift
-struct Settings: Codable {
-  var atlasRoot: String; var brainPathOverride: String?; var signerPathOverride: String?
+struct Settings: Codable, Sendable {
+  var atlasRoot: String?; var brainPathOverride: String?; var signerPathOverride: String?
   var pollMs: Int?; var heartbeatSeconds: Int?
   var egressCapabilityKeySource: EgressKeySource; var resumeMode: ResumeMode
+  static let defaults: Settings          // fresh-install value: all optionals nil, .env, .resume
+}
+struct WatchOptionPolicy {                // derived from the bound watch schema flag table (SSOT)
+  init(watchSchema: Data) throws
+  func validatePollMs(_ v: Int) -> Bool; func validateHeartbeatSeconds(_ v: Int) -> Bool
+  var defaultPollMs: Int { get }; var defaultHeartbeatSeconds: Int { get }   // display hints only
 }
 enum EgressKeySource: String, Codable { case env, keychain }
 extension Settings {   // maps into Phase 1's dependency-free resolution input (P1-Task-5)
   func resolutionInputs() -> ResolutionInputs
 }
 struct SettingsStore { func load() -> Settings; func save(_ s: Settings) }
-var effectivePollMs: Int { settings.pollMs ?? 500 }
-var effectiveHeartbeatSeconds: Int { settings.heartbeatSeconds ?? 30 }
+// flag emission: an absent override OMITS the flag (the CLI owns its default); a present
+// override rides --poll-ms/--heartbeat-seconds after WatchOptionPolicy validation
 ```
 
-**Test:** `SettingsStoreTests` — defaults (`resumeMode == .resume`, `pollMs ?? 500`, `heartbeatSeconds ?? 30`); persistence round-trip; range clamping rejects out-of-band values.
+**Test:** `SettingsStoreTests` — fresh-install `load()` returns `Settings.defaults`; a corrupt blob returns defaults + the reset notice (never throws); persistence round-trip; `WatchOptionPolicy` validation sourced from a fixture watch schema rejects out-of-band values and tracks a mutated fixture range (proves schema-derivation, not a copied constant); an absent override produces argv with **no** `--poll-ms`/`--heartbeat-seconds` flag.
 
 ### P4-Task-3 — Watch supervisor (gated backoff)
 
-Spawn `brain watch --json --poll-ms <effective> --heartbeat-seconds <effective> [--since-seq <cursor>]` (the only periodically polling subprocess). On process exit, classify before acting:
+Spawn `brain watch --json [--poll-ms <override>] [--heartbeat-seconds <override>] [--since-seq <cursor>]` (the only periodically polling subprocess; an absent Settings override **omits the flag** so the CLI owns its default — `WatchOptionPolicy`, P4-Task-2). On process exit, classify before acting:
 
 - **Clean detach** — exit 0 (EPIPE/SIGTERM/SIGINT): no restart, no error surface.
-- **Non-retryable fault** — exit **5** (usage), exit **2** (config/vault/lock), or exit **4** with a `StreamItem.terminalEnvelope` carrying `retryable:false`: terminal "watch failed" state naming exit + `code`/`hint`; zero restarts.
-- **Retryable fault** — exit **4** with `retryable:true`, or a dropped stream with no envelope: restart under backoff.
+- **Structurally terminal** — exit **5** (usage) or exit **2** (config/vault/lock): terminal "watch failed" state naming exit + `code`/`hint`; zero restarts.
+- **Any other nonzero exit — exhaustive by construction** (exit 4, and defensively 1/3/6/unknown codes the watch contract says cannot occur): classified by the final envelope. Envelope present + `retryable:true` ⇒ **retryable**; envelope present + `retryable:false` ⇒ **terminal**; expected retryable shape with no envelope (exit 4 / dropped stream) ⇒ **retryable**; **an off-contract exit code with no parseable envelope ⇒ terminal fail-fast** (a bug surface, not a retry loop). Every `(exitCode, envelope?)` pair maps to exactly one of {cleanDetach, terminal, retryable, contract-mismatch}.
 - **Contract mismatch** — a framing or strict-decode failure on a stream line (surfaced from P2 while the child is still alive): the supervisor **terminates the child and awaits its exit**, then enters a terminal `contract-mismatch` state naming the offending stage (framing/decode) — never an indefinite wait on `completion()`; zero restarts.
 - **Backoff** — 500 ms initial, ×2, cap 30 s, ±20 % jitter; `retryAfterMs` (when present) is a floor; delay **and** consecutive-failure counter reset **only on a proven-healthy run** — a `hello` *followed by* its first attached `heartbeat` (a sustained stream), never on a bare `hello` — so a watcher that repeatedly emits `hello` then immediately faults keeps incrementing the counter and reaches the terminal cap.
 - **Terminal cap** — `WATCH_MAX_CONSECUTIVE_FAILURES = 6` counts consecutive failed runs **including the initial failed run** (≤ 5 respawns); the 6th failure spawns no further attempt and enters the terminal state.
@@ -464,10 +472,10 @@ actor WatchSupervisor {
   var state: SupervisorState { get }                // .streaming | .retrying(attempt,nextAt,lastCode) | .failed(exit,code) | .contractMismatch(stage) | .detached
   var events: AsyncStream<WatchEvent> { get }
 }
-enum ExitClass { case cleanDetach, nonRetryable(Int32,String), retryable(Int?) }
+enum ExitClass { case cleanDetach, terminal(Int32,String), retryable(retryAfterMs: Int?), contractMismatch(String) }  // total over (exitCode, envelope?)
 ```
 
-**Test:** `WatchSupervisorTests` (test-plan #20) — a scripted spawn harness feeds exit sequences and asserts the full policy: (a) retryable delays progress 500 → ~1 s → ~2 s → … capped at 30 s within the ±20 % band; `retryAfterMs` honored as floor; (b) attempt/next-retry/last-`code` surfaced (assert the banner state); (c) a **proven-healthy** run (`hello` + its first attached heartbeat) between two failures resets both delay-to-500 and counter-to-0 (assert the post-reset delay), while six `[hello, retryable exit]` runs with no sustained heartbeat still reach the terminal cap (a bare `hello` never clears the storm counter); (d) non-retryable exit 5/2 or exit 4 `retryable:false` ⇒ terminal, zero restarts; (e) six consecutive failed runs (initial + 5 respawns) ⇒ terminal, no 6th spawn; (f) clean exit 0 ⇒ no restart, no failure surface; (g) dropped stream with no envelope ⇒ retry path; (h) a strict framing/decode failure on a line while the fixture child stays alive ⇒ the supervisor terminates + awaits the child and enters terminal `contract-mismatch` naming the stage, never hanging on `completion()`.
+**Test:** `WatchSupervisorTests` (test-plan #20) — a scripted spawn harness feeds exit sequences and asserts the full policy over **the exhaustive `(exitCode, envelope?)` matrix — every brain code 0–6 plus an unknown code (9), each with valid / retryable:false / absent envelope**: (a) retryable delays progress 500 → ~1 s → ~2 s → … capped at 30 s within the ±20 % band; `retryAfterMs` honored as floor; (b) attempt/next-retry/last-`code` surfaced (assert the banner state); (c) a **proven-healthy** run (`hello` + its first attached heartbeat) between two failures resets both delay-to-500 and counter-to-0 (assert the post-reset delay), while six `[hello, retryable exit]` runs with no sustained heartbeat still reach the terminal cap (a bare `hello` never clears the storm counter); (d) non-retryable exit 5/2 or exit 4 `retryable:false` ⇒ terminal, zero restarts; (e) six consecutive failed runs (initial + 5 respawns) ⇒ terminal, no 6th spawn; (f) clean exit 0 ⇒ no restart, no failure surface; (g) dropped stream with no envelope ⇒ retry path; (h) a strict framing/decode failure on a line while the fixture child stays alive ⇒ the supervisor terminates + awaits the child and enters terminal `contract-mismatch` naming the stage, never hanging on `completion()`.
 
 ### P4-Task-4 — Daemon / detach transitions
 
@@ -531,9 +539,11 @@ struct OperationDescriptor {
 struct Operand { let name: String; let kind: OperandKind; let source: OperandSource }
 enum OperandKind { case positional(Int); case flag(String) }
 enum OperandSource { case focusedObject(String); case operatorEntry }   // from Console-owned OperandSourceMap
-struct BoundInvocation {                              // immutable; the single argv authority for one flow
+struct BoundInvocation: Sendable {                    // immutable; the single argv authority for one flow
   let op: String
-  let argv: [String]                                  // fully-resolved operand argv (no --export-challenge/--authorization)
+  let argv: [String]                                  // fully-resolved operand argv, ALWAYS including --json
+                                                      // (verified: brain emits the JSON error envelope only when --json
+                                                      // is sniffed — without it every authz.* branch returns human text)
   var exportArgv: [String] { argv + ["--export-challenge"] }
   func authorizeArgv(authorizationPath: URL) -> [String] { argv + ["--authorization", authorizationPath.path] }
 }
@@ -551,12 +561,30 @@ struct OperationRouter {
 Each flow runs in a per-flow temp dir (`0700`) as cwd, with `--config <atlasRoot>/brain.config.yaml`. States: `Idle → Export → Display → Sign → Authorize → {Done | AuthorizeRetry | Retry | Failed}`.
 
 - **Export** — `brain <op> --export-challenge` (exit 6) mints `<tempdir>/challenge.json`; read **once** into an immutable in-memory representation; never re-read the file.
-- **Display** — validate the exported bytes once via `SignerContractValidator`; render every committed field from that frozen representation; user confirms.
+- **Display** — validate the exported bytes once via `SignerContractValidator`, then run the **challenge↔invocation consistency gate** before anything renders: `challenge.op` MUST equal `BoundInvocation.op`; `challenge.runId`/`targetCommit` MUST match the invocation's corresponding operands when both carry them; `payloadCanonicalization` MUST be a supported value — any mismatch is a terminal `challenge-mismatch` failure that never reaches Display. (Full cryptographic binding of displayed fields → signed bytes is the **signer's** duty per SP-3 — it re-derives `signingPayload` from the displayed fields pre-prompt and refuses exit 2 on mismatch, broker recompute as second backstop; the Console adds the cheap contextual gate, not a second crypto path.) Render every committed field from that frozen representation; user confirms.
 - **Sign** — pipe those exact confirmed bytes to `atlas-signer sign` on **stdin**, **no `--out`** (response is the sole stdout content); validate strict against the SP-3 response schema; branch on signer exit 0–5.
 - **Authorize** — write the validated response to `<tempdir>/authorization.json` (`0600`); run `brain <op> --authorization <path>`.
 - **Cleanup** — temp dir removed on **every** terminal transition (Done/Failed/cancel) and discarded-then-recreated on re-export.
 
-Transitions: signer exit 3 (expired) / any broker `authz.*_expired`/`_unknown` ⇒ back to **Export** (re-export, never resubmit); signer exit 4 (cancel/biometry) ⇒ Idle; signer exit 5 (key invalidated) ⇒ surface the SP-3 re-enroll runbook (Console runs no `sudo`); idempotent replay `authz.ok`+`noop:true` ⇒ success. **AuthorizeRetry** (retryable exit 4/6 with `retryable:true`, or indeterminate — `brain` died / no parseable envelope after the mutation may have committed) ⇒ resubmit the **exact same argv + authorization artifact**, `retryAfterMs` as floor: `authz.ok` (incl. `noop:true`) ⇒ Done; `authz.nonce_replayed` (exit 1, nonce spent on an incomplete op) ⇒ Failed + reconciliation surface (inspect via read commands, then explicit re-export); `authz.nonce_expired`/`nonce_unknown` ⇒ Export.
+**Per-stage outcome matrix (total — every stage lists its full outcome set; an unlisted combination is a plan bug, never implementer discretion):**
+
+| stage | outcome | transition |
+|---|---|---|
+| Export | exit 6 + challenge minted | → Display |
+| Export | spawn error / timeout / exit ∈ {1,2,4,5} / envelope `retryable:false` / missing or invalid `challenge.json` | → **Failed** (stage + code named; temp dir cleaned) |
+| Export | envelope `retryable:true` | → **Failed** with a retry affordance (operator re-initiates; no auto-loop at Export) |
+| Display | consistency-gate mismatch (op / context / canonicalization) | → **Failed** (`challenge-mismatch`) |
+| Display | operator cancels | → Idle (cleanup) |
+| Sign | exit 0 + schema-valid response echoing the frozen challenge | → Authorize |
+| Sign | exit 1 (internal) / exit 2 (malformed or re-derivation refuse) / malformed stdout | → **Failed** (stage-named) |
+| Sign | exit 3 (expired, checked pre-prompt) | → Export (fresh challenge) |
+| Sign | exit 4 (cancel / biometry) | → Idle |
+| Sign | exit 5 (key invalidated) | → **Failed** + SP-3 re-enroll runbook surface |
+| Authorize | `authz.ok` (incl. `noop:true` — idempotent replay renders success) | → Done |
+| Authorize | `authz.nonce_expired` / `nonce_unknown` | → Export |
+| Authorize | retryable (exit 4/6 + `retryable:true`) or indeterminate (no parseable envelope after possible commit) | → AuthorizeRetry (same artifact) |
+| Authorize | `authz.nonce_replayed` (exit 1 — nonce spent, op incomplete) | → **Failed** + reconciliation surface |
+| Authorize | any other exit-1 `authz.*` refusal / exit 2 / exit 5 | → **Failed** (non-retryable contract refusal, stage-named) | **AuthorizeRetry** (retryable exit 4/6 with `retryable:true`, or indeterminate — `brain` died / no parseable envelope after the mutation may have committed) ⇒ resubmit the **exact same argv + authorization artifact**, `retryAfterMs` as floor: `authz.ok` (incl. `noop:true`) ⇒ Done; `authz.nonce_replayed` (exit 1, nonce spent on an incomplete op) ⇒ Failed + reconciliation surface (inspect via read commands, then explicit re-export); `authz.nonce_expired`/`nonce_unknown` ⇒ Export.
 
 **Interfaces:**
 ```swift
@@ -586,7 +614,7 @@ Any broker `exit 6` (`action-required`) refusing a mutation for want of authoriz
 
 ### P5-Task-4 — Egress-gated actions + transient key handling
 
-`query` / `index eval` behind explicit user action only (never polled), with `ATLAS_EGRESS_CAPABILITY_KEY` injected into the child env **only** for those two commands. Two operator-selected sources (both read-only to the Console): `env` (inherited from the operator's shell) and `keychain` (read via `SecItemCopyMatching` from a pre-existing operator-provisioned generic-password item — service `com.atlas.console.egress-capability-key`, account = login name; the Console never `SecItemAdd`/`Update`/`Delete`). Plaintext held in process memory only for the spawn's lifetime, never cached, never persisted to any Console-owned store, never logged.
+`query` / `index eval` behind explicit user action only (never polled), with `ATLAS_EGRESS_CAPABILITY_KEY` injected into the child env **only** for those two commands. Two operator-selected sources (both read-only to the Console): `env` (inherited from the operator's shell) and `keychain` (read via `SecItemCopyMatching` from a pre-existing operator-provisioned generic-password item — service `com.atlas.console.egress-capability-key`, account = login name; the Console never `SecItemAdd`/`Update`/`Delete`). **Keychain ACL contract (ad-hoc-signing reality):** the item is created out-of-band (`security add-generic-password`) with the default ACL; the Console is ad-hoc-signed, so its code requirement changes every rebuild and macOS re-shows the consent prompt after a rebuild — **"Always Allow" does not survive a rebuild, and that is the declared UX** (`env` stays the default source; `keychain` is opt-in). The Console never broadens the ACL; live-drive verifies the consent flow with the assembled `.app`. Plaintext held in process memory only for the spawn's lifetime, never cached, never persisted to any Console-owned store, never logged.
 
 **Interfaces:**
 ```swift
@@ -602,7 +630,9 @@ struct EgressAction {
 }
 ```
 
-**Test:** `EgressKeyScopingTests` (test-plan #18) — the key is injected into the child env only for `query`/`index eval` and for **no** other spawn (drive every read/privileged command, assert absence); logged argv/env redact it; it is never written to `UserDefaults`, the cursor SQLite, or the unified log; for `keychain`, assert a read-only `SecItemCopyMatching` (no Add/Update/Delete) and plaintext dropped after the child exits.
+**Sensitive-operand boundary (redaction does not stop at the Console's own log):** the `query` text unavoidably rides argv to `brain` (upstream stdin input is a recorded atlas follow-up; until then the process-table exposure is **declared** — single-operator machine, consistent with the spec's executable-trust posture). What the Console owns: (1) its unified-log argv line redacts the operand (P2-Task-5); (2) **captured stderr from an egress-minting spawn is redaction-scrubbed before any `ConsoleLog.failure(detail:)` write** — a failed CLI invocation echoing the query must not reintroduce it into a persistent sink; the scrubbed stderr may render on the transient error surface.
+
+**Test:** `EgressKeyScopingTests` (test-plan #18) — the key is injected into the child env only for `query`/`index eval` and for **no** other spawn (drive every read/privileged command, assert absence); logged argv/env redact it; it is never written to `UserDefaults`, the cursor SQLite, or the unified log; for `keychain`, assert a read-only `SecItemCopyMatching` (no Add/Update/Delete) and plaintext dropped after the child exits. `FailingQueryRedactionTests` — a scripted `query` failure whose stderr echoes the operand: assert it appears in **no** unified-log record (scrubbed from the failure detail) while the error surface still shows the scrubbed stderr.
 
 ### P5-Task-5 — Cadence guard + egress-minting drift + read-command conformance
 
@@ -682,21 +712,30 @@ enum A11yEvent { case jobSucceeded(String), jobFailed(String), backupUnhealthy, 
 
 ### P6-Task-4 — Composition root, app model, settings surface
 
-The application assembly nothing else owns: `AtlasConsoleApp` (`@main`), an `AppModel` that runs the launch sequence — load `Settings` → `BinaryResolution.resolve` both binaries (blocking "unavailable" error state on probe failure, naming path + remediation) → build `ContractBundle`-derived inventories → start `AttachCoordinator` → wire reducers, `TransitionRouter`, `PrivilegedFlow`, and `ReadCommandExecutor` into the view tree — plus navigation between the surfaces and the **settings view** (atlasRoot, path overrides, pollMs/heartbeatSeconds, egress key source, resumeMode). A settings change **re-probes** (the only re-probe trigger besides launch), then calls `AttachCoordinator.stop()` and awaits the old `brain watch`'s exit before launching any replacement — so exactly one watcher ever runs — and only then rebuilds the affected subsystems; an in-flight privileged flow blocks settings-applied restarts until it terminates.
+The application assembly nothing else owns: `AtlasConsoleApp` (`@main`) and a **`@MainActor` `AppModel`**. **Launch sequence (wiring before starting — load-bearing order):** load `Settings` (fresh install ⇒ `Settings.defaults`; no `atlasRoot`/override ⇒ blocking setup state) → `BinaryResolution.resolve` both binaries (blocking "unavailable" error state on probe failure, naming path + remediation) → build `ContractBundle`-derived inventories → **construct all reducers + `TransitionRouter`, obtain `AttachCoordinator.events`, start and retain the reducer-consumption task** → only then `AttachCoordinator.start()` — so a fast child's hello/replay/checkpoint-heartbeat can never outrun its consumer; the same order applies on every settings rebuild.
+
+**Actor → UI observability:** `WatchSupervisor` and `PrivilegedFlow` each expose an `AsyncStream` of state changes (`stateChanges`); `AppModel` consumes both on the main actor and mirrors them into `@Observable` properties — every retry/terminal/challenge/authorize transition reaches SwiftUI (banners, modals, `A11yAnnouncer`) without polling actor snapshots.
+
+**Pending-settings protocol (probe before persist; the cutover is atomic-or-rolled-back):** `applySettings(candidate)` (1) gates on any in-flight privileged flow; (2) **probes the candidate WITHOUT saving** — a probe failure surfaces validation feedback while the persisted settings and the running coordinator stay untouched; (3) on probe success: `AttachCoordinator.stop()` + await the old watch's exit → start the replacement coordinator → **commit (save) the candidate only after the replacement's first successful spawn**; (4) if the replacement fails to start, **restore the prior coordinator and keep the prior persisted settings** (typed failure surfaced). Persisted state can never name a configuration that was not proven live.
+
+**Action surfaces (the intent-criterion-3 entry points):** an **Actions** surface enumerates `authorizableOps` (from `AuthorizableOpSet`), collects operands per the op's descriptor (focused-object fields pre-filled from the current selection, operator-entry fields as form inputs), and calls `PrivilegedFlow.begin` — rendering every flow state from the `stateChanges` stream (Display modal, AuthorizeRetry progress, Failed + reconciliation). A **Query** surface takes the query text + explicit run action, calls `EgressAction.query` via `EgressKeyProvider`, and renders `QueryResult` (and its `model_call` event lands in the feed). Both are keyboard-drivable end to end (P6-Task-3 bar).
 
 **Interfaces:**
 ```swift
 @main struct AtlasConsoleApp: App                  // scene = MainWindow(AppModel)
-@Observable final class AppModel {
-  var phase: AppPhase                              // .probing | .blocked(BlockingResolutionError) | .running
-  func launch() async                              // settings → resolve+probe → coordinator → wiring
-  func applySettings(_ new: Settings) async        // save → re-probe → coordinator.stop()+await → rebuild
+@MainActor @Observable final class AppModel {
+  var phase: AppPhase                              // .probing | .blocked | .setupNeeded | .running
+  func launch() async                              // settings → resolve+probe → WIRE → start
+  func applySettings(_ candidate: Settings) async  // gate → probe (no save) → stop+await → start replacement → commit | rollback
 }
 struct SettingsView: View                          // edits Settings; Apply drives applySettings
-enum AppPhase { case probing, blocked(reason: String, path: String, remediation: String), running }
+struct ActionsView: View                           // authorizableOps list → operand form → PrivilegedFlow.begin
+struct QueryView: View                             // explicit query action → EgressAction.query → result render
+enum AppPhase { case probing, blocked(reason: String, path: String, remediation: String), setupNeeded, running }
+// P4/P5 actors gain: var stateChanges: AsyncStream<SupervisorState> / AsyncStream<PrivilegedFlowState>
 ```
 
-**Test:** `AppLaunchProbeTests` — a failing `brain` probe lands in `.blocked` naming the path + remediation, no coordinator started; a passing probe reaches `.running` with the watch spawn observed. `SettingsReprobeTests` — `applySettings` with a changed override re-probes exactly once, awaits the old watch process's exit before rebuilding, and leaves exactly one watcher running; an unchanged save does not re-probe (launch + settings change are the only probe triggers, per the cadence rule).
+**Test:** `AppLaunchProbeTests` — a failing `brain` probe lands in `.blocked` naming the path + remediation, no coordinator started; a fresh install with no atlasRoot lands in `.setupNeeded`; a passing probe reaches `.running` with the watch spawn observed. `WiringOrderTests` — a fast-emitter child whose hello/replay/heartbeat fire immediately on spawn: every event reaches the reducers (none lost pre-wiring) and no checkpoint precedes reducer consumption. `SettingsCutoverTests` — candidate probe failure ⇒ nothing saved, old coordinator untouched, validation surfaced; replacement-start failure ⇒ prior coordinator restored, prior settings retained; success ⇒ exactly one watcher, candidate committed only after the replacement spawn; an unchanged save does not re-probe. `ActionSurfaceTests` — a UI-initiated op drives `PrivilegedFlow.begin` through the real spawn boundary (scripted runner) and renders each state from the stream; the query surface invokes `EgressAction.query` only on explicit action. `ActorStateStreamTests` — a supervisor retry transition and a flow challenge transition each reach the mirrored `@Observable` properties (and fire the matching `A11yEvent`).
 
 ### P6-Task-5 — Live-drive checklist + retro
 
@@ -705,15 +744,15 @@ Execute the 10-step manual E2E against a real install, capturing evidence in `do
 **Live-drive checklist (run in order; pass = every expected observation seen; any deviation fails at that step number):**
 
 1. **Prerequisites** — provisioned install, daemons loaded (`provisioning/macos/services.sh status` shows both), enrolled SE signer (`-vN`), `brain` + `atlas-signer` + Console built from source; `brain db status --json` exits 0.
-2. **Seed state** — a vault with ≥ 1 open run, ≥ 1 queued + ≥ 1 failed job, a quarantined item; export `ATLAS_EGRESS_CAPABILITY_KEY` (or provision the Keychain item) for step 6.
+2. **Seed state** — a vault with ≥ 1 open run, ≥ 1 queued + ≥ 1 failed job, a quarantined item; export `ATLAS_EGRESS_CAPABILITY_KEY` (or provision the Keychain item) for step 6. **Create the scratch trust fixture and record its baseline:** `brain source list --json` → pick/ingest a scratch source (`brain source show --json <id>` recorded), then `brain source trust show --json <id>` → record its exact trust state as `<baseline>` (the step-5 op and step-10 inverse are defined against this recorded value).
 3. **Surface parity** — launch the Console; compare each surface against a one-shot manual read (dashboard vs `brain status --json` run once by hand; jobs vs `brain jobs list --json`; audit tail vs the most recent run-space rows). Expected: field-for-field agreement; snapshot-only fields labelled "as of `<hello.at>`".
 4. **Daemon transition** — `sudo launchctl bootout system/com.atlas.egress` → indicator flips + banner within one heartbeat, no error dialog; re-bootstrap → recovers.
-5. **Privileged round trip (criterion 3)** — pick the least-destructive enrolled-signer op (e.g. `source trust promote` on a scratch source). Export → challenge display shows `op`, every `intendedEffect` field, `canonicalBaseCommit`, `expiresAt`, payload SHA-256, all quoted/full-length. Sign → exactly **one** Touch ID prompt naming the op + digest prefix. Authorize → `authz.ok`, success surface, new run-space audit row in the timeline.
+5. **Privileged round trip (criterion 3)** — run `source trust promote` on the step-2 scratch source (exact operands from the recorded baseline). **From this step on, the step-10 twin-op cleanup is an unconditional `finally`: it runs on success, failure, or abort of any later step — a drive stopped at 6–9 still executes 10 before it is called failed; a cleanup failure is its own escalation, recorded in the retro.** Export → challenge display shows `op`, every `intendedEffect` field, `canonicalBaseCommit`, `expiresAt`, payload SHA-256, all quoted/full-length. Sign → exactly **one** Touch ID prompt naming the op + digest prefix. Authorize → `authz.ok`, success surface, new run-space audit row in the timeline.
 6. **Egress action + model-call surface** — run one explicit `query`. Expected: result renders; a `model_call` event for this query appears in the model-call feed (provider/model/operation + token counts); no `query` on any timer; the query string appears in **no** Console log line (`log show --predicate 'subsystem == "com.atlas.console"' --last 5m`).
 7. **Broker-restart re-export** — export + sign, then `sudo launchctl kickstart -k system/com.atlas.broker` **before** authorizing. Submit → `authz.nonce_expired`/`nonce_unknown` surfaces; the Console **re-exports** a fresh challenge (never resubmits); the fresh flow succeeds.
-8. **Watch resilience + resume** — `kill -9` the `brain watch` process → retry banner with attempt count + next-retry time, then a fresh `hello` re-baselines and clears it. Quit + relaunch → resume from the persisted cursor with no re-replay.
+8. **Watch resilience + resume** — `kill -9` the `brain watch` process → retry banner with attempt count + next-retry time, then a fresh `hello` re-baselines and clears it. **Before quitting: generate one new run-space audit event (e.g. the step-5 flow's row suffices if it landed after the last checkpoint; otherwise run one audited read like `brain status --json` by hand), then observe the next attached checkpoint heartbeat** — the cursor must be persisted past the new row so the relaunch assertion cannot pass trivially. Quit + relaunch → resume from the persisted cursor with no re-replay of the observed rows.
 9. **VoiceOver pass** — execute the P6-Task-3 manual checklist (announcements + keyboard-only privileged flow).
-10. **Cleanup** — revert the step-5 trust change (its twin op), confirm every per-flow temp dir is gone, re-run `brain db status --json` (exit 0).
+10. **Cleanup (unconditional — runs even when an earlier step failed or the drive was aborted after step 5)** — run the exact inverse of step 5 (`source trust revoke` on the same source, via the full signer flow), then `brain source trust show --json <id>` and **verify the state equals the recorded `<baseline>`**; confirm every per-flow temp dir is gone; re-run `brain db status --json` (exit 0). Cleanup evidence is recorded separately in the retro; a cleanup failure escalates explicitly.
 
 **Test:** the checklist itself + `docs/retros/2026-07-19-console-live-drive-retro.md` capturing each step's observation.
 
