@@ -35,19 +35,22 @@ import { assertOffsetInRange, parseLimit, parseOffset } from "./pagination.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { openJobsCommandStore } from "./store-open.js";
 import { installTestJobHandler } from "./jobs-test-handler.js";
+import { buildJobHandlers } from "./job-handlers.js";
 import { beginIdempotentCommand, releaseIdempotent, type IdempotencyRequest } from "../workflows/index.js";
 
 /** RFC-3339 UTC clock (ms precision; lexicographically monotonic for `next_run_at`). */
 const nowIso = (): string => new Date().toISOString();
 
 /**
- * The workflow→executor registry, populated by later phases (Task 2.6 capture
- * follow-ons register here at import time). A job whose workflow is unregistered
- * fails `internal` — a mis-enqueued job never silently no-ops.
+ * Import-time registry, now carrying ONLY the env-gated test handler. Production
+ * executors need a `RunContext` + open `Store`, neither of which exists at import
+ * time, so they are built per-drain by `buildJobHandlers` (see `job-handlers.ts`)
+ * and merged in at `jobsRun`. A job whose workflow is unregistered fails
+ * `internal` — a mis-enqueued job never silently no-ops.
  */
 const JOB_HANDLERS: Record<string, JobHandler> = {};
 
-/** Register a workflow executor (Phase-2 capture wiring seam). */
+/** Register a workflow executor (env-gated test seam; see `jobs-test-handler.ts`). */
 export function registerJobHandler(workflow: string, handler: JobHandler): void {
   JOB_HANDLERS[workflow] = handler;
 }
@@ -309,7 +312,11 @@ function jobsRun(ctx: RunContext): Promise<number> {
     const cancellation = new SqliteCancellationSource(store.db);
     const deps: JobsDeps = {
       store,
-      handlers: JOB_HANDLERS,
+      // Production executors are built per-drain (they close over ctx + the open
+      // store); the import-time map carries only the env-gated test handler. The
+      // test handler is spread FIRST so a production workflow can never be
+      // shadowed by `ATLAS_TEST_JOB_WORKFLOW` naming collision.
+      handlers: { ...JOB_HANDLERS, ...buildJobHandlers({ ctx, store }) },
       withLock: ctx.withLock,
       now: nowIso,
       backoff: { baseMs: j.backoff_base_ms, factor: j.backoff_factor, maxMs: j.backoff_max_ms },
