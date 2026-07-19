@@ -57,6 +57,7 @@ logs:
   dir: ./.atlas/logs
   max_files: 10
   max_bytes: 10485760 # 10 MiB
+  retention_days: 30 # age window: the retention:log-rotation job hard-deletes rotated logs older than this
 
 broker:
   socket_path: /usr/local/var/run/atlas/broker.sock # D10 (macOS; Linux: /var/run/atlas/broker.sock)

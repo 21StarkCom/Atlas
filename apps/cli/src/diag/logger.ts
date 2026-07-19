@@ -10,7 +10,7 @@
  * the logger scrubs any context key whose name matches a sensitive pattern before
  * serialization. Rotation + retention honor `logs.max_bytes` / `logs.max_files`.
  */
-import { mkdirSync, appendFileSync, statSync, renameSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync, appendFileSync, readdirSync, statSync, renameSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 /** Log severity levels. */
@@ -94,6 +94,27 @@ export interface LoggerFactory {
   diag(runId: string | null): Logger;
 }
 
+/**
+ * Rotate the active file out of the way: shift `atlas.log.(N-1)` → `atlas.log.N`
+ * (dropping anything that would exceed `maxFiles`), then `atlas.log` → `atlas.log.1`.
+ * `maxFiles` counts the active file, so the highest rotated index kept is
+ * `maxFiles - 1`. The rename preserves the file's mtime, so a subsequent age sweep
+ * still sees a just-rotated quiescent log as old.
+ */
+function rotate(dir: string, fileName: string, maxFiles: number): void {
+  const active = join(dir, fileName);
+  const highest = Math.max(0, maxFiles - 1);
+  // Drop the oldest that would exceed retention.
+  const overflow = join(dir, `${fileName}.${highest}`);
+  if (existsSync(overflow)) rmSync(overflow, { force: true });
+  for (let i = highest - 1; i >= 1; i--) {
+    const from = join(dir, `${fileName}.${i}`);
+    if (existsSync(from)) renameSync(from, join(dir, `${fileName}.${i + 1}`));
+  }
+  if (highest >= 1) renameSync(active, join(dir, `${fileName}.1`));
+  else rmSync(active, { force: true }); // maxFiles <= 1: no history kept
+}
+
 function rotateIfNeeded(
   dir: string,
   fileName: string,
@@ -109,20 +130,98 @@ function rotateIfNeeded(
     size = 0;
   }
   if (size === 0 || size + nextLen <= maxBytes) return;
+  rotate(dir, fileName, maxFiles);
+}
 
-  // Shift atlas.log.(N-1) → atlas.log.N, dropping anything beyond maxFiles, then
-  // atlas.log → atlas.log.1. `maxFiles` counts the active file, so the highest
-  // rotated index kept is maxFiles - 1.
-  const highest = Math.max(0, maxFiles - 1);
-  // Drop the oldest that would exceed retention.
-  const overflow = join(dir, `${fileName}.${highest}`);
-  if (existsSync(overflow)) rmSync(overflow, { force: true });
-  for (let i = highest - 1; i >= 1; i--) {
-    const from = join(dir, `${fileName}.${i}`);
-    if (existsSync(from)) renameSync(from, join(dir, `${fileName}.${i + 1}`));
+/** Parse the rotated-file index `N` from `atlas.log.N`, or `null` for a non-match. */
+function rotatedIndex(name: string, fileName: string): number | null {
+  const prefix = `${fileName}.`;
+  if (!name.startsWith(prefix)) return null;
+  const suffix = name.slice(prefix.length);
+  if (!/^[0-9]+$/.test(suffix)) return null;
+  return Number(suffix);
+}
+
+/** The result of a {@link sweepLogRetention} pass (for logging + tests). */
+export interface LogRetentionResult {
+  /** True iff the active log was age-rotated in this pass. */
+  readonly rotated: boolean;
+  /** Rotated files hard-deleted by the sweep (basenames). */
+  readonly deleted: string[];
+}
+
+/**
+ * The SCHEDULED log-retention pass (retention-matrix.md row 26: "rotation + size/age
+ * retention", "hard delete on rotation/expiry").
+ *
+ * WHY this exists as a separate entry point: {@link rotateIfNeeded} is size-triggered
+ * and fires only ON WRITE (it returns early unless the next append would exceed
+ * `maxBytes`). A quiescent process therefore never rotates and never expires old logs
+ * — nothing enforces the AGE half of the matrix's "size/age" contract. This function
+ * is the age/scheduled complement the `retention:log-rotation` job drives:
+ *
+ *  1. **Age-rotate** the active file when it has gone untouched past `retentionMs`
+ *     (a size trigger can never reach a low-traffic log), so its content ages out via
+ *     the rotated chain rather than living forever as `atlas.log`.
+ *  2. **Expire** any rotated `atlas.log.N` whose mtime is older than `retentionMs`
+ *     (hard delete — the matrix forbids soft-deleting logs), AND
+ *  3. **Trim** any rotated index `N >= maxFiles` (the retention count bound), so the
+ *     kept set never exceeds `{active} ∪ {maxFiles - 1 rotated}`.
+ *
+ * All deletes are `rmSync` hard deletes. Missing dir / vanished files are non-fatal
+ * (retention "never blocks a purge" — matrix row 26 purge-ordering column).
+ */
+export function sweepLogRetention(opts: {
+  dir: string;
+  fileName?: string;
+  maxFiles: number;
+  retentionMs: number;
+  now?: () => number;
+}): LogRetentionResult {
+  const { dir, maxFiles, retentionMs } = opts;
+  const fileName = opts.fileName ?? "atlas.log";
+  const nowMs = (opts.now ?? (() => Date.now()))();
+  const deleted: string[] = [];
+
+  const ageMs = (path: string): number => {
+    try {
+      return nowMs - statSync(path).mtimeMs;
+    } catch {
+      return -Infinity; // vanished — treat as fresh (nothing to delete)
+    }
+  };
+
+  // (1) Age-rotate a quiescent active log the size trigger can never reach. Only when
+  // it has content (an empty active file has nothing worth preserving/expiring).
+  const active = join(dir, fileName);
+  let rotated = false;
+  try {
+    const st = statSync(active);
+    if (st.size > 0 && nowMs - st.mtimeMs >= retentionMs) {
+      rotate(dir, fileName, maxFiles);
+      rotated = true;
+    }
+  } catch {
+    /* no active file — nothing to rotate */
   }
-  if (highest >= 1) renameSync(active, join(dir, `${fileName}.1`));
-  else rmSync(active, { force: true }); // maxFiles <= 1: no history kept
+
+  // (2)+(3) Expire rotated files past the window and trim any index beyond maxFiles.
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return { rotated, deleted }; // dir vanished — nothing to sweep
+  }
+  for (const name of entries) {
+    const idx = rotatedIndex(name, fileName);
+    if (idx === null) continue; // the active file + foreign files are untouched here
+    const path = join(dir, name);
+    if (idx >= maxFiles || ageMs(path) >= retentionMs) {
+      rmSync(path, { force: true });
+      deleted.push(name);
+    }
+  }
+  return { rotated, deleted };
 }
 
 /**
