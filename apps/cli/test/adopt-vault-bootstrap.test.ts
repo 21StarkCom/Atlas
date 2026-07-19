@@ -237,8 +237,10 @@ describe("adopt-vault-bootstrap — seeding + state validation", () => {
 
 describe("adopt-vault-bootstrap — OQ#2 boundary (ATLAS_PROVISIONED=1 only)", () => {
   const provisioned = process.env["ATLAS_PROVISIONED"] === "1";
+  // chown to atlas-broker:atlas-broker requires root — skip if not running as root
+  const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
 
-  it.skipIf(!provisioned)(
+  it.skipIf(!provisioned || !isRoot)(
     "atlas-agent is denied update-ref on refs/atlas/* (adversarial)",
     () => {
       const dir = mkdtempSync(join(tmpdir(), "atlas-adopt-oq2-"));
