@@ -117,6 +117,7 @@ A seam audit of **this worktree** found three places where reality differs from 
 - Modify: `packages/sqlite-store/src/index.ts` (re-export the migration)
 - Modify: `apps/cli/src/commands/store-open.ts` (register `0012` in `registerFeatureMigrations` before `store.migrate()`)
 - Create: `apps/cli/src/sync/seed.ts` (seed the `sync_cursors` row at adoption)
+- Create: `provisioning/adopt-vault.sh` (executable bootstrap: broker-create `refs/atlas/main` at an empty-tree baseline, seed the cursor, validate both refs, fail closed)
 - Modify: `provisioning/` docs + `apps/cli/CLAUDE.md` + `packages/sqlite-store/CLAUDE.md` + `docs/install.md`
 - Test: `apps/cli/test/config-canonical-ref.test.ts`, `packages/sqlite-store/test/migrate-0012-sync-cursors.test.ts`, `packages/sqlite-store/test/rebuild-preserves-sync-cursors.test.ts`, `apps/cli/test/sync-seed.test.ts`
 
@@ -351,7 +352,7 @@ export function seedSyncCursor(store: Store, args: SeedSyncCursorArgs): void {
 
 ### Task 1.6 — Provisioning + docs for adoption
 
-- [ ] **Step 1:** Document the adoption procedure in `docs/install.md` (a new "Adopting a live vault" subsection): set `vault.path = /Users/aryeh/Code/Vaults/main-vault`, set `git.canonical_ref = "refs/atlas/main"`, provision `refs/atlas/main` as a broker-owned ref in the main-vault repo (OQ#2 decision: in-repo, not a bare mirror), run `db migrate` then `seedSyncCursor` (wired into the adoption command/provisioning script), and confirm `refs/heads/main` remains untouched.
+- [ ] **Step 1: Write + test the executable bootstrap** — `provisioning/adopt-vault.sh` (`set -euo pipefail`), the one command that adopts a vault. It (a) has the broker create `refs/atlas/main` at a **broker-minted empty-tree baseline commit** — never at `refs/heads/main`, so the canonical protected ref never starts on unscanned upstream bytes; the first `sync` fast-forwards the real notes in through the scan pipeline; (b) runs `db migrate`; (c) calls `seedSyncCursor` to write the zero-state row; (d) validates `refs/atlas/main` resolves, the cursor row exists at zero-state, and `refs/heads/main` is byte-identical to before; and (e) **fails closed** — any incomplete step leaves no half-adopted state (never a ref without a cursor, nor a cursor without a ref). Cover the happy path + a fault-injected partial bootstrap in `provisioning/test/adopt-vault.test.ts`. Then document the exact invocation in `docs/install.md` (a new "Adopting a live vault" subsection): set `vault.path = /Users/aryeh/Code/Vaults/main-vault`, set `git.canonical_ref = "refs/atlas/main"`, run `provisioning/adopt-vault.sh` (OQ#2 decision: in-repo, not a bare mirror), and confirm `refs/heads/main` remains untouched.
 - [ ] **Step 2:** Update `apps/cli/CLAUDE.md` (canonical ref is now config-driven; `sync/` dir introduced), `packages/sqlite-store/CLAUDE.md` (add `sync_cursors` to the authoritative-non-derived table inventory alongside `jobs`), and `packages/broker/CLAUDE.md` (protected canonical ref is config-supplied).
 - [ ] **Step 3:** Run `pnpm -r build && pnpm -r test && pnpm contract:check` — expect green.
 - [ ] **Step 4: Commit** — `docs(adoption): live-vault adoption runbook + CLAUDE.md updates`
@@ -400,16 +401,27 @@ describe("noteFencesForNotes", () => {
     expect(out.map((f) => f.noteId).sort()).toEqual(["n1", "n3"]);
     expect(out.find((f) => f.noteId === "n1")).toMatchObject({ contentHash: "h1", activeGenerationId: "g1" });
   });
+
+  it("scopes the DB scan to the requested ids (O(delta), not O(corpus))", () => {
+    const store = storeWithManyNotes(5000);
+    const spy = spyOnPrepare(store);
+    noteFencesForNotes(store, ["n42"]);
+    expect(spy.lastSql).toMatch(/WHERE note_id IN/); // bounded query, no full-table fence scan
+  });
 });
 ```
 
 - [ ] **Step 2: Run — expect FAIL** (`noteFences` not exported).
-- [ ] **Step 3: Implement** — in `apps/cli/src/commands/index-ops.ts`: change `function noteFences` → `export function noteFences`. Add:
+- [ ] **Step 3: Implement** — in `apps/cli/src/commands/index-ops.ts`: change `function noteFences` → `export function noteFences`, and refactor its body onto a shared `NOTE_FENCE_SELECT` + `fenceRowsToInputs` (its unscoped form omits the `WHERE`). Add a **bounded** scoped helper — never materialize the full corpus:
 
 ```ts
 export function noteFencesForNotes(store: Store, noteIds: NoteId[]): NoteFenceInput[] {
-  const wanted = new Set(noteIds);
-  return noteFences(store).filter((f) => wanted.has(f.noteId as NoteId));
+  const ids = [...new Set(noteIds.map(String))];
+  if (ids.length === 0) return [];
+  const placeholders = ids.map(() => "?").join(",");   // indexed IN, O(delta) not O(corpus)
+  return fenceRowsToInputs(
+    store.db.prepare(`${NOTE_FENCE_SELECT} WHERE note_id IN (${placeholders})`).all(...ids),
+  );
 }
 ```
 
@@ -707,13 +719,14 @@ describe("index:reconcile enqueue", () => {
 - Create: `docs/specs/cli-contract/sync.schema.json`, `docs/specs/cli-contract/sync-status.schema.json`
 - Modify: `docs/specs/security-broker-contract.md` (add the `diverged:*` error codes to the authz `errorCatalog`)
 - Create: `apps/cli/src/sync/cursor.ts` (read/advance/reconcile `sync_cursors`), `apps/cli/src/sync/diff.ts` (name-status diff + commit grouping), `apps/cli/src/sync/cycle.ts` (the engine), `apps/cli/src/sync/pending.ts` (pending-quarantine set reconcile), `apps/cli/src/commands/sync.ts` (handler + status handler)
-- Modify: `packages/git/src/repo.ts` (+`changedPaths(from, to, pathspec)` name-status helper on the agent `Repo`, mirroring `BrokerGit.changedPathsInRange`)
+- Modify: `packages/git/src/repo.ts` (+`changedPaths(from,to,pathspec)` net tree diff, `commitsInRange(from,to,pathspec)` per-commit name-status walk, and `readBlobAt(commitOid,path)` snapshot-bound blob read on the agent `Repo`, mirroring `BrokerGit.changedPathsInRange`)
+- Modify: `apps/cli/src/ingest/capture.ts` (extract a side-effect-free `planCaptureSource`; `captureSource` becomes a wrapper that plans then integrates)
 - Modify: `apps/cli/src/commands/index.ts` barrel (register handlers)
 - Test: `apps/cli/test/sync-cycle.test.ts`, `apps/cli/test/sync-status.test.ts`, `apps/cli/test/sync-divergence.test.ts`, `apps/cli/test/sync-dry-run.test.ts`, `apps/cli/test/sync-max-paths.test.ts`, `apps/cli/test/sync-crash.failpoint.test.ts`
 
 **Interfaces:**
 - Produces: `runSyncCycle(deps, opts): Promise<SyncResult>` and `readSyncStatus(deps): Promise<SyncStatus>` (envelope shapes = the spec's `interfaces` tables, with `divergence` added to status and `behindBy: number | null`).
-- Consumes: Phase 1 (`sync_cursors`, `config.git.canonical_ref`, `config.vault.note_globs`, `protectedRefsFor`), Phase 2 (`foldNotesForPaths`), Phase 3 (`index:reconcile` enqueue), `captureSource` (`capture.ts:359`), `foldProvenanceFromCanonical` (`manifests.ts:265`), broker integrate (`handle.integrate`, `capture.ts:464`), `repo.readRef`/`repo.isAncestor` (`@atlas/git`), the §2.8 finalize transaction.
+- Consumes: Phase 1 (`sync_cursors`, `config.git.canonical_ref`, `config.vault.note_globs`, `protectedRefsFor`), Phase 2 (`foldNotesForPaths`), Phase 3 (`index:reconcile` enqueue), `planCaptureSource` (extracted from `captureSource`, `capture.ts:359`), `foldProvenanceFromCanonical` (`manifests.ts:265`), broker integrate (`handle.integrate`, `capture.ts:464`), `repo.readRef`/`repo.isAncestor` (`@atlas/git`), the §2.8 finalize transaction.
 
 ### Task 4.1 — Contract: rows + fixture + schemas + `contract:write`
 
@@ -795,7 +808,7 @@ it("halts diverged:cursor-unreachable after upstream gc prunes the cursor commit
 ```
 
 - [ ] **Step 2: Run — expect FAIL.**
-- [ ] **Step 3: Implement** — add `changedPaths(from, to, pathspec)` to `packages/git/src/repo.ts` (shell `git diff --name-status <from>..<to> -- <pathspec>` via the internal `runGit`, returning `Array<{ status: "A"|"M"|"D"|"R"; path: string; fromPath?: string }>`). Then `apps/cli/src/sync/diff.ts` `detectDivergence(repo, lastOid, upstreamHead)`:
+- [ ] **Step 3: Implement** — add **two** helpers to `packages/git/src/repo.ts` via the internal `runGit`: `changedPaths(from, to, pathspec)` (net tree-vs-tree name-status, `git diff --name-status <from>..<to> -- <pathspec>`, used only by `sync reset`'s tree diff) **and** `commitsInRange(from, to, pathspec)` (walks `git rev-list --reverse --topo-order <from>..<to>`, then per commit `git diff-tree --name-status --no-commit-id -r <commit> -- <pathspec>`, returning `Array<{ oid: string; changes: Array<{ status: "A"|"M"|"D"|"R"; path: string; fromPath?: string }> }>` oldest→newest). The cycle groups on these real commit OIDs — a net-only `from..to` diff loses commit boundaries, silently drops modify-then-revert, and leaves `--max-paths` no valid continuation cursor, so the per-commit walk is required. Then `apps/cli/src/sync/diff.ts` `detectDivergence(repo, lastOid, upstreamHead)`:
 
 ```ts
 export type Divergence =
@@ -858,9 +871,9 @@ it("identical-content re-observation bumps observation_count, no op, no reconcil
 - [ ] **Step 3: Implement** — `apps/cli/src/sync/cycle.ts` `runSyncCycle(deps, opts)`. Steps mirror the spec's *Sync cycle (happy path)*:
   1. acquire vault + `vault-maintenance` locks; defer if `jobs-runner` held; exit 2 `backup-unhealthy` if degraded.
   2. `readCursor`; `upstreamHead = readRef("refs/heads/main")`; **`detectDivergence` (Task 4.3) — halt on non-`ok`**; else compute `behindBy`; **short-circuit exit 0 if `behindBy==0`** (no run).
-  3. open **one** run; `repo.changedPaths(lastOid ?? EMPTY_TREE, upstreamHead, note_globs)`; group by commit, oldest→newest.
+  3. open **one** run; `repo.commitsInRange(lastOid ?? EMPTY_TREE, upstreamHead, note_globs)` → per-commit name-status, oldest→newest (real commit boundaries, so modify-then-revert nets correctly and `--max-paths` continuation is well-defined).
   4. dispatch per path (Task 4.5 does A/M/D/R detail); accumulate one ChangePlan; identical bytes ⇒ `unchanged`, no op.
-  5. close run: if ChangePlan non-empty → `handle.integrate(...)` (one CAS FF of `refs/atlas/main`), `foldProvenanceFromCanonical(store, repo, config.git.canonical_ref)`, `foldNotesForPaths(store, repo, ref, changedNoteIds)`, checkpoint `reindexed`; **finalize tx (§2.8 step 3):** `finalizeCursor(...)` (advance + `cycle_seq++` + reconcile pending) **and** enqueue the single `index:reconcile` (idempotencyKey = run OID) — atomically. Empty ChangePlan ⇒ no integrate, but still append `run.*` + finalize cursor.
+  5. close run: if ChangePlan non-empty → **first persist a durable finalization intent** (§2.8 step 1: target upstream OID + changed note IDs + reconciled pending set + the `index:reconcile` enqueue), **then** `handle.integrate(...)` (one CAS FF of `refs/atlas/main`), `foldProvenanceFromCanonical(store, repo, config.git.canonical_ref)`, `foldNotesForPaths(store, repo, ref, changedNoteIds)`, checkpoint `reindexed`; **finalize tx (§2.8 step 3):** `finalizeCursor(...)` (advance + `cycle_seq++` + reconcile pending) **and** enqueue the single `index:reconcile` (idempotencyKey = run OID) — atomically, consuming the intent. The intent is what makes recovery correct: after the ref FF a retry sees the bytes already present and classifies them `unchanged` (enqueuing nothing), so fold + enqueue + cursor-advance must be replayed from the persisted intent, never re-derived from the diff. Empty ChangePlan ⇒ no integrate, but still append `run.*` + finalize cursor.
   6. return the success envelope.
 - [ ] **Step 4: Run — expect PASS.**
 - [ ] **Step 5: Commit** — `feat(sync): cycle engine — clean path, single-run invariant, no-delta short-circuit`
@@ -869,8 +882,8 @@ it("identical-content re-observation bumps observation_count, no op, no reconcil
 
 - [ ] **Step 1: Write the failing tests** — `apps/cli/test/sync-cycle.test.ts` (dispatch section): delete→`ProposeArchive` (row `archived`, chunks removed, bytes recoverable from git, NOT `ProposeDelete`/`erase`); rename (same `contentId`, blob reused, no re-embed); modify re-indexes only that note (payload cardinality 1; the other N-1 provably untouched — the O(delta) proof).
 - [ ] **Step 2: Run — expect FAIL.**
-- [ ] **Step 3: Implement** — in `cycle.ts` dispatch:
-  - `A`/`M`: `preflight(path, guard)` (scan raw+normalized before mutating deps), then `captureSource({ path, guard, deps })`-front-half → append create/modify op (identical bytes ⇒ bump `observation_count`, no op); mark any prior pending entry for removal.
+- [ ] **Step 3: Implement** — **first extract a side-effect-free `planCaptureSource` primitive** in `apps/cli/src/ingest/capture.ts`: it accepts **bytes read from an exact `commit:path`** (via a new `repo.readBlobAt(commitOid, path)` — never the working tree, so a concurrent worktree edit can't leak in) plus source metadata, runs exactly the existing normalization + scan preflight, and **returns proposed ops + observation metadata without opening or integrating a run**. Refactor `captureSource` to call `planCaptureSource` then integrate, so both share one pipeline. Then in `cycle.ts` dispatch, over the bytes at the snapshotted commit:
+  - `A`/`M`: `planCaptureSource(repo.readBlobAt(commitOid, path), meta)` (scan raw+normalized) → append create/modify op to the single accumulating ChangePlan (identical bytes ⇒ bump `observation_count`, no op); mark any prior pending entry for removal.
   - `D`: append `ProposeArchive` (`packages/contracts/src/ops/archive.ts`); mark prior pending for removal.
   - `R`: append `ProposeRename` (`packages/contracts/src/ops/rename.ts`); rename-with-edit = delete-old + add-new at path level, dedup at content level; from-path pending cleared, to-path scanned.
 - [ ] **Step 4: Run — expect PASS.**
@@ -894,9 +907,9 @@ it("identical-content re-observation bumps observation_count, no op, no reconcil
 
 ### Task 4.8 — Crash semantics (failpoints)
 
-- [ ] **Step 1: Write the failing tests** — `apps/cli/test/sync-crash.failpoint.test.ts`: crash between broker integrate and cursor finalize → cursor unadvanced, pending unchanged, next cycle re-derives identical delta, no duplicate note/blob (content-addressed no-op FF); crash between audit append and ledger commit in an all-quarantined cycle → cursor unadvanced, no duplicate pending rows; crash after step 3 before step 4 → recovered by existing `reconcileRunsOnStartup` (no sync-specific recovery machinery).
+- [ ] **Step 1: Write the failing tests** — `apps/cli/test/sync-crash.failpoint.test.ts`: crash between broker integrate and cursor finalize → startup recovery **replays the persisted finalization intent** and idempotently completes fold + `index:reconcile` enqueue + cursor advance (the retry cannot re-derive the delta — the bytes are already present and classify `unchanged`); assert the cursor advanced to the intent's target OID, the `index:reconcile` job row is present, the `notes` projection and LanceDB index are current for the changed notes, and there is no duplicate note/blob; crash between audit append and ledger commit in an all-quarantined cycle → cursor unadvanced, no duplicate pending rows; crash after step 3 before step 4 → recovered by existing `reconcileRunsOnStartup`.
 - [ ] **Step 2: Run — expect FAIL.**
-- [ ] **Step 3: Implement** — insert failpoints at the two boundaries; ensure the finalize (cursor advance + pending reconcile + enqueue) is one transaction so a crash leaves an all-or-nothing state. Register the new failpoints in `docs/specs/recovery-state-machine.md`'s `stateTable` and regen `failpoints.generated.md`.
+- [ ] **Step 3: Implement** — insert failpoints at the two boundaries; ensure the finalize (cursor advance + pending reconcile + enqueue) is one transaction so a crash leaves an all-or-nothing state. **Extend `reconcileRunsOnStartup` to replay the sync finalization intent** (Task 4.4): for a run whose `refs/atlas/main` FF committed but whose cursor never advanced, idempotently finish `foldNotesForPaths` + `index:reconcile` enqueue + `finalizeCursor` from the intent's target OID + changed note IDs (never re-deriving from the now-`unchanged` diff). Register the new failpoints in `docs/specs/recovery-state-machine.md`'s `stateTable` and regen `failpoints.generated.md`.
 - [ ] **Step 4: Run — expect PASS** (`pnpm failpoints:check` green).
 - [ ] **Step 5: Commit** — `test(sync): crash-recovery failpoints (both directions), no duplicate/lost state`
 
@@ -940,7 +953,7 @@ it("identical-content re-observation bumps observation_count, no op, no reconcil
 
 ### Task 5.1 — Contract row + schema + authz mapping
 
-- [ ] **Step 1:** Insert `{ "name": "sync reset", "schemaRef": ".../sync-reset.schema.json", "phase": 5, "idempotency": "key-accepting", "privilege": "privileged", "implemented": false }` (name-sorted) in `commands.json`; add the fixture line `` `sync reset` — privileged: re-converge refs/atlas/main to upstream after a divergence halt. ``. Create `sync-reset.schema.json` with success envelope (`{ command, reBaselinedTo, archived[], captured[], reconcileJobId, cycleSeq }`) + `x-atlas-contract` (`privilege:"privileged"`, `idempotency:"key-accepting"`, `authz{op:"sync reset", mechanism, challengeFields, driftCodes, universalCodes}`, `exitCodes:[0,2,6]`, `errorCodes`).
+- [ ] **Step 1:** Insert `{ "name": "sync reset", "schemaRef": ".../sync-reset.schema.json", "phase": 5, "idempotency": "key-accepting", "privilege": "privileged", "implemented": false }` (name-sorted) in `commands.json`; add the fixture line `` `sync reset` — privileged: re-converge refs/atlas/main to upstream after a divergence halt. ``. Create `sync-reset.schema.json` with success envelope (`{ command, reBaselinedTo, archived[], captured[], reconcileJobId, cycleSeq }`, `reconcileJobId: string | null` — `null` on a history-only/empty reset) + `x-atlas-contract` (`privilege:"privileged"`, `idempotency:"key-accepting"`, `authz{op:"sync reset", mechanism, challengeFields, driftCodes, universalCodes}`, `exitCodes:[0,2,6]`, `errorCodes`).
 - [ ] **Step 2:** Add `sync reset` to `security-broker-contract.md`'s `privilegedOps` (the bijection `contract-lint` enforces at `tools/cli-contract.ts:586-604`) with challenge fields (request-hash scope = upstream head OID + note globs) and drift codes.
 - [ ] **Step 3:** `pnpm contract:write && pnpm contract:check` — expect green (`implemented:false`).
 - [ ] **Step 4: Commit** — `feat(contract): sync reset privileged command row + authz mapping (implemented:false)`
@@ -955,10 +968,11 @@ it("identical-content re-observation bumps observation_count, no op, no reconcil
 
 ### Task 5.3 — Tree-diff reconcile + re-baseline + audit
 
-- [ ] **Step 1: Write the failing tests** — `apps/cli/test/sync-reset.test.ts` (the §0 `sync reset` re-converge test): after a `diverged:non-ancestral` halt, an authorized `sync reset` makes `refs/atlas/main`'s tree equal the current upstream tree over the note globs; notes present only in the old `refs/atlas/main` become `archived` and their chunks drop; cursor re-baselined to head; `divergence.state` returns `ok`; a broker-signed `run.*` audit event records the reset; the following `sync` is a `behindBy==0` no-op. Also assert scan-before-persist still applies (a secret in the current upstream tree is quarantined during reset, not absorbed).
+- [ ] **Step 1: Write the failing tests** — `apps/cli/test/sync-reset.test.ts` (the §0 `sync reset` re-converge test): after a `diverged:non-ancestral` halt, an authorized `sync reset` makes `refs/atlas/main`'s tree equal the current upstream tree over the note globs; notes present only in the old `refs/atlas/main` become `archived` and their chunks drop; cursor re-baselined to head; `divergence.state` returns `ok`; a broker-signed `run.*` audit event records the reset; the following `sync` is a `behindBy==0` no-op. Also assert scan-before-persist still applies (a secret in the current upstream tree is quarantined during reset, not absorbed). Also cover **history-only divergence**: a force-push that rewrites history but leaves an **identical final tree** — `sync reset` re-baselines the cursor, integrates nothing, enqueues **no** reconcile job (`reconcileJobId: null`), returns `divergence.state: ok`, and does **not** throw on the empty note-ID union.
 - [ ] **Step 2: Run — expect FAIL.**
 - [ ] **Step 3: Implement** — `apps/cli/src/sync/reset.ts` `runSyncReset(deps, { authorization })`:
   - compute `repo.changedPaths(atlasTree, upstreamHeadTree, note_globs)` where `atlasTree = refs/atlas/main^{tree}`, `upstreamHeadTree = refs/heads/main^{tree}` (tree-vs-tree, not history);
+  - **empty-diff (history-only divergence — rewritten history, identical final tree):** if the diff is empty, the trees already match — **skip integration and the reconcile job entirely** (do **not** enqueue `index:reconcile`; Tasks 2.3/3.1 reject an empty `noteIds`), still authorize + audit the accepted history gap, re-baseline the cursor to head, and return `reconcileJobId: null`. This is a common force-push case and must not throw;
   - map: paths only in `refs/atlas/main` → `ProposeArchive`; paths in upstream → `captureSource` (A/M, content-addressed, scan-before-persist);
   - one broker integrate (authorized protected-ref advance) of `refs/atlas/main` to the reconciled tree; `foldProvenanceFromCanonical` + full `foldNotesForPaths` over the union; enqueue a **full** `index rebuild`/`index:reconcile` over the union so retrieval re-converges;
   - `finalizeCursor` re-baseline: `last_absorbed_oid = upstreamHead`, `cycle_seq++`, reconcile pending against the fresh scan;
@@ -981,6 +995,8 @@ it("identical-content re-observation bumps observation_count, no op, no reconcil
 ## Phase 6 — 60-B: launchd sync service, auto-hook closure, egress-key custody, acceptance gates
 
 **Deployable slice:** the ingest→index auto-hook is closed. `com.atlas.sync.plist` runs the two-step wrapper on a 300 s timer under `atlas-agent`, with fail-closed Keychain custody of `ATLAS_EGRESS_CAPABILITY_KEY`. The E2E acceptance gates (`index eval`, D20) pass on the adopted corpus.
+
+**Upstream-fetch prerequisite.** `brain sync` reads the **local** `refs/heads/main`; `atlas-agent` is network-denied (D17), so the wrapper cannot fetch. Advancing local `refs/heads/main` from the GitHub remote is the job of the **existing brain-hub sync** (the network-capable puller already mirroring main-vault) — it updates **only** `refs/heads/main` (never `refs/atlas/main`), and its successful pull is a **provisioning prerequisite** of enabling `com.atlas.sync.plist`. A direct GitHub push is observed only after that puller lands it locally; the timer's cadence is deliberately downstream. Task 6.3's install gate asserts the puller is provisioned before enabling the timer.
 
 **Files:**
 - Create: `provisioning/macos/com.atlas.sync.plist`, `provisioning/macos/atlas-sync-wrapper.sh`
@@ -1010,7 +1026,7 @@ it("identical-content re-observation bumps observation_count, no op, no reconcil
 
 - [ ] **Step 1: Write the failing test** — `provisioning/test/sync-plist.test.ts`: `com.atlas.sync.plist` has `StartInterval` 300, runs the wrapper, runs as `atlas-agent`, references **no** secret in `EnvironmentVariables`.
 - [ ] **Step 2: Run — expect FAIL.**
-- [ ] **Step 3: Implement** — `provisioning/macos/com.atlas.sync.plist` (`StartInterval` 300, `ProgramArguments` → wrapper, `UserName` atlas-agent, stdout/stderr logs per the existing daemon pattern). Install script: **the service stays disabled until the keychain-unlock prerequisite is provisioned** (OQ#1 gate) — never enabled in a state that fail-closes every cycle. Interactive-session posture only in this phase (headless/logged-out unlock deferred per OQ#1(b)).
+- [ ] **Step 3: Implement** — `provisioning/macos/com.atlas.sync.plist` (`StartInterval` 300, `ProgramArguments` → wrapper, `UserName` atlas-agent, stdout/stderr logs per the existing daemon pattern). Install script: **the service stays disabled until both the keychain-unlock prerequisite (OQ#1 gate) and the brain-hub upstream puller (upstream-fetch prerequisite) are provisioned** — never enabled in a state that fail-closes every cycle or silently ignores remote pushes. Interactive-session posture only in this phase (headless/logged-out unlock deferred per OQ#1(b)).
 - [ ] **Step 4: Run — expect PASS.**
 - [ ] **Step 5: Commit** — `feat(provisioning): com.atlas.sync.plist launchd service (gated on keychain-unlock)`
 
