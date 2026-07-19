@@ -496,6 +496,7 @@ describe("Phase-2 cli-contract schema presence (Task 2.0)", () => {
         "jobs list",
         "jobs retry",
         "jobs run",
+        "note add",
         "note history",
         "note related",
         "note show",

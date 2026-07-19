@@ -163,12 +163,14 @@ const METHOD_PARAM_SCHEMAS: Record<BrokerMethod, z.ZodTypeAny> = {
     expectedBase: z.string().min(1),
     manifest: RunManifestSchema,
     auditEvent: WireSignedAuditEventSchema,
+    scope: z.enum(["sources", "note"]).optional(),
   }),
   signAndIntegrateSourceCapture: z.object({
     captureCommit: z.string().min(1),
     expectedBase: z.string().min(1),
     manifest: RunManifestSchema,
     event: UnsignedAuditEventSchema,
+    scope: z.enum(["sources", "note"]).optional(),
   }),
   signAndAdvanceProtectedRef: z.object({
     ref: z.string().min(1),

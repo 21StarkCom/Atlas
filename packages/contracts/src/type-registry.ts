@@ -17,7 +17,7 @@ export interface TypeDef {
 /** The single supported/emitted schema version. Reader + migrator both import this. */
 export const SCHEMA_VERSION = 1 as const;
 
-export const STRICT_TYPES = ["project", "repo", "tool", "cloud", "person", "team", "conversation", "meeting", "memory", "concept", "source"] as const;
+export const STRICT_TYPES = ["project", "repo", "tool", "cloud", "person", "team", "conversation", "meeting", "memory", "history", "concept", "source"] as const;
 export const LOOSE_TYPES = ["research", "personal", "note"] as const;
 
 /** Required base frontmatter for a STRICT type (vault schema §"Strict note types"). */

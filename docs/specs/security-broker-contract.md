@@ -117,6 +117,20 @@ Applied by provisioning (D1); asserted by `brain doctor` / `brain git verify`.
   It *can* write objects (harmless: unreferenced) and `refs/agent/*` (its own proposals); only the
   broker advances canonical/`refs/audit`/`refs/trust`.
 
+### 3.3 Tier-1 capture scope (`integrateSourceCapture`)
+
+Tier-1 captures are the one non-signature path that advances canonical (fast-forward CAS only; see
+`workflow-risk-contract.md` for the tier semantics). Safety comes from a **broker-enforced path
+scope** checked over the **whole `base..capture` range** — every commit the capture adds, not just
+the tip — so a multi-commit capture cannot smuggle a forbidden path through an earlier commit while
+the tip stays clean. The capture RPC's optional `scope` field selects the scope (default
+`"sources"`); any violation refuses `broker.capture_scope_violation` and canonical does not move.
+
+| Scope | Allowed changes |
+|-------|-----------------|
+| `"sources"` (default) | any path under `sources/**` + capture manifests (`manifest.json`/`.yaml`/`.yml`) — adds AND updates (recaptures rewrite the observation manifest in place) |
+| `"note"` (#262 — authored-note ingest) | **additions only** (git status `A`) of `*.md` paths outside `sources/` — **status-checked** over the same whole range, so an authored-note capture can never modify, delete, or rename existing content |
+
 ---
 
 ## 4. Per-key ACL matrix

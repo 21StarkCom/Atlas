@@ -26,6 +26,7 @@ import "./graduation-migrate.js";
 import "./quarantine-inspect.js";
 import "./quarantine-resolve.js";
 import "./note.js";
+import "./note-add.js";
 import "./git-status.js";
 import "./git-cleanup.js";
 import "./git-verify.js";

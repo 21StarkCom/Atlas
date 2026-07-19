@@ -75,6 +75,8 @@ export interface SourceCaptureRequest {
   readonly expectedBase: string;
   readonly manifest: RunManifest;
   readonly auditEvent: SignedAuditEvent;
+  /** The broker-enforced path scope (default `"sources"`). See {@link CaptureScope}. */
+  readonly scope?: CaptureScope;
 }
 
 /**
@@ -90,6 +92,8 @@ export interface SignAndSourceCaptureRequest {
   readonly expectedBase: string;
   readonly manifest: RunManifest;
   readonly event: Omit<AuditEvent, "prevAuditHead">;
+  /** The broker-enforced path scope (default `"sources"`). See {@link CaptureScope}. */
+  readonly scope?: CaptureScope;
 }
 
 /**
@@ -134,6 +138,26 @@ export interface RefAdvanceResult {
 export function isCaptureAllowedPath(p: string): boolean {
   if (p.startsWith("sources/")) return true;
   return /(^|\/)manifest\.(json|ya?ml)$/.test(p);
+}
+
+/**
+ * The broker-enforced scope of a Tier-1 capture commit (#262):
+ * - `"sources"` (default): the original source-capture scope — any path under
+ *   `sources/**` + capture manifests, adds AND updates (recaptures rewrite the
+ *   observation manifest in place).
+ * - `"note"`: authored-note ingest — ADDITIONS ONLY of `*.md` files OUTSIDE
+ *   `sources/`. No modify/delete/rename of anything, anywhere, over the whole
+ *   `base..commit` range, so an authored-note commit can never clobber existing
+ *   wiki content or masquerade as a source capture.
+ */
+export type CaptureScope = "sources" | "note";
+
+/**
+ * True iff `p` may be ADDED by a `"note"`-scoped capture: a markdown file
+ * outside `sources/` (the source-capture namespace stays capture-only).
+ */
+export function isNoteAddAllowedPath(p: string): boolean {
+  return p.endsWith(".md") && !p.startsWith("sources/");
 }
 
 /**
@@ -297,19 +321,39 @@ export class ProtectedRefWriter {
     }
 
     // Scope: EVERY commit added by the capture (the whole expectedBase..capture
-    // range, not just the tip vs its parent) may touch ONLY sources/** + manifest
-    // paths — a multi-commit capture cannot smuggle a forbidden path through an
-    // earlier commit while the tip stays clean.
-    const changed =
-      current === null
-        ? await this.git.changedPaths(captureSha)
-        : await this.git.changedPathsInRange(currentOrZero, captureSha);
-    const offending = changed.filter((p) => !isCaptureAllowedPath(p));
-    if (offending.length > 0) {
-      throw new BrokerRefusal(
-        "broker.capture_scope_violation",
-        `source capture touches paths outside sources/** + manifest: ${offending.join(", ")}`,
-      );
+    // range, not just the tip vs its parent) is checked — a multi-commit capture
+    // cannot smuggle a forbidden path/status through an earlier commit while the
+    // tip stays clean. `"sources"` (default) = sources/** + manifest paths, adds
+    // and updates. `"note"` (#262 authored-note ingest) = ADDITIONS ONLY of
+    // `*.md` outside sources/ — status-checked so an authored-note commit can
+    // never modify, delete, or rename existing content.
+    const scope: CaptureScope = req.scope ?? "sources";
+    if (scope === "note") {
+      const entries =
+        current === null
+          ? await this.git.changedPathStatuses(captureSha)
+          : await this.git.changedPathStatusesInRange(currentOrZero, captureSha);
+      const offending = entries.filter((e) => e.status !== "A" || !isNoteAddAllowedPath(e.path));
+      if (offending.length > 0) {
+        throw new BrokerRefusal(
+          "broker.capture_scope_violation",
+          `note add must only ADD *.md files outside sources/: ${offending
+            .map((e) => `${e.status} ${e.path}`)
+            .join(", ")}`,
+        );
+      }
+    } else {
+      const changed =
+        current === null
+          ? await this.git.changedPaths(captureSha)
+          : await this.git.changedPathsInRange(currentOrZero, captureSha);
+      const offending = changed.filter((p) => !isCaptureAllowedPath(p));
+      if (offending.length > 0) {
+        throw new BrokerRefusal(
+          "broker.capture_scope_violation",
+          `source capture touches paths outside sources/** + manifest: ${offending.join(", ")}`,
+        );
+      }
     }
 
     // Fast-forward only.

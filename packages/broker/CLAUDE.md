@@ -50,9 +50,11 @@ Normative SSOT: [`docs/specs/security-broker-contract.md`](../../docs/specs/secu
 - `nonce.ts` — `NonceStore`: 128-bit hex, op-bound, `DEFAULT_NONCE_TTL_SECONDS = 300`. In-memory
   only (out of Phase-1 scope, fail-closed on restart). `validate()` split from `consume()` so a bad
   request never burns a live challenge.
-- `refs.ts` — `ProtectedRefWriter` + `isCaptureAllowedPath`: FF-only CAS, Tier-1 capture scope over
-  the WHOLE `base..capture` range (`changedPathsInRange`), `bindAuditEventToOperation`. Refuses
-  `advanceProtectedRef` on the audit ref (dedicated append path only).
+- `refs.ts` — `ProtectedRefWriter` + `isCaptureAllowedPath`/`isNoteAddAllowedPath` (`CaptureScope =
+  "sources" | "note"`): FF-only CAS, Tier-1 capture scope over the WHOLE `base..capture` range
+  (`changedPathsInRange`; `"note"` = additions-only `*.md` outside `sources/` via
+  `changedPathStatusesInRange`), `bindAuditEventToOperation`. Refuses `advanceProtectedRef` on the
+  audit ref (dedicated append path only).
 - `audit-append.ts` — `AuditLog`: append to `refs/audit/runs` as commits whose message is the
   on-wire signed envelope. Signed-only, gapless seq, chained heads, content-keyed idempotency on
   `(runId,seq)`, full-chain re-verify at `init()`, WORM anchor every append. `CANONICAL_INSTALLING_KINDS
@@ -131,7 +133,7 @@ audit `refs/audit/runs`, trust `refs/trust/ledger`. Exit codes `0..6`; `egress.s
 8. **Nonce single-use, TTL-bounded, consumed LAST**; cross-op reuse ⇒ `authz.nonce_unknown`.
 9. **Canonical-bound LEDGER ops re-derive the base from broker state** — a caller can't smuggle an
    all-zero base past the drift gate.
-10. **Capture scope:** a Tier-1 capture touches ONLY `sources/**` + `manifest.*`, over the WHOLE `base..capture` range.
+10. **Capture scope:** a Tier-1 capture touches ONLY `sources/**` + `manifest.*`, over the WHOLE `base..capture` range; the `"note"` scope (#262, selected by the capture RPC's optional `scope` field) instead requires additions-only (`A`) `*.md` outside `sources/`, status-checked over the same range.
 11. **D20 test-signer gate:** `atlas-test-approver` is hard-rejected unless `ATLAS_TEST_MODE=1`
     (`test/broker.rejects-test-signer-in-prod.test.ts`); the launcher never sets it.
 12. **Egress scans the EXACT bytes:** request = exact serialized HTTP body; error/retry bodies raw;

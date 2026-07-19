@@ -1,10 +1,44 @@
 {
-  "source": "main-vault/00_System/Vault Schema.md (snapshot 2026-07-17)",
-  "strictTypes": ["project", "repo", "tool", "cloud", "person", "team", "meeting", "conversation", "memory"],
-  "looseTypes": ["research", "personal"],
-  "v1CompatStrict": ["concept", "source"],
-  "v1CompatLoose": ["note"],
-  "statuses": ["active", "draft", "needs-review", "stale", "archived", "deprecated"],
-  "classifications": ["public", "personal", "internal"],
-  "confidenceLevels": ["low", "medium", "high"]
+  "source": "main-vault/00_System/Vault Schema.md (snapshot 2026-07-19 \u2014 history added, 2nd-brain#4)",
+  "strictTypes": [
+    "project",
+    "repo",
+    "tool",
+    "cloud",
+    "person",
+    "team",
+    "meeting",
+    "conversation",
+    "memory",
+    "history"
+  ],
+  "looseTypes": [
+    "research",
+    "personal"
+  ],
+  "v1CompatStrict": [
+    "concept",
+    "source"
+  ],
+  "v1CompatLoose": [
+    "note"
+  ],
+  "statuses": [
+    "active",
+    "draft",
+    "needs-review",
+    "stale",
+    "archived",
+    "deprecated"
+  ],
+  "classifications": [
+    "public",
+    "personal",
+    "internal"
+  ],
+  "confidenceLevels": [
+    "low",
+    "medium",
+    "high"
+  ]
 }

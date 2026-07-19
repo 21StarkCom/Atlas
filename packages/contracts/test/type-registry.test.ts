@@ -8,12 +8,12 @@ import {
 const TAXO = JSON.parse(readFileSync(new URL("./fixtures/vault-taxonomy.json", import.meta.url), "utf8"));
 
 describe("type-registry — exact membership", () => {
-  it("registers EXACTLY the 14 expected names (11 vault + 3 V1 compat)", () => {
+  it("registers EXACTLY the 15 expected names (12 vault + 3 V1 compat)", () => {
     expect([...STRICT_TYPES].sort()).toEqual(
       [...TAXO.strictTypes, ...TAXO.v1CompatStrict].sort());
     expect([...LOOSE_TYPES].sort()).toEqual(
       [...TAXO.looseTypes, ...TAXO.v1CompatLoose].sort());
-    expect(new Set([...STRICT_TYPES, ...LOOSE_TYPES]).size).toBe(14);
+    expect(new Set([...STRICT_TYPES, ...LOOSE_TYPES]).size).toBe(15);
   });
   it("V1 compat: concept/source are STRICT, note is LOOSE, all three registered", () => {
     expect(resolveType("concept").tier).toBe("strict");

@@ -19,6 +19,29 @@ const execFileAsync = promisify(execFile);
 /** The all-zeros object id: as a CAS old-value it means "the ref must not exist". */
 export const ZERO_OID = "0".repeat(40);
 
+/**
+ * Parse `git … --name-status` output into `{ status, path }` entries. Lines are
+ * `X\tpath` (or `Xnn\told\tnew` for renames/copies, whose score suffix is
+ * stripped and whose BOTH paths are reported under `X` — an add-only policy must
+ * see the rename source, not just its destination).
+ */
+function parseNameStatus(out: string): { status: string; path: string }[] {
+  if (out.length === 0) return [];
+  const entries: { status: string; path: string }[] = [];
+  for (const line of out.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    const parts = trimmed.split("\t");
+    const rawStatus = parts[0];
+    if (rawStatus === undefined || parts.length < 2) continue;
+    const status = rawStatus.charAt(0);
+    for (const p of parts.slice(1)) {
+      if (p.length > 0) entries.push({ status, path: p });
+    }
+  }
+  return entries;
+}
+
 /** Raised when a broker `git` subprocess exits non-zero. */
 export class BrokerGitError extends Error {
   constructor(
@@ -90,6 +113,52 @@ export class BrokerGit {
       commit,
     ]);
     return out.length === 0 ? [] : out.split("\n").map((l) => l.trim()).filter(Boolean);
+  }
+
+  /**
+   * The per-path change STATUSES for `commit` relative to its first parent (root
+   * commit ⇒ every path as `A`). Statuses are git's one-letter codes (`A` add,
+   * `M` modify, `D` delete, `R`/`C` rename/copy — score suffix stripped); rename
+   * and copy lines carry two paths and BOTH are reported under the same status,
+   * so an add-only policy rejects the whole rename rather than missing its
+   * source. Used by the note-add capture scope (additions-only).
+   */
+  async changedPathStatuses(commit: string): Promise<{ status: string; path: string }[]> {
+    const out = await runGit(this.dir, [
+      "diff-tree",
+      "--no-commit-id",
+      "--name-status",
+      "-r",
+      "--root",
+      commit,
+    ]);
+    return parseNameStatus(out);
+  }
+
+  /**
+   * The UNION of per-path change statuses across EVERY commit in `base..commit`
+   * (each vs its first parent, `-m` for merges) — the name-status analogue of
+   * {@link changedPathsInRange}, so a modify/delete introduced by an earlier
+   * commit of a multi-commit range is caught even if the tip only adds.
+   */
+  async changedPathStatusesInRange(base: string, commit: string): Promise<{ status: string; path: string }[]> {
+    const out = await runGit(this.dir, [
+      "log",
+      "--name-status",
+      "--format=",
+      "-m",
+      `${base}..${commit}`,
+    ]);
+    const seen = new Set<string>();
+    const entries: { status: string; path: string }[] = [];
+    for (const e of parseNameStatus(out)) {
+      const key = `${e.status} ${e.path}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        entries.push(e);
+      }
+    }
+    return entries;
   }
 
   /**
