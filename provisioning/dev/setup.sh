@@ -35,8 +35,12 @@ ensure_dir "$ATLAS_KEYS_DIR/agent"        "$ATLAS_AGENT_USER" "$ATLAS_AGENT_USER
 # broker keys
 gen_ed25519 "$ATLAS_KEYS_DIR/atlas-broker/audit-attestation" "atlas-broker" "atlas-broker"
 run "chmod 0600 '$ATLAS_KEYS_DIR/atlas-broker/audit-attestation.key'"
-# audit-attestation public is also agent-readable by design → publish a group-readable copy
-ensure_dir "$ATLAS_KEYS_DIR/shared" "atlas-broker" "$ATLAS_GROUP" 0750
+# audit-attestation public is also agent-readable by design → publish a group-readable copy.
+# The shared dir is owned by atlas-egress: it must traverse it to reach the cross-identity
+# artifacts (3b) it reads as OWNER — egress is deliberately NOT in atlas-git (D18), so
+# any other owner locks it out entirely (observed live 2026-07-19: egress crash-looped
+# EACCES on egress-capability.key behind an atlas-broker-owned 0750 dir).
+ensure_dir "$ATLAS_KEYS_DIR/shared" "atlas-egress" "$ATLAS_GROUP" 0750
 run "cp -f '$ATLAS_KEYS_DIR/atlas-broker/audit-attestation.pub' '$ATLAS_KEYS_DIR/shared/audit-attestation.pub'"
 run "chown atlas-broker:$ATLAS_GROUP '$ATLAS_KEYS_DIR/shared/audit-attestation.pub'"
 run "chmod 0644 '$ATLAS_KEYS_DIR/shared/audit-attestation.pub'"
@@ -66,30 +70,37 @@ run "chmod 0600 '$ATLAS_KEYS_DIR/atlas-egress/atlas.gemini.key'"
 #     D18 (no vault/object read) still holds. Egress reaches these as OWNER, the CLI as GROUP.
 #
 #     capability MAC secret: CLI MINTS (group read), egress VERIFIES (owner read).
-run "touch '$ATLAS_KEYS_DIR/shared/egress-capability.key'"
-run "chown atlas-egress:$ATLAS_GROUP '$ATLAS_KEYS_DIR/shared/egress-capability.key'"
-run "chmod 0640 '$ATLAS_KEYS_DIR/shared/egress-capability.key'"
-#     quarantine recipient PUBLIC key: egress seals refused payloads to the CLI (public ⇒ 0644).
-run "touch '$ATLAS_KEYS_DIR/shared/quarantine-recipient.pub'"
-run "chown $ATLAS_AGENT_USER:$ATLAS_GROUP '$ATLAS_KEYS_DIR/shared/quarantine-recipient.pub'"
-run "chmod 0644 '$ATLAS_KEYS_DIR/shared/quarantine-recipient.pub'"
+#     Deliberately NOT touch'd as empty placeholders (live 2026-07-19: the daemon
+#     treats an EMPTY capability key as present — skipping its own 0640 bootstrap —
+#     and an empty recipient pub fails startup with a cryptic asymmetric-key error;
+#     a MISSING file gives a clear ENOENT instead). The daemon bootstraps the
+#     capability secret itself; the operator installs the CLI's real quarantine
+#     public key per docs/install.md.
 #     egress state dir: budget file (egress-WRITABLE — the old default sat in a root-owned dir)
 #     and the sealed-quarantine spool the CLI drains (2770 setgid so drained files keep the group).
 ensure_dir "$ATLAS_EGRESS_STATE" "atlas-egress" "$ATLAS_GROUP" 2770
 ensure_dir "$ATLAS_EGRESS_STATE/quarantine-spool" "atlas-egress" "$ATLAS_GROUP" 2770
-run "touch '$ATLAS_EGRESS_STATE/budget-state.json'"
-run "chown atlas-egress:$ATLAS_GROUP '$ATLAS_EGRESS_STATE/budget-state.json'"
-run "chmod 0660 '$ATLAS_EGRESS_STATE/budget-state.json'"
+# Do NOT pre-create budget-state.json: the daemon treats a MISSING file as a fresh
+# start but an EMPTY file as corruption (fail-closed, refusing a silent allowance
+# reset) — a touch'd placeholder bricks startup (observed live 2026-07-19).
 
 # 4) WORM audit anchor (D8): broker-owned 0600, parent 0700, OUTSIDE vault+repo
-ensure_dir "$(dirname "$ATLAS_ANCHOR")" "atlas-broker" "atlas-broker" 0700
+# The anchor's parent is SHARED state (it also holds the egress state dir on both
+# OSes) — it must stay root-owned and world-traversable or egress is locked out of
+# its own subdir (observed live 2026-07-19: EACCES mkdir quarantine-spool behind an
+# atlas-broker-owned 0700 parent). WORM protection rides on the anchor FILE's
+# 0600 + the root-only-writable dir entry, not on hiding the parent.
+ensure_dir "$(dirname "$ATLAS_ANCHOR")" "root" "$ATLAS_ROOT_GROUP" 0755
 run "touch '$ATLAS_ANCHOR'"
 run "chown atlas-broker:atlas-broker '$ATLAS_ANCHOR'"
 run "chmod 0600 '$ATLAS_ANCHOR'"
 
-# 5) socket run dir (setgid atlas-git so egress/broker sockets inherit the group
-#    without atlas-egress being a group member — D18 preserved)
-ensure_dir "$ATLAS_RUN_DIR" "root" "$ATLAS_GROUP" 2770
+# 5) socket run dir (setgid atlas-git so sockets inherit the group). Owner is
+#    atlas-egress: it must CREATE egress.sock here but is deliberately not in
+#    atlas-git (D18), so with a root-owned 2770 dir it could not bind at all
+#    (observed live 2026-07-19). Egress writes as OWNER; the broker (an atlas-git
+#    member) and the CLI reach it via the group — D18 preserved.
+ensure_dir "$ATLAS_RUN_DIR" "atlas-egress" "$ATLAS_GROUP" 2770
 
 # 6) install dir for the hash-verified privileged binaries (D16), root-owned
 ensure_dir "$ATLAS_INSTALL_BIN" "root" "$ATLAS_ROOT_GROUP" 0755
