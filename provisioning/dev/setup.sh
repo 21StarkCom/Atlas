@@ -81,9 +81,9 @@ run "chmod 0644 '$ATLAS_KEYS_DIR/shared/quarantine-recipient.pub'"
 #     and the sealed-quarantine spool the CLI drains (2770 setgid so drained files keep the group).
 ensure_dir "$ATLAS_EGRESS_STATE" "atlas-egress" "$ATLAS_GROUP" 2770
 ensure_dir "$ATLAS_EGRESS_STATE/quarantine-spool" "atlas-egress" "$ATLAS_GROUP" 2770
-run "touch '$ATLAS_EGRESS_STATE/budget-state.json'"
-run "chown atlas-egress:$ATLAS_GROUP '$ATLAS_EGRESS_STATE/budget-state.json'"
-run "chmod 0660 '$ATLAS_EGRESS_STATE/budget-state.json'"
+# Do NOT pre-create budget-state.json: the daemon treats a MISSING file as a fresh
+# start but an EMPTY file as corruption (fail-closed, refusing a silent allowance
+# reset) — a touch'd placeholder bricks startup (observed live 2026-07-19).
 
 # 4) WORM audit anchor (D8): broker-owned 0600, parent 0700, OUTSIDE vault+repo
 # The anchor's parent is SHARED state (it also holds the egress state dir on both
@@ -96,9 +96,12 @@ run "touch '$ATLAS_ANCHOR'"
 run "chown atlas-broker:atlas-broker '$ATLAS_ANCHOR'"
 run "chmod 0600 '$ATLAS_ANCHOR'"
 
-# 5) socket run dir (setgid atlas-git so egress/broker sockets inherit the group
-#    without atlas-egress being a group member — D18 preserved)
-ensure_dir "$ATLAS_RUN_DIR" "root" "$ATLAS_GROUP" 2770
+# 5) socket run dir (setgid atlas-git so sockets inherit the group). Owner is
+#    atlas-egress: it must CREATE egress.sock here but is deliberately not in
+#    atlas-git (D18), so with a root-owned 2770 dir it could not bind at all
+#    (observed live 2026-07-19). Egress writes as OWNER; the broker (an atlas-git
+#    member) and the CLI reach it via the group — D18 preserved.
+ensure_dir "$ATLAS_RUN_DIR" "atlas-egress" "$ATLAS_GROUP" 2770
 
 # 6) install dir for the hash-verified privileged binaries (D16), root-owned
 ensure_dir "$ATLAS_INSTALL_BIN" "root" "$ATLAS_ROOT_GROUP" 0755
