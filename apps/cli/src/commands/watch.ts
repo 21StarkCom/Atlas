@@ -16,20 +16,15 @@
  * `x-atlas-contract.prohibitedEffects`.
  */
 import { BrokerClient } from "@atlas/broker";
-import { CliError, EXIT, emitJson } from "../errors/envelope.js";
+import { CliError, EXIT, emitLineAwaitable, StdoutClosedError } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { ledgerDbPath } from "./backup-config.js";
 import { attachLedger, emitHello, flushPendingDaemonFaults } from "../watch/attach.js";
 import { runPollLoop } from "../watch/poll-loop.js";
 import { runDetachedLoop } from "../watch/detached-loop.js";
-import {
-  diffSources,
-  emitPostReplayHeartbeat,
-  emitWatchError,
-  heartbeatTick,
-  reattach,
-  runReplay,
-} from "../watch/stubs.js";
+import { diffSources } from "../watch/diff.js";
+import { emitWatchError, heartbeatTick } from "../watch/heartbeat.js";
+import { emitPostReplayHeartbeat, reattach, runReplay } from "../watch/stubs.js";
 import type { AttachContext, AttachedLedger, EmitLine, WatchOpts } from "../watch/types.js";
 
 /** Flag defaults + bounds (§5). */
@@ -231,11 +226,9 @@ async function watch(ctx: RunContext): Promise<number> {
     brokerSocket: ctx.config.config.broker.socket_path,
     egressSocket: ctx.config.config.broker.egress_socket_path,
   };
-  // Phase 3 emits through `emitJson` (the allowlisted NDJSON writer); Phase 4
-  // swaps in the blocking `emitLineAwaitable` writer for real backpressure.
-  const emit: EmitLine = async (line) => {
-    emitJson(line);
-  };
+  // The BLOCKING NDJSON writer (Phase 4 Task 4): per-line flush, honors `drain`
+  // under backpressure — nothing is dropped or reordered for a slow consumer.
+  const emit: EmitLine = (line) => emitLineAwaitable(line);
 
   // A single persistent shutdown latch, installed once — a signal arriving between
   // loop handles is remembered and honored at the next await boundary (§10.1;
@@ -250,6 +243,11 @@ async function watch(ctx: RunContext): Promise<number> {
 
   try {
     return await runWatch(path, opts, attachCtx, emit, shutdown);
+  } catch (e) {
+    // The consumer closed the pipe (a `head -1`-style reader): detaching a watcher
+    // is success — exit 0 quietly, never SIGPIPE/141 (§10.1).
+    if (e instanceof StdoutClosedError) return EXIT.OK;
+    throw e;
   } finally {
     process.removeListener("SIGINT", onSignal);
     process.removeListener("SIGTERM", onSignal);

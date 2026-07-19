@@ -197,6 +197,65 @@ export function emitJson(
 }
 
 /**
+ * Escape C0 AND C1 control characters (incl. U+009B CSI) in a string as JSON
+ * `\uXXXX` sequences. `JSON.stringify` alone escapes C0 but passes C1 RAW — a
+ * terminal-injection surface on any consumer that prints stream free-text
+ * (`watch.error.message`, `job.lastError`). Applied to the SERIALIZED line by
+ * {@link emitLineAwaitable}, where it can only land inside string literals.
+ */
+export function escapeControls(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/[\u0000-\u001f\u007f-\u009f]/g, (c) => `\\u${c.codePointAt(0)!.toString(16).padStart(4, "0")}`);
+}
+
+/** Thrown by {@link emitLineAwaitable} when the consumer closed the pipe (EPIPE-class) — the stream maps it to a clean exit 0 (§10.1), never SIGPIPE/141. */
+export class StdoutClosedError extends Error {
+  constructor(cause: unknown) {
+    super("stdout closed by the consumer (EPIPE)");
+    this.cause = cause;
+  }
+}
+
+/** Error codes that mean "the reader went away" — detach is success, not failure. */
+const PIPE_CLOSED_CODES = new Set(["EPIPE", "ERR_STREAM_DESTROYED", "ERR_STREAM_WRITE_AFTER_END"]);
+
+/**
+ * The BLOCKING NDJSON line writer for long-lived streams (`watch`): serialize,
+ * escape C0+C1 in the serialized form (stringify already escaped C0 inside
+ * strings; the C1 pass here covers what it passes raw), `\n`-terminate, and
+ * AWAIT completion — resolving on the write callback and, when `write()` returns
+ * `false`, only after `'drain'` — so a slow consumer backpressures the producer
+ * and nothing is ever dropped or reordered. An EPIPE-class failure rejects with
+ * {@link StdoutClosedError} (the caller exits 0). The one-shot {@link emitJson}
+ * (which ignores backpressure) stays intact for one-shot commands.
+ */
+export function emitLineAwaitable(obj: unknown, stream: NodeJS.WriteStream = process.stdout): Promise<void> {
+  const line = `${escapeControls(JSON.stringify(obj))}\n`;
+  return new Promise<void>((resolve, reject) => {
+    const fail = (e: unknown): void => {
+      const code = (e as NodeJS.ErrnoException)?.code ?? "";
+      reject(PIPE_CLOSED_CODES.has(code) ? new StdoutClosedError(e) : (e as Error));
+    };
+    let needsDrain = false;
+    try {
+      needsDrain = !stream.write(line, (err) => {
+        if (err) {
+          fail(err);
+          return;
+        }
+        if (!needsDrain) resolve();
+      });
+    } catch (e) {
+      fail(e);
+      return;
+    }
+    if (needsDrain) {
+      stream.once("drain", () => resolve());
+    }
+  });
+}
+
+/**
  * Emit `e`'s envelope to stdout and terminate the process with its exit code.
  * The `never` return reflects that this is a terminal operation; `runCli` uses
  * {@link writeErrorEnvelope} instead so it can return a code for tests.
