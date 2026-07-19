@@ -58,4 +58,4 @@ Registry version: **1** · Commands: **51**
 | 5 | `index eval` | none | shared | yes | `docs/specs/cli-contract/index-eval.schema.json` |
 | 5 | `quarantine inspect` | none | privileged | yes | `docs/specs/cli-contract/quarantine-inspect.schema.json` |
 | 5 | `quarantine resolve` | key-accepting | privileged | yes | `docs/specs/cli-contract/quarantine-resolve.schema.json` |
-| 6 | `watch` | none | shared | no | `docs/specs/cli-contract/watch.schema.json` |
+| 6 | `watch` | none | shared | yes | `docs/specs/cli-contract/watch.schema.json` |
