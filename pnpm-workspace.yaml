@@ -24,6 +24,8 @@ catalog:
   "@lancedb/lancedb": ^0.31.0
   apache-arrow: 18.1.0
   better-sqlite3: ^12.2.0
+  # Bundles the privileged daemon bins into single-file artifacts (tools/build-artifact.sh).
+  esbuild: ^0.25.0
   # EXACT pin (no range): parse5 composes into `extractorVersion` (packages/sources), so a
   # later 8.x resolution must never change HTML extraction without a conscious version bump.
   # Kept in sync with normalize/pins.ts PARSE5_VERSION; the conformance test asserts the

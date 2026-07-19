@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Integration broker daemon (D13): sole protected-ref mutator + audit signer.
+     Installed by provisioning/macos/services.sh. To point the broker at a specific
+     vault clone, add ATLAS_VAULT_REPO_DIR to EnvironmentVariables and re-install. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.atlas.broker</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@ATLAS_INSTALL_BIN@/broker-launcher.sh</string>
+  </array>
+  <key>UserName</key><string>atlas-broker</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>5</integer>
+  <key>StandardOutPath</key><string>/usr/local/var/log/atlas/broker.log</string>
+  <key>StandardErrorPath</key><string>/usr/local/var/log/atlas/broker.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- The bundled binary's shebang is `/usr/bin/env node`; launchd's default PATH
+         has no Homebrew, so node must be reachable here. -->
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>

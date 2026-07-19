@@ -78,6 +78,8 @@ describe("provisioning scripts exist + are executable", () => {
     "provisioning/install-artifact.sh",
     "provisioning/bin/broker-launcher.sh",
     "provisioning/bin/egress-launcher.sh",
+    "provisioning/macos/services.sh",
+    "tools/build-artifact.sh",
     "provisioning/linux/netns.sh",
     "provisioning/linux/agent-cgroup.sh",
   ];

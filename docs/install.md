@@ -84,11 +84,23 @@ Read directly from the script (`provisioning/dev/setup.sh`, 8 numbered steps):
 The broker/egress daemons are **never** run privileged from the agent-writable repo `dist/` (D16). Build, then install hash-verified copies into the root-owned install dir:
 
 ```bash
-sudo provisioning/install-artifact.sh <artifact-dir>
-# <artifact-dir> holds the built atlas-broker + atlas-egress (+ optional .sha256 manifests).
+tools/build-artifact.sh                          # bundles both bins + sha256 manifests into dist-artifact/
+sudo provisioning/install-artifact.sh dist-artifact
 # Installs them + the two launchers into /usr/local/lib/atlas/bin (macOS) or /opt/atlas/bin (Linux),
 # recording <bin>.installed.sha256 for the planned provisioning.integrity suite (named in script comments; not yet implemented).
 ```
+
+### Run the daemons as services (macOS)
+
+Install both daemons as launchd system services — `RunAtLoad` + `KeepAlive` (restart on crash, start at boot), per-identity `UserName`, logs under `/usr/local/var/log/atlas/`:
+
+```bash
+sudo provisioning/macos/services.sh install      # copy plists to /Library/LaunchDaemons, bootstrap, start
+provisioning/macos/services.sh status            # per-daemon loaded/pid
+sudo provisioning/macos/services.sh uninstall    # bootout + remove
+```
+
+The broker's vault path defaults to `/var/lib/atlas/vault` (`ATLAS_VAULT_REPO_DIR` in the launcher) — to point at a different clone, add `ATLAS_VAULT_REPO_DIR` to `EnvironmentVariables` in `provisioning/macos/com.atlas.broker.plist` and re-run `install`. For a one-off foreground run (no service), the launchers still work directly: `sudo -u atlas-broker /usr/local/lib/atlas/bin/broker-launcher.sh`. Linux service units (systemd) are not provided yet.
 
 Finally, write the real Gemini key into the egress-only credential (replacing the placeholder) and export the marker:
 
