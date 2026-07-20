@@ -141,7 +141,7 @@ export function isCaptureAllowedPath(p: string): boolean {
 }
 
 /**
- * The broker-enforced scope of a Tier-1 capture commit (#262):
+ * The broker-enforced scope of a Tier-1 capture commit (#262, #266):
  * - `"sources"` (default): the original source-capture scope — any path under
  *   `sources/**` + capture manifests, adds AND updates (recaptures rewrite the
  *   observation manifest in place).
@@ -149,8 +149,15 @@ export function isCaptureAllowedPath(p: string): boolean {
  *   `sources/`. No modify/delete/rename of anything, anywhere, over the whole
  *   `base..commit` range, so an authored-note commit can never clobber existing
  *   wiki content or masquerade as a source capture.
+ * - `"sync"`: the continuous-vault-sync absorb commit (#60/#266) — a broker-
+ *   signed Tier-1 integrate mirroring upstream vault edits onto canonical. May
+ *   ADD, MODIFY, DELETE, or RENAME/COPY `*.md` files OUTSIDE `sources/` (git
+ *   statuses `A`/`M`/`D`/`R*`/`C*`; BOTH sides of a rename/copy are path-
+ *   validated), checked over the whole `base..commit` range. Any OTHER status
+ *   (`T` typechange, `U`, `X`, `B`, or unrecognized) fails closed — a change
+ *   this gate does not understand is a change it refuses.
  */
-export type CaptureScope = "sources" | "note";
+export type CaptureScope = "sources" | "note" | "sync";
 
 /**
  * True iff `p` may be ADDED by a `"note"`-scoped capture: a markdown file
@@ -175,6 +182,31 @@ export function isNoteAddAllowedPath(p: string): boolean {
   if (segments[0]!.toLowerCase() === "sources") return false; // capture-only namespace
   return true;
 }
+
+/**
+ * True iff `p` may be TOUCHED (added, modified, deleted, or either side of a
+ * rename/copy) by a `"sync"`-scoped absorb commit: a markdown file outside
+ * `sources/`, with no `.git` component and no traversal/absolute/empty segment
+ * — TODAY exactly {@link isNoteAddAllowedPath}'s checks, delegated rather than
+ * aliased so the sync contract reads by name and can diverge without touching
+ * the note-add gate. Unlike `"note"` the sync scope permits mutation of
+ * existing notes (that is its purpose: mirroring upstream vault edits), so this
+ * predicate is applied to EVERY reported path of EVERY allowed-status entry
+ * over the whole `base..commit` range — a rename INTO or OUT OF `sources/`
+ * fails on whichever side lands there.
+ */
+export function isSyncAllowedPath(p: string): boolean {
+  return isNoteAddAllowedPath(p);
+}
+
+/**
+ * The git name-status letters a `"sync"` absorb may carry (score suffixes like
+ * `R100` are already stripped by the `-z` parser, which reports BOTH paths of
+ * an `R`/`C` record under the letter). Everything else — `T` (typechange, e.g.
+ * a note replaced by a symlink), `U`, `X`, `B`, or an unrecognized future
+ * letter — is refused fail-closed by the gate below.
+ */
+const SYNC_ALLOWED_STATUSES: ReadonlySet<string> = new Set(["A", "M", "D", "R", "C"]);
 
 /**
  * The protected-ref mutator. Holds the git handle, the protected-ref set, the
@@ -342,7 +374,9 @@ export class ProtectedRefWriter {
     // tip stays clean. `"sources"` (default) = sources/** + manifest paths, adds
     // and updates. `"note"` (#262 authored-note ingest) = ADDITIONS ONLY of
     // `*.md` outside sources/ — status-checked so an authored-note commit can
-    // never modify, delete, or rename existing content.
+    // never modify, delete, or rename existing content. `"sync"` (#60/#266
+    // continuous-vault-sync absorb) = A/M/D/R/C of `*.md` outside sources/,
+    // status-checked over the same range, fail-closed on any other status.
     const scope: CaptureScope = req.scope ?? "sources";
     if (scope === "note") {
       // Inspect EVERY commit in the new history (whole reachable set when
@@ -367,6 +401,39 @@ export class ProtectedRefWriter {
         throw new BrokerRefusal(
           "broker.capture_scope_violation",
           `note add must only ADD *.md files outside sources/: ${offending
+            .map((e) => `${e.status} ${e.path}`)
+            .join(", ")}`,
+        );
+      }
+    } else if (scope === "sync") {
+      // Same whole-range `-z` name-status inspection as `"note"` (every commit,
+      // `-m` for merges), but the ALLOWED verdict differs: a sync absorb mirrors
+      // upstream vault edits, so adds, modifications, deletions, and renames/
+      // copies of `*.md` outside sources/ are all legitimate. The parser reports
+      // BOTH paths of an R/C record under the (score-stripped) letter, so a
+      // rename into OR out of sources/ is caught on whichever side lands there;
+      // any status outside {A,M,D,R,C} — including `T`, a note swapped for a
+      // symlink — fails closed as a change this gate does not understand.
+      const entries =
+        current === null
+          ? await this.git.changedPathStatusesFromRoot(captureSha)
+          : await this.git.changedPathStatusesInRange(currentOrZero, captureSha);
+      // Fail closed on an empty change set: an absorb that mirrors nothing has
+      // no business advancing canonical, and an empty set is also the shape a
+      // silently-misparsed diff would take.
+      if (entries.length === 0) {
+        throw new BrokerRefusal(
+          "broker.capture_scope_violation",
+          "sync absorb changed no paths (or the change set could not be read) — refusing",
+        );
+      }
+      const offending = entries.filter(
+        (e) => !SYNC_ALLOWED_STATUSES.has(e.status) || !isSyncAllowedPath(e.path),
+      );
+      if (offending.length > 0) {
+        throw new BrokerRefusal(
+          "broker.capture_scope_violation",
+          `sync absorb may only ADD/MODIFY/DELETE/RENAME *.md files outside sources/: ${offending
             .map((e) => `${e.status} ${e.path}`)
             .join(", ")}`,
         );
