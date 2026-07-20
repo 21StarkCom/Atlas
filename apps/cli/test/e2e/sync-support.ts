@@ -17,7 +17,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { BrokerClient, BrokerService, generateEd25519, startBrokerServer } from "@atlas/broker";
+import { BrokerClient, BrokerService, generateEd25519, signBytes, startBrokerServer } from "@atlas/broker";
 import { openRepo, type Repo } from "@atlas/git";
 import { bindEnqueueContext } from "@atlas/jobs";
 import { registerJobsMigration } from "@atlas/jobs";
@@ -67,6 +67,8 @@ export interface SyncHarness {
   readonly quarantines: { origin: string; quarantineId: string }[];
   /** Mutable failpoints threaded into deps() (Task 4.8). */
   failpoints: NonNullable<SyncCycleDeps["failpoints"]> | undefined;
+  /** The broker socket the CLI seams + reset command connect to. */
+  readonly socketPath: string;
   git(args: string[]): string;
   /** Write + stage a file on the upstream working tree. */
   writeUpstream(path: string, content: string): void;
@@ -76,6 +78,8 @@ export interface SyncHarness {
   commitUpstream(msg: string): string;
   /** The cycle deps against this harness (fresh integration per call, shared store). */
   deps(overrides?: Partial<SyncCycleDeps>): SyncCycleDeps;
+  /** Sign a `sync reset` challenge (JSON string) with the enrolled approver → AuthorizationResponse object. */
+  signReset(challengeJson: string): { schemaVersion: 1; challenge: unknown; signature: string; signerId: string };
   readRef(ref: string): string | null;
   cursorRow(): {
     last_absorbed_oid: string | null;
@@ -136,6 +140,12 @@ export async function makeSyncHarness(opts: SyncHarnessOptions = {}): Promise<Sy
   git(["update-ref", SYNC_CANONICAL_REF, baseline]);
 
   const attKp = generateEd25519();
+  // A per-test approver enrolled + permitted for `sync reset` (Phase 5): the
+  // reset tests sign a challenge with approverKp.privateKey, exactly as
+  // graduation.e2e signs migrate authorizations (a locally-generated approver,
+  // not the D20 atlas-test-approver, so testMode is not load-bearing here).
+  const approverKp = generateEd25519();
+  const approverId = "atlas-sync-reset-approver";
   const service = new BrokerService({
     repoDir: vaultDir,
     refs: { canonical: SYNC_CANONICAL_REF, audit: AUDIT_REF, trust: TRUST_REF },
@@ -145,6 +155,13 @@ export async function makeSyncHarness(opts: SyncHarnessOptions = {}): Promise<Sy
         signerId: "atlas-audit-attestation-v1",
         publicKey: attKp.publicKeyString,
         permittedOps: [],
+        status: "active",
+        enrolledAt: "2026-07-01T00:00:00.000Z",
+      },
+      {
+        signerId: approverId,
+        publicKey: approverKp.publicKeyString,
+        permittedOps: ["sync reset"],
         status: "active",
         enrolledAt: "2026-07-01T00:00:00.000Z",
       },
@@ -207,6 +224,12 @@ export async function makeSyncHarness(opts: SyncHarnessOptions = {}): Promise<Sy
     repo,
     quarantines,
     failpoints: undefined,
+    socketPath,
+    signReset(challengeJson: string) {
+      const challenge = JSON.parse(challengeJson) as { signingPayload: string };
+      const signature = signBytes(new TextEncoder().encode(challenge.signingPayload), approverKp.privateKey);
+      return { schemaVersion: 1 as const, challenge, signature, signerId: approverId };
+    },
     git,
     writeUpstream(path: string, content: string): void {
       mkdirSync(join(vaultDir, dirname(path)), { recursive: true });

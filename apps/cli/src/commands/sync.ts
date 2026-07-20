@@ -69,8 +69,8 @@ function parseSyncArgs(argv: readonly string[]): SyncArgs {
   return { dryRun, maxPaths };
 }
 
-/** Real-cycle scanners: quarantine-before-throw with the captured item id. */
-function realScanners(ctx: RunContext): Pick<SyncCycleDeps, "scanNoteBytes" | "scanGeneratedArtifact"> {
+/** Real-cycle scanners: quarantine-before-throw with the captured item id. Shared with `sync reset`. */
+export function realScanners(ctx: RunContext): Pick<SyncCycleDeps, "scanNoteBytes" | "scanGeneratedArtifact"> {
   const qstore = quarantineStoreFromContext(ctx);
   let lastQuarantineId = "";
   // The store's own async sink discards the item id; sync needs it for the

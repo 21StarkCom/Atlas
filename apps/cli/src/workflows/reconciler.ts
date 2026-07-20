@@ -279,7 +279,7 @@ async function recoverRun(
   // this sweep; we simply LEAVE the promoted run for `recoverSyncRuns` to finalize
   // from its durable intent. (#289 review: CRITICAL — generic recovery finalizes
   // stuck sync runs.)
-  if (row.operation === "sync") {
+  if (row.operation === "sync" || row.operation === "sync-reset") {
     return { runId: row.run_id, from: row.status, action: "left", reason: "sync-producer-owned" };
   }
   switch (row.status) {
