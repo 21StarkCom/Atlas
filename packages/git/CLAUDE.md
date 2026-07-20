@@ -17,14 +17,14 @@ Specs: `docs/specs/security-broker-contract.md` (the privilege boundary), `docs/
 
 | File | Role |
 |------|------|
-| `src/exec.ts` | `runGit(cwd, args, {input?})` — the ONE funnel for every git call; `execFile` (argv array, never a shell string) ⇒ no shell-injection surface. Exports `GitError` (`args`, `cwd`, `exitCode`, `stderr`). `maxBuffer` 64 MiB. **`runGit` is package-internal, never re-exported.** |
+| `src/exec.ts` | `runGit(cwd, args, {input?})` — the ONE funnel for every git call; `execFile` (argv array, never a shell string) ⇒ no shell-injection surface. Exports `GitError` (`args`, `cwd`, `exitCode`, `stderr`). `maxBuffer` 64 MiB. `runGitBuffer(cwd, args)` — the byte-exact variant (no trim, no utf8 decode) blob reads require. **Both are package-internal, never re-exported.** |
 | `src/refs.ts` | **The security boundary.** Ref naming + the guarded write functions. `AGENT_REF_PREFIX`, `AGENT_REF_RE`, `isAgentRef`, `assertAgentRef`, `agentRef`, `readRef` (read-only, any ref), `updateAgentRef`, `deleteAgentRef`, `attachHeadToAgentRef`. |
-| `src/repo.ts` | `openRepo(dir) → Repo` (pure — `resolve`s dir only, does not touch the FS). Composes refs + worktree ops: `readRef`, `createAgentBranch`, `addWorktree`, `removeWorktree`, `listWorktrees`, `commitTree`, `isAncestor`. `WorktreeEntry` type. |
+| `src/repo.ts` | `openRepo(dir) → Repo` (pure — `resolve`s dir only, does not touch the FS). Composes refs + worktree ops: `readRef`, `createAgentBranch`, `addWorktree`, `removeWorktree`, `listWorktrees`, `commitTree`, `isAncestor`, plus the read-only sync-cycle helpers `readBlobAt` (byte-exact blob at `<commit>:<path>`, null-only-unresolved), `commitsInRange` (first-parent walk, every commit boundary returned, merge = first-parent diff) and `changedPaths` (net tree diff) — both with fail-closed name-status normalization (`R<n>`→`R`+`fromPath`, `C<n>`→`A`, `T`→`M`, anything else throws). Types: `WorktreeEntry`, `ChangeStatus`, `PathChange`, `CommitChanges`. |
 | `src/worktree.ts` | `Worktree` bound to an agent ref. `commit(msg, manifest)` (stage-all + manifest trailer, advances the ref), `readManifest(rev?)`. |
 | `src/commit.ts` | Run-manifest trailer codec. `RUN_MANIFEST_TRAILER = "Atlas-Run-Manifest"`, `encodeManifestTrailer`, `buildCommitMessage`, `parseManifestTrailer`. Manifest → `canonicalSerialize` → base64 → one byte-stable trailer line. |
 | `src/index.ts` | Public surface. Deliberately does NOT export `runGit` (locked by the public-surface test; the reasoning is inline at `index.ts:29-33`). |
 
-Tests (24 across 3 files): `test/git.plumbing.test.ts` (Task 1.5 round-trip), `test/git.no-protected-write.test.ts` (the invariant, three ways — exports a pure `auditSources()` fed synthetic mutations), `test/git.adversarial.test.ts` (failure propagation, rollback-on-attach-failure, trailer-injection resistance).
+Tests (53 across 4 files): `test/git.plumbing.test.ts` (Task 1.5 round-trip), `test/git.no-protected-write.test.ts` (the invariant, three ways — exports a pure `auditSources()` fed synthetic mutations), `test/git.adversarial.test.ts` (failure propagation, rollback-on-attach-failure, trailer-injection resistance), `test/git.sync-helpers.test.ts` (byte-exact blob reads, first-parent walk semantics, net diffs, NUL-safe paths, `runGitBuffer` unexported).
 
 ## Invariants & guardrails — do not weaken
 
