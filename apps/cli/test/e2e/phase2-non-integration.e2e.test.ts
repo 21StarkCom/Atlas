@@ -341,7 +341,9 @@ describeIfSandbox("phase2.non-integration: Phase 2 cannot mutate the vault via m
     assertSinksUnchanged(before, snapshotSinks(h));
   });
 
-  it("MUTATION PROOF (per-sink teeth): EVERY snapshot category detects a targeted mutation", async () => {
+  // 60_000: seeds a real broker capture before mutating every sink category — routinely
+  // exceeds vitest's 5 s default on a loaded machine (same budget as the file's peers).
+  it("MUTATION PROOF (per-sink teeth): EVERY snapshot category detects a targeted mutation", { timeout: 60_000 }, async () => {
     // Seed audit + anchor (a capture writes both) so those sinks are non-trivial.
     await captureViaBroker(h, join(REPO_ROOT, "fixtures/inputs/sample.md"));
 
