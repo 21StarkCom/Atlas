@@ -18,7 +18,7 @@ import {
   type PendingEntry,
 } from "../src/sync/cursor.js";
 import { reconcilePending } from "../src/sync/pending.js";
-import { runSyncCycle, computeBlocked, readSingleCursor } from "../src/sync/cycle.js";
+import { runSyncCycle, computeBlocked, readSingleCursor, recoverSyncRuns, readSyncIntent } from "../src/sync/cycle.js";
 import { buildSyncPlan, SyncBlockedError } from "../src/sync/plan.js";
 import { reconcileRunsOnStartup } from "../src/workflows/index.js";
 import { dryScanners } from "../src/commands/sync.js";
@@ -580,11 +580,12 @@ describe("runSyncCycle — the absorb engine (Tasks 4.4–4.7, 4.10)", () => {
       }
       expect(h.cursorRow()).toEqual(cursorBefore);
     }
-    // status-side diagnosis — the SAME derivation the planner runs.
+    // status-side diagnosis — the SAME derivation the planner runs (real canonical base).
     const blocked = await computeBlocked(
       { repo: h.repo, noteGlobs: ["**/*.md"] },
       readSingleCursor(h.store),
       h.readRef(h.upstreamRef)!,
+      h.readRef(SYNC_CANONICAL_REF)!,
     );
     expect(blocked).toEqual({ commitOid: badCommit, reason: expect.stringContaining("aws-access-key-id") });
   }, 60_000);
@@ -824,6 +825,40 @@ describe("sync recovery ownership (#289 CRITICAL — generic recovery must not f
     expect(res.envelope.cursorTo).toBe(head);
     expect(h.cursorRow().last_absorbed_oid).toBe(head);
     expect((h.store.db.prepare(`SELECT status FROM notes WHERE note_id='concept-z'`).get() as { status: string }).status).toBe("active");
+  }, 60_000);
+
+  it("W6: a pre-integrate run that HOLDS a run.integrated intent (append/CAS split) is LEFT, never force-failed (#289 round-2)", async () => {
+    // The append-success/canonical-CAS-failure window: the broker anchored
+    // run.integrated but canonical never moved, so the run stays agent-committed
+    // with a durable run.integrated intent. Force-failing it would append
+    // run.failed atop the anchored run.integrated (WORM trail contradiction).
+    // recoverSyncRuns must LEAVE such a run for operator resolution.
+    h = await makeSyncHarness();
+    await runSyncCycle(h.deps());
+    h.writeUpstream("notes/w6.md", noteText("concept-w6", "W6"));
+    h.commitUpstream("w6");
+    // Crash post-integrate to obtain a real anchored run.integrated intent...
+    h.failpoints = { afterIntegrate: () => { throw new Error("crash"); } };
+    await expect(runSyncCycle(h.deps())).rejects.toThrow("crash");
+    h.failpoints = undefined;
+    const run = h.runRows().filter((r) => r.operation === "sync" && r.status === "integrated").at(-1)!.run_id;
+    // ...then DEMOTE only the run row to agent-committed (the intent + its anchored
+    // audit event stay intact) — the W6 durable shape.
+    h.store.db.prepare(`UPDATE agent_runs SET status='agent-committed' WHERE run_id=?`).run(run);
+    expect(readSyncIntent(h.store, run)).not.toBeNull(); // the intent is present
+
+    const integration = await h.deps().connectIntegration();
+    let report;
+    try {
+      report = await recoverSyncRuns(h.deps(), integration);
+    } finally {
+      integration.close();
+    }
+    // LEFT — not failed, not finalized. No run.failed appended atop run.integrated.
+    expect(h.runRows().find((r) => r.run_id === run)!.status).toBe("agent-committed");
+    expect(report.failed).toBe(0);
+    const failedEvents = h.store.db.prepare(`SELECT COUNT(*) c FROM audit_events WHERE run_id=? AND event_type='run.failed'`).get(run) as { c: number };
+    expect(failedEvents.c).toBe(0);
   }, 60_000);
 });
 

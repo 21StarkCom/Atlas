@@ -208,6 +208,7 @@ export async function readSyncStatus(
   store: Store,
   repo: Repo,
   noteGlobs: readonly string[],
+  canonicalRef: string,
 ): Promise<SyncStatusEnvelope> {
   const row = readSingleCursor(store);
   const upstreamHead = await repo.readRef(row.upstreamRef);
@@ -222,8 +223,11 @@ export async function readSyncStatus(
   const divergence = await detectDivergence(repo, row.lastAbsorbedOid, upstreamHead);
   const ok = divergence.state === "ok";
   const behindBy = ok ? await countBehind(repo, row.lastAbsorbedOid, upstreamHead) : null;
+  // The archived-id block derivation needs the REAL canonical base (#289 round-2)
+  // so status and the live cycle agree; a missing canonical ref means no block.
+  const canonicalBase = ok && behindBy !== null && behindBy > 0 ? await repo.readRef(canonicalRef) : null;
   const blocked =
-    ok && behindBy !== null && behindBy > 0 ? await computeBlocked({ repo, noteGlobs }, row, upstreamHead) : null;
+    canonicalBase !== null ? await computeBlocked({ repo, noteGlobs }, row, upstreamHead, canonicalBase) : null;
   return {
     command: "sync status",
     sourceId: row.sourceId,
@@ -248,7 +252,7 @@ async function syncStatusHandler(ctx: RunContext): Promise<number> {
   const store = openMigratedStore(ctx);
   try {
     const repo = openRepo(resolvePath(ctx, ctx.config.config.vault.path));
-    const env = await readSyncStatus(store, repo, ctx.config.config.vault.note_globs);
+    const env = await readSyncStatus(store, repo, ctx.config.config.vault.note_globs, ctx.config.config.git.canonical_ref);
     if (ctx.output.mode === "json") {
       emitJson(env);
     } else {

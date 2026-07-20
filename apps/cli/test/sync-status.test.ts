@@ -12,6 +12,7 @@ import {
   makeSyncHarness,
   noteText,
   PLANTED_SECRET,
+  SYNC_CANONICAL_REF,
   type SyncHarness,
 } from "./e2e/sync-support.js";
 
@@ -23,7 +24,7 @@ describe("readSyncStatus", () => {
 
   it("zero-state: null cursor, cycleSeq 0, empty pending, seed timestamp, full behindBy, divergence ok", async () => {
     h = await makeSyncHarness();
-    const env = await readSyncStatus(h.store, h.repo, ["**/*.md"]);
+    const env = await readSyncStatus(h.store, h.repo, ["**/*.md"], SYNC_CANONICAL_REF);
     expect(env).toEqual({
       command: "sync status",
       sourceId: "main-vault",
@@ -46,7 +47,7 @@ describe("readSyncStatus", () => {
     const head = h.commitUpstream("dirty");
     await runSyncCycle(h.deps());
 
-    const env = await readSyncStatus(h.store, h.repo, ["**/*.md"]);
+    const env = await readSyncStatus(h.store, h.repo, ["**/*.md"], SYNC_CANONICAL_REF);
     expect(env.lastAbsorbedOid).toBe(head);
     expect(env.behindBy).toBe(0);
     expect(env.cycleSeq).toBe(2);
@@ -68,7 +69,7 @@ describe("readSyncStatus", () => {
     h.writeUpstream("notes/x.md", noteText("concept-x", "X", "rewritten"));
     h.commitUpstream("rewrite");
 
-    const env = await readSyncStatus(h.store, h.repo, ["**/*.md"]);
+    const env = await readSyncStatus(h.store, h.repo, ["**/*.md"], SYNC_CANONICAL_REF);
     expect(env.behindBy).toBeNull();
     expect(env.divergence).toEqual({
       state: "non-ancestral",
@@ -83,7 +84,7 @@ describe("readSyncStatus", () => {
     h.writeUpstream(`notes/${PLANTED_SECRET}.md`, noteText("concept-leak", "Leak"));
     const bad = h.commitUpstream("leaky filename");
 
-    const env = await readSyncStatus(h.store, h.repo, ["**/*.md"]);
+    const env = await readSyncStatus(h.store, h.repo, ["**/*.md"], SYNC_CANONICAL_REF);
     expect(env.blocked).toEqual({ commitOid: bad, reason: expect.stringContaining("aws-access-key-id") });
     expect(env.behindBy).toBe(1); // ancestry intact — a block is NOT a divergence
   }, 60_000);

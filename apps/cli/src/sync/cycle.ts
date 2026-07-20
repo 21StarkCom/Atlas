@@ -16,9 +16,11 @@
  * - **A durable finalization intent rides the `run.integrated` event detail**
  *   (persisted in `audit_intents.event_json` at §2.8 step 1, BEFORE the ref
  *   move). A crash between integrate and finalize is replayed from that intent
- *   (`replayPendingSyncFinalize`) — never re-derived from the upstream diff,
- *   which post-integrate would classify every byte `unchanged` and strand the
- *   fold/enqueue/cursor forever.
+ *   by `recoverSyncRuns` — never re-derived from the upstream diff, which
+ *   post-integrate would classify every byte `unchanged` and strand the
+ *   fold/enqueue/cursor forever. `recoverSyncRuns` is the SOLE recovery path
+ *   for sync runs (the generic reconciler leaves them); it also fails
+ *   pre-integrate zombies so the next cycle re-derives cleanly.
  *
  * The all-quarantined / all-unchanged cycle is a successfully FINALIZED run
  * with an empty ChangePlan: no integrate, no canonical move — `planned →
@@ -593,8 +595,21 @@ export async function recoverSyncRuns(deps: SyncCycleDeps, integration: CaptureI
       replayed++;
       continue;
     }
-    // Pre-integrate: canonical did NOT advance. Fail the run at its checkpoint so
-    // it converges; the cursor is untouched, so the next cycle re-derives it.
+    // Pre-integrate. Two sub-cases (#289 round-2, W6):
+    //   (a) A durable run.integrated intent EXISTS but the run is still
+    //       pre-integrate — the append/canonical-CAS split window: the broker
+    //       anchored run.integrated at seq N, then its canonical CAS failed (or
+    //       the process died before it). Layer-0 preserves that intent as
+    //       action-required and does NOT promote the run. Force-failing here
+    //       would append run.failed atop the already-anchored run.integrated,
+    //       corrupting the WORM trail. LEAVE it for operator resolution (the
+    //       #65 residual class) — exactly the pre-fix behavior.
+    //   (b) NO intent (clean crash before §2.8 step 1): canonical never moved
+    //       and nothing was anchored. Fail the run so it converges; the cursor
+    //       is untouched, so the next cycle re-derives the identical delta.
+    if (readSyncIntent(deps.store, runRow.run_id) !== null) {
+      continue; // (a) anchored-intent — leave for operator / sync reset
+    }
     const handle = await startRun(wdeps, { operation: "sync", runId: runRow.run_id, targetNoteId: null, resume: true });
     const at = handle.hydrateFromDurable();
     if (at === null || !canTerminateFrom(at)) {
@@ -624,19 +639,29 @@ async function cleanupWorktree(repo: Repo, dir: string): Promise<void> {
  * the planner's generated-artifact guard refused. Nothing persists — verdicts
  * only; a parse/vault halt is NOT the exit-3 block (sync itself reports it),
  * so `SyncPlanError` yields null.
+ *
+ * `canonicalBase` MUST be the real pre-cycle canonical OID (`git.canonical_ref`),
+ * NOT `upstreamHead` (#289 round-2): the archived-note-id scan runs during
+ * end-state derivation, which compares the overlay against `canonicalBase`. A
+ * throwaway base mis-derives the archive set (a note present on canonical but
+ * deleted at head resolves to null against `upstreamHead`), so the archive
+ * scan would be skipped here while the real cycle halts exit 3 on it — the two
+ * consumers would disagree. Threading the real base restores the single
+ * derivation.
  */
 export async function computeBlocked(
   deps: Pick<SyncCycleDeps, "repo" | "noteGlobs">,
   row: SyncCursor,
   upstreamHead: string,
+  canonicalBase: string,
 ): Promise<{ commitOid: string; reason: string } | null> {
   const commits = await deps.repo.commitsInRange(row.lastAbsorbedOid, upstreamHead, noteGlobPathspec(deps.noteGlobs));
   if (commits.length === 0) return null;
   const dry: SyncPlanDeps = {
     repo: deps.repo,
-    // Only the walk matters for the block derivation; the end-state output is
-    // discarded, so any resolvable commit works as the comparison base.
-    canonicalBase: upstreamHead,
+    // The real pre-cycle canonical base, so the end-state archive derivation
+    // (and its archived-id scan) matches the live cycle exactly.
+    canonicalBase,
     noteGlobs: deps.noteGlobs,
     pendingBefore: [],
     scanNoteBytes: async (bytes, origin) => {
