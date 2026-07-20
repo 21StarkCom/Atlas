@@ -11,7 +11,7 @@ import {
   CommitHash,
   Rfc3339Ms,
   Ed25519Sig,
-  Ed25519PubKey,
+  PublicKeyString,
   SchemaVersion1,
 } from "./primitives.js";
 
@@ -120,10 +120,23 @@ export type AuditIdMapEntry = z.infer<typeof AuditIdMapEntrySchema>;
 // §9.2 signer registry entry
 // ---------------------------------------------------------------------------
 
-/** A signer-registry entry (contract §9.2). */
+/**
+ * A signer-registry entry (contract §9.2, SP-3-widened per ADR-0002).
+ *
+ * - `alg` — the signature algorithm this signer's key uses; **absent ⇒
+ *   `"ed25519"`**, so every pre-SP-3 `signers.json` and key-file-derived entry
+ *   parses and verifies byte-identically.
+ * - `presence` — an enrollment-time custody claim that the key is released only
+ *   after an OS-mediated per-use presence ceremony (§7.1); **absent ⇒ false**.
+ *   Only a `presence: true` signer may hold the two os-presence quarantine ops.
+ * - `publicKey` — widened to accept the P-256 forms (SPKI PEM or `p256:` DER);
+ *   the broker validates the key shape against `alg` at load, not by regex here.
+ */
 export const SignerRegistryEntrySchema = z.object({
   signerId: z.string().min(1),
-  publicKey: Ed25519PubKey,
+  alg: z.enum(["ed25519", "p256"]).optional(),
+  presence: z.boolean().optional(),
+  publicKey: PublicKeyString,
   permittedOps: z.array(z.string().min(1)),
   status: z.enum(["active", "revoked"]),
   enrolledAt: Rfc3339Ms,

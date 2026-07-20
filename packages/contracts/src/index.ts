@@ -44,6 +44,10 @@ export {
   Nonce,
   Ed25519Sig,
   Ed25519PubKey,
+  P256Sig,
+  P256PubKey,
+  AuthzSignature,
+  PublicKeyString,
   Sha256Digest,
   SchemaVersion1,
 } from "./primitives.js";

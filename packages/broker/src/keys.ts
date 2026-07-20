@@ -16,7 +16,7 @@ import {
   type SignerRegistryEntry,
 } from "@atlas/contracts";
 import { parsePrivateKeyFlexible, parsePublicKeyFlexible, serializePublicKey } from "./crypto.js";
-import { TEST_SIGNER_ID } from "./authorize.js";
+import { TEST_SIGNER_ID, TEST_SIGNER_DESCRIPTOR } from "./authorize.js";
 import type { AttestationKey, BrokerServiceConfig } from "./service.js";
 import type { ProtectedRefs } from "./refs.js";
 
@@ -31,14 +31,17 @@ export const DEFAULT_APPROVER_SIGNER_ID = "approval-verify";
  * authorizations for. This is the registry-privileged set (security/broker
  * contract §7) RESTRICTED to the `broker-signature` mechanism — it deliberately
  * EXCLUDES `quarantine inspect` / `quarantine resolve`, which the contract
- * authorizes via **`os-presence`** (trusted-CLI local presence + quarantine-AEAD
- * custody, §7.4 lines), never via an Ed25519 signature. Granting a signature
- * signer those ops would let an approval key authorize an operation the contract
- * reserves for os-presence — so they are not in any signature signer's
- * `permittedOps`. This matches the contract's §9.2 example `permittedOps`
- * verbatim (nine ops, no quarantine). `git reject` is likewise excluded — it is
- * shared, not privileged. Consumed as the default `permittedOps` when deriving
- * the signer registry from provisioned key files (round-3 finding 1).
+ * authorizes via **`os-presence`** (an OS-mediated presence assertion bound to
+ * the challenge, §7.1/§7.4) — **presence-gated signers excepted**: a signer
+ * enrolled with `presence: true` (SP-3, only possible for a `p256` SE key) MAY
+ * carry the two quarantine ops, because its per-use biometric ceremony IS the
+ * presence assertion the contract requires. A plain file/derived key proves key
+ * custody, not presence, so it never gets them — granting them would let an
+ * ambient key authorize an op the contract reserves for os-presence. `git reject`
+ * is likewise excluded — it is shared, not privileged. Consumed as the default
+ * (non-presence) `permittedOps` when deriving the signer registry from
+ * provisioned key files (round-3 finding 1); `enroll-signer.sh` adds the two
+ * quarantine ops on top of this set iff `--presence` (SP-3 §7.1).
  */
 export const SIGNATURE_AUTHORIZABLE_OPS = [
   "db restore",
@@ -137,7 +140,7 @@ export function deriveSignerRegistryFromKeyFiles(keysDir: string): SignerRegistr
     });
   }
 
-  // The fixture signer is registered (so the D20 gate produces a precise
+  // The ed25519 fixture signer is registered (so the D20 gate produces a precise
   // `authz.signer_not_permitted`+`d20` refusal rather than `signer_unknown`),
   // but the broker hard-rejects it outside ATLAS_TEST_MODE regardless.
   const testKey = readKeyFileIfPresent(join(keysDir, PROVISIONED_FILES.testApproverKey));
@@ -150,6 +153,21 @@ export function deriveSignerRegistryFromKeyFiles(keysDir: string): SignerRegistr
       enrolledAt: PROVISIONED_ENROLLED_AT,
     });
   }
+
+  // The SP-3 software-P256 fixture signer is registered UNCONDITIONALLY from the
+  // shared descriptor's committed public key — it has no key FILE (SE keys expose
+  // no broker-readable private key), so unlike the ed25519 fixture it does not
+  // gate on a `.key` file being present. Registering it always is deliberate: the
+  // D20 gate then yields the precise `d20` refusal (never `signer_unknown`) when
+  // an `atlas-test-approver-p256` authorization is presented in production.
+  entries.push({
+    signerId: TEST_SIGNER_DESCRIPTOR.p256.signerId,
+    alg: "p256",
+    publicKey: TEST_SIGNER_DESCRIPTOR.p256.publicKey,
+    permittedOps: [...SIGNATURE_AUTHORIZABLE_OPS],
+    status: "active",
+    enrolledAt: PROVISIONED_ENROLLED_AT,
+  });
 
   return entries;
 }

@@ -327,6 +327,16 @@ The **execute step re-derives the challenge from current state and rejects any d
 stable error codes of §7.3 **before the broker acts**. The full challenge is echoed back so the
 broker verifies the signature over the exact bytes the signer saw.
 
+**Algorithm-agile signature (SP-3, ADR-0002).** `signature` is one of a **closed two-member set**:
+`ed25519:<base64url(64-byte raw)>` (above) **or** `p256:<base64url(DER X9.62 ECDSA-SHA256)>` — the
+form a Secure-Enclave / P-256 approver emits (e.g. an `atlas-signer`-enrolled key, §9.2). The prefix
+**must match the enrolled signer's `alg`**; a prefix/`alg` mismatch or a malformed body is
+`authz.signature_invalid` (no new code). Everything else is identical between the two — the echoed
+challenge, the drift re-derivation, and the exact `signingPayload` bytes signed. A p256 response is
+byte-for-byte the block above with, e.g., `"signature": "p256:MEUCIQ…"` and
+`"signerId": "approver-se-mac-v1"`. (The audit stream §5 and WORM anchor §6 stay **Ed25519-only**,
+§8.1 — this set applies to authorization responses only.)
+
 ### 7.3 Drift-rejection error catalog (stable codes)
 
 Every code is stable across versions. `exitCode` maps to §2.5 of the plan (`0` ok · `1` validation ·
@@ -351,7 +361,7 @@ Every code is stable across versions. `exitCode` maps to §2.5 of the plan (`0` 
 | `authz.signer_unknown` | `signerId` not in the signer registry (§9) | `1` |
 | `authz.signer_revoked` | signer revoked (§10) | `1` |
 | `authz.signer_not_permitted` | signer not permitted for this `op` | `1` |
-| `authz.signature_invalid` | Ed25519 verification failed | `1` |
+| `authz.signature_invalid` | signature verification failed (Ed25519 or P-256, per the enrolled signer's `alg`; incl. a signature whose prefix disagrees with that `alg`) | `1` |
 | `authz.payload_mismatch` | `signingPayload` ≠ broker-recomputed canonical bytes | `1` |
 | `authz.schema_invalid` | challenge/response fails the `contracts` schema | `1` |
 | `authz.canonicalization_unsupported` | unknown `payloadCanonicalization` id | `1` |
@@ -363,11 +373,19 @@ fresh submission of a spent nonce for an *incomplete* op is `authz.nonce_replaye
 
 ### 7.4 Per-privileged-op mapping (challenge fields → verification → codes)
 
-Two authorization **mechanisms** appear (§7 intro): `broker-signature` (the non-interactive Ed25519
-challenge/response, or its OS-presence interactive equivalent bound to the same challenge) and
-`os-presence` (the trusted-CLI local presence assertion for the quarantine-AEAD ops, which never
-touch a protected ref and so are not broker-signed). `nonce_*` = `nonce_unknown` / `nonce_expired` /
-`nonce_replayed`; `signer_*` = `signer_unknown` / `signer_revoked` / `signer_not_permitted`.
+Two authorization **mechanisms** appear (§7 intro): `broker-signature` (the non-interactive signed
+challenge/response — Ed25519 or P-256 per the signer's `alg`, §7.2 — or its OS-presence interactive
+equivalent bound to the same challenge) and `os-presence` (an OS-mediated presence assertion bound to
+the challenge, for the quarantine-AEAD ops, which never touch a protected ref). **SP-3 implements
+`os-presence`** as a **challenge-bound, presence-gated P-256 signature**: a signer enrolled
+`presence: true` (§9.2, only a Secure-Enclave `p256` key) releases exactly one signature over exactly
+this challenge's bytes only after a per-use biometric ceremony — an un-synthesizable live presence
+act. So the two quarantine rows verify like any signed op (signer permitted + signature + payload),
+and a **non-presence** signer attempting them is refused `authz.signer_not_permitted` at the registry
+step (it does not carry the ops in `permittedOps`). `authz.presence_unverified` stays in the catalog
+but is **reserved and unemitted** — no code emits it; a future *interactive* presence path would.
+`nonce_*` = `nonce_unknown` / `nonce_expired` / `nonce_replayed`; `signer_*` = `signer_unknown` /
+`signer_revoked` / `signer_not_permitted`.
 
 | Op (registry name) | Mechanism | Required challenge fields | Verification steps | Drift codes |
 |--------------------|-----------|---------------------------|--------------------|-------------|
@@ -378,8 +396,8 @@ touch a protected ref and so are not broker-signed). `nonce_*` = `nonce_unknown`
 | `graduation migrate` | broker-signature | `op,intendedEffect{graduate,fromGeneration,toGeneration,migrationPlanDigest},nonce,expiresAt` | current generation == `fromGeneration`; re-derive migration plan digest and match; signer permitted | `generation_mismatch`,`migration_plan_mismatch`,`signature_invalid`,`payload_mismatch`,`signer_*`,`nonce_*` |
 | `source trust promote` / `source trust revoke` | broker-signature | `op,intendedEffect{trust,sourceOpaqueId,fromLevel,toLevel},nonce,expiresAt` | current trust level == `fromLevel`; signer permitted; append to `refs/trust/ledger` | `trust_level_mismatch`,`signature_invalid`,`payload_mismatch`,`signer_*`,`nonce_*` |
 | `db backup --force-unblock` (variant) | broker-signature | `op,intendedEffect{forceUnblock,latestLedgerSeq,acceptedRpoGap},nonce,expiresAt` | latest ledger seq unchanged; accepted-RPO-gap current | `rpo_gap_unaccepted`,`signature_invalid`,`payload_mismatch`,`signer_*`,`nonce_*` |
-| `quarantine inspect` | os-presence | `op,intendedEffect{quarantineInspect,quarantineItemOpaqueId},nonce,expiresAt` | item exists and is quarantined; OS presence assertion bound to challenge; quarantine AEAD readable by this trusted-CLI identity | `quarantine_item_unknown`,`quarantine_key_denied`,`presence_unverified`,`nonce_*` |
-| `quarantine resolve` | os-presence | `op,intendedEffect{quarantineResolve,quarantineItemOpaqueId,resolution},nonce,expiresAt` | item exists and is quarantined; `resolution ∈ {release,discard}`; OS presence assertion bound; quarantine AEAD readable | `quarantine_item_unknown`,`quarantine_key_denied`,`presence_unverified`,`target_mismatch`,`nonce_*` |
+| `quarantine inspect` | os-presence | `op,intendedEffect{quarantineInspect,quarantineItemOpaqueId},nonce,expiresAt` | item exists and is quarantined; the **challenge-bound presence-gated signature** verifies and its signer is enrolled `presence:true` + permitted (SP-3, §7.1); quarantine AEAD readable by this trusted-CLI identity | `quarantine_item_unknown`,`quarantine_key_denied`,`signer_*`,`signature_invalid`,`payload_mismatch`,`presence_unverified`(reserved),`nonce_*` |
+| `quarantine resolve` | os-presence | `op,intendedEffect{quarantineResolve,quarantineItemOpaqueId,resolution},nonce,expiresAt` | item exists and is quarantined; `resolution ∈ {release,discard}`; the **challenge-bound presence-gated signature** verifies and its signer is enrolled `presence:true` + permitted; quarantine AEAD readable | `quarantine_item_unknown`,`quarantine_key_denied`,`signer_*`,`signature_invalid`,`payload_mismatch`,`presence_unverified`(reserved),`target_mismatch`,`nonce_*` |
 
 Every privileged op therefore maps to **challenge fields + verification steps + stable error codes**
 (acceptance criterion 1). The machine-readable §7.5 block below is the SSOT; `contract-lint` asserts
@@ -432,7 +450,7 @@ mechanically enforces acceptance criterion 1 and can never drift from the regist
         "targetCommit unchanged from the run's proposed commit",
         "broker re-parses the tree and recomputes effectiveRisk, matching intendedEffect.changePlanDigest",
         "signerId is enrolled, active, and permitted for this op",
-        "Ed25519 signature verifies over the recomputed signingPayload"
+        "the enrolled signer's algorithm verifies over the recomputed signingPayload"
       ],
       "driftCodes": ["authz.canonical_moved", "authz.target_mismatch", "authz.signature_invalid", "authz.payload_mismatch", "authz.signer_unknown", "authz.signer_revoked", "authz.signer_not_permitted", "authz.nonce_unknown", "authz.nonce_expired", "authz.nonce_replayed"]
     },
@@ -445,7 +463,7 @@ mechanically enforces acceptance criterion 1 and can never drift from the regist
         "derive the revert commit from the target run and canonical, matching intendedEffect.revertCommit",
         "canonical tip equals canonicalBaseCommit",
         "signerId is enrolled, active, and permitted for this op",
-        "Ed25519 signature verifies over the recomputed signingPayload including revertCommit"
+        "the enrolled signer's algorithm verifies over the recomputed signingPayload including revertCommit"
       ],
       "driftCodes": ["authz.revert_mismatch", "authz.canonical_moved", "authz.signature_invalid", "authz.payload_mismatch", "authz.signer_unknown", "authz.signer_revoked", "authz.signer_not_permitted", "authz.nonce_unknown", "authz.nonce_expired", "authz.nonce_replayed"]
     },
@@ -484,7 +502,7 @@ mechanically enforces acceptance criterion 1 and can never drift from the regist
         "current generation equals intendedEffect.fromGeneration",
         "re-derive the migration plan digest and match intendedEffect.migrationPlanDigest",
         "signerId is enrolled, active, and permitted for this op",
-        "Ed25519 signature verifies over the recomputed signingPayload"
+        "the enrolled signer's algorithm verifies over the recomputed signingPayload"
       ],
       "driftCodes": ["authz.generation_mismatch", "authz.migration_plan_mismatch", "authz.signature_invalid", "authz.payload_mismatch", "authz.signer_unknown", "authz.signer_revoked", "authz.signer_not_permitted", "authz.nonce_unknown", "authz.nonce_expired", "authz.nonce_replayed"]
     },
@@ -522,7 +540,7 @@ mechanically enforces acceptance criterion 1 and can never drift from the regist
         "latest ledger seq unchanged from intendedEffect.latestLedgerSeq",
         "accepted-RPO-gap is current",
         "signerId is enrolled, active, and permitted for this op",
-        "Ed25519 signature verifies over the recomputed signingPayload"
+        "the enrolled signer's algorithm verifies over the recomputed signingPayload"
       ],
       "driftCodes": ["authz.rpo_gap_unaccepted", "authz.signature_invalid", "authz.payload_mismatch", "authz.signer_unknown", "authz.signer_revoked", "authz.signer_not_permitted", "authz.nonce_unknown", "authz.nonce_expired", "authz.nonce_replayed"]
     },
@@ -574,6 +592,14 @@ Every signed object (audit event §5, WORM anchor §6, authorization response §
 
 - **Algorithm:** Ed25519 (RFC 8032). Signature bytes base64url, no padding, prefixed `ed25519:`.
 - The signature covers the **canonical byte string** of `payload` under the named `canonicalization`.
+- **Signature-string set (SP-3, ADR-0002):** **authorization responses** (§7.2) carry one of a closed
+  two-member set — `ed25519:<base64url(64-byte raw)>` **or** `p256:<base64url(DER X9.62
+  ECDSA-SHA256)>`, discriminated by the enrolled signer's `alg` (§9.2). **The audit stream (§5), the
+  WORM anchor (§6), and every `SignedEnvelope` above stay Ed25519-only** — the attestation identity,
+  chain verification, and anchor format are untouched. P-256 signatures are randomized and
+  DER-length-variable, so an authorization signature is **verified, never byte-compared or deduped**
+  (ADR-0002); `atlas-jcs-v1` canonicalization is orthogonal and unchanged (the `signingPayload` §8.2
+  is a newline-joined form, not JCS, and the registry file is Zod-parsed JSON, never canonically signed).
 
 ### 8.2 Canonicalization (`atlas-jcs-v1`) — byte-stable across processes
 
@@ -610,20 +636,54 @@ the broker recomputes + compares (`authz.payload_mismatch` on mismatch).
 
 ### 9.2 Signer registry
 
-- `signers` maps `signerId → { publicKey (Ed25519), permittedOps[], status: active|revoked,
+- `signers` maps `signerId → { alg?, presence?, publicKey, permittedOps[], status: active|revoked,
   enrolledAt, revokedAt? }`. Held with the broker's key material (agent-unreadable).
+- **`alg` (SP-3, ADR-0002):** `"ed25519" | "p256"`, **absent ⇒ `"ed25519"`** — every pre-SP-3 entry
+  and key-file-derived registry is unchanged byte-for-byte. The verifier dispatches on the resolved
+  `alg`; a signature whose prefix disagrees is `authz.signature_invalid`.
+- **`presence` (SP-3):** `boolean`, **absent ⇒ false** — an *enrollment-time custody claim* that the
+  key is released only after an OS-mediated per-use presence ceremony (§7.1). **Only a
+  `presence: true` signer may carry the two `os-presence` quarantine ops** (`quarantine inspect` /
+  `quarantine resolve`) in `permittedOps`; a plain file/derived key proves key custody, not presence,
+  and never gets them. The broker cannot verify the claim remotely and does not pretend to — the
+  operator asserting how the key is gated is the same trust act as installing approver key custody.
+- **`publicKey` (SP-3-widened):** the Ed25519 native form (`ed25519:<base64url(DER SPKI)>`), the
+  P-256 native form (`p256:<base64url(DER SPKI)>`), **or** an SPKI PEM (`-----BEGIN PUBLIC KEY-----`).
+  The broker validates the key shape against `alg` at load. **`p256` signers are enrollment-only** —
+  key-file *derivation* stays Ed25519-only (an SE key has no broker-readable private-key file), so a
+  `p256` signer enters the registry solely through explicit `signers.json` enrollment (§10 /
+  `enroll-signer.sh`). Hardware signers are enrolled, never inferred.
 - Verification looks up `signerId`; `authz.signer_unknown` if absent, `authz.signer_revoked` if
   `status=revoked`, `authz.signer_not_permitted` if `op ∉ permittedOps`.
 - The **approval-verify** public keys (§4) live here; the audit-attestation signer is a distinct
   registry entry used only for §5/§6.
 
+An Ed25519 file-key approver (the example `permittedOps` is the nine-op signature-authorizable set —
+`git refresh` included — reconciled with the broker's `SIGNATURE_AUTHORIZABLE_OPS`; no quarantine ops
+because it is not `presence: true`):
+
 ```json
 {
   "signerId": "atlas-approver-hsm-01",
   "publicKey": "ed25519:MCowBQYDK2VwAyEA...",
-  "permittedOps": ["git approve", "git rollback", "purge", "db restore", "graduation migrate", "source trust promote", "source trust revoke", "db backup --force-unblock"],
+  "permittedOps": ["git approve", "git refresh", "git rollback", "purge", "db restore", "graduation migrate", "source trust promote", "source trust revoke", "db backup --force-unblock"],
   "status": "active",
   "enrolledAt": "2026-07-01T00:00:00.000Z"
+}
+```
+
+A Secure-Enclave `p256` approver enrolled `presence: true` — the only signer class permitted the two
+`os-presence` quarantine ops (`atlas-signer`, SP-3):
+
+```json
+{
+  "signerId": "approver-se-mac-v1",
+  "alg": "p256",
+  "presence": true,
+  "publicKey": "p256:MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE...",
+  "permittedOps": ["git approve", "git refresh", "git rollback", "purge", "db restore", "graduation migrate", "source trust promote", "source trust revoke", "db backup --force-unblock", "quarantine inspect", "quarantine resolve"],
+  "status": "active",
+  "enrolledAt": "2026-07-20T00:00:00.000Z"
 }
 ```
 
@@ -641,6 +701,12 @@ the broker recomputes + compares (`authz.payload_mismatch` on mismatch).
   audit history (the public key is retained for historical verification).
 - **Salt rotation** (§5.1): bump `saltVersion`; new opaque IDs use the new salt; old `audit_id_map`
   rows retain their `saltVersion` so historical linkage stays verifiable.
+- **Biometry re-enrollment (SP-3, `p256` SE signers):** Apple **invalidates** a
+  `.biometryCurrentSet`-protected Secure-Enclave key when fingerprints are added or removed. The
+  signer then fails (`atlas-signer` exit 5), and recovery is exactly the rotation above — `keygen
+  --force` mints `…-v(N+1)`, `enroll-signer.sh` enrolls it, then `--revoke` the old id. Key loss is
+  an **enrollment event, not a DR event**; the vault/ledger/audit chain are indifferent to which
+  enrolled signer approves, and in-flight challenges are voided by the enroll-time broker restart.
 
 ---
 

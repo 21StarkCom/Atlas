@@ -22,6 +22,7 @@ import {
   DEFAULT_APPROVER_SIGNER_ID,
   DEFAULT_PROTECTED_REFS,
   TEST_SIGNER_ID,
+  TEST_P256_SIGNER_ID,
   deriveSignerRegistryFromKeyFiles,
   loadAttestationKey,
   loadSignerRegistry,
@@ -104,9 +105,22 @@ describe("broker against provisioning-generated PEM keys (finding 1)", () => {
     const { keysDir } = provision();
     const registry = deriveSignerRegistryFromKeyFiles(keysDir);
     const ids = registry.map((e) => e.signerId).sort();
-    expect(ids).toEqual([TEST_SIGNER_ID, DEFAULT_APPROVER_SIGNER_ID, DEFAULT_ATTESTATION_SIGNER_ID].sort());
-    // Every derived public key is in the package-native `ed25519:` form.
-    for (const e of registry) expect(e.publicKey.startsWith("ed25519:")).toBe(true);
+    // The ed25519 trio PLUS the SP-3 software-P256 fixture (registered
+    // unconditionally from the shared descriptor — it has no key file).
+    expect(ids).toEqual(
+      [TEST_SIGNER_ID, TEST_P256_SIGNER_ID, DEFAULT_APPROVER_SIGNER_ID, DEFAULT_ATTESTATION_SIGNER_ID].sort(),
+    );
+    // Every ed25519 derived public key is in the package-native `ed25519:` form;
+    // the p256 fixture carries its `p256:` native key + `alg:"p256"`.
+    for (const e of registry) {
+      if (e.signerId === TEST_P256_SIGNER_ID) {
+        expect(e.alg).toBe("p256");
+        expect(e.publicKey.startsWith("p256:")).toBe(true);
+      } else {
+        expect(e.alg).toBeUndefined();
+        expect(e.publicKey.startsWith("ed25519:")).toBe(true);
+      }
+    }
     // The approver is permitted for the registry-privileged ops; attestation for none.
     expect(registry.find((e) => e.signerId === DEFAULT_APPROVER_SIGNER_ID)!.permittedOps).toContain("git approve");
     expect(registry.find((e) => e.signerId === DEFAULT_ATTESTATION_SIGNER_ID)!.permittedOps).toEqual([]);

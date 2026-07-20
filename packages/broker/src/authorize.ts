@@ -20,12 +20,59 @@ import {
   type SignerRegistryEntry,
 } from "@atlas/contracts";
 import { type KeyObject } from "node:crypto";
-import { parsePublicKey, verifyBytes } from "./crypto.js";
+import { parsePublicKeyFlexible, parseP256PublicKeyFlexible, verifyBytes, verifyP256Bytes } from "./crypto.js";
 import { BrokerRefusal, type AuthzCode } from "./errors.js";
 import { NonceStore } from "./nonce.js";
 
-/** The fixture signer id (keys.acl.json). D20 hard-rejects it outside test mode. */
-export const TEST_SIGNER_ID = "atlas-test-approver";
+/**
+ * The shared fixture-signer descriptor (D20, SP-3). This is the SINGLE source of
+ * truth for every fixture signer's id + algorithm + committed key material, so
+ * `authorize.ts`'s D20 reject set, `keys.ts`'s fixture registration, and
+ * `tools/test-signer.ts`'s signing key can NEVER drift apart (a rename in one
+ * place that slipped the production reject in another is the exact hazard this
+ * closes). Both fixture ids are hard-rejected unless `ATLAS_TEST_MODE=1`.
+ *
+ * - `ed25519` — the classic fixture; its key is DERIVED from the provisioned
+ *   `atlas-test-approver.key` file (no committed key here — provisioning owns it).
+ * - `p256` — the SP-3 software fixture; it has NO key file (SE keys have no
+ *   broker-readable private key), so the descriptor carries a **committed fixed
+ *   keypair**: `test-signer --alg p256` signs with `privateKeyPem`, the broker
+ *   registers `publicKey` UNCONDITIONALLY (so D20 yields `d20`, not
+ *   `signer_unknown`). Committing a fixture private key is safe precisely because
+ *   D20 makes it un-authorizable outside test mode.
+ */
+export const TEST_SIGNER_DESCRIPTOR = {
+  ed25519: { signerId: "atlas-test-approver", alg: "ed25519" as const },
+  p256: {
+    signerId: "atlas-test-approver-p256",
+    alg: "p256" as const,
+    /** `p256:<base64url(DER SPKI)>` — the broker registers + verifies against this. */
+    publicKey:
+      "p256:MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAETLl9CKOG0i5lvX7wYZJhwFuYCQ0skIzj73x6lmIvX79VqhxIvPwyPckvRwTd-KYd0X-8rQPoxca1uTRys44VVg",
+    /** PKCS#8 PEM — `tools/test-signer.ts --alg p256` signs with this. Fixture-only. */
+    privateKeyPem:
+      "-----BEGIN PRIVATE KEY-----\n" +
+      "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQghPjIVg7zPK9FXX4t\n" +
+      "YtQIjP3LcuV25ugmxKacEuyUtwWhRANCAARMuX0Io4bSLmW9fvBhkmHAW5gJDSyQ\n" +
+      "jOPvfHqWYi9fv1WqHEi8/DI9yS9HBN34ph3Rf7ytA+jFxrW5NHKzjhVW\n" +
+      "-----END PRIVATE KEY-----\n",
+  },
+} as const;
+
+/** The classic ed25519 fixture signer id (keys.acl.json). Kept for back-compat. */
+export const TEST_SIGNER_ID = TEST_SIGNER_DESCRIPTOR.ed25519.signerId;
+
+/** The SP-3 software-P256 fixture signer id. */
+export const TEST_P256_SIGNER_ID = TEST_SIGNER_DESCRIPTOR.p256.signerId;
+
+/**
+ * The full set of fixture signer ids the D20 gate hard-rejects outside test mode
+ * (both algorithms). Derived from the descriptor — never a hand-kept second list.
+ */
+export const TEST_SIGNER_IDS: ReadonlySet<string> = new Set([
+  TEST_SIGNER_DESCRIPTOR.ed25519.signerId,
+  TEST_SIGNER_DESCRIPTOR.p256.signerId,
+]);
 
 /** The signing-payload preamble tag (§8.2). */
 const SIGNING_PREFIX = "atlas.authz.v1";
@@ -232,7 +279,15 @@ export class Authorizer {
   ) {
     this.nonces = new NonceStore(now);
     for (const entry of signerEntries) {
-      this.signers.set(entry.signerId, { entry, publicKey: parsePublicKey(entry.publicKey) });
+      // Parse the key per the entry's algorithm (absent ⇒ ed25519). ed25519 uses
+      // the flexible parser (native `ed25519:` OR SPKI PEM); p256 uses the
+      // curve-checked flexible parser (native `p256:` OR SPKI PEM). A malformed
+      // or wrong-curve key throws HERE, at load — a signer that can't be parsed
+      // never enters the registry (fail-closed).
+      const alg = entry.alg ?? "ed25519";
+      const publicKey =
+        alg === "p256" ? parseP256PublicKeyFlexible(entry.publicKey) : parsePublicKeyFlexible(entry.publicKey);
+      this.signers.set(entry.signerId, { entry, publicKey });
     }
   }
 
@@ -333,19 +388,28 @@ export class Authorizer {
       );
     }
 
-    // D20: the fixture signer is fixture-only. Hard-reject outside test mode.
-    if (res.signerId === TEST_SIGNER_ID && !this.testMode) {
+    // D20: fixture signers (of EITHER algorithm) are fixture-only. Hard-reject
+    // any member of the shared descriptor's id set outside test mode.
+    if (TEST_SIGNER_IDS.has(res.signerId) && !this.testMode) {
       throw new BrokerRefusal(
         "authz.signer_not_permitted",
-        `test signer "${TEST_SIGNER_ID}" is rejected unless ATLAS_TEST_MODE=1 (D20)`,
+        `test signer "${res.signerId}" is rejected unless ATLAS_TEST_MODE=1 (D20)`,
         { d20: true },
       );
     }
 
-    // Signature over the exact signing-payload bytes.
-    const ok = verifyBytes(encoder.encode(ch.signingPayload), res.signature, signer.publicKey);
+    // Signature over the exact signing-payload bytes, dispatched on the enrolled
+    // signer's algorithm (absent ⇒ ed25519). A signature whose prefix disagrees
+    // with the enrolled alg fails the algorithm's own prefix check and so is
+    // `authz.signature_invalid` — no new code, no negotiation (ADR-0002).
+    const alg = signer.entry.alg ?? "ed25519";
+    const payloadBytes = encoder.encode(ch.signingPayload);
+    const ok =
+      alg === "p256"
+        ? verifyP256Bytes(payloadBytes, res.signature, signer.publicKey)
+        : verifyBytes(payloadBytes, res.signature, signer.publicKey);
     if (!ok) {
-      throw new BrokerRefusal("authz.signature_invalid", "Ed25519 verification failed");
+      throw new BrokerRefusal("authz.signature_invalid", "signature verification failed");
     }
 
     // State drift (§7.4). Re-derive the expected descriptor from broker-observed
