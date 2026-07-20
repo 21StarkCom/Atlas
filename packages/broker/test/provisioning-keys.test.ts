@@ -154,7 +154,9 @@ describe("broker against provisioning-generated PEM keys (finding 1)", () => {
     expect(res.code).toBe("authz.ok");
   });
 
-  it("the test-signer CLI reads the provisioned PEM key; broker accepts in test mode, D20-rejects in prod", () => {
+  // 60_000: provisions real keys + spawns the test-signer CLI subprocess —
+  // routinely exceeds vitest's 5 s default on a loaded machine.
+  it("the test-signer CLI reads the provisioned PEM key; broker accepts in test mode, D20-rejects in prod", { timeout: 60_000 }, () => {
     const { keysDir, repoDir, anchorPath } = provision();
     // The CLI reads `<keysDir>/atlas-test-approver.key` (PEM) directly.
     const runSigner = (challenge: unknown): unknown =>

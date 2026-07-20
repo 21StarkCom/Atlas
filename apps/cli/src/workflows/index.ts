@@ -14,6 +14,8 @@ export {
   type RunInput,
   type TerminalRun,
   type TerminalExtras,
+  type FinalizeExtras,
+  type IntegrateOptions,
   type IdempotentStart,
   type RunIntegrator,
   type IntegrationContext,

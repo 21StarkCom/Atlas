@@ -413,7 +413,7 @@ that no state lacks a `recoveryAction`.
         { "artifact": "baseRef", "hash": "sha256(canonical-HEAD)" }
       ],
       "atomicWrite": "agent_runs.state='planned' with planHash,baseRef",
-      "nextStates": ["patched", "failed@planned", "cancelled@planned"],
+      "nextStates": ["patched", "finalized", "failed@planned", "cancelled@planned"],
       "idempotencyCheck": "row state='planned' and stored planHash matches recompute",
       "retainedArtifacts": ["ChangePlan"],
       "worktreeCleanup": "none (not yet created)",
@@ -516,7 +516,7 @@ that no state lacks a `recoveryAction`.
         { "artifact": "canonicalSha", "hash": "canonicalSha" },
         { "artifact": "backup watermark covering seq", "hash": "backup_watermark.seq>=run.seq" }
       ],
-      "atomicWrite": "agent_runs.state='finalized' (gated on reindexed + §2.8 step 4 backup/watermark success)",
+      "atomicWrite": "agent_runs.state='finalized' (gated on reindexed + §2.8 step 4 backup/watermark success; the 60-B empty-ChangePlan sync cycle finalizes straight from planned — no integrate, no canonical move — via an explicit engine opt-in)",
       "nextStates": [],
       "idempotencyCheck": "state='finalized' with backup_watermark.seq >= run.seq",
       "retainedArtifacts": ["canonical commit", "ledger", "projection", "backup"],

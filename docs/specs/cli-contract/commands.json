@@ -403,6 +403,22 @@
       "implemented": true
     },
     {
+      "name": "sync",
+      "schemaRef": "docs/specs/cli-contract/sync.schema.json",
+      "phase": 5,
+      "idempotency": "intrinsic",
+      "privilege": "shared",
+      "implemented": true
+    },
+    {
+      "name": "sync status",
+      "schemaRef": "docs/specs/cli-contract/sync-status.schema.json",
+      "phase": 5,
+      "idempotency": "none",
+      "privilege": "shared",
+      "implemented": true
+    },
+    {
       "name": "validate",
       "schemaRef": "docs/specs/cli-contract/validate.schema.json",
       "phase": 4,

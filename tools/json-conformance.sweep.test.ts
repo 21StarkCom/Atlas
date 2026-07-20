@@ -66,6 +66,7 @@ const ADAPTERS: Record<string, Adapter> = {
     argv: ["graduation", "scan", "--source", h.seeded.gradSource, "--copy", h.seeded.gradCopy, "--json"],
   }),
   "graduation audit": () => ({ argv: ["graduation", "audit", "--json"] }),
+  "sync status": () => ({ argv: ["sync", "status", "--json"] }),
   "quarantine inspect": async (h) => {
     if (h.seeded.quarantineId === null) return { argv: [], skip: "no quarantined item was produced by the arrangement ingest" };
     const challenge = await h.run(["quarantine", "inspect", h.seeded.quarantineId, "--export-challenge", "--json"]);
@@ -78,6 +79,7 @@ const ADAPTERS: Record<string, Adapter> = {
 
 const registry = loadRegistry(root);
 const inventory = registry.commands.filter((r) => {
+  if (!r.implemented) return false; // an unimplemented row cannot be invoked; the adapter obligation starts when the flag flips
   const schema = JSON.parse(readFileSync(join(root, r.schemaRef), "utf8"));
   return SWEEP_CLASSES.has(schema["x-atlas-contract"]?.executionClass);
 });

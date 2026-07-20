@@ -132,7 +132,7 @@ lock — `signAndIntegrateSourceCapture` (Tier-1 capture, #77) and `signAndAdvan
 8. **Nonce single-use, TTL-bounded, consumed LAST**; cross-op reuse ⇒ `authz.nonce_unknown`.
 9. **Canonical-bound LEDGER ops re-derive the base from broker state** — a caller can't smuggle an
    all-zero base past the drift gate.
-10. **Capture scope:** a Tier-1 capture touches ONLY `sources/**` + `manifest.*`, over the WHOLE `base..capture` range; the `"note"` scope (#262, selected by the capture RPC's optional `scope` field) instead requires additions-only (`A`) `*.md` outside `sources/`, status-checked over the same range.
+10. **Capture scope:** a Tier-1 capture touches ONLY `sources/**` + `manifest.*`, over the WHOLE `base..capture` range; the `"note"` scope (#262, selected by the capture RPC's optional `scope` field) instead requires additions-only (`A`) `*.md` outside `sources/`, status-checked over the same range; the `"sync"` scope (#266, the 60-B absorb cycle) allows A/M/D/R (and C) of `*.md` outside `sources/` — both sides of a rename validated, unknown statuses (T/U/X/B) and empty change-sets refused fail-closed — so a sync commit can mirror upstream note changes but can never touch the capture namespace, non-markdown, or `.git`.
 11. **D20 test-signer gate:** `atlas-test-approver` is hard-rejected unless `ATLAS_TEST_MODE=1`
     (`test/broker.rejects-test-signer-in-prod.test.ts`); the launcher never sets it.
 12. **Egress scans the EXACT bytes:** request = exact serialized HTTP body; error/retry bodies raw;

@@ -267,6 +267,13 @@ export async function makeSweepHarness(): Promise<SweepHarness> {
         `INSERT INTO git_operations (git_op_id, run_id, op_type, ref_name, commit_sha, created_at)
          VALUES (?, ?, 'agent-committed', ?, ?, '2026-07-19T00:00:02.000Z')`,
       ).run(`${reviewRunId}:agent-committed`, reviewRunId, `refs/agent/${reviewRunId}`, head);
+      // `sync status` (60-B) reads the adoption cursor row — seed the zero-state
+      // exactly as provisioning/adopt-vault.sh does (the 0012 table exists after
+      // the real `db migrate` above).
+      db.prepare(
+        `INSERT OR IGNORE INTO sync_cursors (source_id, upstream_ref, last_absorbed_oid, last_synced_at, cycle_seq, pending_quarantine)
+         VALUES ('main-vault', 'refs/heads/main', NULL, '2026-07-19T00:00:00.000Z', 0, '[]')`,
+      ).run();
     } finally {
       db.close();
     }

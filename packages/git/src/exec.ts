@@ -57,3 +57,38 @@ export async function runGit(
     throw new GitError(args, cwd, e.code ?? null, e.stderr ?? String(err));
   }
 }
+
+/**
+ * Run `git <args>` returning stdout as RAW BYTES — no trim, no utf8 decode.
+ *
+ * Exists because {@link runGit} is byte-lossy in two ways that a blob read
+ * cannot tolerate: `trim()` eats a blob's leading/trailing whitespace (a
+ * trailing newline IS content), and forcing `utf8` mangles non-utf8 bytes
+ * (0x80–0xFF sequences become U+FFFD before the caller ever sees them). Blob
+ * reads for the sync cycle must be byte-exact against the committed object, so
+ * they funnel through here instead. Same discipline as {@link runGit}: this is
+ * the ONE raw-argv escape hatch and it stays package-internal — never
+ * re-exported from the barrel (the public-surface regression test locks both).
+ */
+export async function runGitBuffer(cwd: string, args: readonly string[]): Promise<Buffer> {
+  try {
+    const { stdout } = await execFileAsync("git", args as string[], {
+      cwd,
+      encoding: "buffer",
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    return stdout;
+  } catch (err) {
+    // stderr arrives as a Buffer in buffer mode; GitError carries it as utf8
+    // text (error messages are ASCII in practice, and the classification in
+    // repo.ts matches on the decoded text).
+    const e = err as { code?: number | null; stderr?: string | Buffer };
+    const stderr =
+      typeof e.stderr === "string"
+        ? e.stderr
+        : e.stderr instanceof Buffer
+          ? e.stderr.toString("utf8")
+          : String(err);
+    throw new GitError(args, cwd, e.code ?? null, stderr);
+  }
+}

@@ -7,7 +7,14 @@
  * impossible here — see `refs.ts` for the guarded write surface.
  */
 
-export { openRepo, type Repo, type WorktreeEntry } from "./repo.js";
+export {
+  openRepo,
+  type Repo,
+  type WorktreeEntry,
+  type ChangeStatus,
+  type PathChange,
+  type CommitChanges,
+} from "./repo.js";
 export { type Worktree } from "./worktree.js";
 export {
   AGENT_REF_PREFIX,
@@ -26,9 +33,10 @@ export {
   buildCommitMessage,
   parseManifestTrailer,
 } from "./commit.js";
-// NOTE: `runGit` is deliberately NOT re-exported. Exposing raw `git` argv
-// execution would let a consumer call `update-ref`/`symbolic-ref` on any ref
-// (incl. `refs/heads/*`) and bypass every agent-ref guard in `refs.ts`. Only
-// the capability-specific guarded operations above are public; `runGit` stays
-// package-internal. The public-surface regression test locks this down.
+// NOTE: `runGit` / `runGitBuffer` are deliberately NOT re-exported. Exposing
+// raw `git` argv execution would let a consumer call `update-ref`/`symbolic-ref`
+// on any ref (incl. `refs/heads/*`) and bypass every agent-ref guard in
+// `refs.ts`. Only the capability-specific guarded operations above are public;
+// both executors stay package-internal. The public-surface regression tests
+// lock this down.
 export { GitError } from "./exec.js";

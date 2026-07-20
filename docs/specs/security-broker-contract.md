@@ -130,8 +130,9 @@ the tip stays clean. The capture RPC's optional `scope` field selects the scope 
 |-------|-----------------|
 | `"sources"` (default) | any path under `sources/**` + capture manifests (`manifest.json`/`.yaml`/`.yml`) — adds AND updates (recaptures rewrite the observation manifest in place) |
 | `"note"` (#262 — authored-note ingest) | **additions only** (git status `A`) of `*.md` paths outside `sources/` — **status-checked** over the same whole range, so an authored-note capture can never modify, delete, or rename existing content |
+| `"sync"` (#60/#266 — continuous-vault-sync absorb) | **adds, modifications, deletions, and renames/copies** (git statuses `A`/`M`/`D`/`R*`/`C*`, rename/copy scores stripped) of `*.md` paths outside `sources/` — **status-checked** over the same whole range, with **both** paths of a rename/copy validated (a rename into OR out of `sources/` is refused on whichever side lands there). Any **other** status (`T` typechange, `U`, `X`, `B`, or unrecognized) **fails closed** with `broker.capture_scope_violation`, as does an **empty** change set |
 
-`scope` is a **policy selector, not trusted input**: the broker re-derives the verdict entirely from the **broker-observed** committed diff (name-status over the whole range, read via NUL-terminated `-z` so non-ASCII paths are never mangled) — the flag only chooses which self-verifying policy runs, and **both** policies forbid touching existing content outside their namespace (`"note"` is additions-only; `"sources"` only rewrites `sources/**` manifests). Neither scope lets a caller (even a fully-compromised agent reaching the socket) modify or delete another note. Path checks are **case-insensitive** and reject any `.git` component, `..`/absolute segment — the enforcement boundary is here, not the CLI's advisory `deriveDestPath`. A note-add integration is **distinguishable in the permanent record**: the canonical commit the signed `run.integrated` event binds to carries the message `note add <id>` (vs `capture <id>`), so an auditor walking the chain sees exactly which integrations were authored-note ingests.
+`scope` is a **policy selector, not trusted input**: the broker re-derives the verdict entirely from the **broker-observed** committed diff (name-status over the whole range, read via NUL-terminated `-z` so non-ASCII paths are never mangled) — the flag only chooses which self-verifying policy runs. `"note"` is additions-only and `"sources"` only rewrites `sources/**` manifests, so neither lets a caller (even a fully-compromised agent reaching the socket) modify or delete another note. `"sync"` deliberately CAN mutate and remove notes — mirroring upstream vault edits is its purpose — but only `*.md` outside `sources/`, so a sync absorb can never touch captured source material, manifests, or any non-markdown byte on canonical. Path checks are **case-insensitive** and reject any `.git` component, `..`/absolute segment — the enforcement boundary is here, not the CLI's advisory `deriveDestPath`. A note-add integration is **distinguishable in the permanent record**: the canonical commit the signed `run.integrated` event binds to carries the message `note add <id>` (vs `capture <id>`), so an auditor walking the chain sees exactly which integrations were authored-note ingests.
 
 ---
 
@@ -419,7 +420,9 @@ mechanically enforces acceptance criterion 1 and can never drift from the regist
     { "code": "authz.payload_mismatch", "exitCode": 1 },
     { "code": "authz.schema_invalid", "exitCode": 1 },
     { "code": "authz.canonicalization_unsupported", "exitCode": 1 },
-    { "code": "authz.presence_unverified", "exitCode": 6 }
+    { "code": "authz.presence_unverified", "exitCode": 6 },
+    { "code": "diverged:non-ancestral", "exitCode": 2 },
+    { "code": "diverged:cursor-unreachable", "exitCode": 2 }
   ],
   "privilegedOps": [
     {
