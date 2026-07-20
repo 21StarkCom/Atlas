@@ -121,7 +121,10 @@ lock — `signAndIntegrateSourceCapture` (Tier-1 capture, #77) and `signAndAdvan
 `ATLAS_VAULT_REPO_DIR`, `ATLAS_BROKER_SOCKET`, `ATLAS_AUDIT_ANCHOR_PATH` (defaults per-OS:
 `/usr/local/var/atlas/audit-anchor` darwin, `/var/lib/atlas/audit-anchor` linux), `ATLAS_TEST_MODE`.
 **Egress:** `ATLAS_EGRESS_SOCKET`, `ATLAS_EGRESS_KEYS_DIR` (holds `atlas.gemini.key` only),
-`ATLAS_EGRESS_CAPABILITY_KEY` (shared/CLI-readable), `ATLAS_EGRESS_QUARANTINE_PUBKEY`,
+`ATLAS_EGRESS_CAPABILITY_KEY` (shared/CLI-readable) **or** `ATLAS_EGRESS_CAPABILITY_KEY_FD`
+(command-scoped fd, #60 Phase 6) — both resolved by the one `src/egress/capability-custody.ts`
+that the CLI mint path also uses, fail-closed, fd wins, fd never bootstraps —
+`ATLAS_EGRESS_QUARANTINE_PUBKEY`,
 `ATLAS_EGRESS_QUARANTINE_SPOOL`, `ATLAS_EGRESS_BUDGET_STATE`. **Refs:** canonical ref is **config-supplied** (`git.canonical_ref`, default `refs/atlas/main` for adopted vaults, `refs/heads/main` for plain vaults) — the broker reads it from config, never hardcodes it. Audit: `refs/audit/runs`; trust: `refs/trust/ledger`. Exit codes `0..6`; `egress.secret_detected` = 3,
 `egress.capability_invalid` = 1.
 
