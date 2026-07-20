@@ -377,6 +377,7 @@ touch a protected ref and so are not broker-signed). `nonce_*` = `nonce_unknown`
 | `purge` | broker-signature | `op,intendedEffect{erase,oldHead,replacementHead,scope},nonce,expiresAt` | derive replacement head deterministically; match `replacementHead`; authorize the signed non-fast-forward canonical-ref replacement (§12.2) | `target_mismatch`,`canonical_moved`,`signature_invalid`,`payload_mismatch`,`signer_*`,`nonce_*` |
 | `db restore` | broker-signature | `op,intendedEffect{restore,backupRef,backupContentHash},nonce,expiresAt` | backup ref exists; content hash matches; authorize restore (crypto runs CLI-side, §2) | `backup_hash_mismatch`,`signature_invalid`,`payload_mismatch`,`signer_*`,`nonce_*` |
 | `graduation migrate` | broker-signature | `op,intendedEffect{graduate,fromGeneration,toGeneration,migrationPlanDigest},nonce,expiresAt` | current generation == `fromGeneration`; re-derive migration plan digest and match; signer permitted | `generation_mismatch`,`migration_plan_mismatch`,`signature_invalid`,`payload_mismatch`,`signer_*`,`nonce_*` |
+| `sync reset` | broker-signature | `op,runId,targetCommit,canonicalBaseCommit,intendedEffect{integrate,tier,changePlanDigest},nonce,expiresAt` | canonical tip == base (a concurrent capture is refused); `targetCommit` == the reconciled child commit the challenge bound (a changed upstream tree, note-glob set, or reconciliation plan yields a different sha ⇒ `target_mismatch`); the reconciled commit is a fast-forward child of canonical head; signer permitted. Re-converges the canonical ref to the upstream TREE (60-B OQ#5 escape hatch) via the same signed fast-forward advance as `git approve` — accepting an audited history gap; not a non-fast-forward rewrite. | `canonical_moved`,`target_mismatch`,`signature_invalid`,`payload_mismatch`,`signer_*`,`nonce_*` |
 | `source trust promote` / `source trust revoke` | broker-signature | `op,intendedEffect{trust,sourceOpaqueId,fromLevel,toLevel},nonce,expiresAt` | current trust level == `fromLevel`; signer permitted; append to `refs/trust/ledger` | `trust_level_mismatch`,`signature_invalid`,`payload_mismatch`,`signer_*`,`nonce_*` |
 | `db backup --force-unblock` (variant) | broker-signature | `op,intendedEffect{forceUnblock,latestLedgerSeq,acceptedRpoGap},nonce,expiresAt` | latest ledger seq unchanged; accepted-RPO-gap current | `rpo_gap_unaccepted`,`signature_invalid`,`payload_mismatch`,`signer_*`,`nonce_*` |
 | `quarantine inspect` | os-presence | `op,intendedEffect{quarantineInspect,quarantineItemOpaqueId},nonce,expiresAt` | item exists and is quarantined; OS presence assertion bound to challenge; quarantine AEAD readable by this trusted-CLI identity | `quarantine_item_unknown`,`quarantine_key_denied`,`presence_unverified`,`nonce_*` |
@@ -434,6 +435,20 @@ mechanically enforces acceptance criterion 1 and can never drift from the regist
         "canonical tip equals canonicalBaseCommit",
         "targetCommit unchanged from the run's proposed commit",
         "broker re-parses the tree and recomputes effectiveRisk, matching intendedEffect.changePlanDigest",
+        "signerId is enrolled, active, and permitted for this op",
+        "Ed25519 signature verifies over the recomputed signingPayload"
+      ],
+      "driftCodes": ["authz.canonical_moved", "authz.target_mismatch", "authz.signature_invalid", "authz.payload_mismatch", "authz.signer_unknown", "authz.signer_revoked", "authz.signer_not_permitted", "authz.nonce_unknown", "authz.nonce_expired", "authz.nonce_replayed"]
+    },
+    {
+      "op": "sync reset",
+      "command": "sync reset",
+      "mechanism": "broker-signature",
+      "challengeFields": ["op", "runId", "targetCommit", "canonicalBaseCommit", "intendedEffect", "nonce", "expiresAt"],
+      "verificationSteps": [
+        "canonical tip equals canonicalBaseCommit (the pre-reset canonical head; a concurrent capture moving it is refused)",
+        "targetCommit unchanged from the reconciled child commit the challenge bound (a different upstream tree, note-glob set, or reconciliation plan yields a different sha)",
+        "the reconciled commit is a fast-forward child of the current canonical head",
         "signerId is enrolled, active, and permitted for this op",
         "Ed25519 signature verifies over the recomputed signingPayload"
       ],

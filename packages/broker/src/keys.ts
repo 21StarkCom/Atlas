@@ -50,6 +50,7 @@ export const SIGNATURE_AUTHORIZABLE_OPS = [
   "source trust promote",
   "source trust revoke",
   "db backup --force-unblock",
+  "sync reset",
 ] as const;
 
 /** The provisioning-generated key-file names (Task 1.0 / `keys.acl.json`). */

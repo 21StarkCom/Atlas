@@ -4,7 +4,7 @@
 
 # Atlas — CLI command surface (generated overview)
 
-Registry version: **1** · Commands: **54**
+Registry version: **1** · Commands: **55**
 
 | Phase | Command | Idempotency | Privilege | Implemented | Schema |
 |---|---|---|---|---|---|
@@ -60,5 +60,6 @@ Registry version: **1** · Commands: **54**
 | 5 | `quarantine inspect` | none | privileged | yes | `docs/specs/cli-contract/quarantine-inspect.schema.json` |
 | 5 | `quarantine resolve` | key-accepting | privileged | yes | `docs/specs/cli-contract/quarantine-resolve.schema.json` |
 | 5 | `sync` | intrinsic | shared | yes | `docs/specs/cli-contract/sync.schema.json` |
+| 5 | `sync reset` | key-accepting | privileged | no | `docs/specs/cli-contract/sync-reset.schema.json` |
 | 5 | `sync status` | none | shared | yes | `docs/specs/cli-contract/sync-status.schema.json` |
 | 6 | `watch` | none | shared | yes | `docs/specs/cli-contract/watch.schema.json` |
