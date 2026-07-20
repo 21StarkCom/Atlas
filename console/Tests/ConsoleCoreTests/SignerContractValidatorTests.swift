@@ -2,21 +2,13 @@ import XCTest
 @testable import ConsoleCore
 
 final class SignerContractValidatorTests: XCTestCase {
-    // The SP-3 embedded example challenge (§7.1).
-    private let challengeJSON = #"""
-    {
-      "schemaVersion": 1,
-      "op": "git approve",
-      "runId": "01J9Z8Q0000000000000000000",
-      "targetCommit": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
-      "canonicalBaseCommit": "b7e23c9d4a1f6082e5c3d90a1b2c3d4e5f607182",
-      "intendedEffect": { "kind": "integrate", "tier": 3, "changePlanDigest": "sha256:3f9ac012" },
-      "nonce": "9c1f7b2e4d6a8c0e1f3b5d7a9c1e2f40",
-      "expiresAt": "2026-07-12T09:19:22.581Z",
-      "payloadCanonicalization": "atlas-jcs-v1",
-      "signingPayload": "atlas.authz.v1\ngit approve\n01J9Z8Q0000000000000000000"
-    }
-    """#
+    // #272: the example challenge is ANCHORED to the SP-3 `atlas-signer` package's
+    // committed golden vectors (`console/signer/.../signing-payload-vectors.json`,
+    // themselves generated from the broker's buildSigningPayload) — so upstream
+    // contract drift in the signer source breaks this Console gate, instead of an
+    // inline copy that could silently diverge. Force-try: the fixture is committed;
+    // its absence/corruption is a hard test failure, which is the point.
+    private lazy var challengeJSON: String = try! TestSupport.signerGoldenChallenge()
 
     private func responseJSON(signature: String = "ed25519:1f8a3caa0", challenge: String? = nil) -> String {
         """
