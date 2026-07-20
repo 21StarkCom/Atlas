@@ -68,6 +68,17 @@ Normative SSOT: [`docs/specs/security-broker-contract.md`](../../docs/specs/secu
   crosses the seam).
 - `keys.ts` — env config + signer-registry derivation from provisioned key files;
   `DEFAULT_PROTECTED_REFS`, `SIGNATURE_AUTHORIZABLE_OPS` (9 ops), default signer ids, `defaultAnchorPath()`.
+  **SP-3:** an explicit `signers.json` (written by `provisioning/enroll-signer.sh`) wins over derivation; the
+  broker parses each entry's `publicKey` per its `alg` (ed25519 flexible / `parseP256PublicKeyFlexible`). The
+  software-P256 fixture (`atlas-test-approver-p256`) is registered **unconditionally** from the shared
+  descriptor so D20 yields `d20`, not `signer_unknown`. `presence:true` signers (only `p256`) may carry the two
+  quarantine os-presence ops (§7.1).
+- **SP-3 alg-agility (ADR-0002):** `crypto.ts` gains `verifyP256Bytes`/`parseP256PublicKeyFlexible`/
+  `signP256Bytes`/`generateP256` (DER X9.62 ECDSA-SHA256, ≤72-byte bound, default DER `dsaEncoding`,
+  curve-checked + canonical-DER round-trip, fail-closed, verify-never-byte-compare). `authorize.ts` dispatches
+  the signature step on the enrolled signer's `alg` (absent ⇒ ed25519; verify ORDER unchanged); D20 widened to a
+  set via the single `TEST_SIGNER_DESCRIPTOR` (`TEST_SIGNER_IDS`). No new error codes — a prefix/alg mismatch is
+  `authz.signature_invalid`. The `atlas-signer` SE signer + enrollment live in [`console/signer/`](../../console/signer/CLAUDE.md) + [`provisioning/`](../../provisioning/CLAUDE.md).
 - `git.ts` — `BrokerGit`: privileged plumbing via `execFile` argv (never a shell). **Deterministic
   authorship** `Aryeh Stark <aryeh@21stark.com>` + fixed dates — load-bearing for reproducible audit
   SHAs. Package-internal, never re-exported. `crypto.ts` — Ed25519 + `atlas-jcs-v1`; native `ed25519:`
