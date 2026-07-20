@@ -17,7 +17,10 @@
  *     keys dir (which the CLI cannot read); it lives at `ATLAS_EGRESS_CAPABILITY_KEY`
  *     — a file the launcher provisions readable by BOTH the CLI and egress. If absent
  *     the daemon bootstraps it there `0640` (custody bootstrap for the local-first
- *     playground); in production the launcher provisions it ahead of time.
+ *     playground); in production the launcher provisions it ahead of time. The
+ *     command-scoped `ATLAS_EGRESS_CAPABILITY_KEY_FD` form is accepted too (#60
+ *     Phase 6) and never bootstraps — the two ends share one resolver
+ *     (`src/egress/capability-custody.ts`) so their representations cannot drift.
  *   - **Quarantine — CIPHERTEXT-ONLY, sealed to the CLI (fixes the plaintext finding).**
  *     The daemon MUST NOT hold the quarantine AEAD key (trusted-CLI-only, §4). It
  *     holds only the CLI's quarantine PUBLIC key (`ATLAS_EGRESS_QUARANTINE_PUBKEY`,
@@ -35,6 +38,11 @@ import { GeminiAdapter } from "../src/egress/gemini.js";
 import { EgressService, startEgressServer } from "../src/egress/server.js";
 import { SealedSpoolQuarantineSink } from "../src/egress/spool-quarantine.js";
 import { FileBudgetStore } from "../src/egress/budget-store.js";
+import {
+  resolveCapabilitySecret,
+  CAPABILITY_KEY_ENV,
+  CAPABILITY_KEY_FD_ENV,
+} from "../src/egress/capability-custody.js";
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -42,15 +50,29 @@ function requireEnv(name: string): string {
   return v;
 }
 
-/** Read a shared secret file, or bootstrap it `0640` (CLI-readable) when absent. */
-function readOrBootstrapCapabilitySecret(path: string): string {
-  if (existsSync(path)) return readFileSync(path, "utf8").trim();
-  mkdirSync(dirname(path), { recursive: true, mode: 0o750 });
-  const secret = randomBytes(32).toString("base64");
-  // 0640: the CLI (group) reads it to MINT; egress reads it to VERIFY. NOT 0600 in
-  // the egress-only 0700 keys dir — that is exactly the ACL the finding flagged.
-  writeFileSync(path, secret, { mode: 0o640 });
-  return secret;
+/**
+ * Resolve the shared capability secret from custody, bootstrapping the custody FILE
+ * `0640` (CLI-readable) when the path form is used and the file is absent.
+ *
+ * Custody itself (fd form vs path form, fail-closed on empty/unreadable) belongs to
+ * the one shared {@link resolveCapabilitySecret} the CLI mint path also uses — the
+ * two ends must never disagree about the representation (#60 Phase 6, Task 6.2).
+ * Bootstrap stays here because it is a property of the FILE, not of the resolution:
+ * an fd hand-off has nothing to create, and an fd that cannot be read must fail
+ * closed rather than silently mint a fresh secret the CLI does not hold.
+ */
+function readOrBootstrapCapabilitySecret(): string {
+  const fd = process.env[CAPABILITY_KEY_FD_ENV];
+  const path = process.env[CAPABILITY_KEY_ENV];
+  if ((fd === undefined || fd.length === 0) && path !== undefined && path.length > 0 && !existsSync(path)) {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o750 });
+    const secret = randomBytes(32).toString("base64");
+    // 0640: the CLI (group) reads it to MINT; egress reads it to VERIFY. NOT 0600 in
+    // the egress-only 0700 keys dir — that is exactly the ACL the finding flagged.
+    writeFileSync(path, secret, { mode: 0o640 });
+    return secret;
+  }
+  return resolveCapabilitySecret();
 }
 
 async function main(): Promise<void> {
@@ -61,7 +83,7 @@ async function main(): Promise<void> {
   const apiKey = readFileSync(join(keysDir, "atlas.gemini.key"), "utf8").trim();
 
   // Shared, CLI-readable capability-MAC secret (NOT inside the egress-only keys dir).
-  const capabilitySecret = readOrBootstrapCapabilitySecret(requireEnv("ATLAS_EGRESS_CAPABILITY_KEY"));
+  const capabilitySecret = readOrBootstrapCapabilitySecret();
 
   // Ciphertext-only quarantine: seal to the CLI's public key into the provisioned spool.
   const spoolDir = requireEnv("ATLAS_EGRESS_QUARANTINE_SPOOL");
