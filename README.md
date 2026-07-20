@@ -141,7 +141,7 @@ That builds and runs the local test subset. **Exercising the real security spine
 
 ## Command surface
 
-`brain` exposes **54 commands** across 5 phases, driven by a single registry SSOT (`docs/specs/cli-contract/commands.json`, version 1). The full generated list with args, flags, exit codes, and side-effects is [`docs/specs/cli-contract/commands-overview.md`](docs/specs/cli-contract/commands-overview.md). A curated tour by domain:
+`brain` exposes **55 commands** across 5 phases, driven by a single registry SSOT (`docs/specs/cli-contract/commands.json`, version 1). The full generated list with args, flags, exit codes, and side-effects is [`docs/specs/cli-contract/commands-overview.md`](docs/specs/cli-contract/commands-overview.md). A curated tour by domain:
 
 | Domain | Commands | Notes |
 |---|---|---|
@@ -153,7 +153,7 @@ That builds and runs the local test subset. **Exercising the real security spine
 | **Graduation** | `graduation scan/audit/migrate` · `quarantine inspect/resolve` | Fail-closed, byte-exact, resumable. |
 | **DB / DR** | `db status/verify/migrate/rebuild/backup/restore` | `db migrate` is the sole migration composition root; `db restore` is privileged. |
 | **Jobs** | `jobs list/run/retry/cancel` | Durable single-runner queue; batch commands emit `{items, aggregate}`. |
-| **Vault sync (60-B)** | `sync` · `sync status` | One-way absorb of the adopted vault's upstream into `refs/atlas/main`: scan-before-persist, delete→archive, OQ#5 divergence REJECT-halt, O(delta) `index:reconcile` enqueue. |
+| **Vault sync (60-B)** | `sync` · `sync status` · `sync reset` | One-way absorb of the adopted vault's upstream into `refs/atlas/main`: scan-before-persist, delete→archive, OQ#5 divergence REJECT-halt, O(delta) `index:reconcile` enqueue. `sync reset` is the privileged, broker-authorized tree-reconcile recovery from a divergence/exit-3 halt (accepts + audits a history gap). |
 | **Evidence & purge** | `evidence review/retry/resolve` · `purge` | `purge` is authorize-first, one transaction, post-purge verified. |
 
 **Global conventions:** every command supports `--json` (one NDJSON envelope), `--plain`/`--quiet`/`--verbose`, `--config <path>`. Output is terminal-injection-safe by construction (all CSI/OSC/bidi stripped). Exit codes: `0` ok · `1` validation · `2` config/vault/lock · `3` secret-scan · `4` internal · `5` usage · `6` action-required. *(The contracts name a nominal exit 7 "provider-retryable"; a single-command run expresses retryability as a `retryable` flag on the exit-4/6 envelope, and only the `jobs run` batch aggregate can actually return exit 7.)*

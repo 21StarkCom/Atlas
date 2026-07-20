@@ -169,6 +169,11 @@ public enum OperandSourceMap {
         ],
         "source trust promote": ["sourceId": .init(.focusedObject("sourceId"), .required)],
         "source trust revoke": ["sourceId": .init(.focusedObject("sourceId"), .required)],
+        // 60-B `sync reset` (OQ#5 recovery) has NO non-reserved operands — its only
+        // flags are the flow-reserved --export-challenge / --authorization, which the
+        // descriptor already excludes. So the map entry is empty (the operator drives
+        // the pure export→sign→authorize flow with no per-op operand form).
+        "sync reset": [:],
     ]
 }
 

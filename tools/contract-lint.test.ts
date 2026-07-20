@@ -1429,6 +1429,7 @@ describe("Phase-5 cli-contract schema presence (Task 5.0)", () => {
         "quarantine inspect",
         "quarantine resolve",
         "sync",
+        "sync reset",
         "sync status",
       ].sort(),
     );
@@ -1482,9 +1483,9 @@ describe("Phase-5 privileged schemas ⇄ broker authzContract (per-command exits
   const opByName = new Map(authzContract.privilegedOps.map((o) => [o.op, o]));
   const privileged = registry.commands.filter((c) => c.phase === 5 && c.privilege === "privileged");
 
-  it("has the three privileged Phase-5 commands", () => {
+  it("has the four privileged Phase-5 commands", () => {
     expect(privileged.map((c) => c.name).sort()).toEqual(
-      ["graduation migrate", "quarantine inspect", "quarantine resolve"].sort(),
+      ["graduation migrate", "quarantine inspect", "quarantine resolve", "sync reset"].sort(),
     );
   });
 

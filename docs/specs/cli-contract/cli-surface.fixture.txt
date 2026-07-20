@@ -90,6 +90,7 @@ contains backticked words. The text after the em dash is descriptive only.
 
 # Live vault sync (Phase 5)
 `sync` — run one upstream→refs/atlas/main absorb cycle over the adopted vault.
+`sync reset` — privileged: re-converge refs/atlas/main to upstream after a divergence halt.
 `sync status` — read the sync cursor, behind-by, pending quarantine, and divergence state.
 
 # Console enablement (Phase 6)

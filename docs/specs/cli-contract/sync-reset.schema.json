@@ -1,0 +1,208 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/sync-reset.schema.json",
+  "title": "brain sync reset [--export-challenge | --authorization <path>] — --json success output",
+  "description": "The operator-authorized OQ#5 escape hatch: re-converge the broker-owned canonical ref (git.canonical_ref, refs/atlas/main) to the current upstream tree over the note globs after a divergence REJECT halt (or a deterministic exit-3 block whose offending artifact is now absent upstream). TREE-reconcile, not history-replay: it diffs canonicalTree vs upstreamTree, builds ONE reconciled commit as a CHILD of the current canonical head (always a fast-forward), scans every absorbed byte, archives notes present only in the old canonical tree, and re-baselines the cursor to the upstream head — accepting (and auditing) the history gap. Two exclusive modes: --export-challenge does scanned, READ-ONLY planning and emits the broker AuthorizationChallenge (exit 0, zero mutation); --authorization <path> applies a signed challenge. A mutating invocation with neither is action-required (exit 6). --yes never authorizes. Privileged (broker-signature); the challenge binds the reconciliation via intendedEffect.changePlanDigest (a hash of canonicalBase + upstreamHead + note globs + the reconciled writes/deletes/quarantined set) + canonicalBaseCommit, so any drift in canonical head, upstream head, note globs, or the reconciliation plan changes the bound digest and the broker refuses before any mutation. (No targetCommit is bound: the reconciled child commit's sha is only known after the worktree commit, so the deterministic plan digest is the binding — functionally stronger than a single sha.)",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": [
+    "command",
+    "mode",
+    "reBaselinedTo",
+    "canonicalRef",
+    "upstreamRef",
+    "archived",
+    "captured",
+    "quarantined",
+    "pendingQuarantine",
+    "reconcileJobId",
+    "cycleSeq",
+    "historyGapAccepted"
+  ],
+  "properties": {
+    "command": { "const": "sync reset" },
+    "mode": {
+      "enum": ["export-challenge", "applied"],
+      "description": "'export-challenge' = the read-only plan+challenge emission (no mutation); 'applied' = a signed authorization was verified and the reconcile committed."
+    },
+    "reBaselinedTo": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "The upstream head OID the cursor was re-baselined to (mode 'applied'); the head the reset WOULD re-baseline to under 'export-challenge'. null only if the upstream ref does not resolve (which fails before this envelope)."
+    },
+    "canonicalRef": { "type": "string", "minLength": 1, "description": "The configured broker-owned canonical ref (git.canonical_ref)." },
+    "upstreamRef": { "type": "string", "minLength": 1, "description": "The row's upstream_ref (the single upstream authority)." },
+    "archived": {
+      "type": "array",
+      "description": "Notes present only in the OLD canonical tree (absent from the reconciled upstream tree) → ProposeArchive (non-destructive, chunks dropped on the enqueued reconcile drain). May be empty.",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["path", "noteId"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "noteId": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "captured": {
+      "type": "array",
+      "description": "Notes present in the upstream tree that the reconcile absorbed (add/modify), content-addressed, scan-before-persist. May be empty (history-only reset).",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["path", "noteId", "contentId"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "noteId": { "type": "string", "minLength": 1 },
+          "contentId": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "quarantined": {
+      "type": "array",
+      "description": "Upstream-tree paths whose bytes failed the scan — quarantined, not absorbed. The 'canonical tree equals upstream' guarantee holds only over NON-quarantined paths; a non-empty quarantined set makes reset exit 6 (partial reconcile). quarantineId is \"\" under --export-challenge.",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["path", "quarantineId"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "quarantineId": { "type": "string" }
+        }
+      }
+    },
+    "pendingQuarantine": {
+      "type": "array",
+      "description": "The reconciled durable pending-quarantine set after the reset (self-reports the pending state for the partial-reconcile/exit-6 case).",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["path", "quarantineId", "firstSeenOid"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "quarantineId": { "type": "string", "minLength": 1 },
+          "firstSeenOid": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+        }
+      }
+    },
+    "reconcileJobId": {
+      "type": ["string", "null"],
+      "description": "The enqueued index:reconcile job id (idempotencyKey = the reconciled canonical commit OID); null on a history-only/empty reset (nothing to re-index) and under --export-challenge."
+    },
+    "cycleSeq": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "sync_cursors.cycle_seq after the reset (post-increment in mode 'applied'); the current unchanged value under --export-challenge."
+    },
+    "historyGapAccepted": {
+      "type": "boolean",
+      "description": "true when the reset re-baselined the cursor across a non-ancestral/unreachable divergence (an accepted history gap, audited as 'accepted-history-gap'); false when it recovered a deterministic exit-3 block with ancestry intact ('deterministic-scan-halt-recovery')."
+    }
+  },
+  "examples": [
+    {
+      "command": "sync reset",
+      "mode": "applied",
+      "reBaselinedTo": "cccccccccccccccccccccccccccccccccccccccc",
+      "canonicalRef": "refs/atlas/main",
+      "upstreamRef": "refs/heads/main",
+      "archived": [{ "path": "notes/removed.md", "noteId": "concept-removed" }],
+      "captured": [{ "path": "notes/kept.md", "noteId": "concept-kept", "contentId": "sha256:1a2b3c:text/markdown" }],
+      "quarantined": [],
+      "pendingQuarantine": [],
+      "reconcileJobId": "job-01J9Z8Q00000000000000000RS",
+      "cycleSeq": 12,
+      "historyGapAccepted": true
+    },
+    {
+      "command": "sync reset",
+      "mode": "export-challenge",
+      "reBaselinedTo": "cccccccccccccccccccccccccccccccccccccccc",
+      "canonicalRef": "refs/atlas/main",
+      "upstreamRef": "refs/heads/main",
+      "archived": [],
+      "captured": [{ "path": "notes/kept.md", "noteId": "concept-kept", "contentId": "sha256:1a2b3c:text/markdown" }],
+      "quarantined": [{ "path": "notes/dirty.md", "quarantineId": "" }],
+      "pendingQuarantine": [],
+      "reconcileJobId": null,
+      "cycleSeq": 11,
+      "historyGapAccepted": true
+    }
+  ],
+  "x-atlas-contract": {
+    "command": "sync reset",
+    "phase": 5,
+    "privilege": "privileged",
+    "idempotency": "key-accepting",
+    "executionClass": "ledger-writing",
+    "requestHashScope": ["command", "canonicalRef", "upstreamRef", "reconciledCommit", "idempotencyKey"],
+    "summary": "Operator-authorized tree-reconcile of the canonical ref to the upstream tree after a divergence/exit-3 halt: scan-before-persist, delete→archive, one FF canonical advance to a reconciled child commit, cursor re-baseline + one index:reconcile enqueue, accepted history gap audited. Two exclusive modes: --export-challenge (read-only) / --authorization.",
+    "args": [],
+    "flags": [
+      { "flag": "--export-challenge", "type": "boolean", "default": false, "description": "Scanned READ-ONLY planning: emit the broker AuthorizationChallenge bound to canonicalBaseCommit + intendedEffect.changePlanDigest (the deterministic reconciliation-plan hash), mutate nothing (no ref/cursor/projection/audit/quarantine write). Sign it out of band, then apply with --authorization. Exit 0." },
+      { "flag": "--authorization <path>", "type": "string", "default": null, "description": "Apply a signed AuthorizationChallenge: the broker re-verifies (canonicalBaseCommit CAS + the re-derived changePlanDigest matches the signed one + signer/nonce) immediately before the single canonical advance. A drift (canonical moved ⇒ authz.canonical_moved; upstream tree / note globs / reconciliation plan changed ⇒ different changePlanDigest ⇒ authz.target_mismatch; a concurrent cursor advance ⇒ the finalize cycle_seq CAS) is refused before any mutation. --yes never substitutes for this." }
+    ],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "locks": [
+      { "scope": "vault-maintenance", "mode": "exclusive" },
+      { "scope": "canonical-integration", "mode": "exclusive", "note": "during the single authorized broker advance" }
+    ],
+    "authz": {
+      "op": "sync reset",
+      "mechanism": "broker-signature",
+      "challengeFields": ["op", "canonicalBaseCommit", "intendedEffect", "nonce", "expiresAt"],
+      "driftCodes": [
+        "authz.canonical_moved",
+        "authz.target_mismatch",
+        "authz.signature_invalid",
+        "authz.payload_mismatch",
+        "authz.signer_unknown",
+        "authz.signer_revoked",
+        "authz.signer_not_permitted",
+        "authz.nonce_unknown",
+        "authz.nonce_expired",
+        "authz.nonce_replayed"
+      ],
+      "universalCodes": ["authz.schema_invalid", "authz.canonicalization_unsupported"]
+    },
+    "sideEffects": [
+      "one run (run.planned then run.integrated broker-signed) when the reconcile has a non-empty ChangePlan and a valid authorization",
+      "one authorized broker CAS fast-forward of the configured canonical ref to the reconciled child commit",
+      "sync_cursors re-baseline (last_absorbed_oid = upstream head, cycle_seq++, reconciled pending_quarantine) under a cycle_seq CAS, in the finalize transaction",
+      "one index:reconcile enqueue (idempotencyKey = reconciled canonical OID) over the union of changed notes, atomic with the cursor finalize",
+      "quarantine records (AEAD, ciphertext-only) for upstream-tree paths that fail the scan"
+    ],
+    "prohibitedEffects": [
+      "any mutation under --export-challenge (read-only plan + challenge only)",
+      "any mutation without a verified authorization (--yes never authorizes)",
+      "writes refs/heads/main (or any upstream ref — only the configured canonical ref advances, via the broker)",
+      "a non-fast-forward canonical rewrite (the reconciled commit is a CHILD of the current canonical head)",
+      "ProposeDelete/erase for a note absent upstream (archive only)"
+    ],
+    "exitCodes": [0, 1, 2, 3, 4, 5, 6],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "both --export-challenge and --authorization, or an unknown flag" },
+      { "code": "internal", "exit": 4, "when": "a non-terminal per-path error aborts the reconcile; the canonical ref and cursor are unchanged" },
+      { "code": "action-required", "exit": 6, "when": "a mutating invocation with neither --export-challenge nor --authorization" },
+      { "code": "config-invalid", "exit": 2, "when": "the canonical ref is not an adopted broker-owned ref, or equals the row's upstream_ref" },
+      { "code": "vault-error", "exit": 2, "when": "the vault repo/upstream ref is unresolvable or the sync_cursors row is absent/malformed" },
+      { "code": "backup-unhealthy", "exit": 2, "when": "the fail-closed backup watermark blocks ledger-writing runs" },
+      { "code": "secret-scan", "exit": 3, "when": "a non-attributable dirty verdict, or a deterministic exit-3 artifact still present in the upstream tree (reset is not a scan override); cursor unadvanced" },
+      { "code": "authz.canonical_moved", "exit": 6, "when": "broker drift: the canonical tip moved from the challenge's canonicalBaseCommit (a concurrent capture) — no mutation" },
+      { "code": "authz.target_mismatch", "exit": 6, "when": "broker drift: the re-derived intendedEffect.changePlanDigest differs from the signed challenge (upstream tree, note globs, or reconciliation plan changed since signing) — no mutation" },
+      { "code": "authz.nonce_expired", "exit": 6, "when": "broker: the challenge nonce expired (expiresAt passed)" },
+      { "code": "authz.signature_invalid", "exit": 1, "when": "broker: Ed25519 signature verification failed" },
+      { "code": "authz.payload_mismatch", "exit": 1, "when": "broker: signingPayload differs from the broker-recomputed canonical bytes" },
+      { "code": "authz.schema_invalid", "exit": 1, "when": "broker: the challenge/response fails the contracts schema (universal broker validation failure)" },
+      { "code": "authz.canonicalization_unsupported", "exit": 1, "when": "broker: the response's payloadCanonicalization id is unknown (universal broker validation failure)" },
+      { "code": "authz.signer_unknown", "exit": 1, "when": "broker: signerId is not in the signer registry" },
+      { "code": "authz.signer_revoked", "exit": 1, "when": "broker: the signer is revoked" },
+      { "code": "authz.signer_not_permitted", "exit": 1, "when": "broker: the signer is not permitted for the sync reset op" },
+      { "code": "authz.nonce_unknown", "exit": 1, "when": "broker: the nonce was not issued by this broker" },
+      { "code": "authz.nonce_replayed", "exit": 1, "when": "broker: the nonce was already consumed" },
+      { "code": "action-required", "exit": 6, "when": "≥1 attributable upstream path was quarantined (partial reconcile); the cursor still re-baselines over non-quarantined paths" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}

@@ -20,6 +20,7 @@ import "./source.js";
 import "./source-trust-promote.js";
 import "./source-trust-revoke.js";
 import "./sync.js";
+import "./sync-reset.js";
 import "./purge.js";
 import "./graduation-scan.js";
 import "./graduation-audit.js";

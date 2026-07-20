@@ -483,7 +483,7 @@ function envelopeFor(row: SyncCursor, upstreamHead: string, plan: SyncPlan, reco
   };
 }
 
-async function runStartupRecovery(deps: SyncCycleDeps, integration: CaptureIntegration): Promise<void> {
+export async function runStartupRecovery(deps: SyncCycleDeps, integration: CaptureIntegration): Promise<void> {
   const reindexHook: ReconcileHooks["reindex"] = async () => {
     const head = await foldProvenanceFromCanonical(deps.store, deps.repo, deps.canonicalRef);
     return { indexGeneration: 1, canonicalSha: head };
@@ -542,12 +542,12 @@ export interface SyncRecoveryReport {
 export async function recoverSyncRuns(deps: SyncCycleDeps, integration: CaptureIntegration): Promise<SyncRecoveryReport> {
   const rows = deps.store.db
     .prepare(
-      `SELECT run_id, status FROM agent_runs
-        WHERE operation = 'sync'
+      `SELECT run_id, operation, status FROM agent_runs
+        WHERE operation IN ('sync', 'sync-reset')
           AND status NOT IN ('finalized','failed','cancelled','rejected','rolled-back')
         ORDER BY started_at ASC, run_id ASC`,
     )
-    .all() as { run_id: string; status: string }[];
+    .all() as { run_id: string; operation: string; status: string }[];
   const wdeps: WorkflowDeps = {
     store: deps.store,
     broker: integration.broker,
@@ -568,7 +568,7 @@ export async function recoverSyncRuns(deps: SyncCycleDeps, integration: CaptureI
           exitCode: EXIT.INTERNAL,
         });
       }
-      const handle = await startRun(wdeps, { operation: "sync", runId: runRow.run_id, targetNoteId: null, resume: true });
+      const handle = await startRun(wdeps, { operation: runRow.operation, runId: runRow.run_id, targetNoteId: null, resume: true });
       // Idempotent re-drive of the post-integrate steps.
       await foldProvenanceFromCanonical(deps.store, deps.repo, deps.canonicalRef);
       foldNotesForPaths(deps.store, [...intent.changedNoteIds], resolveAtRef(deps.repo, deps.canonicalRef, deps.noteGlobs));
@@ -610,7 +610,7 @@ export async function recoverSyncRuns(deps: SyncCycleDeps, integration: CaptureI
     if (readSyncIntent(deps.store, runRow.run_id) !== null) {
       continue; // (a) anchored-intent — leave for operator / sync reset
     }
-    const handle = await startRun(wdeps, { operation: "sync", runId: runRow.run_id, targetNoteId: null, resume: true });
+    const handle = await startRun(wdeps, { operation: runRow.operation, runId: runRow.run_id, targetNoteId: null, resume: true });
     const at = handle.hydrateFromDurable();
     if (at === null || !canTerminateFrom(at)) {
       // A state the terminal contract does not permit failing from — leave it for

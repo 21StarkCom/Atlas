@@ -411,6 +411,14 @@
       "implemented": true
     },
     {
+      "name": "sync reset",
+      "schemaRef": "docs/specs/cli-contract/sync-reset.schema.json",
+      "phase": 5,
+      "idempotency": "key-accepting",
+      "privilege": "privileged",
+      "implemented": true
+    },
+    {
       "name": "sync status",
       "schemaRef": "docs/specs/cli-contract/sync-status.schema.json",
       "phase": 5,
