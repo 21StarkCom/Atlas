@@ -35,6 +35,11 @@ KEYCHAIN_SERVICE="atlas-egress-capability"
 # `atlas-agent` is a home-less service UID with no login keychain, so the custody
 # point must be a keychain in every identity's search list.
 SYNC_KEYCHAIN_DEFAULT="${ATLAS_SYNC_KEYCHAIN:-/Library/Keychains/System.keychain}"
+# HOME for the timer. launchd supplies none, and atlas-agent's real home is the
+# root-owned /var/empty — the CLI's default quarantine state dir hangs off HOME, so
+# it must be a directory atlas-agent can actually write. Kept in sync with the
+# `HOME` value in com.atlas.sync.plist (asserted by tools/sync-plist.test.ts).
+SYNC_AGENT_HOME="/usr/local/var/atlas/agent"
 
 status() {
   for s in "${SERVICES[@]}" "${GATED_SERVICES[@]}"; do
@@ -50,13 +55,19 @@ status() {
 # ---------------------------------------------------------------------------
 # The sync-timer gate (#60 Phase 6, Task 6.3)
 #
-# Five prerequisites, ALL required. Each one, if unmet, produces a timer that looks
+# SEVEN prerequisites, ALL required. Each one, if unmet, produces a timer that looks
 # healthy in `launchctl` while doing nothing useful — which is why the timer is never
 # enabled without them:
 #
 #   1. wrapper installed and executable
 #   2. the wrapper's baked-in `brain` path resolves and is executable (launchd has no
 #      shell PATH — a bare `brain` dies at command resolution every cycle)
+#   2b. its baked-in CONFIG DIR is absolute and atlas-agent can read brain.config.yaml
+#      there — launchd's cwd is `/` and the CLI resolves the config as
+#      `<cwd>/brain.config.yaml` with no upward walk and no env fallback
+#   2c. atlas-agent can WRITE the timer's HOME. launchd supplies no HOME and the
+#      account's real one is the root-owned /var/empty, while the CLI's default
+#      quarantine state dir hangs off HOME — so the first dirty scan would wedge
 #   3. `atlas-agent` can OPEN the vault repo read-only. The wrapper runs as
 #      atlas-agent, not the vault's owning user, so git's dubious-ownership guard
 #      rejects the repo and the very first readRef fails — even with every other gate
@@ -72,6 +83,14 @@ status() {
 # Read-only: `sync-gate` mutates nothing except the safe.directory entry it must add
 # to perform probe 3 honestly.
 # ---------------------------------------------------------------------------
+# Read one `NAME="value"` line the installer baked into the wrapper. Never fails the
+# caller: a missing/unreadable wrapper yields the empty string, so every probe still
+# runs and the gate reaches its own verdict instead of dying under `set -e`.
+wrapper_field() {
+  [ -r "$SYNC_WRAPPER" ] || return 0
+  sed -n "s|^$1=\"\\(.*\\)\"\$|\\1|p" "$SYNC_WRAPPER" 2>/dev/null | head -1
+}
+
 sync_gate() {
   local vault="${1:-}"
   local failed=0
@@ -86,7 +105,7 @@ sync_gate() {
   if [ -x "$SYNC_WRAPPER" ]; then
     gate_ok "wrapper installed: $SYNC_WRAPPER"
     local brain_bin config_dir
-    brain_bin="$(sed -n 's|^BRAIN="\(.*\)"$|\1|p' "$SYNC_WRAPPER" | head -1)"
+    brain_bin="$(wrapper_field BRAIN || true)"
     case "$brain_bin" in
       "" | *@ATLAS_BRAIN_BIN@*)
         gate_fail "the wrapper's brain path was never substituted — re-run install-artifact.sh (ATLAS_BRAIN_BIN=...)" ;;
@@ -98,7 +117,7 @@ sync_gate() {
     esac
     # launchd runs the job with cwd `/`, and brain resolves its config strictly as
     # <cwd>/brain.config.yaml — an unsubstituted or wrong dir fail-closes EVERY cycle.
-    config_dir="$(sed -n 's|^CONFIG_DIR="\(.*\)"$|\1|p' "$SYNC_WRAPPER" | head -1)"
+    config_dir="$(wrapper_field CONFIG_DIR || true)"
     case "$config_dir" in
       "" | *@ATLAS_CONFIG_DIR@*)
         gate_fail "the wrapper's config dir was never substituted — re-run install-artifact.sh (ATLAS_CONFIG_DIR=...)" ;;
@@ -113,6 +132,15 @@ sync_gate() {
     esac
   else
     gate_fail "wrapper missing or not executable: $SYNC_WRAPPER — run install-artifact.sh first (it SKIPS when ATLAS_BRAIN_BIN/ATLAS_CONFIG_DIR are unset)"
+  fi
+
+  # 2c — a WRITABLE HOME for the timer. launchd supplies none; the CLI's default
+  # quarantine state dir is `<HOME>/Library/Application Support/atlas/quarantine`, so
+  # an unwritable HOME wedges the first cycle that quarantines anything.
+  if sudo -n -u "$ATLAS_AGENT_USER" test -w "$SYNC_AGENT_HOME"; then
+    gate_ok "$ATLAS_AGENT_USER can write its timer HOME: $SYNC_AGENT_HOME"
+  else
+    gate_fail "$ATLAS_AGENT_USER cannot write $SYNC_AGENT_HOME (the plist's HOME) — re-run \`services.sh install\`; without it the default quarantine dir lands under the root-owned /var/empty"
   fi
 
   # 3 — the atlas-agent repo-open probe (the failure that survives every other gate).
@@ -142,8 +170,12 @@ sync_gate() {
   # wrapper performs: `-w` (retrieve + DECRYPT the password) against the SAME explicit
   # keychain file. An attribute-only lookup succeeds without decrypting, so it would
   # pass on a locked keychain the wrapper then fails to read.
+  # `|| true`: with `set -euo pipefail`, sed on a MISSING wrapper exits 1 and pipefail
+  # carries it into this bare assignment, killing the gate before probes 4-6 ever run —
+  # and "wrapper not installed" is the NORMAL state on a host that never adopted a
+  # vault. The gate must always reach its own summary and exit 2, never die at 1.
   local keychain
-  keychain="$(sed -n 's|^KEYCHAIN="\(.*\)"$|\1|p' "$SYNC_WRAPPER" 2>/dev/null | head -1)"
+  keychain="$(wrapper_field KEYCHAIN || true)"
   case "$keychain" in "" | *@ATLAS_KEYCHAIN@*) keychain="$SYNC_KEYCHAIN_DEFAULT" ;; esac
   if sudo -n -u "$ATLAS_AGENT_USER" /usr/bin/security find-generic-password -w \
        -s "$KEYCHAIN_SERVICE" -a "$ATLAS_AGENT_USER" "$keychain" >/dev/null 2>&1; then
@@ -189,6 +221,8 @@ case "${1:-}" in
     done
     # The sync timer runs as atlas-agent (not `atlas-sync`), so its log needs that owner.
     touch "$LOG_DIR/sync.log"; chown "$ATLAS_AGENT_USER:$ATLAS_ROOT_GROUP" "$LOG_DIR/sync.log"; chmod 0644 "$LOG_DIR/sync.log"
+    # …and a writable HOME, since launchd supplies none and /var/empty is root-owned.
+    ensure_dir "$SYNC_AGENT_HOME" "$ATLAS_AGENT_USER" "$ATLAS_ROOT_GROUP" 0700
     for s in "${SERVICES[@]}"; do
       step "install $s"
       rendered="$(mktemp -t atlas-plist)"

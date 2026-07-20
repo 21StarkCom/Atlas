@@ -55,27 +55,57 @@ if [ "$ATLAS_OS" = "Darwin" ]; then
 BRAIN_BIN="${ATLAS_BRAIN_BIN:-$(command -v brain || true)}"
 CONFIG_DIR="${ATLAS_CONFIG_DIR:-}"
 KEYCHAIN_FILE="${ATLAS_SYNC_KEYCHAIN:-/Library/Keychains/System.keychain}"
+BRAIN_SHIM="$ATLAS_INSTALL_BIN/brain-shim.sh"
 skip_wrapper=""
-if [ -z "$BRAIN_BIN" ] || [ ! -x "$BRAIN_BIN" ]; then
-  skip_wrapper="no executable \`brain\` — set ATLAS_BRAIN_BIN=/absolute/path/to/brain"
-# Identity probe: `brain` is a generic name on \$PATH. Bake in only a real Atlas CLI,
+# `atlas` ships no installed binary: `apps/cli/dist/bin.js` is plain `tsc` output, mode
+# 0644, and the repo docs use a shell alias. So the entrypoint is accepted either as an
+# executable OR as a readable `.js` (invoked through `node`) — requiring the exec bit
+# would make the documented runbook silently skip the wrapper every time.
+brain_invoke=""
+if [ -z "$BRAIN_BIN" ]; then
+  skip_wrapper="no \`brain\` — set ATLAS_BRAIN_BIN=/absolute/path/to/brain (or dist/bin.js)"
+elif [ -x "$BRAIN_BIN" ]; then
+  brain_invoke="$BRAIN_BIN"
+elif [ -r "$BRAIN_BIN" ] && case "$BRAIN_BIN" in *.js | *.mjs | *.cjs) true ;; *) false ;; esac; then
+  brain_invoke="/usr/bin/env node $BRAIN_BIN"
+else
+  skip_wrapper="\`$BRAIN_BIN\` is neither executable nor a readable JS entrypoint"
+fi
+# Identity probe: `brain` is a generic name on $PATH. Bake in only a real Atlas CLI,
 # never whatever else answered to that name under root's PATH.
-elif ! "$BRAIN_BIN" --help 2>&1 | grep -q "Atlas CLI"; then
+if [ -z "$skip_wrapper" ] && ! $brain_invoke --help 2>&1 | grep -q "Atlas CLI"; then
   skip_wrapper="\`$BRAIN_BIN\` does not identify as the Atlas CLI (\`--help\` lacks the 'Atlas CLI' banner)"
-elif [ -z "$CONFIG_DIR" ] || [ ! -f "$CONFIG_DIR/brain.config.yaml" ]; then
+fi
+if [ -z "$skip_wrapper" ] && { [ -z "$CONFIG_DIR" ] || [ ! -f "$CONFIG_DIR/brain.config.yaml" ]; }; then
   skip_wrapper="no brain.config.yaml — set ATLAS_CONFIG_DIR to the dir holding it (launchd runs with cwd /)"
 fi
 if [ -n "$skip_wrapper" ]; then
   log "SKIP atlas-sync-wrapper.sh: $skip_wrapper"
   log "     (continuous sync stays unavailable; the daemons are unaffected)"
+  # A wrapper left over from an earlier install would keep running with STALE
+  # substitutions — remove it so `sync_gate` reports "missing" rather than green.
+  rm -f "$ATLAS_INSTALL_BIN/atlas-sync-wrapper.sh" "$BRAIN_SHIM"
 else
-  step "install atlas-sync-wrapper.sh (brain → $BRAIN_BIN, config → $CONFIG_DIR, keychain → $KEYCHAIN_FILE)"
-  rendered_wrapper="$(mktemp -t atlas-sync-wrapper)"
+  step "install atlas-sync-wrapper.sh (brain → $brain_invoke, config → $CONFIG_DIR, keychain → $KEYCHAIN_FILE)"
   # `|` is the sed delimiter, so a path containing one would corrupt the render.
   for v in "$BRAIN_BIN" "$CONFIG_DIR" "$KEYCHAIN_FILE"; do
     case "$v" in *'|'* | *'&'* | *'\'*) echo "error: unsupported character in path '$v'" >&2; exit 2 ;; esac
   done
-  sed -e "s|@ATLAS_BRAIN_BIN@|$BRAIN_BIN|g" \
+  # The wrapper's contract is ONE absolute executable (it `-x`-checks it, and the gate
+  # re-checks it). When the entrypoint is a non-executable .js, that executable is a
+  # root-owned shim in the same non-agent-writable install dir (D16) — never a `node …`
+  # string spliced into the wrapper, which would break quoting and the `-x` invariant.
+  if [ "$brain_invoke" = "$BRAIN_BIN" ]; then
+    brain_target="$BRAIN_BIN"
+  else
+    printf '#!/bin/sh\nexec /usr/bin/env node %s "$@"\n' "$BRAIN_BIN" > "$BRAIN_SHIM.tmp"
+    install -m 0755 -o root -g "$ATLAS_ROOT_GROUP" "$BRAIN_SHIM.tmp" "$BRAIN_SHIM"
+    rm -f "$BRAIN_SHIM.tmp"
+    brain_target="$BRAIN_SHIM"
+    log "brain entrypoint is not executable — installed shim $BRAIN_SHIM → node $BRAIN_BIN"
+  fi
+  rendered_wrapper="$(mktemp -t atlas-sync-wrapper)"
+  sed -e "s|@ATLAS_BRAIN_BIN@|$brain_target|g" \
       -e "s|@ATLAS_CONFIG_DIR@|$CONFIG_DIR|g" \
       -e "s|@ATLAS_KEYCHAIN@|$KEYCHAIN_FILE|g" \
       -e "s|@ATLAS_SECURITY_BIN@|/usr/bin/security|g" \

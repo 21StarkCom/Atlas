@@ -350,7 +350,10 @@ brain jobs run --all --json   drain that job (this is the step that indexes)
 # 1  render + install the wrapper. It is SKIPPED (with a warning, never a hard fail)
 #    unless BOTH deployment facts are given — launchd supplies neither.
 #      ATLAS_BRAIN_BIN   absolute brain; Atlas ships no installed binary, and launchd
-#                        has no shell PATH, so a bare `brain` dies every cycle
+#                        has no shell PATH, so a bare `brain` dies every cycle.
+#                        dist/bin.js is plain tsc output (mode 0644) — the installer
+#                        wraps a non-executable JS entrypoint in a root-owned
+#                        brain-shim.sh, so no chmod is needed.
 #      ATLAS_CONFIG_DIR  the dir holding brain.config.yaml; launchd runs with cwd `/`
 #                        and `brain` resolves its config strictly as <cwd>/brain.config.yaml
 sudo ATLAS_BRAIN_BIN="$PWD/apps/cli/dist/bin.js" \
@@ -382,7 +385,8 @@ tail -f /usr/local/var/log/atlas/sync.log
 | Gate | If unmet |
 |---|---|
 | wrapper installed + executable | nothing runs (install-artifact.sh skipped it — see step 1) |
-| its baked-in `brain` path is absolute and executable | launchd has no shell PATH — a bare `brain` dies at command resolution *every cycle* |
+| its baked-in `brain` path is absolute and executable | launchd has no shell PATH — a bare `brain` dies at command resolution *every cycle*. `dist/bin.js` is plain `tsc` output (mode 0644), so the installer wraps a non-executable JS entrypoint in a root-owned `brain-shim.sh` and bakes *that* in |
+| `atlas-agent` can **write** the timer's `HOME` (`/usr/local/var/atlas/agent`, provisioned by `services.sh install`) | launchd supplies no `HOME` and the account's real one is the root-owned `/var/empty`, while the CLI's default quarantine dir hangs off `HOME` — the first cycle that quarantines anything would wedge |
 | its baked-in **config dir** is absolute and `atlas-agent` can read `brain.config.yaml` there | launchd runs with cwd `/`; `brain` resolves the config as `<cwd>/brain.config.yaml` with no upward walk and no env fallback, so every cycle would exit 2 at config load |
 | `atlas-agent` can open the vault repo (repo-specific `safe.directory`, written to `/etc/gitconfig`) | the wrapper runs as a different user than the vault owner; git's dubious-ownership guard kills the first `readRef` even with every other gate green. It is the **system** config, not `--global`: `atlas-agent`'s home is the root-owned `/var/empty`, so a `--global` write has nowhere to land |
 | the capability secret **reads** (`-w`, decrypting) as `atlas-agent` from the named keychain | every drain fail-closes with no credential. The probe is the wrapper's exact operation — an attribute-only lookup would pass against a *locked* keychain |

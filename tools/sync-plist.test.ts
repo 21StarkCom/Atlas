@@ -46,6 +46,16 @@ describe("com.atlas.sync.plist — shape", () => {
     expect(PLIST).not.toMatch(/<string>brain<\/string>/);
   });
 
+  it("pins a WRITABLE HOME — launchd supplies none and atlas-agent's is root-owned /var/empty", () => {
+    // The CLI's default quarantine state dir hangs off HOME; an unwritable one wedges
+    // the first cycle that quarantines anything.
+    expect(plistValue("HOME")).toBe("/usr/local/var/atlas/agent");
+    // services.sh must provision exactly that path, and gate on it.
+    expect(SERVICES).toContain('SYNC_AGENT_HOME="/usr/local/var/atlas/agent"');
+    expect(SERVICES).toMatch(/ensure_dir "\$SYNC_AGENT_HOME" "\$ATLAS_AGENT_USER"/);
+    expect(SERVICES).toMatch(/test -w "\$SYNC_AGENT_HOME"/);
+  });
+
   it("carries NO secret in EnvironmentVariables — a plist is world-readable", () => {
     const env = /<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/.exec(PLIST)?.[1] ?? "";
     expect(env).toContain("PATH");
@@ -127,6 +137,20 @@ describe("services.sh — the gates", () => {
     expect(gate).toMatch(/-a "\$ATLAS_AGENT_USER" "\$keychain"/);
   });
 
+  it("reads every wrapper field through the guarded helper — a missing wrapper must not abort the gate", () => {
+    // ROUND-2 REGRESSION: a bare `sed "$SYNC_WRAPPER"` outside the wrapper-exists
+    // guard exits 1 under `set -euo pipefail`, killing the gate before the later
+    // probes and returning exit 1 instead of the documented exit 2 — on the now-NORMAL
+    // path where install-artifact.sh skipped the wrapper.
+    expect(SERVICES).toMatch(/^wrapper_field\(\) \{/m);
+    expect(SERVICES).toMatch(/\[ -r "\$SYNC_WRAPPER" \] \|\| return 0/);
+    for (const field of ["BRAIN", "CONFIG_DIR", "KEYCHAIN"]) {
+      expect(gate).toContain(`$(wrapper_field ${field} || true)`);
+    }
+    // No raw sed against the wrapper may survive anywhere in the gate.
+    expect(gate).not.toMatch(/sed[^\n]*\$SYNC_WRAPPER/);
+  });
+
   it("requires the upstream puller — atlas-agent is network-denied and cannot fetch", () => {
     expect(gate).toContain("ATLAS_UPSTREAM_PULLER_LABEL");
     expect(gate).toMatch(/launchctl print "system\/\$puller"/);
@@ -140,7 +164,7 @@ describe("services.sh — the gates", () => {
 describe("install-artifact.sh — wrapper rendering", () => {
   it("substitutes every placeholder and installs the wrapper root-owned 0755", () => {
     for (const sub of [
-      "s|@ATLAS_BRAIN_BIN@|$BRAIN_BIN|g",
+      "s|@ATLAS_BRAIN_BIN@|$brain_target|g",
       "s|@ATLAS_CONFIG_DIR@|$CONFIG_DIR|g",
       "s|@ATLAS_KEYCHAIN@|$KEYCHAIN_FILE|g",
       "s|@ATLAS_SECURITY_BIN@|/usr/bin/security|g",
@@ -159,7 +183,23 @@ describe("install-artifact.sh — wrapper rendering", () => {
 
   it("verifies the resolved `brain` really IS the Atlas CLI before baking it in", () => {
     // `brain` is a generic name on root's PATH.
-    expect(INSTALL).toMatch(/"\$BRAIN_BIN" --help[\s\S]{0,60}Atlas CLI/);
+    expect(INSTALL).toMatch(/\$brain_invoke --help[\s\S]{0,60}Atlas CLI/);
+  });
+
+  it("accepts a NON-executable .js entrypoint via a root-owned shim", () => {
+    // ROUND-2 REGRESSION: `apps/cli/dist/bin.js` is plain tsc output (mode 0644) and
+    // the repo ships no installed binary, so an `-x`-only test made the documented
+    // runbook silently skip the wrapper every single time.
+    expect(INSTALL).toMatch(/\*\.js \| \*\.mjs \| \*\.cjs/);
+    expect(INSTALL).toContain("/usr/bin/env node");
+    // The shim keeps the wrapper's one-absolute-executable invariant (and D16: it is
+    // installed root-owned into the non-agent-writable dir, never spliced as a string).
+    expect(INSTALL).toMatch(/install -m 0755 -o root -g "\$ATLAS_ROOT_GROUP" "\$BRAIN_SHIM\.tmp" "\$BRAIN_SHIM"/);
+    expect(INSTALL).toContain('BRAIN_SHIM="$ATLAS_INSTALL_BIN/brain-shim.sh"');
+  });
+
+  it("removes a stale wrapper when the install SKIPS — never leaves old substitutions running", () => {
+    expect(INSTALL).toMatch(/rm -f "\$ATLAS_INSTALL_BIN\/atlas-sync-wrapper\.sh" "\$BRAIN_SHIM"/);
   });
 
   it("requires a config dir — the launchd cwd-`/` failure is otherwise silent", () => {

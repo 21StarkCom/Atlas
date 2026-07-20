@@ -31,6 +31,12 @@
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <!-- launchd supplies no HOME. atlas-agent's NFSHomeDirectory is the root-owned
+         /var/empty (0555), and the CLI's default quarantine state dir resolves to
+         `<HOME>/Library/Application Support/atlas/quarantine` — so without this the
+         FIRST dirty scan wedges the timer trying to write an unwritable path. Points
+         at an atlas-agent-owned dir that `services.sh install` provisions. -->
+    <key>HOME</key><string>/usr/local/var/atlas/agent</string>
   </dict>
 </dict>
 </plist>
