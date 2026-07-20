@@ -622,6 +622,43 @@ describe("runSyncCycle — the absorb engine (Tasks 4.4–4.7, 4.10)", () => {
     expect(h.cursorRow()).toEqual(cursorBefore);
   }, 60_000);
 
+  it("rename-with-edit: one renamed[] entry PLUS a modified op; content lands at the new path", async () => {
+    h = await makeSyncHarness();
+    await runSyncCycle(h.deps());
+    h.mvUpstream("seed.md", "notes/seed-v2.md");
+    h.writeUpstream("notes/seed-v2.md", noteText("concept-seed", "Seed", "edited during the move"));
+    h.commitUpstream("rename + edit");
+
+    const res = await runSyncCycle(h.deps());
+
+    expect(res.envelope.renamed).toEqual([{ fromPath: "seed.md", toPath: "notes/seed-v2.md", noteId: "concept-seed" }]);
+    expect(res.envelope.absorbed).toEqual([
+      { path: "notes/seed-v2.md", noteId: "concept-seed", contentId: expect.any(String), action: "modified" },
+    ]);
+    expect(h.git(["show", `${SYNC_CANONICAL_REF}:notes/seed-v2.md`])).toContain("edited during the move");
+    expect(() => h.git(["cat-file", "-e", `${SYNC_CANONICAL_REF}:seed.md`])).toThrow();
+  }, 60_000);
+
+  it("quarantine→delete of a pending-only path finalizes cleanly: pending cleared, no archive of a nonexistent note, cursor advances", async () => {
+    h = await makeSyncHarness();
+    await runSyncCycle(h.deps());
+    h.writeUpstream("notes/ghost.md", noteText("concept-ghost", "Ghost", PLANTED_SECRET));
+    h.commitUpstream("dirty ghost");
+    await runSyncCycle(h.deps()); // pending entry, never absorbed
+    const pendingBefore = JSON.parse(h.cursorRow().pending_quarantine) as { path: string; quarantineId: string }[];
+    expect(pendingBefore.map((p) => p.path)).toEqual(["notes/ghost.md"]);
+
+    h.rmUpstream("notes/ghost.md");
+    const head = h.commitUpstream("delete ghost");
+    const res = await runSyncCycle(h.deps());
+
+    expect(res.exitCode).toBe(0);
+    expect(res.envelope.archived).toEqual([]); // no note ever existed canonically — nothing to archive
+    expect(res.envelope.clearedPending).toEqual([{ path: "notes/ghost.md", quarantineId: pendingBefore[0]!.quarantineId }]);
+    expect(JSON.parse(h.cursorRow().pending_quarantine)).toEqual([]);
+    expect(h.cursorRow().last_absorbed_oid).toBe(head);
+  }, 60_000);
+
   it("config guard: canonical_ref == upstream_ref (or the un-adopted default) refuses config-invalid", async () => {
     h = await makeSyncHarness();
     await expectCliError(runSyncCycle(h.deps({ canonicalRef: h.upstreamRef })), "config-invalid");

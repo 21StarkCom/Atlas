@@ -24,7 +24,9 @@ const FIXTURES_ROOT = resolve(
 );
 
 describe("withFixtureVault", () => {
-  it("loads all seven fixtures into an isolated temp copy", async () => {
+  // 60_000: seven fixture copies + git inits routinely exceed vitest's 5 s
+  // default on a loaded machine (same budget the apps/cli e2e suites use).
+  it("loads all seven fixtures into an isolated temp copy", { timeout: 60_000 }, async () => {
     for (const name of ALL_FIXTURES) {
       let seen = "";
       await withFixtureVault(name, async ({ vaultDir, git }) => {
