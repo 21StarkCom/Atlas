@@ -81,7 +81,7 @@ Repo constitution: [`../../CLAUDE.md`](../../CLAUDE.md). Design SSOT: [`../../do
 
 ## Open items
 
-- **#60** — graduation E2E (automatable half shipped in #142): still owed are workflow-runs + purge live on the migrated copy, `tools/scale-bench.ts` (5k/50k), the ingest→index auto-hook. Exercises `graduation migrate`/workflow/purge/index commands end-to-end; real-copy apply stays human-gated (D20 — test signer rejected outside `ATLAS_TEST_MODE`).
+- **#60** — graduation E2E (automatable half shipped in #142): still owed are workflow-runs + purge live on the migrated copy and `tools/scale-bench.ts` (5k/50k). **The ingest→index auto-hook is CLOSED** (Phase 6, #268): `provisioning/macos/atlas-sync-wrapper.sh` on a 300 s `com.atlas.sync` launchd timer runs `brain sync --json` then `brain jobs run --all --json` — sync only *enqueues* `index:reconcile`, so without that drain nothing synced is ever retrievable. Custody detail (Keychain → fd 3, never the environment) in [`provisioning/CLAUDE.md`](../../provisioning/CLAUDE.md); enablement gate in [`docs/install.md`](../../docs/install.md) §5.6. Exercises `graduation migrate`/workflow/purge/index commands end-to-end; real-copy apply stays human-gated (D20 — test signer rejected outside `ATLAS_TEST_MODE`).
 - **#65** — ledger/backup hardening residuals from the #23 review (touches `db backup`/`db restore` custody + `--force-unblock`; and the `recordIntegration`-without-`repo` ancestry residual above).
 - `synthesis/integrate.ts` general-advance seam is unwired; `ops/index.ts` `CreateRelationship` executor is deferred (`EXECUTABLE_OPS` = claims/evidence trio only).
 

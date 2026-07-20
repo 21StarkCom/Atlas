@@ -136,6 +136,13 @@ export {
 // ---------------------------------------------------------------------------
 
 export {
+  resolveCapabilitySecret,
+  CAPABILITY_KEY_ENV,
+  CAPABILITY_KEY_FD_ENV,
+  type CapabilityCustodyEnv,
+} from "./egress/capability-custody.js";
+
+export {
   mintEgressCapability,
   verifyCapability,
   sensitivityRank,

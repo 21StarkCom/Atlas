@@ -42,9 +42,20 @@ tail -3 /usr/local/var/log/atlas/*.log                # "…listening on…" ×2
 
 # 8  first run (config → ledger → projections → index): §5
 export ATLAS_PROVISIONED=1
+
+# 9  (optional, after §5.4 adoption) enable continuous sync — §5.6
+VAULT=/path/to/vault-repo                       # the adopted repo
+sudo ATLAS_BRAIN_BIN="$PWD/apps/cli/dist/bin.js" ATLAS_CONFIG_DIR=/path/to/config-dir \
+  provisioning/install-artifact.sh dist-artifact              # re-render with the wrapper
+sudo security add-generic-password -a atlas-agent -s atlas-egress-capability -U -A \
+  -w "$(sudo cat /usr/local/etc/atlas/keys/shared/egress-capability.key)" \
+  /Library/Keychains/System.keychain
+sudo provisioning/macos/services.sh sync-gate "$VAULT"        # shows exactly what's missing
+sudo ATLAS_UPSTREAM_PULLER_LABEL=<puller-label> \
+  provisioning/macos/services.sh enable-sync "$VAULT"
 ```
 
-Ordering that bites if violated: **artifact before services** (`services.sh` refuses without the launchers), **vault before services** (the broker validates `refs/audit/runs` at startup and crash-loops on a missing repo), **`db migrate` before `db rebuild`** (§5.3).
+Ordering that bites if violated: **artifact before services** (`services.sh` refuses without the launchers), **vault before services** (the broker validates `refs/audit/runs` at startup and crash-loops on a missing repo), **`db migrate` before `db rebuild`** (§5.3), **adoption before `enable-sync`** (the timer needs a seeded `sync_cursors` row).
 
 ---
 
@@ -175,7 +186,8 @@ Each verified against source before documenting.
 | Var | Read by | What it does |
 |---|---|---|
 | **`ATLAS_PROVISIONED`** | `apps/cli/src/commands/doctor.ts:356`; the two-UID gate in `packages/broker/test/approval-boundary.adversarial.test.ts:127` (the one suite that skips without it) | `="1"` enables the OS-level test suites and tells `doctor` the custody-key/identity checks are active (a dev host that hasn't provisioned reports `provisioning-presence` as info, not a failure). Purely a gate — no runtime behavior beyond that. |
-| **`ATLAS_EGRESS_CAPABILITY_KEY`** | `packages/models/src/capability.ts:37,44` (CLI mint) and `packages/broker/bin/atlas-egress.ts:64` (daemon verify) | Path to the **shared** capability-MAC secret file. The CLI reads it to *mint* a run-bound egress capability; the egress daemon reads the **same** file to *verify* it. **Must be exported for every mint-bearing command** (`index rebuild`, `index repair`, `index eval`, `query`) or the mint throws before the provider call. The launcher points it at `…/keys/shared/egress-capability.key` (0640, group `atlas-git`) — the CLI must run as an identity that can read it (member of `atlas-git`, e.g. `atlas-agent`). |
+| **`ATLAS_EGRESS_CAPABILITY_KEY_FD`** | `packages/broker/src/egress/capability-custody.ts` — the one resolver both the CLI mint path and the egress daemon use | An already-open **file descriptor** carrying the raw capability-MAC secret, as an alternative to the path form below. This is how the launchd sync wrapper hands the Keychain-fetched secret to the `index:reconcile` drain: never written to disk, never in any environment (the env carries only the integer), command-scoped — it dies with the process. **Wins when both forms are set** (an explicit hand-off must not be silently downgraded to a standing on-disk credential), and never bootstraps a secret. Fail-closed on an unreadable fd or an empty payload. You do not set this by hand; `atlas-sync-wrapper.sh` does. |
+| **`ATLAS_EGRESS_CAPABILITY_KEY`** | `packages/broker/src/egress/capability-custody.ts`, via `packages/models/src/capability.ts` (CLI mint) and `packages/broker/bin/atlas-egress.ts` (daemon verify) | Path to the **shared** capability-MAC secret file. The CLI reads it to *mint* a run-bound egress capability; the egress daemon reads the **same** file to *verify* it. **Must be exported for every mint-bearing command** (`index rebuild`, `index repair`, `index eval`, `query`) or the mint throws before the provider call. The launcher points it at `…/keys/shared/egress-capability.key` (0640, group `atlas-git`) — the CLI must run as an identity that can read it (member of `atlas-git`, e.g. `atlas-agent`). |
 | **`ATLAS_VAULT_REPO_DIR`** | `packages/broker/src/keys.ts:167` (`throw` if unset), `provisioning/bin/broker-launcher.sh:18` (default `/var/lib/atlas/vault`, overridable) | The git repo the **broker** mutates — it is the sole writer of that repo's protected refs (`refs/heads/main`, `refs/audit/runs`, `refs/trust/ledger`). Point it at the same directory as your config `vault.path`. The broker validates `refs/audit/runs` in this repo **at startup** and exits 4 if the repo doesn't exist yet — start the broker only *after* the repo exists. |
 | **`ATLAS_ROOT`** | `apps/cli/src/main.ts:94-95` | Overrides the auto-detected cli-contract root (where `docs/specs/cli-contract/commands.json` lives). Precedence: `options.root` → `env.ATLAS_ROOT` → `findRoot` (walks up from the module dir). You only need it if you run the binary from outside the repo layout; running from the checkout, auto-detect works. |
 
@@ -322,6 +334,69 @@ sudo provisioning/enroll-signer.sh --revoke --signer-id approver-se-<host>-vN   
 ```
 
 Key loss is an **enrollment event, not a DR event** — the vault/ledger/audit chain are indifferent to which enrolled signer approves. The broker restart voids in-flight nonces (5-min TTL), so re-export any pending challenge.
+
+### 5.6 Enabling continuous sync (60-B, Phase 6)
+
+Adoption (§5.4) makes `brain sync` *possible*; this makes it *continuous*. `com.atlas.sync` is a 300 s launchd timer running `atlas-sync-wrapper.sh` as `atlas-agent`, which does the two steps that must both happen for a new note to become retrievable:
+
+```
+brain sync --json          absorb upstream refs/heads/main → refs/atlas/main, enqueue index:reconcile
+brain jobs run --all --json   drain that job (this is the step that indexes)
+```
+
+`services.sh install` copies the plist but leaves the timer **disabled**. Enabling it is a separate, gated command — a timer started before its prerequisites hold looks healthy in `launchctl` while fail-closing every cycle.
+
+```bash
+# 1  render + install the wrapper. It is SKIPPED (with a warning, never a hard fail)
+#    unless BOTH deployment facts are given — launchd supplies neither.
+#      ATLAS_BRAIN_BIN   absolute brain; Atlas ships no installed binary, and launchd
+#                        has no shell PATH, so a bare `brain` dies every cycle.
+#                        dist/bin.js is plain tsc output (mode 0644) — the installer
+#                        wraps a non-executable JS entrypoint in a root-owned
+#                        brain-shim.sh, so no chmod is needed.
+#      ATLAS_CONFIG_DIR  the dir holding brain.config.yaml; launchd runs with cwd `/`
+#                        and `brain` resolves its config strictly as <cwd>/brain.config.yaml
+sudo ATLAS_BRAIN_BIN="$PWD/apps/cli/dist/bin.js" \
+     ATLAS_CONFIG_DIR=/path/to/config-dir \
+     provisioning/install-artifact.sh dist-artifact
+
+# 2  provision the capability secret where a HOME-LESS service UID can read it.
+#    `-a atlas-agent` is only an attribute — the keychain FILE must be named, because
+#    atlas-agent (NFSHomeDirectory /var/empty) has no login keychain at all and a bare
+#    `sudo security add-generic-password` would write to ROOT's default keychain.
+sudo security add-generic-password -a atlas-agent -s atlas-egress-capability -U -A \
+  -w "$(sudo cat /usr/local/etc/atlas/keys/shared/egress-capability.key)" \
+  /Library/Keychains/System.keychain
+
+# 3  dry-run the gate — mutates nothing but the safe.directory entry; needs root
+#    because three of the six probes run AS atlas-agent
+sudo provisioning/macos/services.sh sync-gate /path/to/vault-repo
+
+# 4  enable (names the brain-hub puller that advances local refs/heads/main)
+sudo ATLAS_UPSTREAM_PULLER_LABEL=com.example.brainhub.sync \
+  provisioning/macos/services.sh enable-sync /path/to/vault-repo
+
+provisioning/macos/services.sh status          # com.atlas.sync: loaded
+tail -f /usr/local/var/log/atlas/sync.log
+```
+
+**The gates, and why each one exists:**
+
+| Gate | If unmet |
+|---|---|
+| wrapper installed + executable | nothing runs (install-artifact.sh skipped it — see step 1) |
+| its baked-in `brain` path is absolute and executable | launchd has no shell PATH — a bare `brain` dies at command resolution *every cycle*. `dist/bin.js` is plain `tsc` output (mode 0644), so the installer wraps a non-executable JS entrypoint in a root-owned `brain-shim.sh` and bakes *that* in |
+| `atlas-agent` can **write** the timer's `HOME` (`/usr/local/var/atlas/agent`, provisioned by `services.sh install`) | launchd supplies no `HOME` and the account's real one is the root-owned `/var/empty`, while the CLI's default quarantine dir hangs off `HOME` — the first cycle that quarantines anything would wedge |
+| its baked-in **config dir** is absolute and `atlas-agent` can read `brain.config.yaml` there | launchd runs with cwd `/`; `brain` resolves the config as `<cwd>/brain.config.yaml` with no upward walk and no env fallback, so every cycle would exit 2 at config load |
+| `atlas-agent` can open the vault repo (repo-specific `safe.directory`, written to `/etc/gitconfig`) | the wrapper runs as a different user than the vault owner; git's dubious-ownership guard kills the first `readRef` even with every other gate green. It is the **system** config, not `--global`: `atlas-agent`'s home is the root-owned `/var/empty`, so a `--global` write has nowhere to land |
+| the capability secret **reads** (`-w`, decrypting) as `atlas-agent` from the named keychain | every drain fail-closes with no credential. The probe is the wrapper's exact operation — an attribute-only lookup would pass against a *locked* keychain |
+| `ATLAS_UPSTREAM_PULLER_LABEL` names a **loaded** puller | `brain sync` reads the **local** `refs/heads/main` and `atlas-agent` is network-denied (D17) — without a puller the timer never observes a single remote push |
+
+**Interactive-session posture only.** The Keychain fetch needs an unlocked keychain, so this is supported for a logged-in session. The fully-headless (logged-out) unlock story and the stronger broker-mediated per-run capability handoff are both deferred (plan OQ#1(a)/(b)); do not enable the timer for unattended/logged-out use until those are settled.
+
+**Rotating the capability secret** — a restart cutover, not a dual-key window (the egress broker loads exactly one secret at startup and has no reload machinery). Full procedure + rollback: [`../provisioning/CLAUDE.md`](../provisioning/CLAUDE.md) § "Egress capability key custody".
+
+**Rollback:** `sudo provisioning/macos/services.sh disable-sync`. Sync reverts to manual `brain sync` on demand; no data change.
 
 ### Daemon requirements at a glance
 
