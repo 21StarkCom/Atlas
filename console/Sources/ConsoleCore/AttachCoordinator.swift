@@ -211,7 +211,7 @@ public actor AttachCoordinator {
             executable: binary.launch,
             arguments: ["watch", "--json", "--once"],
             cwd: binary.bundle.checkoutRoot,
-            environment: binary.baseEnv,
+            environment: ChildEnvironment.nonEgress(inherited: binary.baseEnv),
             command: "watch",
             commandSchema: commandSchema
         )

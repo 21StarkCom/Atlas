@@ -138,8 +138,8 @@ public enum BinaryResolution {
         probeTimeout: Duration
     ) async throws {
         // Probe with a `pure` command (no ledger row): `db status --json`. Never an audited read.
-        var probeEnv = env
-        for (k, v) in baseEnv { probeEnv[k] = v }
+        // A probe is a non-egress spawn — strip any inherited egress capability key (ChildEnvironment).
+        let probeEnv = ChildEnvironment.nonEgress(inherited: env, overlay: baseEnv)
         // Probe from the bound checkout root, NOT the Console process's cwd: `brain` loads its config
         // relative to cwd (or an explicit --config), so a Finder-launched Console — whose cwd is `/`
         // or the app bundle — would otherwise fail config loading against a valid checkout.
@@ -217,7 +217,8 @@ public enum BinaryResolution {
     private static func probeSigner(path: String, cwd: URL, env: [String: String], runner: ProcessRunner, probeTimeout: Duration) async throws {
         // `atlas-signer pubkey` prints the SPKI PEM with no SE access — exit 0. Probe from the bound
         // checkout root, matching the brain probe, so a Finder-launched Console does not depend on cwd.
-        let req = SpawnRequest(executable: [path], arguments: ["pubkey"], cwd: cwd, environment: env, timeout: probeTimeout, command: "atlas-signer pubkey")
+        // A signer probe is a non-egress spawn — strip any inherited egress capability key.
+        let req = SpawnRequest(executable: [path], arguments: ["pubkey"], cwd: cwd, environment: ChildEnvironment.nonEgress(inherited: env), timeout: probeTimeout, command: "atlas-signer pubkey")
         let result: SpawnResult
         do {
             result = try await runner.run(req)

@@ -94,6 +94,11 @@ public actor WatchSupervisor {
     private let policy: BackoffPolicy
     private let transport: WatchTransport
     private let commandSchema: Data?
+    /// The recurring command this supervisor spawns, ADMITTED through the enforcing `PeriodicScheduler` at
+    /// init — not a bare literal. A supervisor asked to periodically spawn anything but `watch` throws
+    /// `PeriodicScheduler.SchedulingError` at construction, so a timer-driven audited read is impossible at
+    /// the spawn boundary (the only place a periodic subprocess is born), not merely discouraged.
+    private let periodicCommand: String
     /// Injected sleeper (ms) — tests pass a recording no-op so backoff is asserted without real waits.
     private let sleeper: @Sendable (Int) async -> Void
     /// The SIGTERM→SIGKILL grace period for reaping a child that ignores SIGTERM (contract-mismatch reap
@@ -131,8 +136,14 @@ public actor WatchSupervisor {
         binary: ResolvedBinary,
         policy: BackoffPolicy = .default,
         reapGrace: Duration = .seconds(2),
+        periodicCommand: String = "watch",
         sleeper: (@Sendable (Int) async -> Void)? = nil
     ) throws {
+        // Admit the recurring command through the enforcing scheduler. Anything but `watch` throws here,
+        // so a supervisor that would periodically spawn an audited read can never be constructed.
+        var scheduler = PeriodicScheduler()
+        try scheduler.register(command: periodicCommand)
+        self.periodicCommand = periodicCommand
         self.runner = runner
         self.binary = binary
         self.policy = policy
@@ -282,8 +293,8 @@ public actor WatchSupervisor {
             executable: binary.launch,
             arguments: Self.watchArgs(resumeArg: resumeArg, options: options),
             cwd: binary.bundle.checkoutRoot,
-            environment: binary.baseEnv,
-            command: "watch",
+            environment: ChildEnvironment.nonEgress(inherited: binary.baseEnv),
+            command: periodicCommand,
             commandSchema: commandSchema
         )
 

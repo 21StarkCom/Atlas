@@ -112,6 +112,11 @@ final class ScriptedSpawnRunner: ProcessRunner, @unchecked Sendable {
     private var _streamCalls = 0
     private var _runCalls = 0
     private var _streamArgv: [[String]] = []
+    /// The environments the PRODUCTION caller (WatchSupervisor / AttachCoordinator) built and passed on
+    /// each SpawnRequest — recorded BEFORE this runner substitutes its own emitter env, so a scoping test
+    /// can prove the real caller's child env never carries the egress capability key.
+    private var _runEnvs: [[String: String]] = []
+    private var _streamEnvs: [[String: String]] = []
     private var scriptSeq = 0
 
     init(dir: URL, streams: [Stream], onceOutputs: [Data] = []) {
@@ -123,10 +128,13 @@ final class ScriptedSpawnRunner: ProcessRunner, @unchecked Sendable {
     var streamCallCount: Int { lock.withLock { _streamCalls } }
     var runCallCount: Int { lock.withLock { _runCalls } }
     var streamArgv: [[String]] { lock.withLock { _streamArgv } }
+    var runEnvs: [[String: String]] { lock.withLock { _runEnvs } }
+    var streamEnvs: [[String: String]] { lock.withLock { _streamEnvs } }
 
     func run(_ req: SpawnRequest) async throws -> SpawnResult {
         let out: Data = lock.withLock {
             _runCalls += 1
+            _runEnvs.append(req.environment)
             return onceOutputs.isEmpty ? Data() : onceOutputs.removeFirst()
         }
         return SpawnResult(exitCode: 0, stdout: out, stderr: Data())
@@ -136,6 +144,7 @@ final class ScriptedSpawnRunner: ProcessRunner, @unchecked Sendable {
         let behavior: Stream = try lock.withLock {
             _streamCalls += 1
             _streamArgv.append(req.arguments)
+            _streamEnvs.append(req.environment)
             guard !streams.isEmpty else { throw ScriptExhausted() }
             return streams.removeFirst()
         }
