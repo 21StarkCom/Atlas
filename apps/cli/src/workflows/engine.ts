@@ -226,6 +226,43 @@ export interface BrokerIntegration {
  */
 export type RunIntegrator = (ctx: IntegrationContext) => Promise<BrokerIntegration>;
 
+/** Options for {@link RunHandle.integrate}. */
+export interface IntegrateOptions {
+  /**
+   * Extra op-specific keys merged into the `run.integrated` event `detail`
+   * (alongside the engine-owned `baseRef`). Because the §2.8 step-1 intent
+   * persists the full `event_json` BEFORE the ref move, this is the durable,
+   * replayable home for a producer's finalization intent — the 60-B sync cycle
+   * stores its `{sync: {targetOid, changedNoteIds, pendingQuarantine, …}}`
+   * payload here and replays fold + cursor-finalize + enqueue from it after a
+   * crash between integrate and finalize (never re-deriving from a now-stale
+   * diff). Engine-owned keys win: `baseRef` cannot be overridden.
+   */
+  readonly extraDetail?: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * Extra effects folded into {@link RunHandle.finalize}'s single terminal
+ * transaction. The 60-B sync cycle finalizes its `sync_cursors` advance, the
+ * reconciled pending-quarantine set, and the single `index:reconcile` enqueue
+ * atomically with the run's `finalized` terminal — all-or-nothing with the
+ * cursor, exactly the §2.8 step-3 shape.
+ */
+export interface FinalizeExtras {
+  /** Idempotent statements applied with the terminal (same contract as {@link TerminalExtras.ledgerWrite}). */
+  readonly ledgerWrite?: readonly LedgerStatement[];
+  /** Imperative writes on the SAME connection inside the terminal transaction (e.g. a jobs `enqueue`). */
+  readonly extraCommit?: (db: Store["db"]) => void;
+  /**
+   * Explicit opt-in for the EMPTY-ChangePlan success terminal: finalize straight
+   * from `planned` (60-B all-quarantined sync cycle — every changed path was
+   * quarantined-and-recorded, so there is no integrate, no canonical move, and
+   * no `reindexed`). The run is a successfully finalized run with an empty plan,
+   * not a failure. Without this flag the `reindexed`-only CAS is unchanged.
+   */
+  readonly fromEmptyPlan?: boolean;
+}
+
 /** The result of a completed {@link RunHandle.integrate}. */
 export interface IntegratedResult {
   readonly canonicalRef: string;
@@ -439,10 +476,13 @@ export class RunHandle {
    * only through `review-pending` — a direct `agent-committed → integrated` on a
    * Tier-3 run is refused here.
    */
-  async integrate(perform: RunIntegrator): Promise<IntegratedResult> {
+  async integrate(perform: RunIntegrator, opts?: IntegrateOptions): Promise<IntegratedResult> {
     this.throwIfAborted("integrated");
     assertCheckpointTransition(this.#state, "integrated");
     const db = this.deps.store.db;
+    if (opts?.extraDetail !== undefined && "baseRef" in opts.extraDetail) {
+      throw new GatingEvidenceError("integrated", "extraDetail must not override the engine-owned baseRef detail key");
+    }
 
     const committed = readGitOp(db, this.runId, "agent-committed");
     const base = readGitOp(db, this.runId, "base");
@@ -460,7 +500,10 @@ export class RunHandle {
     // `canonicalCommit` MUST be the installed commit (the broker binds the event to
     // the exact commit being installed), not the run's opening canonicalCommit.
     const draft: AuditEventDraft = {
-      ...this.baseEvent("run.integrated", { baseRef: base.commitSha ?? NO_CANONICAL_COMMIT }),
+      ...this.baseEvent("run.integrated", {
+        ...(opts?.extraDetail ?? {}),
+        baseRef: base.commitSha ?? NO_CANONICAL_COMMIT,
+      }),
       canonicalCommit: committed.commitSha,
     };
     const write = integrationLedgerWrite({
@@ -679,14 +722,19 @@ export class RunHandle {
    * on backup coverage): if the covering backup does not succeed, `finalized` is NOT
    * written and a retryable error is thrown — the run stays `reindexed`.
    */
-  async finalize(completion?: LedgerStatement): Promise<{ runId: string; state: "finalized" }> {
+  async finalize(completion?: LedgerStatement, extras?: FinalizeExtras): Promise<{ runId: string; state: "finalized" }> {
     const db = this.deps.store.db;
     // CAS ONLY from `reindexed` (round-3 finding on engine.ts:635-667): an
     // `integrated → finalized` would SKIP the required `reindexed` checkpoint, so
     // `integrated` is NOT an accepted prior. `finalized` is listed only so an
     // already-finalized run is recognised as a true SINK (handled below) — never
     // re-written (which would bump `checkpoint_seq` and re-publish the completion).
-    const cur = assertPersistedState(db, this.runId, "finalized", ["reindexed", "finalized"]);
+    // `fromEmptyPlan` (explicit opt-in) additionally admits `planned`: the 60-B
+    // all-quarantined sync cycle finalizes an EMPTY-ChangePlan run that never
+    // integrates — no canonical move happened, so skipping `integrated`/`reindexed`
+    // asserts nothing false; the stateTable records the planned→finalized edge.
+    const from: WorkflowState[] = extras?.fromEmptyPlan ? ["planned", "reindexed", "finalized"] : ["reindexed", "finalized"];
+    const cur = assertPersistedState(db, this.runId, "finalized", from);
     const now = this.now();
 
     if (cur === "finalized") {
@@ -710,14 +758,21 @@ export class RunHandle {
           startedAt: now,
           now,
           finishedAt: now,
-          expectedFrom: ["reindexed"],
+          expectedFrom: extras?.fromEmptyPlan ? ["planned"] : ["reindexed"],
           assertAdvanced: true,
         }),
         // Atomic terminal-result publication for the SUCCESS terminal (round-2
         // finding W2): the exact result lands with `finalized` under the serialized
         // owner/hash/state CAS, or the whole finalize rolls back on a stale claim.
         ...(completion ? [completion] : []),
+        // Producer effects that must be all-or-nothing with the terminal (60-B:
+        // the sync cursor advance + reconciled pending set). Same idempotency
+        // contract as TerminalExtras.ledgerWrite.
+        ...(extras?.ledgerWrite ?? []),
       ]);
+      // Imperative same-connection writes inside the SAME transaction (60-B: the
+      // single index:reconcile enqueue, which needs the bound EnqueueContext).
+      extras?.extraCommit?.(db);
       assertRowAdvancedTo(db, this.runId, "finalized");
     });
     commit();
