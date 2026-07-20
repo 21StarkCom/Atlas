@@ -20,6 +20,7 @@
  */
 import type { Store } from "../store.js";
 import {
+  DB_EVENT_SEQ_BASE,
   IntentsRepo,
   applyLedgerWrite,
   latestRunSeq,
@@ -157,8 +158,11 @@ export function readCoalesceCovers(
   const latest = latestRunSeq(db);
   if (latest <= coveredSeq) return true; // nothing uncovered
   if (latest - coveredSeq >= threshold) return false; // gap crossed the debounce window
+  // Run-space events only, partitioned by the seq RANGE — a ledger-internal event
+  // (`evidence.retry_enqueued`, allocated at DB_EVENT_SEQ_BASE+n) must not defeat
+  // the read-coalesce window (it is not a run and never needs backup coverage).
   const rows = db
-    .prepare(`SELECT event_type FROM audit_events WHERE seq > ? AND event_type NOT LIKE 'db.%' ORDER BY seq`)
+    .prepare(`SELECT event_type FROM audit_events WHERE seq > ? AND seq < ${DB_EVENT_SEQ_BASE} ORDER BY seq`)
     .all(coveredSeq) as { event_type: string }[];
   return rows.length > 0 && rows.every((r) => r.event_type === "run.readonly");
 }

@@ -23,7 +23,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { AuditAnchorSchema, SignedEnvelopeSchema, type SignedEnvelope } from "@atlas/contracts";
 import { verifyEnvelope, parsePublicKeyFlexible, isBadRequestRefusal, type AuditChainStatus } from "@atlas/broker";
-import type { SqliteDatabase } from "@atlas/sqlite-store";
+import { DB_EVENT_SEQ_BASE, type SqliteDatabase } from "@atlas/sqlite-store";
 import { isTransportError } from "../health/socket-errors.js";
 
 /** The read-only broker interface this check consults (structural — a `BrokerClient` satisfies it). */
@@ -136,11 +136,17 @@ export interface AnchorCheckResult {
   readonly detail?: string;
 }
 
-/** The live `run.*` event count + latest git head from the ledger. */
+/**
+ * The live `run.*` event count + latest git head from the ledger. Run-space events
+ * are `seq < DB_EVENT_SEQ_BASE` — partitioned by the RANGE, never by event-type
+ * prefix: `evidence.retry_enqueued` is ledger-internal (high range, git_head NULL,
+ * never on the broker chain), and counting it here raised a FALSE truncation/rewrite
+ * alarm after any `brain evidence retry`.
+ */
 function liveAudit(db: SqliteDatabase): { count: number; head: string } {
-  const c = db.prepare(`SELECT COUNT(*) AS n FROM audit_events WHERE event_type NOT LIKE 'db.%'`).get() as { n: number };
+  const c = db.prepare(`SELECT COUNT(*) AS n FROM audit_events WHERE seq < ${DB_EVENT_SEQ_BASE}`).get() as { n: number };
   const top = db
-    .prepare(`SELECT git_head FROM audit_events WHERE event_type NOT LIKE 'db.%' ORDER BY seq DESC LIMIT 1`)
+    .prepare(`SELECT git_head FROM audit_events WHERE seq < ${DB_EVENT_SEQ_BASE} ORDER BY seq DESC LIMIT 1`)
     .get() as { git_head: string | null } | undefined;
   return { count: c.n, head: top?.git_head ?? "" };
 }
@@ -149,7 +155,7 @@ function liveAudit(db: SqliteDatabase): { count: number; head: string } {
 function headAtPosition(db: SqliteDatabase, position: number): string | null {
   if (position <= 0) return null;
   const row = db
-    .prepare(`SELECT git_head FROM audit_events WHERE event_type NOT LIKE 'db.%' ORDER BY seq ASC LIMIT 1 OFFSET ?`)
+    .prepare(`SELECT git_head FROM audit_events WHERE seq < ${DB_EVENT_SEQ_BASE} ORDER BY seq ASC LIMIT 1 OFFSET ?`)
     .get(position - 1) as { git_head: string | null } | undefined;
   return row?.git_head ?? null;
 }
