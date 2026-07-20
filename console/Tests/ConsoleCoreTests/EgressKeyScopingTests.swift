@@ -148,7 +148,7 @@ final class EgressKeyScopingTests: XCTestCase {
     /// carries the sentinel — so we prove the PRODUCTION caller strips it, not a synthetic env.
     private func binaryWithInheritedSentinel() throws -> ResolvedBinary {
         let bundle = try TestSupport.realBundle()
-        return ResolvedBinary(
+        return try ResolvedBinary(
             launch: ["/usr/bin/true"],
             contractAnchor: bundle.checkoutRoot,
             baseEnv: ["PATH": "/usr/bin:/bin", EgressCapabilityEnvVar: Self.sentinel],

@@ -419,6 +419,43 @@ final class AttachResumeCheckpointFlowTests: XCTestCase {
         await coord.stop()
     }
 
+    // MARK: - Revision finding — stop() ABORTS a withheld-ack checkpoint (never advances past unconsumed state)
+
+    /// With consumer acks enabled but the consumer NEVER acknowledging the heartbeat, the checkpoint
+    /// barrier stays suspended. `stop()` must ABORT that barrier — resuming it as "aborted" so the
+    /// checkpoint is skipped — rather than satisfying it and advancing the cursor past state the reducers
+    /// never consumed. Proven: after start (heartbeat pending, ack withheld) then stop, the seeded cursor
+    /// is unchanged and no checkpoint occurred.
+    func testStopWithWithheldHeartbeatAckDoesNotCheckpoint() async throws {
+        let cursors = try newStore()
+        try cursors.checkpoint(incarnationKey: keyA, seq: 100, updatedAt: "seed")
+        let base = cursors.checkpointCount
+
+        let (coord, _) = try makeCoordinator(
+            streams: [.emitThenBlock(lines: [
+                Fx4.hello(path: pathA),
+                Fx4.heartbeat(path: pathA, resumeHead: 907),
+            ])],
+            onceOutputs: [Fx4.hello(path: pathA)],
+            cursors: cursors)
+
+        // Enable the barrier but DELIBERATELY never drain `coord.events` / call `consumed()` — the
+        // heartbeat's checkpoint suspends on the ack that never comes.
+        await coord.enableConsumerAcks()
+        try await coord.start()
+
+        // Let the stream reach the heartbeat's suspended `awaitConsumedAll()`.
+        try? await Task.sleep(for: .milliseconds(400))
+        XCTAssertEqual(cursors.checkpointCount - base, 0, "no checkpoint while the ack is withheld")
+
+        await coord.stop()
+        // stop() must NOT satisfy the barrier as if consumed — the checkpoint is abandoned.
+        try? await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(cursors.checkpointCount - base, 0,
+                       "stop aborts the checkpoint — the cursor never advances past unconsumed state")
+        XCTAssertEqual(try cursors.load(incarnationKey: keyA), 100, "cursor stayed at the seeded value")
+    }
+
     // MARK: - Finding 5 — a checkpoint failure surfaces .degraded, not a silent swallow
 
     func testCheckpointFailureSurfacesDegraded() async throws {

@@ -14,6 +14,9 @@ public enum AttachError: Error, Equatable, Sendable {
     /// `start()` was called after the coordinator latched a terminal failure (a replacement-generation
     /// cursor-load failure) — it is unrecoverable and will not spawn again.
     case terminated
+    /// The supervisor reached a terminal state before its watcher ever spawned (`runner.stream` never
+    /// succeeded) — start() must NOT report success, so the caller never commits an unproven config.
+    case watcherDidNotLaunch
 }
 
 // MARK: - Coordinator state
@@ -81,6 +84,61 @@ public actor AttachCoordinator {
     /// the lifecycle is `.failed`.
     private var terminated = false
     private var _state: CoordinatorState = .idle
+
+    // MARK: - Consumer acknowledgement (no checkpoint before consumption)
+    //
+    // A yielded event is merely ENQUEUED on `events`; without a handshake the coordinator could checkpoint
+    // the cursor before the reducer consumer drained the preceding replay events. When a consumer opts in
+    // via `enableConsumerAcks()` and calls `consumed()` after handling each event, the coordinator awaits
+    // that the consumer has drained every event yielded so far BEFORE it checkpoints — so the cursor can
+    // never advance past state the reducers have actually observed.
+    private var ackEnabled = false
+    private var yieldedOrdinal = 0
+    private var consumedOrdinal = 0
+    /// A waiter resumes with `true` when the consumer has genuinely drained to its threshold, and with
+    /// `false` when the barrier is ABORTED by `stop()` — the caller must then abandon the checkpoint (the
+    /// consumer may have been cancelled without acknowledging, so advancing the cursor would step past
+    /// unconsumed state).
+    private var ackWaiters: [(threshold: Int, cont: CheckedContinuation<Bool, Never>)] = []
+    /// Latched by `stop()`: once stopping, no checkpoint barrier is ever satisfied — a fresh
+    /// `awaitConsumedAll()` returns `false` immediately and every suspended waiter is failed.
+    private var stopping = false
+
+    /// Opt into the consumption-before-checkpoint barrier. The consumer MUST then call `consumed()` after
+    /// handling each event, or a checkpoint will block waiting for the ack.
+    public func enableConsumerAcks() { ackEnabled = true }
+
+    /// Acknowledge that the consumer finished handling one more forwarded event. Resumes any checkpoint
+    /// waiter whose threshold is now met (with `true` — a genuine drain, not a stop-abort).
+    public func consumed() {
+        consumedOrdinal += 1
+        ackWaiters.removeAll { waiter in
+            if consumedOrdinal >= waiter.threshold { waiter.cont.resume(returning: true); return true }
+            return false
+        }
+    }
+
+    /// Forward an event on the public stream, counting it so the checkpoint barrier can wait for the
+    /// consumer to catch up to this ordinal.
+    private func forward(_ event: WatchEvent) {
+        yieldedOrdinal += 1
+        eventContinuation.yield(event)
+    }
+
+    /// Suspend until the consumer has acknowledged every event yielded so far. Returns `true` when the
+    /// consumer genuinely drained to the current ordinal, `false` when the barrier was ABORTED by `stop()`
+    /// (a no-op returning `true` when acks are not enabled, so non-UI callers that read `events` directly
+    /// are unaffected). A `false` result means the caller MUST NOT checkpoint — the consumer may be gone
+    /// without having acknowledged the pending events.
+    private func awaitConsumedAll() async -> Bool {
+        guard ackEnabled else { return true }
+        if stopping { return false }
+        guard consumedOrdinal < yieldedOrdinal else { return true }
+        let threshold = yieldedOrdinal
+        return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            ackWaiters.append((threshold, cont))
+        }
+    }
 
     public var state: CoordinatorState { _state }
 
@@ -157,9 +215,18 @@ public actor AttachCoordinator {
     /// SIGTERM the live watch, await its exit + run-loop task, and finish the coordinator's event stream.
     /// The caller awaits this before any rebuild.
     public func stop() async {
+        // Latch stopping FIRST so no in-flight or subsequent heartbeat can checkpoint past this point.
+        stopping = true
         await supervisor.stop()
         await supervisorTask?.value
         consumeTask?.cancel()
+        // ABORT any checkpoint barrier still waiting on a consumer ack — the consumer is being cancelled,
+        // so it may never acknowledge the pending events. Resume every waiter with `false` so the suspended
+        // `awaitConsumedAll()` returns "aborted" and its caller SKIPS the checkpoint (never advancing the
+        // cursor past state the reducers have not actually consumed) rather than proceeding as if drained.
+        let waiters = ackWaiters
+        ackWaiters.removeAll()
+        for w in waiters { w.cont.resume(returning: false) }
         eventContinuation.finish()
     }
 
@@ -203,6 +270,15 @@ public actor AttachCoordinator {
         let options = watchOptionPolicy.watchOptions(from: settings)
         let supervisor = self.supervisor
         supervisorTask = Task { await supervisor.run(resumeArg: resumeArg, options: options) }
+
+        // On the INITIAL start, prove the watcher actually spawned (runner.stream succeeded) before
+        // returning — so start() only reports success on a launched watcher, and a caller can never
+        // persist a configuration whose stream never launched. A mid-stream transition (transitionHello
+        // set) is already running on a proven watcher, so it does not re-gate.
+        if transitionHello == nil {
+            let ready = await supervisor.awaitReady()
+            if !ready { throw AttachError.watcherDidNotLaunch }
+        }
     }
 
     /// Spawns `brain watch --json --once` and decodes exactly one `hello`.
@@ -256,7 +332,7 @@ public actor AttachCoordinator {
             // A transition that terminated the coordinator must NOT forward the invalidating hello — the
             // lifecycle is `.failed`. A successful (re)baseline forwards the hello as the new baseline.
             guard !terminated else { return }
-            eventContinuation.yield(event)
+            forward(event)
         case .heartbeat(let hb):
             // Generation guard, applied BEFORE forwarding: the shared, untagged supervisor stream can
             // queue an OLD-generation heartbeat behind a transition hello. Once the active generation has
@@ -265,11 +341,18 @@ public actor AttachCoordinator {
             // active generation iff its own ledger identity matches: an attached heartbeat's path must
             // derive the active key; a detached heartbeat is in-generation only while live-only (key nil).
             guard heartbeatIsCurrentGeneration(hb) else { return }
-            eventContinuation.yield(event)
+            forward(event)
             // Checkpoint ONLY on a safe attached heartbeat carrying resume.auditHeadSeq. A detached
             // heartbeat, or a heartbeat with no resume, is forwarded (for the UI) but never checkpoints.
             // The hello's pre-replay min(n, prefix) value is never persisted — only heartbeats reach here.
             guard hb.ledger.attached, let resume = hb.resume, let key = currentIncarnationKey else { return }
+            // Do not advance the cursor before the reducers have consumed the preceding replay events
+            // (and this heartbeat). When acks are enabled this suspends until the consumer catches up; a
+            // `false` result means the barrier was ABORTED by `stop()` — abandon the checkpoint entirely
+            // rather than advancing the cursor past state the consumer never acknowledged.
+            guard await awaitConsumedAll() else { return }
+            // A stop() may have latched between the suspension and here — re-check the terminal latch.
+            guard !stopping else { return }
             do {
                 try cursors.checkpoint(incarnationKey: key, seq: resume.auditHeadSeq, updatedAt: hb.at)
                 if case .degraded = _state { emit(.live) } // recovered
@@ -280,7 +363,7 @@ public actor AttachCoordinator {
             }
         default:
             // Non-ledger events (audit rows, etc.) belong to the streaming generation; forward them.
-            eventContinuation.yield(event)
+            forward(event)
         }
     }
 

@@ -119,6 +119,30 @@ public actor WatchSupervisor {
     private var backoffContinuation: CheckedContinuation<Void, Never>?
     private var backoffTask: Task<Void, Never>?
 
+    /// First-spawn readiness. Resolves `true` the first time `runner.stream()` returns a handle (the
+    /// watcher has actually spawned), or `false` if the supervisor reaches a terminal state before ANY
+    /// spawn succeeds. The coordinator awaits this on initial start so persisted settings can never name a
+    /// configuration whose watcher never launched (a stream-launch failure must not commit).
+    private var readyResolved = false
+    private var readyValue = false
+    private var readyWaiters: [CheckedContinuation<Bool, Never>] = []
+
+    private func signalReady(_ value: Bool) {
+        guard !readyResolved else { return }
+        readyResolved = true
+        readyValue = value
+        let waiters = readyWaiters
+        readyWaiters.removeAll()
+        for w in waiters { w.resume(returning: value) }
+    }
+
+    /// Await the first-spawn readiness signal (see `readyResolved`). Idempotent — every caller gets the
+    /// same resolved value once it lands.
+    public func awaitReady() async -> Bool {
+        if readyResolved { return readyValue }
+        return await withCheckedContinuation { readyWaiters.append($0) }
+    }
+
     private let eventContinuation: AsyncStream<WatchEvent>.Continuation
     /// The post-coordination event stream the coordinator/reducers consume. Created once, never finished
     /// between runs (a `stop()` + re-`run()` for a new incarnation keeps yielding on the same stream).
@@ -166,6 +190,12 @@ public actor WatchSupervisor {
     private func emit(_ newState: SupervisorState) {
         _state = newState
         stateContinuation.yield(newState)
+        // A terminal state reached before any successful spawn resolves readiness as `false`, so the
+        // coordinator's `awaitReady()` never hangs when the watcher never launches.
+        switch newState {
+        case .failed, .contractMismatch, .detached: signalReady(false)
+        default: break
+        }
     }
 
     /// Spawn → classify → backoff/terminal loop. The resume plan is passed at run time, never baked at
@@ -308,6 +338,9 @@ public actor WatchSupervisor {
         }
         currentHandle = handle
         defer { currentHandle = nil }
+        // The watcher has actually spawned (runner.stream returned a handle) — resolve first-spawn
+        // readiness so the coordinator's start() can prove the watcher launched before committing.
+        signalReady(true)
 
         var lastEnvelope: ErrorEnvelope?
         var sawHello = false

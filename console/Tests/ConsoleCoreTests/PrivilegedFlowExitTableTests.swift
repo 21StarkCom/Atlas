@@ -437,7 +437,7 @@ final class PrivilegedFlowExitTableTests: XCTestCase {
         let errEnv = root.appendingPathComponent("docs/specs/cli-contract/error-envelope.schema.json")
         try Data("{ this is not valid json ".utf8).write(to: errEnv)
         let bundle = try ContractBundle.resolve(fromAnchor: root)
-        let brain = ResolvedBinary(launch: ["/usr/bin/true"], contractAnchor: root, baseEnv: [:], bundle: bundle)
+        let brain = try ResolvedBinary(launch: ["/usr/bin/true"], contractAnchor: root, baseEnv: [:], bundle: bundle)
         let runner = PrivRunner()
         XCTAssertThrowsError(
             try PrivilegedFlow(

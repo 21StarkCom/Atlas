@@ -74,7 +74,7 @@ enum Fx4 {
     /// runner ignores it and launches its own emitter scripts.
     static func binary(file: StaticString = #filePath) throws -> ResolvedBinary {
         let bundle = try TestSupport.realBundle(file: file)
-        return ResolvedBinary(
+        return try ResolvedBinary(
             launch: ["/usr/bin/true"],
             contractAnchor: bundle.checkoutRoot,
             baseEnv: ["PATH": "/usr/bin:/bin"],

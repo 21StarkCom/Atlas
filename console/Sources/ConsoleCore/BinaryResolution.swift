@@ -15,6 +15,20 @@ public struct ResolutionInputs: Sendable, Equatable {
     }
 }
 
+/// Why a `ResolvedBinary` could not be constructed — the structural invariants the resolver/probe
+/// previously guaranteed, now enforced at the type boundary so no caller (production OR fixture) can mint
+/// an unlaunchable or cross-checkout binding.
+public enum ResolvedBinaryError: Error, Equatable, Sendable {
+    /// `launch` was empty — there is nothing to exec.
+    case emptyLaunch
+    /// `launch[0]` was not absolute (`Foundation.Process` does no PATH expansion, so a relative token
+    /// would fail to launch).
+    case relativeLaunch(String)
+    /// `contractAnchor` is not inside `bundle.checkoutRoot` — a binary paired with ANOTHER checkout's
+    /// schemas. V1 forbids this cross-checkout pairing (the schemas would not describe this binary).
+    case anchorOutsideCheckout(anchor: String, checkoutRoot: String)
+}
+
 /// A resolved, probed subprocess contract. `launch` is the argv (possibly `[node, bin.js]`); its
 /// `[0]` is always absolute by construction. `contractAnchor` is the atlas checkout entry, resolved
 /// separately from the launch executable.
@@ -23,6 +37,25 @@ public struct ResolvedBinary: Sendable {
     public let contractAnchor: URL
     public let baseEnv: [String: String]
     public let bundle: ContractBundle
+
+    /// Validating initializer. The resolver's structural invariants — a non-empty, absolute `launch` and a
+    /// `contractAnchor` that lives INSIDE the bound bundle's checkout — are enforced here, so a fixture (or
+    /// any future caller) can never bypass the probe/binding guarantees to mint an empty/relative launch or
+    /// pair a binary with a foreign checkout's schemas.
+    public init(launch: [String], contractAnchor: URL, baseEnv: [String: String], bundle: ContractBundle) throws {
+        guard let first = launch.first else { throw ResolvedBinaryError.emptyLaunch }
+        guard first.hasPrefix("/") else { throw ResolvedBinaryError.relativeLaunch(first) }
+        let anchor = contractAnchor.resolvingSymlinksInPath().standardizedFileURL.path
+        let rootPath = bundle.checkoutRoot.resolvingSymlinksInPath().standardizedFileURL.path
+        let rootWithSlash = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
+        guard anchor == rootPath || anchor.hasPrefix(rootWithSlash) else {
+            throw ResolvedBinaryError.anchorOutsideCheckout(anchor: anchor, checkoutRoot: rootPath)
+        }
+        self.launch = launch
+        self.contractAnchor = contractAnchor
+        self.baseEnv = baseEnv
+        self.bundle = bundle
+    }
 }
 
 /// Environment-variable names Console reads during resolution.
@@ -112,7 +145,7 @@ public enum BinaryResolution {
         let baseEnv = [ResolutionEnv.atlasRoot: atlasRoot]
         let bundle = try ContractBundle.resolve(fromAnchor: binJs)
         try await probeBrain(launch: launch, env: env, baseEnv: baseEnv, bundle: bundle, anchorPath: binJs.path, runner: runner, probeTimeout: probeTimeout)
-        return ResolvedBinary(launch: launch, contractAnchor: binJs, baseEnv: baseEnv, bundle: bundle)
+        return try ResolvedBinary(launch: launch, contractAnchor: binJs, baseEnv: baseEnv, bundle: bundle)
     }
 
     private static func resolveStandaloneBrain(
@@ -125,7 +158,7 @@ public enum BinaryResolution {
         let url = URL(fileURLWithPath: abs)
         let bundle = try ContractBundle.resolve(fromAnchor: url) // a standalone binary is itself the anchor
         try await probeBrain(launch: [abs], env: env, baseEnv: [:], bundle: bundle, anchorPath: abs, runner: runner, probeTimeout: probeTimeout)
-        return ResolvedBinary(launch: [abs], contractAnchor: url, baseEnv: [:], bundle: bundle)
+        return try ResolvedBinary(launch: [abs], contractAnchor: url, baseEnv: [:], bundle: bundle)
     }
 
     private static func probeBrain(
@@ -211,7 +244,7 @@ public enum BinaryResolution {
         }
         try await probeSigner(path: abs, cwd: checkoutRoot, env: env, runner: runner, probeTimeout: probeTimeout)
         // contractAnchor is the brain-derived anchor (same checkout as the bundle), not the signer path.
-        return ResolvedBinary(launch: [abs], contractAnchor: brainAnchor, baseEnv: [:], bundle: bundle)
+        return try ResolvedBinary(launch: [abs], contractAnchor: brainAnchor, baseEnv: [:], bundle: bundle)
     }
 
     private static func probeSigner(path: String, cwd: URL, env: [String: String], runner: ProcessRunner, probeTimeout: Duration) async throws {

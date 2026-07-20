@@ -191,6 +191,15 @@ public struct JobListRowState: Equatable, Sendable {
         updatedAt = row.updatedAt; nextRunAt = row.nextRunAt; lastError = row.lastError
     }
 
+    /// A public memberwise initializer so the UI (Phase 6) can synthesize a display row directly (e.g. a
+    /// fixture render) without a `jobs list` read. The live path still goes through `init(row:)` + merge.
+    public init(jobId: String, workflow: String, state: String, attempts: Int, maxAttempts: Int,
+                updatedAt: String, nextRunAt: String? = nil, lastError: String? = nil) {
+        self.jobId = jobId; self.workflow = workflow; self.state = state
+        self.attempts = attempts; self.maxAttempts = maxAttempts
+        self.updatedAt = updatedAt; self.nextRunAt = nextRunAt; self.lastError = lastError
+    }
+
     /// Recency-merge a live event over this row: the event wins iff `event.updatedAt >= updatedAt`
     /// (a list row never clobbers a newer streamed state). Returns whether the merge took effect.
     @discardableResult
