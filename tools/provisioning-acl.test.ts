@@ -76,6 +76,7 @@ describe("provisioning scripts exist + are executable", () => {
     "provisioning/dev/teardown.sh",
     "provisioning/ci/setup.sh",
     "provisioning/install-artifact.sh",
+    "provisioning/enroll-signer.sh",
     "provisioning/bin/broker-launcher.sh",
     "provisioning/bin/egress-launcher.sh",
     "provisioning/macos/services.sh",
