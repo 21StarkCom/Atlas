@@ -26,11 +26,11 @@ Throwaway tooling here earns its keep or graduates: the retrieval-eval harness (
 
 ### The contract data — `docs/specs/cli-contract/`
 
-- **`commands.json`** — registry SSOT (`version:1`, **50 rows**, sorted by name). Row `{ name, schemaRef, phase, idempotency, privilege, implemented }`. Sole owner of command membership/phase/privilege/idempotency.
+- **`commands.json`** — registry SSOT (`version:1`, **54 rows**, sorted by name). Row `{ name, schemaRef, phase, idempotency, privilege, implemented }`. Sole owner of command membership/phase/privilege/idempotency.
 - **`cli-surface.fixture.txt`** — prose CLI-surface inventory; must be a bijection with `commands.json`. Parse rule: a command line **begins with a backtick**, name = first backtick pair; all else ignored (`parseFixture`, `cli-contract.ts:291`).
 - **`commands-overview.md`** — GENERATED (`renderOverview`), sorted by **`(phase, name)`** — a different order than `commands.json` (name only). Never hand-edit (banner says so).
 - **`failpoints.generated.md`** — GENERATED (`gen-failpoints.ts`), 29 failpoints. Never hand-edit.
-- **51 `*.schema.json`** — 50 command schemas (name spaces→hyphens) + `error-envelope.schema.json`. Each carries an `x-atlas-contract` block validated against its registry row.
+- **55 `*.schema.json`** — 54 command schemas (name spaces→hyphens) + `error-envelope.schema.json`. Each carries an `x-atlas-contract` block validated against its registry row.
 
 ## Invariants & guardrails
 

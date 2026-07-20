@@ -14,7 +14,7 @@
  * (null across a divergence), pending set, live-derived divergence + the
  * deterministic exit-3 block. It mutates nothing and resolves no lock.
  */
-import { openRepo } from "@atlas/git";
+import { openRepo, type Repo } from "@atlas/git";
 import {
   scanBytes,
   PrePersistenceGuard,
@@ -24,7 +24,7 @@ import {
   type SecretFinding,
 } from "@atlas/scan";
 import { bindEnqueueContext, productionEnqueueContext } from "@atlas/jobs";
-import { assertBackupHealthy, BackupUnhealthyError } from "@atlas/sqlite-store";
+import { assertBackupHealthy, BackupUnhealthyError, type Store } from "@atlas/sqlite-store";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { buildCaptureDeps } from "../ingest/wiring.js";
@@ -183,54 +183,82 @@ function renderSync(ctx: RunContext, env: SyncEnvelope): void {
   ctx.render(lines.join("\n"));
 }
 
+/** The `sync status` success envelope (mirrors sync-status.schema.json). */
+export interface SyncStatusEnvelope {
+  readonly command: "sync status";
+  readonly sourceId: string;
+  readonly upstreamRef: string;
+  readonly lastAbsorbedOid: string | null;
+  readonly upstreamHead: string;
+  readonly behindBy: number | null;
+  readonly lastSyncedAt: string;
+  readonly cycleSeq: number;
+  readonly pendingQuarantine: readonly { path: string; quarantineId: string; firstSeenOid: string }[];
+  readonly divergence: { state: string; cursorOid: string | null; upstreamHead: string };
+  readonly blocked: { commitOid: string; reason: string } | null;
+}
+
+/**
+ * Assemble the read-only status envelope: cursor row + live-derived divergence,
+ * behind-by (null across a divergence — the count is undefined), and the
+ * deterministic exit-3 block (re-derived because the cursor never advances on
+ * exit 3). Everything beyond the row is read-time-derived; nothing mutates.
+ */
+export async function readSyncStatus(
+  store: Store,
+  repo: Repo,
+  noteGlobs: readonly string[],
+): Promise<SyncStatusEnvelope> {
+  const row = readSingleCursor(store);
+  const upstreamHead = await repo.readRef(row.upstreamRef);
+  if (upstreamHead === null) {
+    throw new CliError({
+      code: "vault-error",
+      message: `upstream ref ${row.upstreamRef} does not resolve`,
+      hint: "The adopted vault's upstream branch is missing.",
+      exitCode: EXIT.CONFIG,
+    });
+  }
+  const divergence = await detectDivergence(repo, row.lastAbsorbedOid, upstreamHead);
+  const ok = divergence.state === "ok";
+  const behindBy = ok ? await countBehind(repo, row.lastAbsorbedOid, upstreamHead) : null;
+  const blocked =
+    ok && behindBy !== null && behindBy > 0
+      ? await computeBlocked({ repo, noteGlobs }, row, upstreamHead, (text) => {
+          const verdict = scanBytes({
+            bytes: new TextEncoder().encode(text),
+            context: { origin: "sync-status:blocked", boundary: "generated-artifact", sink: "audit" },
+          });
+          return verdict.clean
+            ? { clean: true, reason: "" }
+            : { clean: false, reason: `generated-artifact verdict: ${verdict.findings.map((f) => f.ruleId).join(",")}` };
+        })
+      : null;
+  return {
+    command: "sync status",
+    sourceId: row.sourceId,
+    upstreamRef: row.upstreamRef,
+    lastAbsorbedOid: row.lastAbsorbedOid,
+    upstreamHead,
+    behindBy,
+    lastSyncedAt: row.lastSyncedAt,
+    cycleSeq: row.cycleSeq,
+    pendingQuarantine: row.pendingQuarantine,
+    divergence: {
+      state: divergence.state,
+      cursorOid: divergence.state === "ok" ? row.lastAbsorbedOid : divergence.cursorOid,
+      upstreamHead,
+    },
+    blocked,
+  };
+}
+
 async function syncStatusHandler(ctx: RunContext): Promise<number> {
   if (ctx.argv.length > 0) throw CliError.usage(`unknown argument for sync status: ${ctx.argv[0]}`);
   const store = openMigratedStore(ctx);
   try {
-    const row = readSingleCursor(store);
     const repo = openRepo(resolvePath(ctx, ctx.config.config.vault.path));
-    const upstreamHead = await repo.readRef(row.upstreamRef);
-    if (upstreamHead === null) {
-      throw new CliError({
-        code: "vault-error",
-        message: `upstream ref ${row.upstreamRef} does not resolve`,
-        hint: "The adopted vault's upstream branch is missing.",
-        exitCode: EXIT.CONFIG,
-      });
-    }
-    const divergence = await detectDivergence(repo, row.lastAbsorbedOid, upstreamHead);
-    const ok = divergence.state === "ok";
-    const behindBy = ok ? await countBehind(repo, row.lastAbsorbedOid, upstreamHead) : null;
-    const blocked =
-      ok && behindBy !== null && behindBy > 0
-        ? await computeBlocked({ repo, noteGlobs: ctx.config.config.vault.note_globs }, row, upstreamHead, (text) => {
-            const verdict = scanBytes({
-              bytes: new TextEncoder().encode(text),
-              context: { origin: "sync-status:blocked", boundary: "generated-artifact", sink: "audit" },
-            });
-            return verdict.clean
-              ? { clean: true, reason: "" }
-              : { clean: false, reason: `generated-artifact verdict: ${verdict.findings.map((f) => f.ruleId).join(",")}` };
-          })
-        : null;
-
-    const env = {
-      command: "sync status" as const,
-      sourceId: row.sourceId,
-      upstreamRef: row.upstreamRef,
-      lastAbsorbedOid: row.lastAbsorbedOid,
-      upstreamHead,
-      behindBy,
-      lastSyncedAt: row.lastSyncedAt,
-      cycleSeq: row.cycleSeq,
-      pendingQuarantine: row.pendingQuarantine,
-      divergence: {
-        state: divergence.state,
-        cursorOid: divergence.state === "ok" ? row.lastAbsorbedOid : divergence.cursorOid,
-        upstreamHead,
-      },
-      blocked,
-    };
+    const env = await readSyncStatus(store, repo, ctx.config.config.vault.note_globs);
     if (ctx.output.mode === "json") {
       emitJson(env);
     } else {

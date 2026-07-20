@@ -66,6 +66,7 @@ const ADAPTERS: Record<string, Adapter> = {
     argv: ["graduation", "scan", "--source", h.seeded.gradSource, "--copy", h.seeded.gradCopy, "--json"],
   }),
   "graduation audit": () => ({ argv: ["graduation", "audit", "--json"] }),
+  "sync status": () => ({ argv: ["sync", "status", "--json"] }),
   "quarantine inspect": async (h) => {
     if (h.seeded.quarantineId === null) return { argv: [], skip: "no quarantined item was produced by the arrangement ingest" };
     const challenge = await h.run(["quarantine", "inspect", h.seeded.quarantineId, "--export-challenge", "--json"]);

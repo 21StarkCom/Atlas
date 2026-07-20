@@ -28,9 +28,9 @@
       "description": "40-hex git OID last absorbed before this cycle; null on first absorb (zero-state)."
     },
     "cursorTo": {
-      "type": "string",
+      "type": ["string", "null"],
       "pattern": "^[0-9a-f]{40}$",
-      "description": "40-hex OID the cursor advanced to (= last fully-processed commit; = upstreamHead on an unbounded fully-drained cycle). Equals cursorFrom on a no-run outcome (--dry-run or behindBy == 0), where the cursor does not move."
+      "description": "40-hex OID the cursor advanced to (= last fully-processed commit; = upstreamHead on an unbounded fully-drained cycle). Equals cursorFrom on a no-run outcome (--dry-run or behindBy == 0), where the cursor does not move — null only at the zero-state no-run outcome (null cursor, nothing absorbed yet)."
     },
     "upstreamHead": {
       "type": "string",

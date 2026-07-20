@@ -408,7 +408,7 @@
       "phase": 5,
       "idempotency": "intrinsic",
       "privilege": "shared",
-      "implemented": false
+      "implemented": true
     },
     {
       "name": "sync status",
@@ -416,7 +416,7 @@
       "phase": 5,
       "idempotency": "none",
       "privilege": "shared",
-      "implemented": false
+      "implemented": true
     },
     {
       "name": "validate",
