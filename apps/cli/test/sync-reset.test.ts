@@ -243,6 +243,26 @@ describe("sync reset — generated-artifact scan + crash recovery (#293 review)"
     expect(h.readRef(SYNC_CANONICAL_REF)).toBe(commitWithLeak);
   }, 60_000);
 
+  it("a secret-bearing FILENAME of a QUARANTINED upstream note makes reset refuse exit 3 — the pending path is scanned, not skipped (#293 round-2)", async () => {
+    // The note's CONTENT is dirty (⇒ quarantined ⇒ its PATH rides the finalization
+    // intent's pendingQuarantine into the SIGNED audit ref). Its FILENAME also
+    // carries a secret. scanNoteBytes only scans content; the generated-artifact
+    // scan must scan the pending PATH too, so the filename cannot reach the WORM
+    // ledger unscanned — a non-attributable halt (exit 3), not an exit-6 skip.
+    h = await makeSyncHarness();
+    await runSyncCycle(h.deps());
+    h.writeUpstream(`notes/${PLANTED_SECRET}.md`, noteText("concept-leaky", "Leaky", PLANTED_SECRET));
+    h.commitUpstream("dirty note with a secret filename");
+
+    let threw: unknown;
+    try {
+      await exportResetChallenge(resetDeps(h));
+    } catch (e) {
+      threw = e;
+    }
+    expect(threw).toBeInstanceOf(SecretDetectedError);
+  }, 60_000);
+
   it("crash after reset integrate → recoverSyncRuns replays the sync-reset intent (cursor re-baselined, one reconcile job)", async () => {
     h = await makeSyncHarness();
     await runSyncCycle(h.deps());

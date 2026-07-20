@@ -215,7 +215,15 @@ async function buildResetPlan(deps: SyncResetDeps): Promise<{ plan: ResetPlan; r
     JSON.stringify({
       archivedNoteIds: [...new Set(archived.map((a) => a.noteId))].sort(),
       changedNoteIds,
-      capturedPaths: captured.map((c) => c.path).sort(),
+      // The reconciled pending-quarantine PATHS ride the finalization intent
+      // (SyncIntent.pendingQuarantine) into the SIGNED audit ref — so a
+      // secret-bearing FILENAME of a quarantined note would otherwise reach the
+      // WORM ledger unscanned (#293 round-2 MAJOR). scanNoteBytes only scans a
+      // note's CONTENT; the path is scanned here. A dirty verdict is
+      // non-attributable (you cannot quarantine-and-skip a filename headed for
+      // the ledger) → exit 3, cursor unadvanced. This matches the cycle, whose
+      // per-commit scan serializes every change path incl. quarantined ones.
+      pendingPaths: reconciled.entries.map((e) => e.path).sort(),
     }),
     "sync-reset",
   );
