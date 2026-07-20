@@ -40,23 +40,48 @@ install -m 0755 -o root -g "$ATLAS_ROOT_GROUP" "$HERE/bin/broker-launcher.sh" "$
 install -m 0755 -o root -g "$ATLAS_ROOT_GROUP" "$HERE/bin/egress-launcher.sh" "$ATLAS_INSTALL_BIN/egress-launcher.sh"
 
 # --- the sync auto-hook wrapper (#60 Phase 6, macOS/launchd only) ------------
+#
+# OPTIONAL. The wrapper is only useful on a host that has adopted a vault for
+# continuous sync (docs/install.md §5.4 → §5.6), and it needs two deployment facts
+# launchd cannot supply: an absolute `brain` and the config directory. When either
+# is missing this SKIPS with a warning rather than failing the whole privileged
+# install — every other host (including a plain graduated vault, and CI) installs
+# the daemons exactly as before. `services.sh sync-gate` is what reports the skip.
 if [ "$ATLAS_OS" = "Darwin" ]; then
-# launchd does NOT source the operator's interactive shell, so a bare `brain`
-# fails command-not-found under the minimal launchd PATH before sync even starts.
-# Resolve the absolute brain entrypoint HERE, at provisioning time, and bake it in.
-# ATLAS_BRAIN_BIN lets the operator name it explicitly when `brain` is not on root's
-# PATH (a pnpm/nvm install usually isn't).
+# launchd does NOT source the operator's interactive shell, so a bare `brain` fails
+# command-not-found under the minimal launchd PATH before sync even starts. Atlas
+# also ships no installed binary (the repo docs use a shell alias), so in practice
+# ATLAS_BRAIN_BIN is how this gets named.
 BRAIN_BIN="${ATLAS_BRAIN_BIN:-$(command -v brain || true)}"
+CONFIG_DIR="${ATLAS_CONFIG_DIR:-}"
+KEYCHAIN_FILE="${ATLAS_SYNC_KEYCHAIN:-/Library/Keychains/System.keychain}"
+skip_wrapper=""
 if [ -z "$BRAIN_BIN" ] || [ ! -x "$BRAIN_BIN" ]; then
-  echo "error: cannot resolve an absolute \`brain\` executable for the sync wrapper." >&2
-  echo "       re-run with ATLAS_BRAIN_BIN=/absolute/path/to/brain (launchd has no shell PATH)." >&2
-  exit 2
+  skip_wrapper="no executable \`brain\` — set ATLAS_BRAIN_BIN=/absolute/path/to/brain"
+# Identity probe: `brain` is a generic name on \$PATH. Bake in only a real Atlas CLI,
+# never whatever else answered to that name under root's PATH.
+elif ! "$BRAIN_BIN" --help 2>&1 | grep -q "Atlas CLI"; then
+  skip_wrapper="\`$BRAIN_BIN\` does not identify as the Atlas CLI (\`--help\` lacks the 'Atlas CLI' banner)"
+elif [ -z "$CONFIG_DIR" ] || [ ! -f "$CONFIG_DIR/brain.config.yaml" ]; then
+  skip_wrapper="no brain.config.yaml — set ATLAS_CONFIG_DIR to the dir holding it (launchd runs with cwd /)"
 fi
-step "install atlas-sync-wrapper.sh (brain → $BRAIN_BIN)"
-rendered_wrapper="$(mktemp -t atlas-sync-wrapper)"
-sed -e "s|@ATLAS_BRAIN_BIN@|$BRAIN_BIN|g" -e "s|@ATLAS_SECURITY_BIN@|/usr/bin/security|g" \
-  "$HERE/macos/atlas-sync-wrapper.sh" > "$rendered_wrapper"
-install -m 0755 -o root -g "$ATLAS_ROOT_GROUP" "$rendered_wrapper" "$ATLAS_INSTALL_BIN/atlas-sync-wrapper.sh"
-rm -f "$rendered_wrapper"
+if [ -n "$skip_wrapper" ]; then
+  log "SKIP atlas-sync-wrapper.sh: $skip_wrapper"
+  log "     (continuous sync stays unavailable; the daemons are unaffected)"
+else
+  step "install atlas-sync-wrapper.sh (brain → $BRAIN_BIN, config → $CONFIG_DIR, keychain → $KEYCHAIN_FILE)"
+  rendered_wrapper="$(mktemp -t atlas-sync-wrapper)"
+  # `|` is the sed delimiter, so a path containing one would corrupt the render.
+  for v in "$BRAIN_BIN" "$CONFIG_DIR" "$KEYCHAIN_FILE"; do
+    case "$v" in *'|'* | *'&'* | *'\'*) echo "error: unsupported character in path '$v'" >&2; exit 2 ;; esac
+  done
+  sed -e "s|@ATLAS_BRAIN_BIN@|$BRAIN_BIN|g" \
+      -e "s|@ATLAS_CONFIG_DIR@|$CONFIG_DIR|g" \
+      -e "s|@ATLAS_KEYCHAIN@|$KEYCHAIN_FILE|g" \
+      -e "s|@ATLAS_SECURITY_BIN@|/usr/bin/security|g" \
+      "$HERE/macos/atlas-sync-wrapper.sh" > "$rendered_wrapper"
+  install -m 0755 -o root -g "$ATLAS_ROOT_GROUP" "$rendered_wrapper" "$ATLAS_INSTALL_BIN/atlas-sync-wrapper.sh"
+  rm -f "$rendered_wrapper"
+fi
 fi
 step "DONE — privileged binaries installed hash-verified; repo dist/ is never executed privileged"

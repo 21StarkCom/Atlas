@@ -32,6 +32,9 @@ GATED_SERVICES=(com.atlas.sync)
 SYNC_LABEL="com.atlas.sync"
 SYNC_WRAPPER="$ATLAS_INSTALL_BIN/atlas-sync-wrapper.sh"
 KEYCHAIN_SERVICE="atlas-egress-capability"
+# `atlas-agent` is a home-less service UID with no login keychain, so the custody
+# point must be a keychain in every identity's search list.
+SYNC_KEYCHAIN_DEFAULT="${ATLAS_SYNC_KEYCHAIN:-/Library/Keychains/System.keychain}"
 
 status() {
   for s in "${SERVICES[@]}" "${GATED_SERVICES[@]}"; do
@@ -79,10 +82,10 @@ sync_gate() {
 
   step "sync gate — $SYNC_LABEL prerequisites"
 
-  # 1 + 2 — the wrapper and the absolute brain path it baked in at install time.
+  # 1 + 2 — the wrapper, the absolute brain path, and the config dir it baked in.
   if [ -x "$SYNC_WRAPPER" ]; then
     gate_ok "wrapper installed: $SYNC_WRAPPER"
-    local brain_bin
+    local brain_bin config_dir
     brain_bin="$(sed -n 's|^BRAIN="\(.*\)"$|\1|p' "$SYNC_WRAPPER" | head -1)"
     case "$brain_bin" in
       "" | *@ATLAS_BRAIN_BIN@*)
@@ -93,17 +96,37 @@ sync_gate() {
       *)
         gate_fail "the wrapper's brain path is not absolute: $brain_bin (launchd has no shell PATH)" ;;
     esac
+    # launchd runs the job with cwd `/`, and brain resolves its config strictly as
+    # <cwd>/brain.config.yaml — an unsubstituted or wrong dir fail-closes EVERY cycle.
+    config_dir="$(sed -n 's|^CONFIG_DIR="\(.*\)"$|\1|p' "$SYNC_WRAPPER" | head -1)"
+    case "$config_dir" in
+      "" | *@ATLAS_CONFIG_DIR@*)
+        gate_fail "the wrapper's config dir was never substituted — re-run install-artifact.sh (ATLAS_CONFIG_DIR=...)" ;;
+      /*)
+        if sudo -n -u "$ATLAS_AGENT_USER" test -r "$config_dir/brain.config.yaml"; then
+          gate_ok "$ATLAS_AGENT_USER can read $config_dir/brain.config.yaml"
+        else
+          gate_fail "$ATLAS_AGENT_USER cannot read $config_dir/brain.config.yaml — every cycle would exit 2 at config load"
+        fi ;;
+      *)
+        gate_fail "the wrapper's config dir is not absolute: $config_dir" ;;
+    esac
   else
-    gate_fail "wrapper missing or not executable: $SYNC_WRAPPER — run install-artifact.sh first"
+    gate_fail "wrapper missing or not executable: $SYNC_WRAPPER — run install-artifact.sh first (it SKIPS when ATLAS_BRAIN_BIN/ATLAS_CONFIG_DIR are unset)"
   fi
 
   # 3 — the atlas-agent repo-open probe (the failure that survives every other gate).
   if [ -d "$vault/.git" ] || [ -f "$vault/HEAD" ]; then
     # REPOSITORY-SPECIFIC entry, never `*` — a wildcard would hand atlas-agent every
-    # repo on the host. Idempotent: added only when not already present.
+    # repo on the host. Written to the SYSTEM config (/etc/gitconfig), NOT the target
+    # user's --global: atlas-agent is a home-less service UID (NFSHomeDirectory
+    # /var/empty, root-owned 0555), so a --global write has nowhere to land and would
+    # abort the whole gate under `set -e`. Idempotent; failure is a gate failure, not
+    # a crash.
     if [ "$(id -u)" = "0" ] && [ "$DRY_RUN" != "1" ]; then
-      if ! sudo -n -u "$ATLAS_AGENT_USER" git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$vault"; then
-        sudo -n -u "$ATLAS_AGENT_USER" git config --global --add safe.directory "$vault"
+      if ! git config --system --get-all safe.directory 2>/dev/null | grep -qxF "$vault"; then
+        git config --system --add safe.directory "$vault" \
+          || gate_fail "could not add a system-wide git safe.directory entry for $vault"
       fi
     fi
     if sudo -n -u "$ATLAS_AGENT_USER" git -C "$vault" rev-parse --verify refs/heads/main >/dev/null 2>&1; then
@@ -115,19 +138,29 @@ sync_gate() {
     gate_fail "not a git repository: $vault"
   fi
 
-  # 4 — Keychain reachability AS atlas-agent (OQ#1 keychain-unlock prerequisite).
-  if sudo -n -u "$ATLAS_AGENT_USER" /usr/bin/security find-generic-password \
-       -s "$KEYCHAIN_SERVICE" -a "$ATLAS_AGENT_USER" >/dev/null 2>&1; then
-    gate_ok "capability secret reachable from the Keychain as $ATLAS_AGENT_USER"
+  # 4 — Keychain reachability AS atlas-agent. This must be the EXACT operation the
+  # wrapper performs: `-w` (retrieve + DECRYPT the password) against the SAME explicit
+  # keychain file. An attribute-only lookup succeeds without decrypting, so it would
+  # pass on a locked keychain the wrapper then fails to read.
+  local keychain
+  keychain="$(sed -n 's|^KEYCHAIN="\(.*\)"$|\1|p' "$SYNC_WRAPPER" 2>/dev/null | head -1)"
+  case "$keychain" in "" | *@ATLAS_KEYCHAIN@*) keychain="$SYNC_KEYCHAIN_DEFAULT" ;; esac
+  if sudo -n -u "$ATLAS_AGENT_USER" /usr/bin/security find-generic-password -w \
+       -s "$KEYCHAIN_SERVICE" -a "$ATLAS_AGENT_USER" "$keychain" >/dev/null 2>&1; then
+    gate_ok "capability secret READS as $ATLAS_AGENT_USER from $keychain"
   else
-    gate_fail "capability secret NOT reachable as $ATLAS_AGENT_USER (service=$KEYCHAIN_SERVICE) — provision it and unlock the keychain; the interactive-session posture is the only supported one (OQ#1(b))"
+    gate_fail "capability secret does NOT read as $ATLAS_AGENT_USER from $keychain (service=$KEYCHAIN_SERVICE) — provision it there and unlock the keychain; the interactive-session posture is the only supported one (OQ#1(b))"
   fi
 
   # 5 — the upstream puller (atlas-agent is network-denied and cannot fetch).
   local puller="${ATLAS_UPSTREAM_PULLER_LABEL:-}"
   if [ -z "$puller" ]; then
     gate_fail "ATLAS_UPSTREAM_PULLER_LABEL is unset — name the brain-hub puller's launchd label; without it refs/heads/main never advances and the timer never observes a remote push"
-  elif launchctl print "system/$puller" >/dev/null 2>&1 || launchctl print "gui/$(id -u)/$puller" >/dev/null 2>&1; then
+  # A per-user LaunchAgent lives in the INVOKING operator's gui domain — under
+  # `sudo enable-sync` `id -u` is 0, so probe SUDO_UID first or the agent is invisible.
+  elif launchctl print "system/$puller" >/dev/null 2>&1 \
+    || launchctl print "gui/${SUDO_UID:-$(id -u)}/$puller" >/dev/null 2>&1 \
+    || launchctl print "gui/$(id -u)/$puller" >/dev/null 2>&1; then
     gate_ok "upstream puller loaded: $puller"
   else
     gate_fail "upstream puller '$puller' is not loaded"

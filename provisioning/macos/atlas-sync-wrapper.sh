@@ -30,13 +30,24 @@
 # usage) is a true abort: exit with it, do NOT drain. The wrapper's own custody
 # failures exit 2 (a provisioning/config fault), never a silent no-op.
 #
-# `@ATLAS_*@` placeholders are substituted at provisioning time — launchd does not
-# source the operator's shell, so a bare `brain` would fail command-not-found under
-# the minimal launchd PATH before sync even starts.
+# `@ATLAS_*@` placeholders are substituted at provisioning time. Two of them are
+# load-bearing because launchd gives a job NO shell environment and NO useful cwd:
+#
+#   @ATLAS_BRAIN_BIN@   — a bare `brain` fails command-not-found under the minimal
+#                         launchd PATH before sync even starts.
+#   @ATLAS_CONFIG_DIR@  — `brain` resolves its config strictly as
+#                         `<cwd>/brain.config.yaml` (no upward walk, no env
+#                         fallback), and every relative config path (`sqlite.path`,
+#                         `lancedb.dir`, `logs.dir`, the lock dir) resolves against
+#                         the same cwd. launchd starts the job with cwd `/`, so
+#                         without this `cd` EVERY cycle would die at config load
+#                         with exit 2 — a timer that looks alive and does nothing.
 set -euo pipefail
 
 BRAIN="@ATLAS_BRAIN_BIN@"
+CONFIG_DIR="@ATLAS_CONFIG_DIR@"
 SECURITY_BIN="@ATLAS_SECURITY_BIN@"
+KEYCHAIN="@ATLAS_KEYCHAIN@"
 KEYCHAIN_SERVICE="atlas-egress-capability"
 KEYCHAIN_ACCOUNT="atlas-agent"
 
@@ -46,6 +57,9 @@ die() {
 }
 
 [ -x "$BRAIN" ] || die "brain executable not found at '$BRAIN' (provisioning must substitute an absolute path)"
+[ -f "$CONFIG_DIR/brain.config.yaml" ] \
+  || die "no brain.config.yaml in '$CONFIG_DIR' (provisioning must substitute the deployment's config dir)"
+cd "$CONFIG_DIR" || die "cannot enter the config dir '$CONFIG_DIR'"
 
 # ---------------------------------------------------------------------------
 # Step 1 — absorb. No egress credential in this environment, by construction.
@@ -64,8 +78,12 @@ esac
 # ---------------------------------------------------------------------------
 # Step 2 — drain, with the secret scoped to this one command.
 # ---------------------------------------------------------------------------
-key="$($SECURITY_BIN find-generic-password -w -s "$KEYCHAIN_SERVICE" -a "$KEYCHAIN_ACCOUNT" 2>/dev/null)" || key=""
-[ -n "$key" ] || die "capability secret unavailable from the Keychain (service=$KEYCHAIN_SERVICE account=$KEYCHAIN_ACCOUNT) — is the keychain unlocked? refusing to drain without a credential"
+# The keychain FILE is named explicitly. `-a atlas-agent` is only an attribute, not
+# an identity selector: without a keychain argument `security` reads the invoking
+# user's DEFAULT keychain, and `atlas-agent` is a home-less service UID
+# (NFSHomeDirectory /var/empty) that has no login keychain at all.
+key="$("$SECURITY_BIN" find-generic-password -w -s "$KEYCHAIN_SERVICE" -a "$KEYCHAIN_ACCOUNT" "$KEYCHAIN" 2>/dev/null)" || key=""
+[ -n "$key" ] || die "capability secret unavailable from $KEYCHAIN (service=$KEYCHAIN_SERVICE account=$KEYCHAIN_ACCOUNT) — is it provisioned and the keychain unlocked? refusing to drain without a credential"
 
 exec 3< <(printf '%s' "$key")
 key=""

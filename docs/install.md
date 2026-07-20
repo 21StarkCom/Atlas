@@ -44,9 +44,13 @@ tail -3 /usr/local/var/log/atlas/*.log                # "…listening on…" ×2
 export ATLAS_PROVISIONED=1
 
 # 9  (optional, after §5.4 adoption) enable continuous sync — §5.6
-sudo security add-generic-password -a atlas-agent -s atlas-egress-capability \
-  -w "$(sudo cat /usr/local/etc/atlas/keys/shared/egress-capability.key)" -U
-provisioning/macos/services.sh sync-gate "$VAULT"            # read-only: shows what's missing
+VAULT=/path/to/vault-repo                       # the adopted repo
+sudo ATLAS_BRAIN_BIN="$PWD/apps/cli/dist/bin.js" ATLAS_CONFIG_DIR=/path/to/config-dir \
+  provisioning/install-artifact.sh dist-artifact              # re-render with the wrapper
+sudo security add-generic-password -a atlas-agent -s atlas-egress-capability -U -A \
+  -w "$(sudo cat /usr/local/etc/atlas/keys/shared/egress-capability.key)" \
+  /Library/Keychains/System.keychain
+sudo provisioning/macos/services.sh sync-gate "$VAULT"        # shows exactly what's missing
 sudo ATLAS_UPSTREAM_PULLER_LABEL=<puller-label> \
   provisioning/macos/services.sh enable-sync "$VAULT"
 ```
@@ -343,14 +347,29 @@ brain jobs run --all --json   drain that job (this is the step that indexes)
 `services.sh install` copies the plist but leaves the timer **disabled**. Enabling it is a separate, gated command — a timer started before its prerequisites hold looks healthy in `launchctl` while fail-closing every cycle.
 
 ```bash
-# 1  provision the capability secret into the atlas-agent Keychain (the wrapper's custody point)
-sudo security add-generic-password -a atlas-agent -s atlas-egress-capability \
-  -w "$(sudo cat /usr/local/etc/atlas/keys/shared/egress-capability.key)" -U
+# 1  render + install the wrapper. It is SKIPPED (with a warning, never a hard fail)
+#    unless BOTH deployment facts are given — launchd supplies neither.
+#      ATLAS_BRAIN_BIN   absolute brain; Atlas ships no installed binary, and launchd
+#                        has no shell PATH, so a bare `brain` dies every cycle
+#      ATLAS_CONFIG_DIR  the dir holding brain.config.yaml; launchd runs with cwd `/`
+#                        and `brain` resolves its config strictly as <cwd>/brain.config.yaml
+sudo ATLAS_BRAIN_BIN="$PWD/apps/cli/dist/bin.js" \
+     ATLAS_CONFIG_DIR=/path/to/config-dir \
+     provisioning/install-artifact.sh dist-artifact
 
-# 2  dry-run the gate — read-only, tells you exactly which prerequisite is missing
-provisioning/macos/services.sh sync-gate /path/to/vault-repo
+# 2  provision the capability secret where a HOME-LESS service UID can read it.
+#    `-a atlas-agent` is only an attribute — the keychain FILE must be named, because
+#    atlas-agent (NFSHomeDirectory /var/empty) has no login keychain at all and a bare
+#    `sudo security add-generic-password` would write to ROOT's default keychain.
+sudo security add-generic-password -a atlas-agent -s atlas-egress-capability -U -A \
+  -w "$(sudo cat /usr/local/etc/atlas/keys/shared/egress-capability.key)" \
+  /Library/Keychains/System.keychain
 
-# 3  enable (root; names the brain-hub puller that advances local refs/heads/main)
+# 3  dry-run the gate — mutates nothing but the safe.directory entry; needs root
+#    because three of the six probes run AS atlas-agent
+sudo provisioning/macos/services.sh sync-gate /path/to/vault-repo
+
+# 4  enable (names the brain-hub puller that advances local refs/heads/main)
 sudo ATLAS_UPSTREAM_PULLER_LABEL=com.example.brainhub.sync \
   provisioning/macos/services.sh enable-sync /path/to/vault-repo
 
@@ -358,14 +377,15 @@ provisioning/macos/services.sh status          # com.atlas.sync: loaded
 tail -f /usr/local/var/log/atlas/sync.log
 ```
 
-**The five gates, and why each one exists:**
+**The gates, and why each one exists:**
 
 | Gate | If unmet |
 |---|---|
-| wrapper installed + executable | nothing runs |
-| the wrapper's baked-in `brain` path is absolute and executable | launchd has no shell PATH — a bare `brain` dies at command resolution *every cycle* |
-| `atlas-agent` can open the vault repo (repo-specific `safe.directory`) | the wrapper runs as a different user than the vault owner; git's dubious-ownership guard kills the first `readRef` even with every other gate green |
-| the Keychain item is reachable **as `atlas-agent`** | every drain fail-closes with no credential |
+| wrapper installed + executable | nothing runs (install-artifact.sh skipped it — see step 1) |
+| its baked-in `brain` path is absolute and executable | launchd has no shell PATH — a bare `brain` dies at command resolution *every cycle* |
+| its baked-in **config dir** is absolute and `atlas-agent` can read `brain.config.yaml` there | launchd runs with cwd `/`; `brain` resolves the config as `<cwd>/brain.config.yaml` with no upward walk and no env fallback, so every cycle would exit 2 at config load |
+| `atlas-agent` can open the vault repo (repo-specific `safe.directory`, written to `/etc/gitconfig`) | the wrapper runs as a different user than the vault owner; git's dubious-ownership guard kills the first `readRef` even with every other gate green. It is the **system** config, not `--global`: `atlas-agent`'s home is the root-owned `/var/empty`, so a `--global` write has nowhere to land |
+| the capability secret **reads** (`-w`, decrypting) as `atlas-agent` from the named keychain | every drain fail-closes with no credential. The probe is the wrapper's exact operation — an attribute-only lookup would pass against a *locked* keychain |
 | `ATLAS_UPSTREAM_PULLER_LABEL` names a **loaded** puller | `brain sync` reads the **local** `refs/heads/main` and `atlas-agent` is network-denied (D17) — without a puller the timer never observes a single remote push |
 
 **Interactive-session posture only.** The Keychain fetch needs an unlocked keychain, so this is supported for a logged-in session. The fully-headless (logged-out) unlock story and the stronger broker-mediated per-run capability handoff are both deferred (plan OQ#1(a)/(b)); do not enable the timer for unattended/logged-out use until those are settled.

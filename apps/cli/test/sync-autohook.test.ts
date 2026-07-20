@@ -36,6 +36,8 @@ const P = {
   log: (): string => join(dir, "calls.log"),
   fdCapture: (): string => join(dir, "fd3.capture"),
   tmp: (): string => join(dir, "tmp"),
+  configDir: (): string => join(dir, "conf"),
+  keychain: (): string => join(dir, "atlas-test.keychain"),
 };
 
 /**
@@ -46,6 +48,8 @@ const P = {
 function renderWrapper(): void {
   const src = readFileSync(WRAPPER_SRC, "utf8")
     .replaceAll("@ATLAS_BRAIN_BIN@", P.brain())
+    .replaceAll("@ATLAS_CONFIG_DIR@", P.configDir())
+    .replaceAll("@ATLAS_KEYCHAIN@", P.keychain())
     .replaceAll("@ATLAS_SECURITY_BIN@", P.security());
   writeFileSync(P.wrapper(), src, { mode: 0o755 });
 }
@@ -59,6 +63,7 @@ function writeBrainStub(opts: { syncRc: number; drainRc?: number }): void {
 sub="$1"
 {
   echo "ARGV|$*"
+  echo "PWD|$sub|$PWD"
   echo "ENV_KEY|$sub|\${ATLAS_EGRESS_CAPABILITY_KEY-<unset>}"
   echo "ENV_FD|$sub|\${ATLAS_EGRESS_CAPABILITY_KEY_FD-<unset>}"
   # The whole environment, so a test can prove the raw secret is nowhere in it.
@@ -111,6 +116,9 @@ function invocations(): string[] {
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "atlas-autohook-"));
   mkdirSync(P.tmp(), { recursive: true });
+  mkdirSync(P.configDir(), { recursive: true });
+  // The wrapper `cd`s here and refuses to run without it — launchd's cwd is `/`.
+  writeFileSync(join(P.configDir(), "brain.config.yaml"), "vault:\n  path: .\n");
   renderWrapper();
 });
 
@@ -124,7 +132,7 @@ describe("atlas-sync-wrapper — step sequencing", () => {
     writeSecurityStub({ secret: SECRET });
     const res = runWrapper();
     expect(res.status).toBe(0);
-    expect(invocations()).toEqual(["sync --json", "security find-generic-password -w -s atlas-egress-capability -a atlas-agent", "jobs run --all --json"]);
+    expect(invocations()).toEqual(["sync --json", `security find-generic-password -w -s atlas-egress-capability -a atlas-agent ${P.keychain()}`, "jobs run --all --json"]);
   });
 
   it("STILL drains after a mixed clean+quarantined cycle (sync exit 6) — `set -e` must not abort", () => {
@@ -238,9 +246,39 @@ describe("atlas-sync-wrapper — fail-closed custody", () => {
   });
 });
 
+describe("atlas-sync-wrapper — launchd environment (cwd is `/`)", () => {
+  it("runs BOTH steps from the baked-in config dir — brain resolves <cwd>/brain.config.yaml", () => {
+    writeBrainStub({ syncRc: 0 });
+    writeSecurityStub({ secret: SECRET });
+    expect(runWrapper().status).toBe(0);
+    expect(log()).toContain(`PWD|sync|${P.configDir()}`);
+    expect(log()).toContain(`PWD|jobs|${P.configDir()}`);
+  });
+
+  it("fails closed (exit 2) when the config dir holds no brain.config.yaml — never a silent bad-cwd run", () => {
+    writeBrainStub({ syncRc: 0 });
+    writeSecurityStub({ secret: SECRET });
+    rmSync(join(P.configDir(), "brain.config.yaml"));
+    const res = runWrapper();
+    expect(res.status).toBe(2);
+    expect(res.stderr).toMatch(/no brain\.config\.yaml/i);
+    expect(invocations()).toEqual([]);
+  });
+
+  it("names the keychain FILE explicitly — atlas-agent is home-less and has no login keychain", () => {
+    writeBrainStub({ syncRc: 0 });
+    writeSecurityStub({ secret: SECRET });
+    runWrapper();
+    expect(log()).toContain(`-a atlas-agent ${P.keychain()}`);
+  });
+});
+
 describe("atlas-sync-wrapper — provisioning contract", () => {
   it("fails closed (exit 2) when the brain placeholder was never substituted", () => {
-    const raw = readFileSync(WRAPPER_SRC, "utf8").replaceAll("@ATLAS_SECURITY_BIN@", P.security());
+    const raw = readFileSync(WRAPPER_SRC, "utf8")
+      .replaceAll("@ATLAS_CONFIG_DIR@", P.configDir())
+      .replaceAll("@ATLAS_KEYCHAIN@", P.keychain())
+      .replaceAll("@ATLAS_SECURITY_BIN@", P.security());
     writeFileSync(P.wrapper(), raw, { mode: 0o755 });
     const res = runWrapper();
     expect(res.status).toBe(2);

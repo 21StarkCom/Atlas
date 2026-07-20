@@ -16,9 +16,22 @@
  * - **File descriptor** — {@link CAPABILITY_KEY_FD_ENV} names an already-open fd
  *   carrying the raw secret. This is the launchd sync wrapper's form: the secret
  *   is fetched from the Keychain at job start and handed to the drain on fd 3
- *   (`3<<<"$key"`), so it is **never written to disk** and **never visible in the
- *   environment** (the env carries only the small integer `3`). It is
- *   command-scoped — it dies with the process it was passed to.
+ *   (`exec 3< <(printf '%s' "$key")` — a pipe, never a here-string, which bash
+ *   backs with a temp FILE on macOS), so it is **never written to disk** and
+ *   **never visible in the environment** (the env carries only the small integer
+ *   `3`). It is command-scoped — it dies with the process it was passed to.
+ *
+ * **The fd read is memoized per process.** A pipe is a stream: it is drained by
+ * the first read, and every later read returns EOF. But the mint path resolves the
+ * secret on EVERY `mintEgressCapability` call, and one `brain jobs run --all`
+ * drains many jobs in one process — so an un-memoized fd form would serve the
+ * first minting job and hand every later one an empty secret (which
+ * `requireNonEmpty` then throws on, failing the job as a transient `internal`
+ * until it burns its whole attempt budget). Caching is exactly the fd form's
+ * semantics: the descriptor is command-scoped and its payload is immutable for the
+ * process lifetime. Only SUCCESSFUL reads are cached, so a failure stays
+ * fail-closed and is re-attempted rather than remembered. The **path form is
+ * deliberately NOT cached** — re-reading is what makes a rotation observable.
  *
  * The fd form WINS when both are present: it is the explicit, command-scoped
  * hand-off, and silently preferring a standing on-disk credential over the one
@@ -71,6 +84,17 @@ export function resolveCapabilitySecret(env: CapabilityCustodyEnv = process.env)
   );
 }
 
+/**
+ * Successful fd reads, keyed by descriptor number. A pipe yields its payload once;
+ * every mint after the first would otherwise see EOF. See the module header.
+ */
+const fdSecretCache = new Map<number, string>();
+
+/** Reset the fd memo — tests only; production never re-uses a descriptor number. */
+export function __resetCapabilityFdCache(): void {
+  fdSecretCache.clear();
+}
+
 /** Read the secret from an already-open fd. Never falls back to the path form (fail closed). */
 function readFromFd(fdRaw: string): string {
   // `Number` accepts "3.5"/" 3"/"0x3"; require a plain non-negative integer so a
@@ -79,6 +103,8 @@ function readFromFd(fdRaw: string): string {
     throw new Error(`${CAPABILITY_KEY_FD_ENV}=${fdRaw} is not a valid file descriptor (expected a non-negative integer)`);
   }
   const fd = Number(fdRaw);
+  const cached = fdSecretCache.get(fd);
+  if (cached !== undefined) return cached;
   let raw: string;
   try {
     // The fd is consumed whole; the caller (the wrapper) owns closing it.
@@ -89,7 +115,10 @@ function readFromFd(fdRaw: string): string {
         `file descriptor ${fdRaw} is not readable (${err instanceof Error ? err.message : String(err)})`,
     );
   }
-  return requireNonEmpty(raw, `${CAPABILITY_KEY_FD_ENV}=${fdRaw}`);
+  // Only a SUCCESSFUL read is remembered — a throw stays fail-closed and retryable.
+  const secret = requireNonEmpty(raw, `${CAPABILITY_KEY_FD_ENV}=${fdRaw}`);
+  fdSecretCache.set(fd, secret);
+  return secret;
 }
 
 /** Read the secret from the provisioned custody file. */

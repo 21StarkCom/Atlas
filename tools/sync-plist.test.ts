@@ -91,7 +91,7 @@ describe("services.sh — the timer is installed DISABLED", () => {
   });
 });
 
-describe("services.sh — the five gates", () => {
+describe("services.sh — the gates", () => {
   const gate = /^sync_gate\(\) \{([\s\S]*?)^\}/m.exec(SERVICES)?.[1] ?? "";
 
   it("probes the wrapper's absolute brain path and rejects an unsubstituted placeholder", () => {
@@ -99,35 +99,76 @@ describe("services.sh — the five gates", () => {
     expect(gate).toMatch(/not absolute/);
   });
 
+  it("probes the baked-in CONFIG DIR — launchd's cwd is `/` and brain reads <cwd>/brain.config.yaml", () => {
+    expect(gate).toContain("@ATLAS_CONFIG_DIR@");
+    expect(gate).toMatch(/sudo -n -u "\$ATLAS_AGENT_USER" test -r "\$config_dir\/brain\.config\.yaml"/);
+  });
+
   it("runs a REAL read-only git probe as atlas-agent against the vault", () => {
     expect(gate).toMatch(/sudo -n -u "\$ATLAS_AGENT_USER" git -C "\$vault" rev-parse/);
   });
 
-  it("adds a REPOSITORY-SPECIFIC safe.directory entry, never the `*` wildcard", () => {
-    expect(gate).toContain("git config --global --add safe.directory");
+  it("writes safe.directory to the SYSTEM config, not the home-less agent's --global", () => {
+    // atlas-agent's NFSHomeDirectory is the root-owned /var/empty — a --global write
+    // has nowhere to land and would abort the whole gate under `set -e`.
+    expect(gate).toContain("git config --system --add safe.directory");
+    expect(gate).not.toContain("--global --add safe.directory");
     expect(gate).not.toMatch(/safe\.directory\s+['"]?\*/);
   });
 
-  it("probes the Keychain AS atlas-agent (the OQ#1 keychain-unlock prerequisite)", () => {
-    expect(gate).toMatch(/sudo -n -u "\$ATLAS_AGENT_USER" \/usr\/bin\/security find-generic-password/);
+  it("guards the safe.directory write instead of letting `set -e` abort the gate", () => {
+    expect(gate).toMatch(/git config --system --add safe\.directory "\$vault"[\s\S]{0,120}gate_fail/);
+  });
+
+  it("probes the Keychain with `-w` and an EXPLICIT keychain file (the wrapper's exact operation)", () => {
+    // Without -w the lookup never decrypts, so it passes against a LOCKED keychain
+    // the wrapper then fails to read; without the file it hits root's default keychain.
+    expect(gate).toMatch(/sudo -n -u "\$ATLAS_AGENT_USER" \/usr\/bin\/security find-generic-password -w/);
+    expect(gate).toMatch(/-a "\$ATLAS_AGENT_USER" "\$keychain"/);
   });
 
   it("requires the upstream puller — atlas-agent is network-denied and cannot fetch", () => {
     expect(gate).toContain("ATLAS_UPSTREAM_PULLER_LABEL");
     expect(gate).toMatch(/launchctl print "system\/\$puller"/);
   });
+
+  it("probes the puller in the INVOKING operator's gui domain (SUDO_UID), not gui/0", () => {
+    expect(gate).toContain('gui/${SUDO_UID:-$(id -u)}/$puller');
+  });
 });
 
 describe("install-artifact.sh — wrapper rendering", () => {
-  it("substitutes BOTH placeholders and installs the wrapper root-owned 0755", () => {
-    expect(INSTALL).toContain("s|@ATLAS_BRAIN_BIN@|$BRAIN_BIN|g");
-    expect(INSTALL).toContain("s|@ATLAS_SECURITY_BIN@|/usr/bin/security|g");
+  it("substitutes every placeholder and installs the wrapper root-owned 0755", () => {
+    for (const sub of [
+      "s|@ATLAS_BRAIN_BIN@|$BRAIN_BIN|g",
+      "s|@ATLAS_CONFIG_DIR@|$CONFIG_DIR|g",
+      "s|@ATLAS_KEYCHAIN@|$KEYCHAIN_FILE|g",
+      "s|@ATLAS_SECURITY_BIN@|/usr/bin/security|g",
+    ]) {
+      expect(INSTALL).toContain(sub);
+    }
     expect(INSTALL).toMatch(/install -m 0755 -o root -g "\$ATLAS_ROOT_GROUP" "\$rendered_wrapper"/);
   });
 
-  it("refuses to install when no absolute brain can be resolved (fail closed, exit 2)", () => {
-    expect(INSTALL).toContain("ATLAS_BRAIN_BIN");
-    expect(INSTALL).toMatch(/cannot resolve an absolute[\s\S]*?exit 2/);
+  it("SKIPS the optional wrapper instead of failing the privileged install", () => {
+    // The daemons must still install on a host that never adopted a vault (and in CI).
+    expect(INSTALL).toContain("skip_wrapper");
+    expect(INSTALL).toMatch(/log "SKIP atlas-sync-wrapper\.sh/);
+    expect(INSTALL).not.toMatch(/cannot resolve an absolute[\s\S]*?exit 2/);
+  });
+
+  it("verifies the resolved `brain` really IS the Atlas CLI before baking it in", () => {
+    // `brain` is a generic name on root's PATH.
+    expect(INSTALL).toMatch(/"\$BRAIN_BIN" --help[\s\S]{0,60}Atlas CLI/);
+  });
+
+  it("requires a config dir — the launchd cwd-`/` failure is otherwise silent", () => {
+    expect(INSTALL).toContain("ATLAS_CONFIG_DIR");
+    expect(INSTALL).toMatch(/\$CONFIG_DIR\/brain\.config\.yaml/);
+  });
+
+  it("rejects sed-hostile characters in a substituted path rather than corrupting the render", () => {
+    expect(INSTALL).toMatch(/unsupported character in path/);
   });
 
   it("guards the macOS-only wrapper install behind the Darwin check", () => {
@@ -135,7 +176,8 @@ describe("install-artifact.sh — wrapper rendering", () => {
   });
 
   it("the installed wrapper is the SAME artifact the auto-hook test drives", () => {
-    expect(WRAPPER).toContain("@ATLAS_BRAIN_BIN@");
-    expect(WRAPPER).toContain("@ATLAS_SECURITY_BIN@");
+    for (const ph of ["@ATLAS_BRAIN_BIN@", "@ATLAS_CONFIG_DIR@", "@ATLAS_KEYCHAIN@", "@ATLAS_SECURITY_BIN@"]) {
+      expect(WRAPPER).toContain(ph);
+    }
   });
 });

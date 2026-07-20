@@ -12,12 +12,15 @@
  * Fail-closed is the whole point: neither form set, an unreadable fd, or an
  * empty secret must THROW — never resolve to a degraded/empty credential.
  */
-import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, writeFileSync, openSync, closeSync, rmSync } from "node:fs";
+import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, readFileSync, openSync, closeSync, rmSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   resolveCapabilitySecret,
+  __resetCapabilityFdCache,
   CAPABILITY_KEY_ENV,
   CAPABILITY_KEY_FD_ENV,
 } from "../src/egress/capability-custody.js";
@@ -31,7 +34,12 @@ function scratch(): string {
   return d;
 }
 
+beforeEach(() => {
+  __resetCapabilityFdCache();
+});
+
 afterEach(() => {
+  __resetCapabilityFdCache();
   for (const fd of fds.splice(0)) {
     try {
       closeSync(fd);
@@ -117,6 +125,72 @@ describe("resolveCapabilitySecret — fd form (Task 6.2)", () => {
     writeFileSync(path, "");
     const fd = openSync(path, "r");
     fds.push(fd);
+    expect(() => resolveCapabilitySecret({ [CAPABILITY_KEY_FD_ENV]: String(fd) })).toThrow(/empty/i);
+  });
+});
+
+/**
+ * REGRESSION (review round 1, CRITICAL). The wrapper feeds fd 3 from a PIPE
+ * (`exec 3< <(printf …)`), and the mint path resolves the secret afresh on every
+ * `mintEgressCapability` — while one `brain jobs run --all` drains many jobs in one
+ * process. Un-memoized, the first minting job would drain the pipe and every later
+ * one would see EOF → "secret is empty" → a transient `internal` that burns the
+ * job's whole attempt budget. Exactly one egress-bearing job per 300 s cycle would
+ * ever succeed, which is the failure Phase 6 exists to close.
+ */
+describe("resolveCapabilitySecret — fd form is memoized (a pipe yields its payload ONCE)", () => {
+  it("returns the same secret on repeated resolves over a real single-consumption PIPE", () => {
+    const dir = scratch();
+    const script = join(dir, "pipe.sh");
+    const out = join(dir, "resolved.txt");
+    // A real pipe fd, exactly as the wrapper builds it, feeding a real Node process
+    // that resolves three times — the multi-mint drain, reproduced end to end.
+    const resolverJs = join(dir, "resolve.mjs");
+    writeFileSync(
+      resolverJs,
+      [
+        // The BUILT module — this is the artifact the drain actually loads.
+        `import { resolveCapabilitySecret } from ${JSON.stringify(fileURLToPath(new URL("../dist/src/egress/capability-custody.js", import.meta.url)))};`,
+        `import { writeFileSync } from "node:fs";`,
+        `const got = [];`,
+        `for (let i = 0; i < 3; i++) { try { got.push(resolveCapabilitySecret()); } catch (e) { got.push("THREW: " + e.message); } }`,
+        `writeFileSync(${JSON.stringify(out)}, JSON.stringify(got));`,
+      ].join("\n"),
+    );
+    writeFileSync(
+      script,
+      [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        `exec 3< <(printf '%s' "pipe-delivered-secret")`,
+        `ATLAS_EGRESS_CAPABILITY_KEY_FD=3 ${JSON.stringify(process.execPath)} ${JSON.stringify(resolverJs)}`,
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    execFileSync(script, { stdio: "ignore" });
+    expect(JSON.parse(readFileSync(out, "utf8"))).toEqual([
+      "pipe-delivered-secret",
+      "pipe-delivered-secret",
+      "pipe-delivered-secret",
+    ]);
+  });
+
+  it("does NOT memoize the path form — re-reading is what makes a rotation observable", () => {
+    const dir = scratch();
+    const path = join(dir, "rotating.key");
+    writeFileSync(path, "old-secret\n");
+    expect(resolveCapabilitySecret({ [CAPABILITY_KEY_ENV]: path })).toBe("old-secret");
+    writeFileSync(path, "new-secret\n");
+    expect(resolveCapabilitySecret({ [CAPABILITY_KEY_ENV]: path })).toBe("new-secret");
+  });
+
+  it("does not cache a FAILED read — a bad fd stays fail-closed on every attempt", () => {
+    const dir = scratch();
+    const path = join(dir, "empty-fd");
+    writeFileSync(path, "");
+    const fd = openSync(path, "r");
+    fds.push(fd);
+    expect(() => resolveCapabilitySecret({ [CAPABILITY_KEY_FD_ENV]: String(fd) })).toThrow(/empty/i);
     expect(() => resolveCapabilitySecret({ [CAPABILITY_KEY_FD_ENV]: String(fd) })).toThrow(/empty/i);
   });
 });
