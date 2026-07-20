@@ -57,8 +57,8 @@ final class CadenceGuardTests: XCTestCase {
     func testReadSurfaceInventoryCountsFromExecutionClass() throws {
         let bundle = try TestSupport.realBundle()
         let read = ReadSurface.readCommands(bundle)
-        // 17 read + 4 audited-read + 4 pure = 25.
-        XCTAssertEqual(read.count, 25)
+        // 18 read + 4 audited-read + 4 pure = 26 (60-B added `sync status`, executionClass read).
+        XCTAssertEqual(read.count, 26)
         XCTAssertTrue(read.allSatisfy { ReadSurface.readExecutionClasses.contains($0.executionClass) })
     }
 }
