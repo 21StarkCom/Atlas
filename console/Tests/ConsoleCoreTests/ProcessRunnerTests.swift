@@ -182,6 +182,24 @@ final class ProcessRunnerTests: XCTestCase {
         } catch { XCTFail("wrong error \(error)") }
     }
 
+    /// A throwing `process.run()` (executable vanished after resolution) must FAIL PROMPTLY, never
+    /// hang: the child never spawned to close the pipes' write ends, so the launch-failure catch must
+    /// close the parent-held read ends itself before awaiting the drains — otherwise every probe /
+    /// once-hello / read spawn against a deleted checkout suspends forever with no error surface.
+    func testLaunchFailureThrowsPromptlyNeverHangs() async {
+        let req = SpawnRequest(executable: ["/nonexistent-\(UUID().uuidString)"],
+                               cwd: TestSupport.tempDir(), environment: [:])
+        let start = Date()
+        do {
+            _ = try await runner.run(req)
+            XCTFail("a nonexistent executable must throw")
+        } catch let e as SpawnError {
+            guard case .launchFailed = e else { return XCTFail("wrong error \(e)") }
+        } catch { XCTFail("wrong error \(error)") }
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5,
+                          "launch failure resolves promptly — a pipe-drain hang would blow this bound")
+    }
+
     /// Swift 6 strict-concurrency composition: one shared runner across three actors compiles + runs
     /// under complete checking (tools-version 6.0 enables the Swift 6 language mode by default).
     func testSharedRunnerAcrossActors() async throws {

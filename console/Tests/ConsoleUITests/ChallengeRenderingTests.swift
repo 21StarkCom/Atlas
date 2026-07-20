@@ -16,7 +16,14 @@ final class ChallengeRenderingTests: XCTestCase {
             "runId": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
             "targetCommit": String(repeating: "a", count: 40),
             "canonicalBaseCommit": String(repeating: "b", count: 40),
-            "intendedEffect": ["kind": ansi, "scope": longScope, "rtl": rtl],
+            "intendedEffect": [
+                "kind": ansi, "scope": longScope, "rtl": rtl,
+                // Invisible-format smuggling: the TAG block (zero-width, encodes hidden ASCII — here
+                // TAG a/l/l after a visible "notes") and a deprecated Cf format control. A committed
+                // suffix hidden by either must surface as visible <U+XXXXX> tokens, never render-invisible.
+                "tagged": "notes\u{E0061}\u{E006C}\u{E006C}",
+                "deprecatedFormat": "on\u{206A}off",
+            ],
             "nonce": String(repeating: "0", count: 32),
             "expiresAt": "2026-07-20T10:00:00.000Z",
             "payloadCanonicalization": "atlas-jcs-v1",
@@ -59,6 +66,15 @@ final class ChallengeRenderingTests: XCTestCase {
         XCTAssertTrue(all.contains("<U+001B>"), "ESC made visible")
         XCTAssertTrue(all.contains("<U+007F>"), "DEL made visible")
         XCTAssertTrue(all.contains("<U+202E>"), "RTL override made visible")
+        // Category-based fail-closed classification: invisible Cf scalars an enumerated blocklist
+        // would miss must also surface as tokens — a TAG-encoded hidden suffix must never render
+        // invisibly next to the visible prefix it spoofs.
+        XCTAssertTrue(all.contains("<U+E0061>"), "TAG block made visible (hidden-suffix smuggling)")
+        XCTAssertTrue(all.contains("<U+206A>"), "deprecated Cf format control made visible")
+        for field in fields {
+            XCTAssertFalse(field.value.unicodeScalars.contains { $0.value >= 0xE0000 && $0.value <= 0xE007F },
+                           "raw TAG scalar leaked into '\(field.label)'")
+        }
 
         // Over-length values are shown IN FULL — never truncated.
         let scope = fields.first { $0.value.contains("xxxx") }!.value

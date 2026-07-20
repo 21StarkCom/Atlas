@@ -268,6 +268,9 @@ public actor AttachCoordinator {
         // Validate persisted overrides against the schema-derived bounds at the boundary — an out-of-range
         // value is dropped (flag omitted), never passed straight through to the CLI.
         let options = watchOptionPolicy.watchOptions(from: settings)
+        // beginGeneration suspends above (once-hello, cursor load); a coordinator stop() interleaving
+        // there must not be answered with a fresh watcher nothing will ever stop.
+        if stopping { throw AttachError.terminated }
         let supervisor = self.supervisor
         supervisorTask = Task { await supervisor.run(resumeArg: resumeArg, options: options) }
 
@@ -394,6 +397,10 @@ public actor AttachCoordinator {
         // task, discarding the invalidated generation), then re-run the sequence for the new incarnation.
         await supervisor.stop()
         await supervisorTask?.value
+        // A coordinator-level stop() can interleave at either await above (actor reentrancy). Once the
+        // coordinator is stopping, spawning a replacement generation would create a watcher nothing owns
+        // or ever stops — bail out instead; the stop() path has already torn everything down.
+        if stopping { return }
         supervisorTask = nil
         // Raise the generation barrier: every event still queued from the old watch — of any type — is
         // discarded until the replacement generation's own hello arrives.

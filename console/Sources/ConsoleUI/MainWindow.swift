@@ -131,6 +131,10 @@ public struct BlockedView: View {
         }
         .padding()
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Atlas unavailable: \(ControlSafeText.plain(reason)). \(ControlSafeText.plain(remediation))")
+        // The blocked contract NAMES the failing path — the label must carry it too, or a screen-reader
+        // operator hears an unactionable remediation with no way to learn which path failed.
+        .accessibilityLabel(path.isEmpty
+            ? "Atlas unavailable: \(ControlSafeText.plain(reason)). \(ControlSafeText.plain(remediation))"
+            : "Atlas unavailable: \(ControlSafeText.plain(reason)). Path \(ControlSafeText.plain(path)). \(ControlSafeText.plain(remediation))")
     }
 }

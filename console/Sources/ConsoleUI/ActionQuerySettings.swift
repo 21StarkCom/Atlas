@@ -217,8 +217,11 @@ public struct QueryView: View {
                     .accessibilityLabel("Run query")
             }
             if let err = model.lastQueryError {
+                // The label must CARRY the diagnostic (spec §accessibility: error text reaches a
+                // screen-reader operator too) — a constant label would replace the Text's content and
+                // hide the only actionable detail from assistive tech. `err` is already plain-escaped.
                 Text(ControlSafeText.render(err)).foregroundStyle(.red)
-                    .accessibilityLabel("Query failed")
+                    .accessibilityLabel("Query failed: \(err)")
             } else if let result = model.lastQueryResult {
                 ScrollView {
                     Text(ControlSafeText.plain(String(decoding: result.data, as: UTF8.self)))

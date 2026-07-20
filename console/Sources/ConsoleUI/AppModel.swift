@@ -147,6 +147,11 @@ public final class AppModel {
     private var transitionRouter = TransitionRouter()
     private var checkpointReached = false
     private var jobsSeeded = false
+    /// The tail of the serialized job-apply/reseed chain (see `enqueueJobsPublish`).
+    private var jobApplyTask: Task<Void, Never>?
+    /// The last hello's incarnation identity (attached ledger path; nil while detached) — decides
+    /// whether a re-baseline clears the session-scoped model-call feed.
+    private var lastHelloIncarnation: String?
     /// Bumped on every session cutover. An async result (a jobs refresh, a query) captured from the old
     /// session is discarded when it returns against a newer generation, so a delayed task can never
     /// publish another vault's data into the current session.
@@ -350,6 +355,10 @@ public final class AppModel {
     private func teardownObservers(for s: LiveSession) async {
         consumeTask?.cancel(); supervisorObserveTask?.cancel()
         flowObserveTask?.cancel(); coordinatorStateTask?.cancel()
+        // A superseded session's flow must reach its terminal cleanup (temp dir removed) NOW — its
+        // observer is cancelled, so a non-terminal flow would otherwise strand a minted challenge
+        // artifact on disk until the next launch sweep.
+        await s.flow.cancel()
         await s.coordinator.stop()
     }
 
@@ -418,6 +427,9 @@ public final class AppModel {
         checkpointReached = false
         jobsSeeded = false
         sessionGeneration &+= 1
+        jobApplyTask?.cancel()
+        jobApplyTask = nil
+        lastHelloIncarnation = nil
 
         dashboard = DashboardState()
         auditTimeline = []
@@ -444,6 +456,19 @@ public final class AppModel {
             checkpointReached = false
             dashboard = dashboardReducer.state
             auditTimeline = auditReducer.timeline
+            // Full re-baseline (spec §behavior): no live-overlaid field outlives its incarnation. The
+            // session-scoped model-call feed is cleared when the hello names a DIFFERENT ledger
+            // incarnation (a same-incarnation re-hello after a supervisor retry keeps the feed), and
+            // the per-job map re-seeds from `jobs list` so prior-incarnation membership never
+            // recency-merges into the new one.
+            let incarnation = hello.ledger.attached ? hello.ledger.path : nil
+            if incarnation != lastHelloIncarnation {
+                if lastHelloIncarnation != nil { modelCalls = [] }
+                lastHelloIncarnation = incarnation
+            }
+            if jobsSeeded, let jobs = session?.jobs {
+                enqueueJobsPublish(jobs) { try await $0.refresh() }
+            }
         case .heartbeat(let hb):
             if hb.ledger.attached, hb.resume != nil, !checkpointReached {
                 dashboardReducer.markCheckpointReached()
@@ -465,9 +490,13 @@ public final class AppModel {
             }
             onAuditConsumed?(a.seq)
         case .backup(let b):
+            // Announce only the healthy→unhealthy TRANSITION: the backup event fires on ANY watermark
+            // row change (it is not transition-only like `daemon`), so a degraded backup catching up
+            // would otherwise re-announce "Backup is unhealthy" on every poll tick.
+            let wasUnhealthy = dashboardReducer.state.backup?.healthy == false
             dashboardReducer.apply(event)
             dashboard = dashboardReducer.state
-            if !b.healthy { announcer.announce(.backupUnhealthy) }
+            if !b.healthy && !wasUnhealthy { announcer.announce(.backupUnhealthy) }
         case .daemon(let d):
             dashboardReducer.apply(event)
             dashboard = dashboardReducer.state
@@ -475,16 +504,30 @@ public final class AppModel {
         case .job(let j):
             announceJob(j)
             if jobsSeeded, let jobs = session?.jobs {
-                Task { [weak self] in
-                    try? await jobs.apply(j)
-                    let rows = await jobs.rows
-                    await MainActor.run { self?.jobRows = rows }
-                }
+                enqueueJobsPublish(jobs) { try await $0.apply(j) }
             }
         case .modelCall(let m):
             modelCalls.append(m)   // insert-only, session-scoped
         case .watchError, .unknown:
             break                  // watch.error(ledger) already produced a `.reattaching` signal above
+        }
+    }
+
+    /// Serialize job-map mutations + `jobRows` publications in event order, generation-guarded: chained
+    /// tasks cannot publish snapshots out of order, and a task outliving a session cutover cannot land
+    /// another vault's rows into the new session (the `sessionGeneration` doc-comment's promise).
+    private func enqueueJobsPublish(_ jobs: JobStateCoordinator,
+                                    _ mutate: @escaping (JobStateCoordinator) async throws -> Void) {
+        let generation = sessionGeneration
+        let prior = jobApplyTask
+        jobApplyTask = Task { [weak self] in
+            _ = await prior?.value
+            try? await mutate(jobs)
+            let rows = await jobs.rows
+            await MainActor.run {
+                guard let self, generation == self.sessionGeneration else { return }
+                self.jobRows = rows
+            }
         }
     }
 
@@ -524,13 +567,21 @@ public final class AppModel {
             try await jobs.refresh()
             let rows = await jobs.rows
             // A cutover during the read invalidates this result — never publish another vault's rows.
-            guard generation == sessionGeneration else { return }
+            // The open busy utterance is still CLOSED: a screen-reader user must never be left on an
+            // indefinite "in progress" after the read's session was torn down.
+            guard generation == sessionGeneration else {
+                announcer.announce(.cancelled("Jobs refresh"))
+                return
+            }
             jobsSeeded = true
             jobRows = rows
             jobsError = nil
             announcer.announce(.completed("Jobs refresh"))
         } catch {
-            guard generation == sessionGeneration else { return }
+            guard generation == sessionGeneration else {
+                announcer.announce(.cancelled("Jobs refresh"))
+                return
+            }
             // A read failure is non-fatal (the dashboard's snapshot counts remain) but must be VISIBLE —
             // previously it was swallowed by a no-op assignment and announced as a success.
             jobsError = ControlSafeText.plain("\(error)")
@@ -578,12 +629,19 @@ public final class AppModel {
         do {
             let result = try await session.egress.query(text, runner: session.runner,
                                                          brain: session.brain, key: provider)
-            // A cutover during the query invalidates this result — never publish it into a new session.
-            guard generation == sessionGeneration else { return }
+            // A cutover during the query invalidates this result — never publish it into a new session,
+            // but always CLOSE the open busy utterance (never an indefinite "in progress").
+            guard generation == sessionGeneration else {
+                announcer.announce(.cancelled("Query"))
+                return
+            }
             lastQueryResult = result
             announcer.announce(.completed("Query"))
         } catch {
-            guard generation == sessionGeneration else { return }
+            guard generation == sessionGeneration else {
+                announcer.announce(.cancelled("Query"))
+                return
+            }
             lastQueryError = ControlSafeText.plain("\(error)")
             announcer.announce(.failed("Query"))
         }
@@ -605,8 +663,10 @@ public final class AppModel {
         isApplyingSettings = true
         defer { isApplyingSettings = false }
         settingsError = nil
-        // (1) gate on any in-flight privileged flow.
-        if isPrivilegedFlowInFlight {
+        // (1) gate on any in-flight privileged flow — consult the flow ACTOR, not the async-mirrored
+        // `flowState`: the mirror lags the actor by a task hop, so a begin→apply interleaving could
+        // slip the cutover past a mirror-based gate while the flow is mid-export.
+        if let s = session, await s.flow.isInFlight {
             settingsError = "a privileged flow is in progress — finish or cancel it before changing settings"
             return
         }

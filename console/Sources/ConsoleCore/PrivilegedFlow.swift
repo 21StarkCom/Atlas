@@ -70,6 +70,16 @@ public actor PrivilegedFlow {
 
     public var state: PrivilegedFlowState { _state }
 
+    /// Authoritative "a flow is in progress" — read on the actor, not from an async-mirrored copy.
+    /// The settings-cutover gate MUST consult this (a mirror lags the actor by a task hop, so a
+    /// begin→apply interleaving could slip a cutover past a mirror-based gate mid-export).
+    public var isInFlight: Bool {
+        switch _state {
+        case .idle, .done, .failed: return false
+        case .export, .display, .sign, .authorize, .authorizeRetry, .retry: return true
+        }
+    }
+
     /// Every state transition is published here so the UI observes transitions without polling. The
     /// stream is unbounded/newest-buffering; terminal states (`done`/`failed`) are delivered too.
     public nonisolated let stateChanges: AsyncStream<PrivilegedFlowState>

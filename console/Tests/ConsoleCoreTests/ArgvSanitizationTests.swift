@@ -79,6 +79,50 @@ final class ArgvSanitizationTests: XCTestCase {
         XCTAssertNotNil(sink.failures[0].rawOutput, "stderr passed as byte-length-only rawOutput")
     }
 
+    /// The contract corpus spells flag/arg keys BOTH ways (`name` in the SP-1-era schemas, `flag`/`arg`
+    /// in the privileged-op schemas). The classifier must see the flag table either way — a `flag`-keyed
+    /// schema whose table went unparsed would pass every value through as a bare positional, so a
+    /// misplaced secret in a privileged spawn's value-flag would log verbatim.
+    func testFlagKeyedSchemaValueRedacted() throws {
+        let schema = try TestSupport.contractSchema("quarantine-resolve.schema.json")
+        let out = ArgvClassifier.sanitize(
+            command: "quarantine resolve",
+            argv: ["/b", "quarantine", "resolve", "q-123", "--resolution", "sk-MISPLACED-SECRET", "--json", "--export-challenge"],
+            schema: schema)
+        XCTAssertTrue(out.contains("--resolution"), "flag name intact: \(out)")
+        XCTAssertFalse(out.contains("sk-MISPLACED-SECRET"), "flag-keyed schema's value-flag value redacted (fail-closed)")
+        XCTAssertTrue(out.contains("<redacted:val len=19>"), "\(out)")
+        XCTAssertTrue(out.contains("--export-challenge"), "boolean flag intact")
+    }
+
+    /// Bundle-wide conformance: EVERY real schema's declared flags resolve to FlagSpecs and EVERY
+    /// declared positional resolves to a name — a third key spelling fails here instead of silently
+    /// degrading that schema's spawns to pass-through logging.
+    func testEverySchemaFlagAndArgDeclarationParses() throws {
+        let bundle = try TestSupport.realBundle()
+        for row in bundle.commands {
+            guard let schema = bundle.schema(for: row.name),
+                  let obj = try JSONSerialization.jsonObject(with: schema) as? [String: Any],
+                  let contract = obj["x-atlas-contract"] as? [String: Any] else { continue }
+            let specs = ArgvClassifier.flagSpecs(schema: schema)
+            if let flags = contract["flags"] as? [[String: Any]] {
+                for f in flags {
+                    guard let decl = (f["name"] as? String) ?? (f["flag"] as? String) else {
+                        XCTFail("\(row.name): flag declaration with neither `name` nor `flag` key: \(f.keys.sorted())")
+                        continue
+                    }
+                    let base = decl.split(separator: " ").first.map(String.init) ?? decl
+                    XCTAssertNotNil(specs[base], "\(row.name): declared flag \(base) did not resolve to a FlagSpec")
+                }
+            }
+            if let args = contract["args"] as? [[String: Any]] {
+                let names = ArgvClassifier.positionalArgNames(schema: schema)
+                XCTAssertEqual(names.count, args.count,
+                               "\(row.name): \(args.count) declared args but \(names.count) parsed positional names")
+            }
+        }
+    }
+
     /// Every sensitive operand NAME resolves to a real positional in its command schema (stale-mapping
     /// guard): a name absent from the schema would be a stale mapping and fails here.
     func testSensitiveOperandNamesResolveInSchema() throws {

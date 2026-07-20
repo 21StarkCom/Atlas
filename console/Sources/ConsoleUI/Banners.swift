@@ -61,7 +61,11 @@ public struct RestoreBanner: View {
         .padding(8)
         .background(.red.opacity(0.12))
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Backup unhealthy, restore required. Ledger writes are blocked until the backup recovers.")
+        // Mirror the FULL visible content: the seq (to reconcile against `db status`) and the
+        // Actions-tab/db-restore route must reach a screen-reader operator too.
+        .accessibilityLabel(watermarkSeq.map {
+            "Backup unhealthy, restore required. Ledger writes are blocked until the backup watermark catches up, at seq \($0). Use the Actions tab to run db restore."
+        } ?? "Backup unhealthy, restore required. Ledger writes are blocked until the backup recovers. Use the Actions tab to run db restore.")
     }
 }
 

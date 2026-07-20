@@ -71,6 +71,27 @@ final class CoalescingJobCountTests: XCTestCase {
         XCTAssertTrue(map.contains("job-599"), "full membership")
     }
 
+    /// The paginator's sole liveness guard: a page that claims `hasMore` yet returns ZERO rows must
+    /// throw `nonAdvancingPagination` — re-requesting the same offset forever would wedge the
+    /// actor-serialized seed/reseed permanently (an unbounded pendingBuffer, a dead jobs surface).
+    func testReadAllRefusesNonAdvancingPage() async throws {
+        let t0 = "2026-07-18T10:00:00.000Z"
+        let invoker = ScriptedReadInvoker(pages: [
+            0: (rows: [Fx.jobRow("a", state: "pending", updatedAt: t0)], hasMore: true, total: 6),
+            1: (rows: [], hasMore: true, total: 6),   // claims more, returns nothing — must refuse
+        ])
+        do {
+            _ = try await JobsListReader().readAll(invoker: invoker)
+            XCTFail("a hasMore page with zero rows must throw, never loop")
+        } catch let e as JobsListReadError {
+            guard case .nonAdvancingPagination(let offset) = e else {
+                return XCTFail("unexpected JobsListReadError: \(e)")
+            }
+            XCTAssertEqual(offset, 1, "the refused offset is the stalled one")
+        }
+        XCTAssertEqual(invoker.callCount, 2, "the stalled offset is requested exactly once, never re-polled")
+    }
+
     /// readAll dedups a jobId repeated across a page boundary (a concurrent insert shifting the offset
     /// window), keeping first occurrence.
     func testReadAllDedupsAcrossPageBoundary() async throws {

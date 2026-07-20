@@ -200,6 +200,58 @@ final class SettingsCutoverTests: XCTestCase {
         XCTAssertEqual(box.lock.withLock { box.callCount }, before, "an unchanged save does not re-probe")
         XCTAssertNil(model.settingsError)
     }
+
+    /// P6-Task-4 pending-settings criterion (1): applySettings GATES on an in-flight privileged flow.
+    /// The gate consults the flow ACTOR (authoritative), not the async-mirrored `flowState` — the apply
+    /// lands immediately after `beginAction` returns, before the MainActor mirror has necessarily
+    /// observed the transition, and must still be refused: no probe, no save, flow untouched.
+    func testApplySettingsRefusedWhileFlowInFlight() async throws {
+        let dir = UITestSupport.tempDir()
+        let path = "/v/.atlas/atlas.db"
+        let runner = UIScriptedRunner(
+            dir: dir,
+            streams: [.emitThenBlock(lines: [UIFx.hello(path: path)])],
+            onceHellos: [UIFx.hello(path: path)],
+            exportResults: [SpawnResult(exitCode: 6, stdout: UIChallenge.gitApprove(), stderr: Data())])
+        let store = makeStore(Settings(atlasRoot: "ok"))
+        let counter = NSLock()
+        nonisolated(unsafe) var factoryCalls = 0
+        let model = AppModel(
+            settingsStore: store, environment: [:],
+            sessionFactory: { s, _ in
+                counter.withLock { factoryCalls += 1 }
+                return try UITestSupport.session(runner: runner, settings: s)
+            })
+        await model.launch()
+        XCTAssertEqual(model.phase, .running)
+
+        await model.beginAction(op: "git approve",
+                                focus: FocusContext(fields: ["runId": UIChallenge.runId]), entry: [:])
+        // The flow actor is at Display now (begin awaited through export); the mirror may still lag.
+        let before = counter.withLock { factoryCalls }
+        await model.applySettings(Settings(atlasRoot: "changed"))
+
+        XCTAssertNotNil(model.settingsError, "the cutover is refused while a flow is in flight")
+        XCTAssertTrue(model.settingsError?.contains("privileged flow") == true, "\(model.settingsError ?? "")")
+        XCTAssertEqual(counter.withLock { factoryCalls }, before, "no candidate probe while a flow is in flight")
+        XCTAssertEqual(store.load().settings.atlasRoot, "ok", "prior settings retained")
+    }
+
+    /// The single-flight guard: two CONCURRENT applies produce exactly one cutover (the second returns
+    /// on the `isApplyingSettings` latch), never overlapping watchers or interleaved observer handles.
+    func testConcurrentAppliesSingleFlight() async throws {
+        let box = FactoryBox()
+        let store = makeStore(Settings(atlasRoot: "ok"))
+        let model = await launchedModel(box, store: store)
+        let before = box.lock.withLock { box.callCount }
+
+        async let a: Void = model.applySettings(Settings(atlasRoot: "ok2"))
+        async let b: Void = model.applySettings(Settings(atlasRoot: "ok3"))
+        _ = await (a, b)
+
+        XCTAssertEqual(box.lock.withLock { box.callCount }, before + 1,
+                       "exactly one candidate probe: the concurrent apply is refused by the single-flight latch")
+    }
 }
 
 // MARK: - Cutover atomicity, phase transitions, watcher readiness

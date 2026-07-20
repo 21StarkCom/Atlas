@@ -57,6 +57,7 @@ final class AccessibilityAcceptanceTests: XCTestCase {
             .jobSucceeded("j\u{1B}1"), .jobFailed("j2"), .backupUnhealthy,
             .daemonUnreachable("broker\u{202E}"), .challengeArrived, .challengeExpired,
             .watchRetrying(3), .watchFailed, .busy("query"), .completed("query"),
+            .failed("query\u{202E}"), .cancelled("jobs\u{1B}refresh"),
         ]
         for e in events {
             let u = e.utterance
@@ -102,21 +103,49 @@ final class AccessibilityAcceptanceTests: XCTestCase {
         }
     }
 
+    /// The stable per-case discriminant. NO `default`: adding an `A11yEvent` case fails compilation
+    /// HERE — when it does, add a representative to `allEventCases` below so the vocabulary-equality
+    /// assertion forces the declared vocabulary to carry the new case too.
+    private func caseName(_ e: A11yEvent) -> String {
+        switch e {
+        case .jobSucceeded: return "jobSucceeded"
+        case .jobFailed: return "jobFailed"
+        case .backupUnhealthy: return "backupUnhealthy"
+        case .daemonUnreachable: return "daemonUnreachable"
+        case .challengeArrived: return "challengeArrived"
+        case .challengeExpired: return "challengeExpired"
+        case .watchRetrying: return "watchRetrying"
+        case .watchFailed: return "watchFailed"
+        case .busy: return "busy"
+        case .completed: return "completed"
+        case .failed: return "failed"
+        case .cancelled: return "cancelled"
+        }
+    }
+
+    /// One representative per case — kept in lockstep with `caseName` (see its doc comment).
+    private var allEventCases: [A11yEvent] {
+        [.jobSucceeded("j"), .jobFailed("j"), .backupUnhealthy, .daemonUnreachable("d"),
+         .challengeArrived, .challengeExpired, .watchRetrying(1), .watchFailed,
+         .busy("x"), .completed("x"), .failed("x"), .cancelled("x")]
+    }
+
     func testAnnouncementVocabularyCoversEveryEventIncludingTerminalOutcomes() {
-        // The declared vocabulary must include the terminal failed/cancelled outcomes (a busy utterance is
-        // always closed out — never an indefinite in-progress state for a screen-reader user).
-        let utterances = A11yStructure.announcementVocabulary.map(\.utterance)
-        for u in utterances {
+        // STRUCTURAL exhaustiveness, not keyword sampling: the declared vocabulary's case set must
+        // EQUAL the full A11yEvent case set (compiler-pinned via `caseName`), so deleting the terminal
+        // `.failed`/`.cancelled` entries — or leaving a future case out of the vocabulary — fails here.
+        let expected = Set(allEventCases.map(caseName))
+        XCTAssertEqual(expected.count, allEventCases.count, "one representative per case")
+        let declared = Set(A11yStructure.announcementVocabulary.map(caseName))
+        XCTAssertEqual(declared, expected, "the declared vocabulary covers EVERY A11yEvent case")
+
+        for u in A11yStructure.announcementVocabulary.map(\.utterance) {
             XCTAssertFalse(u.isEmpty)
             for scalar in u.unicodeScalars {
                 let v = scalar.value
                 XCTAssertFalse(v <= 0x1F || v == 0x7F || (v >= 0x80 && v <= 0x9F), "control byte in: \(u)")
             }
         }
-        XCTAssertTrue(utterances.contains { $0.contains("failed") }, "a terminal failure is announceable")
-        XCTAssertTrue(utterances.contains { $0.contains("cancelled") }, "a cancellation is announceable")
-        XCTAssertTrue(utterances.contains { $0.contains("in progress") }, "busy is announceable")
-        XCTAssertTrue(utterances.contains { $0.contains("complete") }, "completion is announceable")
     }
 
     func testNoTruncationPolicyForCommittedValues() {

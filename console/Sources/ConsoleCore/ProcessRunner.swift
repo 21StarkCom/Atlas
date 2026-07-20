@@ -126,6 +126,11 @@ public struct SystemProcessRunner: ProcessRunner {
         do {
             try process.run()
         } catch {
+            // The child never spawned, so nothing will ever close the pipes' write ends — close the
+            // read handles (as the timeout path does) or the drains below never see EOF and this
+            // catch suspends forever, bypassing the probe timeout and every fail-fast surface.
+            try? outPipe.fileHandleForReading.close()
+            try? errPipe.fileHandleForReading.close()
             _ = await outData
             _ = await errData
             throw SpawnError.launchFailed(path: req.executable[0], underlying: "\(error)")

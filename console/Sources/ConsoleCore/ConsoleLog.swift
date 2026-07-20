@@ -16,13 +16,15 @@ public enum ArgvClassifier {
     ]
 
     /// The ordered positional-argument names declared in a command schema's `x-atlas-contract.args`.
+    /// The contract corpus spells the key both ways (`name` in the SP-1-era schemas, `arg` in the
+    /// privileged-op schemas) — accept both, exactly as `OperationRouter.operandKinds` does.
     public static func positionalArgNames(schema: Data) -> [String] {
         guard let obj = try? JSONSerialization.jsonObject(with: schema) as? [String: Any],
               let contract = obj["x-atlas-contract"] as? [String: Any],
               let args = contract["args"] as? [[String: Any]] else {
             return []
         }
-        return args.compactMap { $0["name"] as? String }
+        return args.compactMap { ($0["name"] as? String) ?? ($0["arg"] as? String) }
     }
 
     /// What a command schema declares about one flag: whether it takes a value, an optional numeric
@@ -45,7 +47,8 @@ public enum ArgvClassifier {
         for list in flagLists {
             if let flags = list as? [[String: Any]] {
                 for f in flags {
-                    guard let name = f["name"] as? String else { continue }
+                    // Dual-key: the corpus declares flags as `name` OR `flag` (see positionalArgNames).
+                    guard let name = (f["name"] as? String) ?? (f["flag"] as? String) else { continue }
                     record(name, constraint: f["constraint"] as? String,
                            enums: (f["enum"] as? [Any])?.compactMap { $0 as? String }, into: &map)
                 }

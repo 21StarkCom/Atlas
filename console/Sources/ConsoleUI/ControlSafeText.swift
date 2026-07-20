@@ -30,9 +30,10 @@ public enum ControlSafeText {
         escape(raw)
     }
 
-    /// Replace every unsafe scalar with a visible `<U+XXXX>` token, and backslash-escape `"`/`\`. Unsafe =
-    /// C0 (0x00–0x1F — even tab/newline are made visible so a multi-line spoof is obvious), DEL (0x7F), C1
-    /// (0x80–0x9F), the RTL/LTR override + embedding + isolate bidi controls, and the zero-width joiners.
+    /// Replace every unsafe scalar with a visible `<U+XXXX>` token, and backslash-escape `"`/`\`.
+    /// Unsafe is decided by Unicode general category (Cc/Cf/Zl/Zp — see `isUnsafe`), fail-closed, so
+    /// every control, invisible-format, and line/paragraph-breaking scalar is tokenized — including
+    /// ones an enumerated blocklist would miss (the TAG block, U+206A–206F, …).
     /// The `\` escape is applied FIRST so an escaped quote's own backslash is not itself doubled.
     static func escape(_ raw: String) -> String {
         var out = ""
@@ -52,31 +53,22 @@ public enum ControlSafeText {
     }
 
     private static func isUnsafe(_ s: Unicode.Scalar) -> Bool {
-        let v = s.value
-        if v <= 0x1F { return true }            // C0 controls (incl. ESC 0x1B → the ANSI CSI lead-in)
-        if v == 0x7F { return true }            // DEL
-        if v >= 0x80 && v <= 0x9F { return true } // C1 controls
-        switch v {
-        // Visual line/paragraph breakers — NOT in C0, but they still create a fake field line in a
-        // rendered value (U+0085 NEL, U+2028 line separator, U+2029 paragraph separator).
-        case 0x0085, 0x2028, 0x2029:
-            return true
-        // Bidi overrides / embeddings / isolates / marks — the direction-spoofing set. U+061C (Arabic
-        // letter mark) joins the LRM/RLM marks; U+2066–2069 are the isolates; U+202A–202E the
-        // embeddings/overrides.
-        case 0x061C, 0x200E, 0x200F,
-             0x202A, 0x202B, 0x202C, 0x202D, 0x202E,
-             0x2066, 0x2067, 0x2068, 0x2069:
-            return true
-        // Zero-width / invisible format controls that can hide or fabricate structure.
-        case 0x200B, 0x200C, 0x200D,       // zero-width space / non-joiner / joiner
-             0x2060, 0x2061, 0x2062, 0x2063, 0x2064, // word joiner + invisible math operators
-             0x00AD,                       // soft hyphen (invisible, breaks words)
-             0x180E,                       // Mongolian vowel separator (zero-width)
-             0xFEFF:                       // BOM / zero-width no-break space
+        // FAIL-CLOSED by Unicode general category, not by enumeration: an enumerated blocklist misses
+        // invisible format controls it never heard of (the TAG block U+E0001/U+E0020–E007F renders
+        // zero-width and can hide a committed suffix in a displayed challenge value — the exact spoof
+        // the spec's display-fidelity duty closes; likewise U+206A–206F, interlinear annotation, etc.).
+        //   Cc — C0/DEL/C1 controls (incl. ESC, the ANSI CSI lead-in; tab/newline stay visible tokens
+        //        so a multi-line spoof is obvious)
+        //   Cf — every invisible format control: bidi overrides/embeddings/isolates/marks, zero-width
+        //        joiners, soft hyphen, BOM, the TAG block, invisible math operators, …
+        //   Zl/Zp — U+2028/U+2029, the visual line/paragraph breakers that fake a field line
+        // plus U+180E (Mongolian vowel separator — its category has flip-flopped across Unicode
+        // versions; pinned unsafe regardless, it renders zero-width). U+0085 NEL is already Cc.
+        switch s.properties.generalCategory {
+        case .control, .format, .lineSeparator, .paragraphSeparator:
             return true
         default:
-            return false
+            return s.value == 0x180E
         }
     }
 
