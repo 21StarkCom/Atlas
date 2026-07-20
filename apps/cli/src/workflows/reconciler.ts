@@ -29,6 +29,7 @@
  * producer's idempotent re-drive rather than fabricating the effect.
  */
 import {
+  DB_EVENT_SEQ_BASE,
   finalizeLedgerWrite,
   reconcileInterruptedRuns,
   runBackupStep,
@@ -734,7 +735,13 @@ async function resolveIntegrationIntents(
   // an un-anchored intent would punch a permanent hole (round-3 finding on
   // reconciler.ts:716-718): a higher allocation means a later intent depends on this
   // seq existing in the gapless chain, so it must be PRESERVED as a barrier, not deleted.
-  const maxAllocatedSeq = (store.db.prepare(`SELECT COALESCE(MAX(seq), -1) AS m FROM audit_intents`).get() as { m: number }).m;
+  // Range-partitioned to the run space (round-2 finding, same class as the #291
+  // nextRunSeq fix): an intent stranded at >= DB_EVENT_SEQ_BASE by the pre-fix
+  // allocator must not read as "a later allocation exists" forever — that would
+  // permanently disable the un-anchored auto-drop below on an ex-poisoned vault.
+  const maxAllocatedSeq = (
+    store.db.prepare(`SELECT COALESCE(MAX(seq), -1) AS m FROM audit_intents WHERE seq < ${DB_EVENT_SEQ_BASE}`).get() as { m: number }
+  ).m;
   for (const row of intents.listPending()) {
     if (!row.event_json) continue;
     const event = IntentsRepo.parseEvent(row);

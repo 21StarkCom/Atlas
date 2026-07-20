@@ -136,10 +136,10 @@ describe("ledger seq-space partition (range, not type prefix)", () => {
       } as never;
       const report = await reconcileInterruptedRuns(store, broker);
       expect(report.reconciled).toBe(1);
-      const row = store.db
-        .prepare(`SELECT state FROM audit_intents WHERE seq = ?`)
-        .get(DB_EVENT_SEQ_BASE + 2) as { state: string };
-      expect(row.state).toBe("done");
+      // DELETED, not retained: a done row at ~10^12 would keep poisoning
+      // unpartitioned MAX(seq) readers (round-2 finding).
+      const row = store.db.prepare(`SELECT state FROM audit_intents WHERE seq = ?`).get(DB_EVENT_SEQ_BASE + 2);
+      expect(row).toBeUndefined();
     } finally {
       store.close();
     }

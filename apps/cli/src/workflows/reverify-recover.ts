@@ -273,9 +273,12 @@ export async function applyReanchorViaBroker(deps: JobHandlerDeps, req: Reanchor
   // Notes are read AT THE CANONICAL REF, never the working tree (review round-1
   // finding): the working tree does not advance when canonical does (#260), so a
   // multi-head reverify integrating head N+1 from a working-tree snapshot would
-  // patch PRE-head-N text and clobber head N's integrated edit. Reading at the ref
-  // per apply keeps every integration based on the current canonical state.
-  const readNoteAtCanonical = resolveAtRef(repo, cfg.git.canonical_ref, cfg.vault.note_globs);
+  // patch PRE-head-N text and clobber head N's integrated edit. A FRESH resolver is
+  // built per readNote invocation (round-2 finding): applySynthesis retries a
+  // broker.cas_failed integration against the ADVANCED canonical, and a resolver
+  // cached across attempts would serve the pre-retry text — silently reverting the
+  // concurrent edit the CAS retry exists to accommodate.
+  const readNoteAtCanonical = (id: string) => resolveAtRef(repo, cfg.git.canonical_ref, cfg.vault.note_globs)(id);
 
   let brokerClient: BrokerClient;
   try {

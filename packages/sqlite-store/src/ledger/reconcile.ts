@@ -112,11 +112,13 @@ export async function reconcileInterruptedRuns(
     // the pre-#291 poisoned `nextRunSeq` (an `evidence.retry_enqueued` event was
     // counted into the run space). Its event never reached — and can never reach —
     // the broker chain (the broker signs only lastSeq+1), and its owning run
-    // already failed, so it is finalized WITHOUT a broker append (the same
-    // treatment as a pre-`0005` legacy intent). Checked BEFORE the barrier so a
+    // already failed, so it is DELETED without a broker append (round-2 finding:
+    // a retained done row would keep poisoning unpartitioned MAX(seq) readers,
+    // e.g. the workflows reconciler's allocation probe; nothing in the gapless
+    // chain links to a never-anchored seq). Checked BEFORE the barrier so a
     // stranded high-range intent cannot wedge every later reconcile pass.
     if (row.seq >= DB_EVENT_SEQ_BASE) {
-      intents.markDone(row.run_id, row.seq, now());
+      db.prepare(`DELETE FROM audit_intents WHERE run_id = ? AND seq = ?`).run(row.run_id, row.seq);
       reconciled++;
       continue;
     }
