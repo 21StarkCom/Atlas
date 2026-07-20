@@ -167,6 +167,50 @@ describe("trust read surface reports the real projection (#218)", () => {
     expect(JSON.parse(show.out).source.trustLevel).toBe("untrusted");
   });
 
+  it("a revoked-then-repromoted source reads promoted again (suspension cleared)", async () => {
+    const store = openStore({ path: dbPath });
+    let ids: ReturnType<typeof seedBlob>;
+    try {
+      ids = seedBlob(store, 1);
+      await promoteTrust(ids.target, "trusted", "vetted origin", deps(store));
+      await revokeTrust(ids.target, "compromised", deps(store));
+      await promoteTrust(ids.target, "trusted", "re-vetted after rotation", deps(store));
+    } finally { store.close(); }
+
+    const r = await cli(["source", "trust", "show", ids.contentId, "--json"]);
+    expect(r.code, r.out).toBe(0);
+    const out = JSON.parse(r.out);
+    validateSchema("source-trust-show", out);
+    expect(out.effectiveTrustLevel).toBe("trusted");
+    expect(out.reviewedTrustLevel).toBe("trusted");
+    expect(out.suspended).toBe(false);
+    expect(out.suspensionReason).toBeUndefined();
+    expect(out.history).toEqual([{ at: NOW, action: "promote", toLevel: "trusted", reason: "re-vetted after rotation" }]);
+
+    const list = await cli(["source", "list", "--json"]);
+    expect(JSON.parse(list.out).sources[0].trustLevel).toBe("trusted");
+  });
+
+  it("a rendition (5-segment) handle reads the same blob-level trust as the content handle", async () => {
+    const store = openStore({ path: dbPath });
+    let ids: ReturnType<typeof seedBlob>;
+    try {
+      ids = seedBlob(store, 1);
+      await promoteTrust(ids.target, "trusted", "vetted origin", deps(store));
+    } finally { store.close(); }
+
+    const r = await cli(["source", "trust", "show", ids.renditionId, "--json"]);
+    expect(r.code, r.out).toBe(0);
+    const out = JSON.parse(r.out);
+    validateSchema("source-trust-show", out);
+    expect(out.sourceHandle).toBe(ids.renditionId);
+    expect(out.effectiveTrustLevel).toBe("trusted");
+
+    const show = await cli(["source", "show", ids.renditionId, "--json"]);
+    expect(show.code, show.out).toBe(0);
+    expect(JSON.parse(show.out).source.trustLevel).toBe("trusted");
+  });
+
   it("a source with NO trust row still reads untrusted with empty history (default-untrusted contract)", async () => {
     const store = openStore({ path: dbPath });
     let ids: ReturnType<typeof seedBlob>;
