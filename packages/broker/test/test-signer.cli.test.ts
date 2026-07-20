@@ -43,6 +43,15 @@ function runSigner(challenge: unknown): unknown {
   return JSON.parse(out);
 }
 
+/** The p256 fixture needs no key file — it signs with the committed descriptor key. */
+function runP256Signer(challenge: unknown): { signature: string; signerId: string } {
+  const out = execFileSync("node", [TOOL, "--alg", "p256"], {
+    input: JSON.stringify(challenge),
+    encoding: "utf8",
+  });
+  return JSON.parse(out) as { signature: string; signerId: string };
+}
+
 describe("tools/test-signer.ts", () => {
   it("produces an authorization the broker accepts in test mode", () => {
     h = createHarness({ testMode: true });
@@ -64,5 +73,30 @@ describe("tools/test-signer.ts", () => {
     }
     expect(err).toBeInstanceOf(BrokerRefusal);
     expect((err as BrokerRefusal).code).toBe("authz.signer_not_permitted");
+  });
+
+  it("--alg p256 produces a p256: authorization the broker accepts in test mode", () => {
+    h = createHarness({ testMode: true });
+    const challenge = h.service.mintChallenge(OP);
+    const authorization = runP256Signer(challenge);
+    expect(authorization.signature.startsWith("p256:")).toBe(true);
+    expect(authorization.signerId).toBe("atlas-test-approver-p256");
+    const res = h.service.execAuthorized(OP, authorization as never);
+    expect(res.code).toBe("authz.ok");
+  });
+
+  it("--alg p256 authorization is HARD-REJECTED in prod mode with the d20 detail", () => {
+    h = createHarness({ testMode: false });
+    const challenge = h.service.mintChallenge(OP);
+    const authorization = runP256Signer(challenge);
+    let err: unknown;
+    try {
+      h.service.execAuthorized(OP, authorization as never);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(BrokerRefusal);
+    expect((err as BrokerRefusal).code).toBe("authz.signer_not_permitted");
+    expect((err as BrokerRefusal).detail.d20).toBe(true);
   });
 });

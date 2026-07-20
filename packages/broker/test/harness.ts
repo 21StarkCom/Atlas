@@ -23,7 +23,7 @@ import {
   type AttestationKey,
   type PrivilegedOpDescriptor,
 } from "../src/index.js";
-import { TEST_SIGNER_ID } from "../src/authorize.js";
+import { TEST_SIGNER_ID, TEST_SIGNER_DESCRIPTOR } from "../src/authorize.js";
 
 export interface Harness {
   readonly service: BrokerService;
@@ -125,6 +125,17 @@ export function createHarness(opts: { testMode?: boolean } = {}): Harness {
     {
       signerId: TEST_SIGNER_ID,
       publicKey: testKp.publicKeyString,
+      permittedOps: allOps,
+      status: "active",
+      enrolledAt: "2026-07-01T00:00:00.000Z",
+    },
+    // The SP-3 software-P256 fixture, registered unconditionally from the shared
+    // descriptor (mirrors production's `deriveSignerRegistryFromKeyFiles`), so the
+    // D20 gate yields `d20` — not `signer_unknown` — for a p256 fixture in prod.
+    {
+      signerId: TEST_SIGNER_DESCRIPTOR.p256.signerId,
+      alg: "p256",
+      publicKey: TEST_SIGNER_DESCRIPTOR.p256.publicKey,
       permittedOps: allOps,
       status: "active",
       enrolledAt: "2026-07-01T00:00:00.000Z",

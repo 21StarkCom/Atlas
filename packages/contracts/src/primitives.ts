@@ -34,6 +34,40 @@ export const Ed25519Sig = z.string().regex(/^ed25519:/, 'must be an "ed25519:" s
 /** Ed25519 public key string, same lenient rule as the signature. */
 export const Ed25519PubKey = z.string().regex(/^ed25519:/, 'must be an "ed25519:" public key');
 
+/**
+ * P-256 (ECDSA) authorization-signature string (SP-3 / ADR-0002): a base64url
+ * DER X9.62 signature body prefixed `p256:`. Lenient prefix-only, matching the
+ * `Ed25519Sig` posture — the real DER decode + length bound + curve check happen
+ * fail-closed in the broker verifier (`verifyP256Bytes`), never here.
+ */
+export const P256Sig = z.string().regex(/^p256:/, 'must be a "p256:" signature');
+
+/** P-256 public key native string (`p256:<base64url(DER SPKI)>`), lenient prefix-only. */
+export const P256PubKey = z.string().regex(/^p256:/, 'must be a "p256:" public key');
+
+/**
+ * The prefix-discriminated authorization-signature union (SP-3): an
+ * `ed25519:` raw-64 signature OR a `p256:` DER signature. Both members are pure
+ * prefix regexes, so a plain union is unambiguous; the broker resolves the
+ * enrolled signer's `alg` and rejects a prefix that disagrees with it
+ * (`authz.signature_invalid`). The audit stream + WORM anchor stay Ed25519-only
+ * (§8.1) — this union is for authorization responses only.
+ */
+export const AuthzSignature = z.union([Ed25519Sig, P256Sig]);
+
+/**
+ * A signer-registry public-key string (SP-3-widened, §9.2): the Ed25519 native
+ * form (`ed25519:<base64url(DER SPKI)>`), the P-256 native form
+ * (`p256:<base64url(DER SPKI)>`), OR an SPKI PEM (`-----BEGIN PUBLIC KEY-----`,
+ * what `openssl pkey -pubout` and CryptoKit `pemRepresentation` emit). Lenient by
+ * design — the broker parses + validates the key shape against the entry's `alg`
+ * at load (`parsePublicKeyFlexible` / `parseP256PublicKeyFlexible`), never a regex
+ * here (mirrors the existing `Ed25519PubKey` leniency precedent).
+ */
+export const PublicKeyString = z
+  .string()
+  .regex(/^(ed25519:|p256:|-----BEGIN PUBLIC KEY-----)/, "must be an ed25519:/p256: or SPKI-PEM public key");
+
 /** A `sha256:` content digest (lenient body — contract examples truncate it). */
 export const Sha256Digest = z.string().regex(/^sha256:/, 'must be a "sha256:" digest');
 

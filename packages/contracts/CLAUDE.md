@@ -55,6 +55,13 @@ see guardrails). `private`, `version 0.0.0`, ESM, single export `.` → `dist/` 
   here. **Seeded with `ChangePlan` only.**
 - `run-manifest.ts`, `audit.ts`, `authorization.ts`, `provider-errors.ts`, `dtos.ts`
   (zero-runtime D14 types), `type-registry.ts` (open note-type system, `SCHEMA_VERSION = 1`).
+- **SP-3 alg-agility (ADR-0002, additive):** `primitives.ts` adds `P256Sig`/`P256PubKey`, the
+  prefix-discriminated `AuthzSignature = Ed25519Sig | P256Sig` union, and `PublicKeyString`
+  (`ed25519:`/`p256:`/SPKI-PEM, lenient — the broker validates key shape per `alg`). `audit.ts`
+  `SignerRegistryEntry` gains `alg?: "ed25519"|"p256"` (absent ⇒ ed25519, byte-identical for every existing
+  entry) + `presence?: boolean` (absent ⇒ false; the §7.1 os-presence claim) and widens `publicKey`;
+  `authorization.ts` `AuthorizationResponse.signature` widens to `AuthzSignature`. Nothing else changes —
+  `IntendedEffect`, the challenge schema, and `signingPayload` construction are byte-identical.
 
 ## Invariants — do not break
 

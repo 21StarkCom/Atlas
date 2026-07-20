@@ -27,6 +27,9 @@ export {
   Authorizer,
   buildSigningPayload,
   TEST_SIGNER_ID,
+  TEST_P256_SIGNER_ID,
+  TEST_SIGNER_IDS,
+  TEST_SIGNER_DESCRIPTOR,
   type PrivilegedOpDescriptor,
   type VerifyContext,
   type ExpectedAuthorization,
@@ -89,7 +92,13 @@ export {
   serializePrivateKey,
   parsePrivateKey,
   parsePrivateKeyFlexible,
+  parseP256PublicKeyFlexible,
+  serializeP256PublicKey,
+  verifyP256Bytes,
+  signP256Bytes,
+  generateP256,
   type GeneratedKeyPair,
+  type GeneratedP256KeyPair,
 } from "./crypto.js";
 
 // Error taxonomy.

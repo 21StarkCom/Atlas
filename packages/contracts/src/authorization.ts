@@ -6,7 +6,7 @@
  * so both broker and CLI validate identical bytes across the IPC seam.
  */
 import { z } from "zod";
-import { Ulid, CommitHash, Rfc3339Ms, Nonce, Ed25519Sig, Sha256Digest, SchemaVersion1 } from "./primitives.js";
+import { Ulid, CommitHash, Rfc3339Ms, Nonce, AuthzSignature, Sha256Digest, SchemaVersion1 } from "./primitives.js";
 
 // ---------------------------------------------------------------------------
 // §7.4 intendedEffect — op-specific, discriminated on `kind`
@@ -123,11 +123,16 @@ export type AuthorizationChallenge = z.infer<typeof AuthorizationChallengeSchema
 // §7.2 AuthorizationResponse
 // ---------------------------------------------------------------------------
 
-/** `AuthorizationResponse` (contract §7.2): the echoed challenge + signature. */
+/**
+ * `AuthorizationResponse` (contract §7.2): the echoed challenge + signature.
+ * `signature` is the SP-3 prefix-discriminated `ed25519 | p256` union — the
+ * broker resolves the enrolled signer's `alg` and rejects a disagreeing prefix
+ * as `authz.signature_invalid` (ADR-0002).
+ */
 export const AuthorizationResponseSchema = z.object({
   schemaVersion: SchemaVersion1,
   challenge: AuthorizationChallengeSchema,
-  signature: Ed25519Sig,
+  signature: AuthzSignature,
   signerId: z.string().min(1),
 });
 

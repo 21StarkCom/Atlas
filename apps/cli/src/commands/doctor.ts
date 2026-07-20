@@ -25,7 +25,16 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { platform } from "node:os";
 import { openStore } from "@atlas/sqlite-store";
 import { watermarkHealth } from "@atlas/sqlite-store";
-import { BrokerClient } from "@atlas/broker";
+import {
+  BrokerClient,
+  parsePublicKeyFlexible,
+  parseP256PublicKeyFlexible,
+  DEFAULT_ATTESTATION_SIGNER_ID,
+  DEFAULT_APPROVER_SIGNER_ID,
+  TEST_SIGNER_IDS,
+} from "@atlas/broker";
+import { SignerRegistryEntrySchema } from "@atlas/contracts";
+import { createHash, type KeyObject } from "node:crypto";
 import { probeSandbox } from "@atlas/sources";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
@@ -628,6 +637,128 @@ async function checkSandboxCapability(ctx: RunContext): Promise<Check> {
   }
 }
 
+/** DER-SPKI sha256 fingerprint of a registry public key, per its alg (null on parse failure). */
+function signerFingerprint(publicKey: string, alg: string | undefined): string | null {
+  try {
+    const key: KeyObject = (alg ?? "ed25519") === "p256"
+      ? parseP256PublicKeyFlexible(publicKey)
+      : parsePublicKeyFlexible(publicKey);
+    const der = key.export({ format: "der", type: "spki" });
+    return createHash("sha256").update(Buffer.from(der)).digest("hex");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * R2 signer-registry integrity (SP-3). When an explicit `signers.json` exists
+ * (an enrolled p256/SE signer or a materialized registry), verify the invariants a
+ * hand-edit could break — the file becomes load-bearing once it REPLACES key-file
+ * derivation (§9.2/§11), so a dropped attestation entry would brick audit
+ * verification at broker startup:
+ *   - every entry parses (valid `alg`/`presence`/shape);
+ *   - the audit-attestation entry is present + active;
+ *   - `ATLAS_TEST_MODE` is not enabled on a provisioned host (else the D20 fixture
+ *     signers would actually authorize — the one condition that makes a fixture
+ *     "active outside test mode" meaningful);
+ *   - the §7 break-glass orphan trap: a non-empty `approval-verify.pub` with no
+ *     active entry whose key matches it (filled AFTER an explicit file exists ⇒
+ *     inert, since the explicit file bypasses derivation);
+ *   - defense-in-depth: no entry carries a quarantine op without `presence:true`
+ *     AND `alg:"p256"` (the presence gate the broker enforces at authorize time —
+ *     closing the hand-edited/materialized foot-gun R2 exists for).
+ * Absent `signers.json` ⇒ ok (derivation in effect). Every fs/parse error is a
+ * check result, never an escaping throw.
+ */
+function checkSignerRegistry(ctx: RunContext): Check {
+  const id = "signer-registry";
+  const title = "Signer registry integrity";
+  const os = platform() === "darwin" ? "darwin" : "linux";
+
+  // Resolve the broker keys dir: the broker's own env wins (also the test seam);
+  // else the ACL matrix keysDir + the broker identity subdir.
+  let keysDir = ctx.env.ATLAS_BROKER_KEYS_DIR;
+  if (keysDir === undefined) {
+    const acl = loadAclMatrix(ctx.cwd);
+    const base = acl?.paths?.keysDir?.[os];
+    if (base !== undefined) keysDir = join(base, "atlas-broker");
+  }
+  if (keysDir === undefined || !existsSync(keysDir)) {
+    return { id, title, status: "ok", detail: "no broker keys dir resolved — nothing to verify" };
+  }
+
+  const signersPath = join(keysDir, "signers.json");
+  if (!existsSync(signersPath)) {
+    return { id, title, status: "ok", detail: "no explicit signers.json — key-file derivation in effect" };
+  }
+
+  let entries: unknown[];
+  try {
+    entries = JSON.parse(readFileSync(signersPath, "utf8")) as unknown[];
+    if (!Array.isArray(entries)) throw new Error("signers.json is not an array");
+  } catch (e) {
+    return { id, title, status: "action-required", detail: `signers.json unreadable/invalid: ${e instanceof Error ? e.message : String(e)}` };
+  }
+
+  const drift: string[] = [];
+  const parsed: { signerId: string; alg?: string; presence?: boolean; publicKey: string; permittedOps: string[]; status: string }[] = [];
+  for (const raw of entries) {
+    const r = SignerRegistryEntrySchema.safeParse(raw);
+    if (!r.success) {
+      drift.push(`an entry fails the registry schema: ${r.error.issues[0]?.message ?? "invalid"}`);
+      continue;
+    }
+    parsed.push(r.data as (typeof parsed)[number]);
+  }
+
+  // Attestation entry present + active (brick-guard).
+  const att = parsed.find((e) => e.signerId === DEFAULT_ATTESTATION_SIGNER_ID);
+  if (att === undefined) {
+    drift.push(`the audit-attestation entry "${DEFAULT_ATTESTATION_SIGNER_ID}" is MISSING — audit verification would fail at broker startup`);
+  } else if (att.status !== "active") {
+    drift.push(`the audit-attestation entry is ${att.status} (must be active)`);
+  }
+
+  // Test mode on a provisioned host ⇒ the D20 fixture signers would authorize.
+  if (ctx.env.ATLAS_TEST_MODE === "1" && ctx.env.ATLAS_PROVISIONED === "1") {
+    const activeFixtures = parsed.filter((e) => TEST_SIGNER_IDS.has(e.signerId) && e.status === "active");
+    if (activeFixtures.length > 0) {
+      drift.push(`ATLAS_TEST_MODE=1 on a provisioned host — fixture signer(s) ${activeFixtures.map((e) => e.signerId).join(", ")} would authorize (D20 bypassed)`);
+    }
+  }
+
+  // Presence gate (defense-in-depth): a quarantine op requires presence:true + p256.
+  const QUARANTINE = new Set(["quarantine inspect", "quarantine resolve"]);
+  for (const e of parsed) {
+    if (e.status !== "active") continue;
+    const hasQ = (e.permittedOps ?? []).some((op) => QUARANTINE.has(op));
+    if (hasQ && !(e.presence === true && e.alg === "p256")) {
+      drift.push(`signer "${e.signerId}" carries a quarantine op without presence:true+alg:p256 (os-presence gate violated)`);
+    }
+  }
+
+  // Orphaned approval-verify.pub trap (§7 break-glass).
+  const apvPath = join(keysDir, "approval-verify.pub");
+  if (existsSync(apvPath)) {
+    const pem = readFileSync(apvPath, "utf8").trim();
+    if (pem.length > 0) {
+      const fp = signerFingerprint(pem, "ed25519");
+      const matched = fp !== null && parsed.some((e) => e.status === "active" && signerFingerprint(e.publicKey, e.alg) === fp);
+      if (!matched) {
+        drift.push(`approval-verify.pub is non-empty but no active signers.json entry matches it — an explicit registry bypasses key-file derivation, so this key is INERT (enroll it via enroll-signer.sh or clear the placeholder)`);
+      }
+    }
+  }
+  // A well-known default approver id with a mismatched/absent key is worth noting too,
+  // but the fingerprint trap above is the authoritative orphan check.
+  void DEFAULT_APPROVER_SIGNER_ID;
+
+  if (drift.length > 0) {
+    return { id, title, status: "action-required", detail: drift.join("; ") };
+  }
+  return { id, title, status: "ok", detail: `signers.json valid (${parsed.length} entries)` };
+}
+
 async function doctor(ctx: RunContext): Promise<number> {
   const args = parseArgs(ctx.argv);
 
@@ -639,6 +770,7 @@ async function doctor(ctx: RunContext): Promise<number> {
   const quarantine = checkQuarantineSecurity(ctx);
   const sandbox = await checkSandboxCapability(ctx);
   const encrypted = checkEncryptedVolume(ctx);
+  const signerRegistry = checkSignerRegistry(ctx);
 
   let reclaimedLocks: { scope: string; holderPid: number }[] | undefined;
   let livenessCheck = liveness;
@@ -652,7 +784,7 @@ async function doctor(ctx: RunContext): Promise<number> {
     }
   }
 
-  const checks: Check[] = [modes, livenessCheck, watermark, anchor, provisioning, quarantine, sandbox, encrypted];
+  const checks: Check[] = [modes, livenessCheck, watermark, anchor, provisioning, quarantine, sandbox, encrypted, signerRegistry];
 
   const anyActionRequired = checks.some((c) => c.status === "action-required");
   const anyDegraded = checks.some((c) => c.status === "degraded" || c.status === "warning");
@@ -677,4 +809,4 @@ async function doctor(ctx: RunContext): Promise<number> {
 
 registerCommand("doctor", doctor);
 
-export { doctor, checkQuarantineSecurity, checkProvisioning };
+export { doctor, checkQuarantineSecurity, checkProvisioning, checkSignerRegistry };

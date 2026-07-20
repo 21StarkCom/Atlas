@@ -284,6 +284,45 @@ adoption bootstrap  →  brain sync --dry-run (throwaway clone)  →  brain sync
 ```
 Do NOT run `brain sync` until all of Phases 1–4 are installed; a premature sync against an un-adopted vault will fail cleanly (canonical ref not found), but a partially-adopted state can leave the cursor unseeded.
 
+### 5.5 Enrolling a Secure-Enclave approver (SP-3)
+
+Every privileged op (`purge`, `graduation migrate --apply/--rollback`, `db restore`, `git approve/rollback`, `source trust promote/revoke`, `quarantine inspect/resolve`) is authorized by the non-interactive challenge/response flow (`--export-challenge` → sign → `--authorization <path>`). Out of the box **no production signer is enrolled** — `approval-verify.pub` is seeded empty and the only working signer is the D20-gated test fixture. SP-3 fills that with a **Secure-Enclave-born, Touch-ID-gated P-256 key** owned end-to-end by `atlas-signer` (the agent UID can't read the blob; the broker holds only the public key).
+
+**Two commands, one per side of the trust boundary** (the enrollment MUST stay a separate, `sudo`-gated, human-typed step — it crosses from operator-space into broker custody):
+
+```bash
+# 1  operator-space: build + link + mint the SE key (fires Touch ID) + export the pubkey
+console/signer/install.sh                    # builds -c release, links ~/bin/atlas-signer,
+                                             # keygen (Touch ID), pubkey --out approver.pem,
+                                             # and prints the exact enroll line below
+
+# 2  sudo: install the public key into broker custody + restart the broker
+sudo provisioning/enroll-signer.sh --pubkey approver.pem --signer-id approver-se-<host>-v1 --alg p256 --presence
+```
+
+`--presence` grants the two `os-presence` quarantine ops (it is refused on `--alg ed25519` — a file key proves custody, not presence). The script materializes the derived registry first (never dropping the attestation/test entries), refuses aliasing / silent key-swaps / silent rights changes, and restarts the broker so it loads the new signer (enrollment is **not** live-reloaded). `brain doctor` gains a `signer-registry` check that flags a dropped attestation entry, a quarantine op without presence, `ATLAS_TEST_MODE` on a provisioned host, or an orphaned `approval-verify.pub`.
+
+**The terminal round trip** (identical shape to the old test-mode flow):
+
+```bash
+brain source trust promote --source s_… --to tier1 --export-challenge > challenge.json
+atlas-signer sign < challenge.json > authorization.json     # displays the exact effect, Touch ID
+brain source trust promote --source s_… --to tier1 --authorization authorization.json
+```
+
+`atlas-signer` exit codes are its own table (the SP-2 Console branches on them): `0` signed · `1` internal · `2` malformed/invalid challenge · `3` expired (checked before the prompt) · `4` cancelled/biometry-failed · `5` key invalidated by biometry re-enrollment.
+
+**Re-enrollment (biometry change).** Adding/removing a fingerprint invalidates a `.biometryCurrentSet` SE key; `atlas-signer sign` then exits **5**. Recover by rotation — the `-v(N+1)` id is derived automatically:
+
+```bash
+atlas-signer keygen --force                                  # mints approver-se-<host>-v(N+1); Touch ID
+atlas-signer pubkey --out approver.pem
+sudo provisioning/enroll-signer.sh --pubkey approver.pem --signer-id approver-se-<host>-v(N+1) --alg p256 --presence
+sudo provisioning/enroll-signer.sh --revoke --signer-id approver-se-<host>-vN    # revoke the old id
+```
+
+Key loss is an **enrollment event, not a DR event** — the vault/ledger/audit chain are indifferent to which enrolled signer approves. The broker restart voids in-flight nonces (5-min TTL), so re-export any pending challenge.
+
 ### Daemon requirements at a glance
 
 | Command | broker | egress + `ATLAS_EGRESS_CAPABILITY_KEY` |

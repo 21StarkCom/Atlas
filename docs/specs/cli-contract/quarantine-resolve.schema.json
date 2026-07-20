@@ -51,7 +51,7 @@
       "challengeFields": ["op", "intendedEffect", "nonce", "expiresAt"],
       "intendedEffectBinds": ["quarantineItemOpaqueId", "resolution"],
       "mechanismBinds": ["callerIdentity", "vault"],
-      "driftCodes": ["authz.quarantine_item_unknown", "authz.quarantine_key_denied", "authz.presence_unverified", "authz.target_mismatch", "authz.nonce_unknown", "authz.nonce_expired", "authz.nonce_replayed"]
+      "driftCodes": ["authz.quarantine_item_unknown", "authz.quarantine_key_denied", "authz.signer_unknown", "authz.signer_revoked", "authz.signer_not_permitted", "authz.signature_invalid", "authz.payload_mismatch", "authz.target_mismatch", "authz.nonce_unknown", "authz.nonce_expired", "authz.nonce_replayed"]
     },
     "executionClass": "ledger-writing",
     "summary": "Privileged, presence-authorized resolution of a quarantined item (release/discard); audited, idempotent.",
@@ -85,6 +85,11 @@
       { "code": "authz.nonce_unknown", "exit": 1, "when": "broker: the nonce was not issued by this broker" },
       { "code": "authz.nonce_replayed", "exit": 1, "when": "broker: the nonce was already consumed" },
       { "code": "authz.quarantine_key_denied", "exit": 2, "when": "broker: the quarantine AEAD key is not readable by this trusted-CLI identity" },
+      { "code": "authz.signer_unknown", "exit": 1, "when": "broker: the signerId is not in the signer registry (SP-3: os-presence implemented as a presence-gated signature, §7.1)" },
+      { "code": "authz.signer_revoked", "exit": 1, "when": "broker: the signer is revoked" },
+      { "code": "authz.signer_not_permitted", "exit": 1, "when": "broker: a non-presence signer is refused here — only a presence:true p256 signer may hold quarantine ops (§7.1)" },
+      { "code": "authz.signature_invalid", "exit": 1, "when": "broker: the presence-gated signature failed verification (or its prefix disagrees with the enrolled alg)" },
+      { "code": "authz.payload_mismatch", "exit": 1, "when": "broker: signingPayload differs from the broker-recomputed canonical bytes" },
       { "code": "internal", "exit": 4, "when": "unexpected internal failure during resolution" }
     ],
     "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"

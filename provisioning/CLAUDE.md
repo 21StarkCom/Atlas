@@ -25,6 +25,7 @@ This is a plain directory, not a workspace package (no `package.json`). Its ACL 
 | `ci/setup.sh` | Runs `dev/setup.sh`, then writes `/etc/sudoers.d/atlas-ci` (0440, `visudo -cf` validated) scoping the runner to `sudo -u atlas-broker`/`atlas-egress` the **two launchers only** (D1). |
 | `bin/broker-launcher.sh` · `bin/egress-launcher.sh` | Fixed-path root-owned launchers; export the daemon env contracts, `exec` the installed binary. Never set `ATLAS_TEST_MODE` (D20). |
 | `install-artifact.sh` | Hash-verified install of built privileged binaries into the root-owned `installBin`; records `<bin>.installed.sha256` for `provisioning.integrity.test`. The artifacts are produced by `tools/build-artifact.sh` (esbuild CJS single-file bundles of `@atlas/broker`'s two bins + sha256 manifests). |
+| `enroll-signer.sh` + `enroll-signer-merge.mjs` | **SP-3 per-device signer enrollment / revocation.** `--pubkey <pem> --signer-id <id> --alg <ed25519\|p256> [--presence]` installs the exported public key as a `<keysDir>/atlas-broker/signers.json` entry (owner `atlas-broker`, `0600`); `--revoke --signer-id <id>` flips `status`. The bash wrapper owns args/validation/root-gate/ownership/**broker restart** (`launchctl kickstart -k` on macOS); the `.mjs` core owns the JSON merge (materialize-if-derived, **DER-SPKI-fingerprint identity**, aliasing/silent-swap/silent-rights-change refusal, idempotency) via `@atlas/broker`'s own derive + key-parse, so the file is exactly what `loadSignerRegistry` reads. `--presence` (the two `os-presence` quarantine ops) is refused on `--alg ed25519`. Escapes: `ATLAS_DRY_RUN=1`, `ATLAS_ENROLL_TEST_MODE=1` (skip root/chown/restart — the behavioral test seam), `ATLAS_ENROLL_SKIP_RESTART=1`. Behavioral contract: `tools/enroll-signer.test.ts`. The operator-space half (build + keygen + pubkey) is `console/signer/install.sh`. |
 | `macos/services.sh` · `macos/com.atlas.{broker,egress}.plist` | launchd **system** services for the two daemons (`install\|uninstall\|status`): `RunAtLoad` + `KeepAlive`, per-identity `UserName`, `PATH` includes Homebrew (the bundles' shebang is `/usr/bin/env node`), logs `/usr/local/var/log/atlas/*.log`. Vault override = add `ATLAS_VAULT_REPO_DIR` to the broker plist's `EnvironmentVariables` + re-`install`. macOS-only; no systemd units yet. |
 | `profiles/agent.sb` | macOS Seatbelt: `(deny default)` + `(deny network*)`, FS-restricted to vault + worker temp, keychain denied. |
 | `macos/agent-pf.conf` · `macos/load-agent-pf.sh` | Per-UID pf anchor (`block drop out ... user <AGENT_UID>`) + its loader (substitutes the real UID at load — pf has no name→UID variable). |
@@ -56,6 +57,7 @@ UID/GID: `free_id_at_or_above` claims the first FREE id ≥ `ATLAS_UID_BASE` (de
 | `quarantine-aead.key` | aead-256 | trusted-cli (`parserModelDenied`) | 0600 | agent |
 | `atlas.gemini.key` | provider-credential | atlas-egress | 0600 | atlas-egress |
 | `atlas-test-approver.key` | ed25519-private | atlas-broker (`testModeOnly`) | 0600 | atlas-broker |
+| `signers.json` (SP-3) | registry-json | atlas-broker | 0600 | atlas-broker |
 
 `trusted-cli` is an **alias resolving to `agent`** — the unprivileged CLI that writes the ledger owns backup + quarantine crypto (D13) (`keys.acl.json:8`).
 
@@ -100,6 +102,8 @@ sudo provisioning/dev/setup.sh                   # provision (idempotent)
 sudo provisioning/dev/teardown.sh                # reverse
 sudo provisioning/ci/setup.sh                    # CI (dev setup + sudoers, D1)
 sudo provisioning/install-artifact.sh <dir>      # hash-verified privileged-binary install
+sudo provisioning/enroll-signer.sh --pubkey approver.pem --signer-id approver-se-<host>-v1 --alg p256 --presence  # SP-3 enroll (restarts the broker)
+sudo provisioning/enroll-signer.sh --revoke --signer-id approver-se-<host>-v1   # SP-3 revoke
 sudo provisioning/macos/load-agent-pf.sh         # macOS D17 kernel half
 sudo provisioning/linux/netns.sh setup           # Linux D17 netns
 export ATLAS_PROVISIONED=1                        # enable the provisioning-gated suites

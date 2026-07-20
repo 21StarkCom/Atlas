@@ -127,6 +127,12 @@
         "title": "Sandbox capability probe",
         "description": "Surface @atlas/sources' probeSandbox() — the per-host isolation matrix of sandbox-contract.md (Task 2.3 / #29): no-network, empty-environment, isolated-filesystem, no-credential-access, no-inherited-fds, no-subprocess, syscall-restriction, resource-caps, scan-before-persist. ok when every REQUIRED guarantee's primitive is available on this host; action-required (fail loud) when any is missing — the parser worker then refuses to launch (fail closed) so no untrusted input is parsed. Guards against macOS Seatbelt / Linux bwrap+seccomp version churn removing a primitive.",
         "phase": 2
+      },
+      {
+        "id": "signer-registry",
+        "title": "Signer registry integrity",
+        "description": "R2 (SP-3): when an explicit signers.json exists (an enrolled p256/Secure-Enclave approver or a materialized registry), verify the invariants a hand-edit could break once the file REPLACES key-file derivation (§9.2/§11): every entry parses (valid alg/presence/shape); the audit-attestation entry is present + active (a dropped one bricks audit verification at broker startup); ATLAS_TEST_MODE is not enabled on a provisioned host (else the D20 fixture signers would authorize); no active entry carries a quarantine os-presence op without presence:true + alg:p256 (the presence gate); and the §7 break-glass orphan trap — a non-empty approval-verify.pub with no active entry matching its key (inert, since an explicit registry bypasses derivation). Absent signers.json ⇒ ok (derivation in effect).",
+        "phase": 3
       }
     ]
   }

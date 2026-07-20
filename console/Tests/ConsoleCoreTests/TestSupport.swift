@@ -32,6 +32,28 @@ enum TestSupport {
         checkoutRoot(file: file).appendingPathComponent("docs/specs/cli-contract")
     }
 
+    /// The `atlas-signer` package's committed golden-vector challenge for a given
+    /// `intendedEffect` kind (SP-3 #272 anchor). The Console's signer-contract tests
+    /// source their example challenge from HERE — the same fixture the signer's own
+    /// tests derive from the broker's `buildSigningPayload` — so upstream contract
+    /// drift in the anchored SP-3 signer source breaks the Console gate. Returns the
+    /// challenge object as a JSON string.
+    static func signerGoldenChallenge(kind: String = "integrate", file: StaticString = #filePath) throws -> String {
+        let url = checkoutRoot(file: file)
+            .appendingPathComponent("console/signer/Tests/SignerCoreTests/Fixtures/signing-payload-vectors.json")
+        let data = try Data(contentsOf: url)
+        guard
+            let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let vectors = obj["vectors"] as? [[String: Any]],
+            let vector = vectors.first(where: { ($0["kind"] as? String) == kind }),
+            let challenge = vector["challenge"] as? [String: Any]
+        else {
+            throw NSError(domain: "TestSupport", code: 1, userInfo: [NSLocalizedDescriptionKey: "no \(kind) golden vector in the atlas-signer fixtures"])
+        }
+        let json = try JSONSerialization.data(withJSONObject: challenge)
+        return String(decoding: json, as: UTF8.self)
+    }
+
     static func contractSchema(_ name: String, file: StaticString = #filePath) throws -> Data {
         try Data(contentsOf: cliContractDir(file: file).appendingPathComponent(name))
     }
