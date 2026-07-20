@@ -1,0 +1,36 @@
+name: console-ci
+
+# Atlas Console (console/) is a SwiftUI macOS Swift package OUTSIDE the pnpm workspace.
+# It builds/tests/assembles independently of the TS monorepo CI.
+on:
+  push:
+    paths:
+      - "console/**"
+      - ".github/workflows/console-ci.yml"
+      # Console's runtime schema engine + contract-bundle binding validate directly against these
+      # CLI-contract schemas; a schema-only change must not bypass the Console gate.
+      - "docs/specs/cli-contract/**"
+  pull_request:
+    paths:
+      - "console/**"
+      - ".github/workflows/console-ci.yml"
+      - "docs/specs/cli-contract/**"
+
+jobs:
+  build-test-assemble:
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: console
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 16 (Swift 6)
+        run: sudo xcode-select -s /Applications/Xcode_16.app
+      - name: swift version
+        run: swift --version
+      - name: build
+        run: swift build
+      - name: test
+        run: swift test
+      - name: assemble app
+        run: scripts/assemble-app.sh

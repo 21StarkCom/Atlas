@@ -25,6 +25,7 @@ This file is the constitution — read it, then reach for the directory's own `C
 | [`provisioning/CLAUDE.md`](provisioning/CLAUDE.md) | The one human-led, `sudo`-requiring step: OS identities, groups, key custody, WORM anchor, sockets, sandbox prerequisites. |
 | [`docs/CLAUDE.md`](docs/CLAUDE.md) | The doc map + conventions — where each spec/plan/ADR/retro lives and which are generated. |
 | [`fixtures/CLAUDE.md`](fixtures/CLAUDE.md) | The committed test corpus — which fixture exercises what, which tests consume it. |
+| [`console/CLAUDE.md`](console/CLAUDE.md) | Atlas Console (SP-2) — a SwiftUI macOS app, **outside the pnpm workspace** (its own `swift build`/`swift test`). Pure read-face over `brain watch --json` + privileged-flow driver; opens no broker socket, imports no atlas internal package. |
 
 Public face + runbook: [`README.md`](README.md) and [`docs/install.md`](docs/install.md) (provision → verify).
 
@@ -80,7 +81,7 @@ The command surface is **data-driven and drift-proof**. `docs/specs/cli-contract
 
 ## Current state & open work
 
-Six phases done; the full-corpus live drive is done (2026-07-17: 210 notes graduated, 0 refused; `index eval` passed the gate at **recall@10 0.878 / MRR 0.784** on the vector-only fallback — post-#159 the default hybrid config scores **0.911 / 0.830**; thresholds ≥ 0.85 / ≥ 0.70). Two issues remain open:
+Six phases done; the full-corpus live drive is done (2026-07-17: 210 notes graduated, 0 refused; `index eval` passed the gate at **recall@10 0.878 / MRR 0.784** on the vector-only fallback — post-#159 the default hybrid config scores **0.911 / 0.830**; thresholds ≥ 0.85 / ≥ 0.70). **SP-2 Atlas Console shipped** (2026-07-20, PR #273 — all 6 console phases + the #257 live drive; the SP-3-gated Touch-ID round trip + manual GUI/VoiceOver passes are the human-led remainder, #286). Open issues:
 
 - **#60** — Graduation E2E remaining slices: workflow runs on the migrated copy (Tier-2/Tier-3 + rollback), purge E2E across every storage class, `tools/scale-bench.ts` (synthetic 5k/50k profiles) + a CI regression subset, and the ingest→index auto-hook. The automatable half shipped (#142); the production real-copy apply stays **human-gated** (the test signer is hard-rejected outside `ATLAS_TEST_MODE`, D20).
 - **#65** — Ledger/backup DR hardening residuals from the #23 review (seq-allocator rewind on older-cut restore, universal-startup interrupted-restore recovery, deleted/corrupt-live-DB restore, `markCovered` clearing a block early, unhonored retry backoff, `--force-unblock` wrongly needing the AEAD key). Real, not phase-blocking.
