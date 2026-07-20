@@ -21,6 +21,10 @@ public final class StreamHandle: @unchecked Sendable {
 
     private let process: Process
     private let lock = NSLock()
+    /// Retained so a bounded finalization can force stderr EOF: a descendant that inherited the pipe can
+    /// hold the write end open indefinitely after the direct child dies, and `completion()` requires EOF.
+    private let stderrReadHandle: FileHandle
+    private let stdoutContinuation: AsyncThrowingStream<Data, Error>.Continuation
     // Single stderr drain owner: only the stderr readability handler ever appends to this buffer,
     // and completion is frozen ONLY once that handler has reached EOF (see `stderrAtEOF`). This closes
     // the race where the termination handler snapshotted the buffer while a readability callback had
@@ -33,10 +37,12 @@ public final class StreamHandle: @unchecked Sendable {
 
     init(process: Process, stdout: Pipe, stderr: Pipe) {
         self.process = process
+        self.stderrReadHandle = stderr.fileHandleForReading
 
         var cont: AsyncThrowingStream<Data, Error>.Continuation!
         self.bytes = AsyncThrowingStream { cont = $0 }
         let continuation = cont!
+        self.stdoutContinuation = continuation
 
         stdout.fileHandleForReading.readabilityHandler = { fh in
             let chunk = fh.availableData
@@ -83,6 +89,32 @@ public final class StreamHandle: @unchecked Sendable {
     /// SIGTERM — a clean detach that `brain watch` reports as exit 0.
     public func terminate() {
         if process.isRunning { process.terminate() }
+    }
+
+    /// SIGKILL — the escalation for a TERM-resistant child. Unblockable, so `completion()` is guaranteed
+    /// to resolve after this. Used only as the bounded backstop when a SIGTERM grace period elapses, so a
+    /// contract-mismatch reap / a `stop()` can never hang on a child that ignores SIGTERM.
+    public func forceKill() {
+        if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+    }
+
+    /// Bounded finalization: resolve `completion()` with whatever has been captured, even if stderr has
+    /// not reached EOF.
+    ///
+    /// SIGKILL guarantees the DIRECT child dies, but not that `completion()` resolves: a descendant that
+    /// inherited the stderr pipe can hold its write end open indefinitely, so the EOF that
+    /// `attemptCompletionLocked` waits on may never arrive and `stop()` would hang forever. Callers use
+    /// this as the last step of a bounded reap. Idempotent, and a no-op once completion is already frozen.
+    public func finalizeNow() {
+        // Detach the readability handlers and close our read end — we are abandoning the pipes.
+        stderrReadHandle.readabilityHandler = nil
+        try? stderrReadHandle.close()
+        stdoutContinuation.finish()
+        lock.lock()
+        // Synthesize an exit code if the child never reported one (it was killed out from under us).
+        if exitCode == nil { exitCode = SIGKILL }
+        stderrAtEOF = true
+        attemptCompletionLocked()   // unlocks and resumes waiters
     }
 
     private func appendStderr(_ chunk: Data) {
