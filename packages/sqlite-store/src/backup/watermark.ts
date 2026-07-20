@@ -83,6 +83,22 @@ export class WatermarkRepo {
   }
 
   /**
+   * Repair a watermark poisoned by the pre-#291 seq-space bug: a backup taken
+   * after an `evidence retry` recorded a covered seq in the ledger-internal range
+   * (>= `internalBase`), vacuously "covering" every future run — coverage
+   * accounting and the read-coalesce window were permanently fail-open. Reset to
+   * the "nothing covered" sentinel (fail-CLOSED): the next verified backup
+   * re-establishes true coverage (the reconcile pass's step-4 re-drive does so
+   * in-pass when a backup config is supplied). Returns whether a repair happened.
+   */
+  repairPoisonedSeq(internalBase: number, now: string): boolean {
+    const info = this.db
+      .prepare(`UPDATE backup_watermark SET seq = -1, updated_at = @now WHERE id = 1 AND seq >= @base`)
+      .run({ base: internalBase, now });
+    return info.changes > 0;
+  }
+
+  /**
    * A verified backup covered `coveredSeq`: advance the watermark (never
    * regressing), clear the block (transition to `unblocked`/`healthy`), and RESET
    * the durable retry state — a successful cut retires any degraded retry progress.

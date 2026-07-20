@@ -27,7 +27,7 @@
  * step 4 when a backup config is supplied.
  */
 import type { Store } from "../store.js";
-import { IntentsRepo, applyLedgerWrite, latestRunSeq, LedgerAssertionError } from "./intents.js";
+import { DB_EVENT_SEQ_BASE, IntentsRepo, applyLedgerWrite, latestRunSeq, LedgerAssertionError } from "./intents.js";
 import type { AuditBroker } from "./finalize.js";
 import { runBackupStep, readCoalesceCovers } from "./finalize.js";
 import { WatermarkRepo, type WatermarkHealth, watermarkHealth } from "../backup/watermark.js";
@@ -100,8 +100,28 @@ export async function reconcileInterruptedRuns(
   let conflicted = 0;
   let haltedAtSeq: number | null = null;
 
+  // Repair a watermark poisoned by the pre-#291 seq-space bug (a backup recorded
+  // a covered seq in the ledger-internal range, vacuously covering every future
+  // run). Reset to "nothing covered" — fail-closed; the step-4 re-drive below
+  // re-establishes true coverage when a backup config is supplied.
+  new WatermarkRepo(db).repairPoisonedSeq(DB_EVENT_SEQ_BASE, now());
+
   const stopAt = opts.stopAtSeq ?? null;
   for (const row of intents.listPending()) {
+    // A pending intent stranded in the ledger-internal seq range was allocated by
+    // the pre-#291 poisoned `nextRunSeq` (an `evidence.retry_enqueued` event was
+    // counted into the run space). Its event never reached — and can never reach —
+    // the broker chain (the broker signs only lastSeq+1), and its owning run
+    // already failed, so it is DELETED without a broker append (round-2 finding:
+    // a retained done row would keep poisoning unpartitioned MAX(seq) readers,
+    // e.g. the workflows reconciler's allocation probe; nothing in the gapless
+    // chain links to a never-anchored seq). Checked BEFORE the barrier so a
+    // stranded high-range intent cannot wedge every later reconcile pass.
+    if (row.seq >= DB_EVENT_SEQ_BASE) {
+      db.prepare(`DELETE FROM audit_intents WHERE run_id = ? AND seq = ?`).run(row.run_id, row.seq);
+      reconciled++;
+      continue;
+    }
     // GLOBAL ordered barrier (round-3 finding on reconcile.ts:94-102): the chain is
     // gapless and driven oldest-first, so an intent at or beyond the layer-0 barrier
     // (an unresolved earlier `run.integrated`) must NEVER be completed — doing so would

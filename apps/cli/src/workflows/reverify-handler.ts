@@ -50,6 +50,7 @@ import type { JobHandler, JobHandlerContext, JobHandlerResult } from "@atlas/job
 import type { JobHandlerDeps } from "../commands/job-handlers.js";
 import { classifyReanchor, type ReanchorMatch } from "./reverify.js";
 import { matchReanchor, parseLocatorStart, type ReanchorInput } from "./reverify-match.js";
+import { applyReanchorViaBroker, recoverReverifyAnchor } from "./reverify-recover.js";
 
 /** The durable payload of a `reverify` job — validated fail-closed (payload is `unknown`). */
 const ReverifyJobPayloadSchema = z
@@ -64,7 +65,7 @@ const ReverifyJobPayloadSchema = z
   .strict();
 
 /** A current evidence head the handler re-anchors, read from the projection. */
-interface EvidenceHeadRow {
+export interface EvidenceHeadRow {
   readonly evidence_id: string;
   readonly claim_id: string;
   readonly lineage_id: string;
@@ -98,34 +99,27 @@ export interface ReanchorApplyResult {
  */
 export interface ReverifySeams {
   /**
-   * Recover the exact quoted span (hash-verified against the head's `quote_hash`) from the
-   * PINNED rendition plus the NEW rendition's normalized text, or `null` when the span
-   * cannot be recovered — in which case the head is routed fail-closed to `pending`
-   * (design: "evidence lacking that data is routed deterministically to `pending`").
+   * Recover the exact quoted span (hash-verified against the head's `quote_hash`) by
+   * re-normalizing the blob's canonical bytes through the `@atlas/sources` sandbox at
+   * the NEW rendition version, or `null` when the span cannot be PROVEN — in which
+   * case the head is routed fail-closed to `pending` (design: "evidence lacking that
+   * data is routed deterministically to `pending`").
    */
-  recoverAnchor(deps: JobHandlerDeps, ev: EvidenceHeadRow, newRenditionId: string): ReanchorInput | null;
+  recoverAnchor(deps: JobHandlerDeps, ev: EvidenceHeadRow, newRenditionId: string): Promise<ReanchorInput | null>;
   /** Integrate a validated re-anchor ChangePlan through the broker/git path. */
   applyReanchor(deps: JobHandlerDeps, req: ReanchorApplyRequest): Promise<ReanchorApplyResult>;
 }
 
 /**
- * The production seams. `recoverAnchor` returns `null` in this slice: recovering the exact
- * quoted span requires RE-NORMALIZING the blob through the sandboxed parser worker at both
- * rendition versions (the same jail `@atlas/sources` owns), which is the ingest→re-anchor
- * wiring tracked as follow-on for #60. Until it lands, EVERY head fails closed to `pending`
- * (Tier-3 review) — so `brain jobs run` DRAINS a reverify job to a deterministic
- * `action-required` instead of the old budget-burning "no handler" failure, and an operator
- * resolves it with `brain evidence resolve`. `applyReanchor` is the broker/git integration
- * `evidence resolve` already performs; it is reached only for a proven `exact` verdict.
+ * The production seams (#217): `recoverAnchor` re-normalizes the blob through the
+ * REAL sandbox and hash-verifies the recorded span (`reverify-recover.ts`);
+ * `applyReanchor` integrates the validated plan through the same broker/git
+ * `applySynthesis` path `evidence resolve` drives — reached only for a proven
+ * `exact` verdict.
  */
 export const defaultReverifySeams: ReverifySeams = {
-  recoverAnchor: () => null,
-  applyReanchor: () => {
-    // A `valid` verdict can only be produced once `recoverAnchor` is wired; reaching the
-    // apply seam before then is a programming error, surfaced as a PERMANENT failure
-    // (never a transient that burns the attempt budget).
-    return Promise.reject({ kind: "validation", message: "reverify apply seam not wired: recoverAnchor must yield an anchor before an exact re-anchor can integrate" });
-  },
+  recoverAnchor: recoverReverifyAnchor,
+  applyReanchor: applyReanchorViaBroker,
 };
 
 /**
@@ -245,7 +239,7 @@ export function buildReverifyHandler(deps: JobHandlerDeps, seams: ReverifySeams 
     for (const evidenceId of payload.evidenceIds) {
       const ev = readHead(deps, evidenceId);
       if (ev === undefined) continue;
-      const anchor = seams.recoverAnchor(deps, ev, payload.newRenditionId);
+      const anchor = await seams.recoverAnchor(deps, ev, payload.newRenditionId);
       // Reconcile the recovered previous offset with the head's locator (defence-in-depth:
       // a comparable offset always fails closed to `moved` when the scheme has none).
       const match: ReanchorMatch =

@@ -113,7 +113,7 @@ function seams(
   applyResult: { mode: "integrated" | "review-pending"; runId: string } = { mode: "integrated", runId: "run-applied" },
 ): ReverifySeams {
   return {
-    recoverAnchor: () => anchor,
+    recoverAnchor: async () => anchor,
     applyReanchor: async (_deps, req) => {
       // Emitted plans MUST already be valid contract objects (byte-identity gate).
       ChangePlanSchema.parse(req.plan);
@@ -258,7 +258,7 @@ describe("buildReverifyHandler — validation, cancel, idempotency", () => {
     ac.abort();
     let recovered = false;
     const s: ReverifySeams = {
-      recoverAnchor: () => { recovered = true; return { quote: "x", previousStart: 0, newText: "x" }; },
+      recoverAnchor: async () => { recovered = true; return { quote: "x", previousStart: 0, newText: "x" }; },
       applyReanchor: async (_d, req) => { calls.push({ req }); return { mode: "integrated", runId: "r" }; },
     };
     try {

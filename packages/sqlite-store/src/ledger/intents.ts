@@ -174,17 +174,25 @@ export class IntentsRepo {
 
   /**
    * The next `run.*` (git-anchored) seq: one past the highest already allocated
-   * across `audit_intents` (pending or done) and the committed non-`db.*`
+   * across `audit_intents` (pending or done) and the committed run-space
    * `audit_events`. Both are consulted so a crash between step 1 and step 3
    * cannot re-issue a seq the intent already claimed.
+   *
+   * The run space is a NUMERIC RANGE (`seq < DB_EVENT_SEQ_BASE`), so both arms
+   * partition by the range — never by event-type prefix. A `NOT LIKE 'db.%'`
+   * filter here counted the ledger-internal `evidence.retry_enqueued` (allocated
+   * at BASE+n by `nextDbEventSeq`) into the run space, after which every
+   * broker-anchored run was refused `broker.audit_seq_nonmonotonic` (the broker
+   * signs only `lastSeq + 1`). The intents arm is range-filtered too so an intent
+   * stranded in the internal range by the pre-fix allocator cannot re-poison this.
    */
   nextRunSeq(): number {
     const row = this.db
       .prepare(
         `SELECT COALESCE(MAX(seq), -1) AS m FROM (
-           SELECT seq FROM audit_intents
+           SELECT seq FROM audit_intents WHERE seq < ${DB_EVENT_SEQ_BASE}
            UNION ALL
-           SELECT seq FROM audit_events WHERE event_type NOT LIKE 'db.%'
+           SELECT seq FROM audit_events WHERE seq < ${DB_EVENT_SEQ_BASE}
          )`,
       )
       .get() as { m: number };
@@ -271,10 +279,14 @@ export function nextDbEventSeq(db: SqliteDatabase): number {
   return row.m + 1;
 }
 
-/** The highest committed `run.*` ledger seq (−1 if none) — the backup cut point. */
+/**
+ * The highest committed `run.*` ledger seq (−1 if none) — the backup cut point.
+ * Partitioned by the seq RANGE, not event-type prefix: `evidence.retry_enqueued`
+ * lives in the internal range and must never become the cut point.
+ */
 export function latestRunSeq(db: SqliteDatabase): number {
   const row = db
-    .prepare(`SELECT COALESCE(MAX(seq), -1) AS m FROM audit_events WHERE event_type NOT LIKE 'db.%'`)
+    .prepare(`SELECT COALESCE(MAX(seq), -1) AS m FROM audit_events WHERE seq < ${DB_EVENT_SEQ_BASE}`)
     .get() as { m: number };
   return row.m;
 }
