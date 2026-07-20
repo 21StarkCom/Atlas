@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { openStore, registerSyncCursorsMigration, type Store } from "@atlas/sqlite-store";
-import { SecretDetectedError, scanBytes } from "@atlas/scan";
+import { SecretDetectedError } from "@atlas/scan";
 import { CliError } from "../src/errors/envelope.js";
 import { seedSyncCursor } from "../src/sync/seed.js";
 import {
@@ -573,15 +573,11 @@ describe("runSyncCycle — the absorb engine (Tasks 4.4–4.7, 4.10)", () => {
       }
       expect(h.cursorRow()).toEqual(cursorBefore);
     }
-    // status-side diagnosis.
+    // status-side diagnosis — the SAME derivation the planner runs.
     const blocked = await computeBlocked(
       { repo: h.repo, noteGlobs: ["**/*.md"] },
       readSingleCursor(h.store),
       h.readRef(h.upstreamRef)!,
-      (text) => {
-        const v = scanBytes({ bytes: new TextEncoder().encode(text), context: { origin: "t", boundary: "generated-artifact", sink: "audit" } });
-        return v.clean ? { clean: true, reason: "" } : { clean: false, reason: v.findings.map((f) => f.ruleId).join(",") };
-      },
     );
     expect(blocked).toEqual({ commitOid: badCommit, reason: expect.stringContaining("aws-access-key-id") });
   }, 60_000);

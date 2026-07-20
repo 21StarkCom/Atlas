@@ -51,7 +51,16 @@ import { resolveAtRef } from "./resolve-at-ref.js";
 import { INDEX_RECONCILE_WORKFLOW } from "./reconcile-handler.js";
 import { readCursor, finalizeCursor, type PendingEntry, type SyncCursor, MalformedPendingError } from "./cursor.js";
 import { detectDivergence, countBehind } from "./diff.js";
-import { buildSyncPlan, expandChange, SyncPlanError, type SyncPlan, type SyncPlanDeps, type ScanOutcome } from "./plan.js";
+// (expandChange stays plan-internal — computeBlocked shares the whole planning walk instead.)
+import { scanBytes, SecretDetectedError } from "@atlas/scan";
+import {
+  buildSyncPlan,
+  SyncBlockedError,
+  SyncPlanError,
+  type SyncPlan,
+  type SyncPlanDeps,
+  type ScanOutcome,
+} from "./plan.js";
 
 /** The `sync` success envelope (mirrors docs/specs/cli-contract/sync.schema.json). */
 export interface SyncEnvelope {
@@ -287,6 +296,10 @@ async function computePlan(ctx: CycleContext, opts: SyncCycleOptions, runId: str
   try {
     return await buildSyncPlan(planDeps, commits, opts.maxPaths === undefined ? {} : { maxPaths: opts.maxPaths });
   } catch (e) {
+    // The commit-attributed blocked wrapper is for `computeBlocked`; the live
+    // cycle surfaces the underlying SecretDetectedError (exit 3, cursor
+    // unadvanced) with the commit named in the envelope hint via sync status.
+    if (e instanceof SyncBlockedError) throw e.cause;
     if (e instanceof SyncPlanError) {
       throw new CliError({
         code: e.code === "vault-error" ? "vault-error" : "internal",
@@ -559,24 +572,54 @@ async function cleanupWorktree(repo: Repo, dir: string): Promise<void> {
 
 /**
  * Derive the deterministic exit-3 block for `sync status` (Task 4.7). Because
- * the cursor never advances on exit 3, the block is re-derivable: re-walk
- * `cursor..upstreamHead` and return the first commit whose Atlas-generated
- * audit contribution (the path/oid detail) scans dirty. No quarantine record is
- * persisted — this is a read-time diagnosis, idempotent by construction.
+ * the cursor never advances on exit 3, the block is re-derivable: re-run the
+ * SAME scan-only planning walk the cycle runs (one derivation, two consumers —
+ * status and cycle can never disagree on what blocks) and report the commit
+ * the planner's generated-artifact guard refused. Nothing persists — verdicts
+ * only; a parse/vault halt is NOT the exit-3 block (sync itself reports it),
+ * so `SyncPlanError` yields null.
  */
 export async function computeBlocked(
   deps: Pick<SyncCycleDeps, "repo" | "noteGlobs">,
   row: SyncCursor,
   upstreamHead: string,
-  scanText: (text: string) => { readonly clean: boolean; readonly reason: string },
 ): Promise<{ commitOid: string; reason: string } | null> {
   const commits = await deps.repo.commitsInRange(row.lastAbsorbedOid, upstreamHead, noteGlobPathspec(deps.noteGlobs));
-  for (const commit of commits) {
-    const filtered = commit.changes.flatMap((c) => expandChange(c, deps.noteGlobs));
-    const verdict = scanText(
-      JSON.stringify({ oid: commit.oid, changes: filtered.map((c) => [c.status, c.path, c.fromPath ?? null]) }),
-    );
-    if (!verdict.clean) return { commitOid: commit.oid, reason: verdict.reason };
+  if (commits.length === 0) return null;
+  const dry: SyncPlanDeps = {
+    repo: deps.repo,
+    // Only the walk matters for the block derivation; the end-state output is
+    // discarded, so any resolvable commit works as the comparison base.
+    canonicalBase: upstreamHead,
+    noteGlobs: deps.noteGlobs,
+    pendingBefore: [],
+    scanNoteBytes: async (bytes, origin) => {
+      await Promise.resolve();
+      const v = scanBytes({ bytes, context: { origin, boundary: "pre-persistence", kind: "raw" } });
+      return v.clean ? { clean: true } : { clean: false, quarantineId: "" };
+    },
+    scanGeneratedArtifact: async (text) => {
+      await Promise.resolve();
+      const v = scanBytes({
+        bytes: new TextEncoder().encode(text),
+        context: { origin: "sync-status:blocked", boundary: "generated-artifact", sink: "audit" },
+      });
+      if (!v.clean) throw new SecretDetectedError("sync-status:blocked", v.findings, "generated-artifact");
+    },
+  };
+  try {
+    await buildSyncPlan(dry, commits, {});
+  } catch (e) {
+    if (e instanceof SyncBlockedError) {
+      const c = e.cause;
+      const reason =
+        c instanceof SecretDetectedError
+          ? `generated-artifact verdict: ${c.findings.map((f) => f.ruleId).join(",")}`
+          : e.reason;
+      return { commitOid: e.commitOid, reason };
+    }
+    if (e instanceof SyncPlanError) return null;
+    throw e;
   }
   return null;
 }

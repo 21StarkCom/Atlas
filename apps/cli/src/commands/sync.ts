@@ -223,17 +223,7 @@ export async function readSyncStatus(
   const ok = divergence.state === "ok";
   const behindBy = ok ? await countBehind(repo, row.lastAbsorbedOid, upstreamHead) : null;
   const blocked =
-    ok && behindBy !== null && behindBy > 0
-      ? await computeBlocked({ repo, noteGlobs }, row, upstreamHead, (text) => {
-          const verdict = scanBytes({
-            bytes: new TextEncoder().encode(text),
-            context: { origin: "sync-status:blocked", boundary: "generated-artifact", sink: "audit" },
-          });
-          return verdict.clean
-            ? { clean: true, reason: "" }
-            : { clean: false, reason: `generated-artifact verdict: ${verdict.findings.map((f) => f.ruleId).join(",")}` };
-        })
-      : null;
+    ok && behindBy !== null && behindBy > 0 ? await computeBlocked({ repo, noteGlobs }, row, upstreamHead) : null;
   return {
     command: "sync status",
     sourceId: row.sourceId,
