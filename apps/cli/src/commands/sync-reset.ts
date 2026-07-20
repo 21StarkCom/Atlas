@@ -142,7 +142,13 @@ async function syncResetHandler(ctx: RunContext): Promise<number> {
   });
 }
 
-/** Dry scanners for --export-challenge (verdict-only, no quarantine persist). */
+/**
+ * Dry scanners for --export-challenge: verdict-only (no quarantine record
+ * persisted), but the generated-artifact scan is REAL — export must refuse to
+ * mint a challenge for a reset whose audit-ref-bound ids/paths carry a secret
+ * (else it would export a challenge for a reset that then blocks at apply). It
+ * throws SecretDetectedError (exit 3) without persisting anything.
+ */
 function dryScannersForExport(): Pick<SyncResetDeps, "scanNoteBytes" | "scanGeneratedArtifact"> {
   return {
     scanNoteBytes: async (bytes, origin) => {
@@ -150,7 +156,12 @@ function dryScannersForExport(): Pick<SyncResetDeps, "scanNoteBytes" | "scanGene
       const v = scanBytes({ bytes, context: { origin, boundary: "pre-persistence", kind: "raw" } });
       return v.clean ? { clean: true } : { clean: false, quarantineId: "" };
     },
-    scanGeneratedArtifact: async () => Promise.resolve(),
+    scanGeneratedArtifact: async (text, runId) => {
+      const { scanBytes, SecretDetectedError } = await import("@atlas/scan");
+      const origin = `run:${runId}→audit`;
+      const v = scanBytes({ bytes: new TextEncoder().encode(text), context: { origin, boundary: "generated-artifact", sink: "audit" } });
+      if (!v.clean) throw new SecretDetectedError(origin, v.findings, "generated-artifact");
+    },
   };
 }
 

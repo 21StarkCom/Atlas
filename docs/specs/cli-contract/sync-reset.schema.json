@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "atlas://cli-contract/sync-reset.schema.json",
   "title": "brain sync reset [--export-challenge | --authorization <path>] — --json success output",
-  "description": "The operator-authorized OQ#5 escape hatch: re-converge the broker-owned canonical ref (git.canonical_ref, refs/atlas/main) to the current upstream tree over the note globs after a divergence REJECT halt (or a deterministic exit-3 block whose offending artifact is now absent upstream). TREE-reconcile, not history-replay: it diffs canonicalTree vs upstreamTree, builds ONE reconciled commit as a CHILD of the current canonical head (always a fast-forward), scans every absorbed byte, archives notes present only in the old canonical tree, and re-baselines the cursor to the upstream head — accepting (and auditing) the history gap. Two exclusive modes: --export-challenge does scanned, READ-ONLY planning and emits the broker AuthorizationChallenge (exit 0, zero mutation); --authorization <path> applies a signed challenge. A mutating invocation with neither is action-required (exit 6). --yes never authorizes. Privileged (broker-signature); the challenge binds the reconciliation (targetCommit = the reconciled commit sha) + the canonical base, so any drift in canonical head, upstream head, note globs, or the reconciliation plan changes the bound sha and the broker refuses before any mutation.",
+  "description": "The operator-authorized OQ#5 escape hatch: re-converge the broker-owned canonical ref (git.canonical_ref, refs/atlas/main) to the current upstream tree over the note globs after a divergence REJECT halt (or a deterministic exit-3 block whose offending artifact is now absent upstream). TREE-reconcile, not history-replay: it diffs canonicalTree vs upstreamTree, builds ONE reconciled commit as a CHILD of the current canonical head (always a fast-forward), scans every absorbed byte, archives notes present only in the old canonical tree, and re-baselines the cursor to the upstream head — accepting (and auditing) the history gap. Two exclusive modes: --export-challenge does scanned, READ-ONLY planning and emits the broker AuthorizationChallenge (exit 0, zero mutation); --authorization <path> applies a signed challenge. A mutating invocation with neither is action-required (exit 6). --yes never authorizes. Privileged (broker-signature); the challenge binds the reconciliation via intendedEffect.changePlanDigest (a hash of canonicalBase + upstreamHead + note globs + the reconciled writes/deletes/quarantined set) + canonicalBaseCommit, so any drift in canonical head, upstream head, note globs, or the reconciliation plan changes the bound digest and the broker refuses before any mutation. (No targetCommit is bound: the reconciled child commit's sha is only known after the worktree commit, so the deterministic plan digest is the binding — functionally stronger than a single sha.)",
   "type": "object",
   "unevaluatedProperties": false,
   "required": [
@@ -151,7 +151,7 @@
     "authz": {
       "op": "sync reset",
       "mechanism": "broker-signature",
-      "challengeFields": ["op", "runId", "targetCommit", "canonicalBaseCommit", "intendedEffect", "nonce", "expiresAt"],
+      "challengeFields": ["op", "canonicalBaseCommit", "intendedEffect", "nonce", "expiresAt"],
       "driftCodes": [
         "authz.canonical_moved",
         "authz.target_mismatch",
@@ -190,7 +190,7 @@
       { "code": "backup-unhealthy", "exit": 2, "when": "the fail-closed backup watermark blocks ledger-writing runs" },
       { "code": "secret-scan", "exit": 3, "when": "a non-attributable dirty verdict, or a deterministic exit-3 artifact still present in the upstream tree (reset is not a scan override); cursor unadvanced" },
       { "code": "authz.canonical_moved", "exit": 6, "when": "broker drift: the canonical tip moved from the challenge's canonicalBaseCommit (a concurrent capture) — no mutation" },
-      { "code": "authz.target_mismatch", "exit": 6, "when": "broker drift: the reconciled targetCommit differs from the challenge (upstream tree, note globs, or reconciliation plan changed since signing) — no mutation" },
+      { "code": "authz.target_mismatch", "exit": 6, "when": "broker drift: the re-derived intendedEffect.changePlanDigest differs from the signed challenge (upstream tree, note globs, or reconciliation plan changed since signing) — no mutation" },
       { "code": "authz.nonce_expired", "exit": 6, "when": "broker: the challenge nonce expired (expiresAt passed)" },
       { "code": "authz.signature_invalid", "exit": 1, "when": "broker: Ed25519 signature verification failed" },
       { "code": "authz.payload_mismatch", "exit": 1, "when": "broker: signingPayload differs from the broker-recomputed canonical bytes" },

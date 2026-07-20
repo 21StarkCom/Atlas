@@ -483,7 +483,7 @@ function envelopeFor(row: SyncCursor, upstreamHead: string, plan: SyncPlan, reco
   };
 }
 
-async function runStartupRecovery(deps: SyncCycleDeps, integration: CaptureIntegration): Promise<void> {
+export async function runStartupRecovery(deps: SyncCycleDeps, integration: CaptureIntegration): Promise<void> {
   const reindexHook: ReconcileHooks["reindex"] = async () => {
     const head = await foldProvenanceFromCanonical(deps.store, deps.repo, deps.canonicalRef);
     return { indexGeneration: 1, canonicalSha: head };

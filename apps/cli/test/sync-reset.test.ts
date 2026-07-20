@@ -3,9 +3,10 @@
  * driven against the in-process BrokerService with a real signed authorization.
  */
 import { describe, it, expect, afterEach } from "vitest";
+import { execFileSync } from "node:child_process";
 import { BrokerClient } from "@atlas/broker";
 import type { AuthorizationResponse } from "@atlas/contracts";
-import { scanBytes } from "@atlas/scan";
+import { scanBytes, SecretDetectedError } from "@atlas/scan";
 import { runSyncCycle } from "../src/sync/cycle.js";
 import { exportResetChallenge, applySyncReset, type SyncResetDeps } from "../src/sync/reset.js";
 import { detectDivergence } from "../src/sync/diff.js";
@@ -34,7 +35,14 @@ function resetDeps(h: SyncHarness): SyncResetDeps {
     noteGlobs: ["**/*.md"],
     now: base.now,
     scanNoteBytes,
-    scanGeneratedArtifact: async () => Promise.resolve(),
+    // REAL generated-artifact scan (#293 review): audit-ref-bound ids/paths are
+    // scanned; a secret trips exit 3. Verdict-only, persists nothing.
+    scanGeneratedArtifact: async (text: string, runId: string) => {
+      await Promise.resolve();
+      const origin = `run:${runId}→audit`;
+      const v = scanBytes({ bytes: new TextEncoder().encode(text), context: { origin, boundary: "generated-artifact", sink: "audit" } });
+      if (!v.clean) throw new SecretDetectedError(origin, v.findings, "generated-artifact");
+    },
   };
 }
 
@@ -194,5 +202,76 @@ describe("sync reset — tree-diff re-converge (Task 5.3)", () => {
     expect(String((threw as Error).message)).toMatch(/cursor CAS failed|cycle_seq/i);
     // The re-baseline did NOT happen (last_absorbed_oid unchanged from before the reset).
     expect(h.cursorRow().last_absorbed_oid).toBe(cursorBefore.last_absorbed_oid);
+  }, 60_000);
+});
+
+// ── #293 review fixes: audit-ref scan + crash recovery ──
+
+describe("sync reset — generated-artifact scan + crash recovery (#293 review)", () => {
+  let h: SyncHarness;
+  afterEach(async () => {
+    await h?.cleanup();
+  });
+
+  it("a secret-bearing ARCHIVED note id (in canonical, gone upstream) makes reset refuse exit 3 — the audit-ref scan is not bypassed", async () => {
+    h = await makeSyncHarness();
+    await runSyncCycle(h.deps()); // absorb seed onto refs/atlas/main; cursor caught up
+    // Seed a note whose ID carries a secret DIRECTLY onto canonical (it could never
+    // be absorbed normally — the cycle's id scan would block it). Upstream does NOT
+    // have it, so reset's tree-diff sees it as an archive candidate; its id flows
+    // into changedNoteIds → the finalization intent + manifest.targets (the signed
+    // audit ref). reset MUST scan it and refuse.
+    const canonical = h.readRef(SYNC_CANONICAL_REF)!;
+    const leak = `---\nid: concept-${PLANTED_SECRET}\ntype: concept\nschema_version: 1\ntitle: Leak\nstatus: active\ncreated: 2026-07-20\nupdated: 2026-07-20\n---\n# Leak\n`;
+    // Plumbing-only seed of a secret-id note onto canonical (off a fresh index).
+    const b = execFileSync("git", ["-C", h.vaultDir, "hash-object", "-w", "--stdin"], { input: leak, encoding: "utf8" }).trim();
+    h.git(["read-tree", canonical]);
+    h.git(["update-index", "--add", "--cacheinfo", `100644,${b},notes/leak.md`]);
+    const treeWithLeak = h.git(["write-tree"]);
+    const commitWithLeak = h.git(["commit-tree", treeWithLeak, "-p", canonical, "-m", "seed secret-id note on canonical"]);
+    h.git(["update-ref", SYNC_CANONICAL_REF, commitWithLeak]);
+
+    // export (read-only) must already refuse — it runs the same plan + scan.
+    let threw: unknown;
+    try {
+      await exportResetChallenge(resetDeps(h));
+    } catch (e) {
+      threw = e;
+    }
+    expect(threw).toBeInstanceOf(SecretDetectedError);
+    // canonical unchanged (export mutates nothing), cursor unchanged.
+    expect(h.readRef(SYNC_CANONICAL_REF)).toBe(commitWithLeak);
+  }, 60_000);
+
+  it("crash after reset integrate → recoverSyncRuns replays the sync-reset intent (cursor re-baselined, one reconcile job)", async () => {
+    h = await makeSyncHarness();
+    await runSyncCycle(h.deps());
+    h.writeUpstream("notes/r.md", noteText("concept-r", "R"));
+    h.commitUpstream("r");
+    await runSyncCycle(h.deps());
+    // Force-push divergence so reset has real work.
+    const root = h.git(["rev-list", "--max-parents=0", h.upstreamRef]);
+    h.git(["reset", "--hard", root]);
+    h.writeUpstream("notes/r.md", noteText("concept-r", "R", "rewritten"));
+    const head = h.commitUpstream("rewrite");
+
+    const challenge = (await exportResetChallenge(resetDeps(h))).challenge as object;
+    const auth = h.signReset(JSON.stringify(challenge)) as unknown as AuthorizationResponse;
+    // Crash the reset right after its canonical integrate, before finalize.
+    const deps = resetDeps(h);
+    const crashing: SyncResetDeps = { ...deps, failpoints: { afterIntegrate: () => { throw new Error("crash post reset-integrate"); } } };
+    await expect(applySyncReset(crashing, auth)).rejects.toThrow("crash post reset-integrate");
+    // Canonical moved (reconciled commit installed); cursor NOT yet re-baselined.
+    expect(h.cursorRow().last_absorbed_oid).not.toBe(head);
+    const stuck = h.runRows().filter((r) => r.operation === "sync-reset" && (r.status === "integrated" || r.status === "reindexed"));
+    expect(stuck.length).toBe(1);
+
+    // The next cycle runs recoverSyncRuns, which replays the sync-reset intent.
+    await runSyncCycle(h.deps());
+    expect(h.runRows().find((r) => r.run_id === stuck[0]!.run_id)!.status).toBe("finalized");
+    expect(h.cursorRow().last_absorbed_oid).toBe(head);
+    expect((h.store.db.prepare(`SELECT status FROM notes WHERE note_id='concept-r'`).get() as { status: string }).status).toBe("active");
+    const jobs = h.jobRows().filter((j) => j.workflow === "index:reconcile" && JSON.parse(j.payload).noteIds.includes("concept-r"));
+    expect(jobs.length).toBeGreaterThanOrEqual(1);
   }, 60_000);
 });
