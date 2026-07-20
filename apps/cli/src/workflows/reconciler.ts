@@ -267,6 +267,21 @@ async function recoverRun(
   now: () => string,
 ): Promise<RunReconcileOutcome> {
   const ctx = runContext(deps.store, row);
+  // `sync`-operation runs are owned EXCLUSIVELY by the sync producer's recovery
+  // (`recoverSyncRuns`, apps/cli/src/sync/cycle.ts). The generic finalizer has no
+  // notion of the sync finalize extras — the `sync_cursors` advance, the
+  // `foldNotesForPaths` projection fold, and the single `index:reconcile` enqueue
+  // — so finalizing a sync run here would strand the cursor and silently lose the
+  // notes projection forever (the NEXT cycle re-plans against an already-absorbed
+  // canonical, classifies every path `unchanged`, and advances the cursor with an
+  // empty plan). Layer-0 (`resolveIntegrationIntents`) still lands an anchored
+  // `run.integrated` intent's step-3 (promoting agent-committed→integrated) before
+  // this sweep; we simply LEAVE the promoted run for `recoverSyncRuns` to finalize
+  // from its durable intent. (#289 review: CRITICAL — generic recovery finalizes
+  // stuck sync runs.)
+  if (row.operation === "sync") {
+    return { runId: row.run_id, from: row.status, action: "left", reason: "sync-producer-owned" };
+  }
   switch (row.status) {
     case "planned":
     case "patched":

@@ -374,6 +374,23 @@ export async function buildSyncPlan(
     ]),
   ].sort();
 
+  // The generated-artifact scan runs per commit over the ids parsed IN-RANGE
+  // (commitNoteIds), but ARCHIVE ids are derived from the PRE-CYCLE canonical
+  // tree (a pure delete / a superseded path — never parsed in the walk), and
+  // they still ride the finalization intent into the SIGNED audit ref + the
+  // canonical commit-message trailer. Scan them here (attributed to the boundary
+  // commit) so a secret-bearing archived id cannot reach a durable signed sink
+  // unscanned. (#289 review: MAJOR — archived ids reach the audit ref unscanned.)
+  const archivedIds = [...new Set(archived.map((a) => a.noteId))].sort();
+  if (archivedIds.length > 0) {
+    try {
+      await deps.scanGeneratedArtifact(JSON.stringify({ archivedNoteIds: archivedIds }));
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : "generated-artifact verdict on an archived note id";
+      throw new SyncBlockedError(boundaryOid, reason, e);
+    }
+  }
+
   const appliedOps = absorbed.filter((a) => a.action !== "unchanged").length + archived.length + renamed.length;
 
   const planHash = createHash("sha256")

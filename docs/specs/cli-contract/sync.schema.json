@@ -39,7 +39,7 @@
     },
     "absorbed": {
       "type": "array",
-      "description": "Per-path absorb outcomes; may be empty. action 'unchanged' = identical-bytes re-observation (observation_count bumped, no ChangePlan op).",
+      "description": "Per-path absorb outcomes; may be empty. action 'unchanged' = identical-bytes re-observation of a note already at that content on the canonical ref (no ChangePlan op, no re-embed). Synced notes are first-class vault notes, not source captures, so there is no captures/observation_count row to bump — the re-observation is recorded only as this envelope entry.",
       "items": {
         "type": "object",
         "unevaluatedProperties": false,
@@ -177,8 +177,8 @@
       { "scope": "canonical-integration", "mode": "exclusive", "note": "during the cycle's single broker integrate" }
     ],
     "sideEffects": [
-      "one run (run.started / run.planned / run.integrated broker-signed) when behindBy > 0 and not --dry-run",
-      "one broker CAS fast-forward of the configured canonical ref (refs/atlas/main) when the ChangePlan is non-empty",
+      "one run when behindBy > 0 and not --dry-run: run.planned (always), then run.integrated (broker-signed) ONLY when the ChangePlan is non-empty (appliedOps > 0); an all-quarantined/all-unchanged cycle is a finalized empty-plan run that emits run.planned only — no integrate",
+      "one broker CAS fast-forward of the configured canonical ref (refs/atlas/main) when the ChangePlan is non-empty (appliedOps > 0)",
       "sync_cursors advance (last_absorbed_oid, cycle_seq++, reconciled pending_quarantine) in the finalize transaction",
       "one index:reconcile enqueue (idempotencyKey = run canonical OID) when appliedOps > 0, atomic with the cursor finalize",
       "quarantine records (AEAD, ciphertext-only) for attributable dirty paths"

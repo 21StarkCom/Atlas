@@ -82,6 +82,40 @@ describe("detectDivergence (OQ#5 pre-diff guard)", () => {
     const d = await detectDivergence(f.repo, cursor, head);
     expect(d).toEqual({ state: "cursor-unreachable", cursorOid: cursor, upstreamHead: head });
   });
+
+  it("ours-merge revert (cursor ancestor via the SECOND parent, off the first-parent chain) ⇒ non-ancestral", async () => {
+    // #289 review MAJOR repro: C0→C1 absorbed (cursor=C1); upstream reverts C1
+    // WITHOUT a force-push via `reset --hard C0 && merge -s ours C1`. C1 is still
+    // an ANY-parent ancestor of the merge M (via M's second parent), so a plain
+    // merge-base --is-ancestor check says "ok" — but M's FIRST-PARENT diff back to
+    // C0 is empty, so the delta walk would absorb nothing and silently advance the
+    // cursor, leaving canonical permanently diverged. The first-parent anchor
+    // check must classify this as a divergence → REJECT.
+    const f = await linearFixture(2); // c0, c1
+    const cursor = f.oids[1]!;
+    f.git(["reset", "--hard", f.oids[0]!]);
+    f.git(["merge", "-s", "ours", "--no-edit", cursor]); // M: first parent C0, second parent C1
+    const head = f.git(["rev-parse", "HEAD"]);
+    // Sanity: C1 IS an any-parent ancestor of M (so a bare isAncestor check passes).
+    expect(await f.repo.isAncestor(cursor, head)).toBe(true);
+    const d = await detectDivergence(f.repo, cursor, head);
+    expect(d).toEqual({ state: "non-ancestral", cursorOid: cursor, upstreamHead: head });
+  });
+
+  it("a normal merge whose cursor IS on the first-parent chain stays ok (no false REJECT)", async () => {
+    const f = await linearFixture(2); // c0, c1 (cursor = c1, on main's first-parent line)
+    const cursor = f.oids[1]!;
+    // Side branch off c1, merged back into main with --no-ff: c1 stays first-parent.
+    f.git(["checkout", "-q", "-b", "side", cursor]);
+    await writeFile(join(f.dir, "s.md"), "---\nid: s\n---\ns\n");
+    f.git(["add", "-A"]);
+    f.git(["commit", "-q", "-m", "s"]);
+    f.git(["checkout", "-q", "main"]);
+    f.git(["merge", "-q", "--no-ff", "--no-edit", "side"]);
+    const head = f.git(["rev-parse", "main"]);
+    const d = await detectDivergence(f.repo, cursor, head);
+    expect(d).toEqual({ state: "ok" });
+  });
 });
 
 describe("countBehind (first-parent behindBy)", () => {

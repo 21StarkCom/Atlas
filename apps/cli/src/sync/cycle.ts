@@ -39,6 +39,7 @@ import {
   startRun,
   reconcileRunsOnStartup,
   sha256Canonical,
+  canTerminateFrom,
   type ReconcileHooks,
   type WorkflowDeps,
 } from "../workflows/index.js";
@@ -108,6 +109,8 @@ export interface SyncCycleDeps {
   readonly scanGeneratedArtifact: (text: string, runId: string) => Promise<void>;
   /** TEST-ONLY crash injection at the cycle's recovery boundaries (Task 4.8). Never set in production. */
   readonly failpoints?: {
+    /** Fires at agent-committed, BEFORE the broker append/CAS — a clean pre-integrate crash. */
+    readonly beforeIntegrate?: () => void;
     readonly afterIntegrate?: () => void;
     readonly afterReindexed?: () => void;
     readonly beforeFinalize?: () => void;
@@ -238,16 +241,17 @@ export async function runSyncCycle(deps: SyncCycleDeps, opts: SyncCycleOptions =
 
   const integration = await deps.connectIntegration();
   try {
-    // Startup recovery. ORDER IS LOAD-BEARING: the sync-specific intent replay
-    // must consume integrated/reindexed sync runs BEFORE the generic reconciler
-    // sees them — `recoverIntegrated` with a reindex hook would otherwise drive
-    // them straight to `finalized` WITHOUT the cursor advance / notes fold /
-    // enqueue, stranding the cursor forever (the diff would re-derive as all-
-    // `unchanged`). The second replay catches runs the generic pass's layer-0
-    // intent resolution just promoted from a mid-integrate crash.
-    await replayPendingSyncFinalize(deps, integration);
+    // Startup recovery. ORDER IS LOAD-BEARING: the generic reconciler runs FIRST
+    // — its layer-0 lands an anchored `run.integrated` intent's §2.8 step-3
+    // (promoting an agent-committed mid-integrate-crash run to `integrated`), and
+    // its `recoverRun` now LEAVES every `operation:"sync"` run (never finalizing
+    // one without the cursor/fold/enqueue extras). `recoverSyncRuns` then runs as
+    // the SOLE finalizer of sync runs: it replays integrated/reindexed runs from
+    // their durable intent and fails pre-integrate zombies so the next cycle
+    // re-derives cleanly. (#289 review: CRITICAL — generic recovery finalized
+    // stuck sync runs and stranded the cursor.)
     await runStartupRecovery(deps, integration);
-    await replayPendingSyncFinalize(deps, integration);
+    await recoverSyncRuns(deps, integration);
 
     // Re-read AFTER recovery — the replay may have advanced the cursor.
     const { ctx, behindBy } = await preamble(deps);
@@ -409,6 +413,9 @@ async function absorb(ctx: CycleContext, integration: CaptureIntegration, opts: 
       manifest,
     );
     await handle.checkpoint("agent-committed", { commitSha, treeHash, agentRef, tier: 1 });
+    // Pre-integrate crash window: the run is durably `agent-committed`, NO broker
+    // append or canonical move has happened, and no intent is anchored (Task 4.8).
+    deps.failpoints?.beforeIntegrate?.();
 
     // The durable finalization intent — everything replay needs, persisted in
     // the §2.8 step-1 intent BEFORE the ref moves.
@@ -505,61 +512,100 @@ export function readSyncIntent(store: Store, runId: string): SyncIntent | null {
   return null;
 }
 
+/** What `recoverSyncRuns` did to the interrupted sync runs it found. */
+export interface SyncRecoveryReport {
+  /** integrated/reindexed runs whose finalize was replayed from the intent. */
+  readonly replayed: number;
+  /** pre-integrate zombies failed so the next cycle re-derives cleanly. */
+  readonly failed: number;
+}
+
 /**
- * Complete a crashed cycle from its durable intent: a sync run whose canonical
- * FF committed (`integrated`/`reindexed`) but whose finalize never ran gets its
- * fold + cursor advance + single enqueue replayed idempotently — from the
- * intent, never from the (now-`unchanged`) upstream diff.
+ * The SOLE recovery path for `operation:"sync"` runs (the generic reconciler
+ * leaves them — see `reconciler.ts` `recoverRun`). Runs AFTER the generic pass,
+ * so an anchored `run.integrated` intent has already been landed (layer-0
+ * promoted its run to `integrated`). Two dispositions:
+ *
+ * - **`integrated`/`reindexed`** (canonical DID advance): replay fold + cursor
+ *   advance + the single `index:reconcile` enqueue idempotently FROM THE DURABLE
+ *   INTENT — never from the upstream diff, which post-integrate classifies every
+ *   byte `unchanged` and would strand the fold/enqueue/cursor forever.
+ * - **pre-integrate** (`planned`/`patched`/`worktree-applied`/`agent-committed`
+ *   — canonical did NOT advance; a crash before §2.8 step 2, or an un-anchored
+ *   intent layer-0 dropped): FAIL the run at its checkpoint so it converges
+ *   (agent_runs terminal + its worktree becomes sweep-eligible). The cursor
+ *   never moved, so the next cycle re-derives the identical delta and opens a
+ *   fresh run. This closes the zombie-run leak.
  */
-export async function replayPendingSyncFinalize(deps: SyncCycleDeps, integration: CaptureIntegration): Promise<number> {
-  const stuck = deps.store.db
-    .prepare(`SELECT run_id, status FROM agent_runs WHERE operation = 'sync' AND status IN ('integrated','reindexed') ORDER BY started_at ASC`)
+export async function recoverSyncRuns(deps: SyncCycleDeps, integration: CaptureIntegration): Promise<SyncRecoveryReport> {
+  const rows = deps.store.db
+    .prepare(
+      `SELECT run_id, status FROM agent_runs
+        WHERE operation = 'sync'
+          AND status NOT IN ('finalized','failed','cancelled','rejected','rolled-back')
+        ORDER BY started_at ASC, run_id ASC`,
+    )
     .all() as { run_id: string; status: string }[];
+  const wdeps: WorkflowDeps = {
+    store: deps.store,
+    broker: integration.broker,
+    backup: deps.backup,
+    repo: deps.repo,
+    now: deps.now,
+  };
   let replayed = 0;
-  for (const runRow of stuck) {
-    const intent = readSyncIntent(deps.store, runRow.run_id);
-    if (intent === null) {
-      throw new CliError({
-        code: "internal",
-        message: `sync run ${runRow.run_id} is ${runRow.status} but carries no sync finalization intent`,
-        hint: "The run.integrated intent should always carry detail.sync; inspect audit_intents.",
-        exitCode: EXIT.INTERNAL,
-      });
-    }
-    const wdeps: WorkflowDeps = {
-      store: deps.store,
-      broker: integration.broker,
-      backup: deps.backup,
-      repo: deps.repo,
-      now: deps.now,
-    };
-    const handle = await startRun(wdeps, { operation: "sync", runId: runRow.run_id, targetNoteId: null, resume: true });
-    // Idempotent re-drive of the post-integrate steps.
-    await foldProvenanceFromCanonical(deps.store, deps.repo, deps.canonicalRef);
-    foldNotesForPaths(deps.store, [...intent.changedNoteIds], resolveAtRef(deps.repo, deps.canonicalRef, deps.noteGlobs));
-    if (runRow.status === "integrated") {
-      await handle.checkpoint("reindexed", { indexGeneration: 1, canonicalSha: intent.canonicalSha });
-    }
-    await handle.finalize(undefined, {
-      extraCommit: (db) => {
-        finalizeCursor(db, {
-          sourceId: intent.sourceId,
-          newOid: intent.targetOid,
-          now: deps.now(),
-          pendingQuarantine: intent.pendingQuarantine,
+  let failed = 0;
+  for (const runRow of rows) {
+    if (runRow.status === "integrated" || runRow.status === "reindexed") {
+      const intent = readSyncIntent(deps.store, runRow.run_id);
+      if (intent === null) {
+        throw new CliError({
+          code: "internal",
+          message: `sync run ${runRow.run_id} is ${runRow.status} but carries no sync finalization intent`,
+          hint: "The run.integrated intent should always carry detail.sync; inspect audit_intents.",
+          exitCode: EXIT.INTERNAL,
         });
-        if (intent.changedNoteIds.length > 0) {
-          enqueue(db, {
-            workflow: INDEX_RECONCILE_WORKFLOW,
-            idempotencyKey: intent.canonicalSha,
-            payload: { noteIds: [...intent.changedNoteIds] },
+      }
+      const handle = await startRun(wdeps, { operation: "sync", runId: runRow.run_id, targetNoteId: null, resume: true });
+      // Idempotent re-drive of the post-integrate steps.
+      await foldProvenanceFromCanonical(deps.store, deps.repo, deps.canonicalRef);
+      foldNotesForPaths(deps.store, [...intent.changedNoteIds], resolveAtRef(deps.repo, deps.canonicalRef, deps.noteGlobs));
+      if (runRow.status === "integrated") {
+        await handle.checkpoint("reindexed", { indexGeneration: 1, canonicalSha: intent.canonicalSha });
+      }
+      await handle.finalize(undefined, {
+        extraCommit: (db) => {
+          finalizeCursor(db, {
+            sourceId: intent.sourceId,
+            newOid: intent.targetOid,
+            now: deps.now(),
+            pendingQuarantine: intent.pendingQuarantine,
           });
-        }
-      },
-    });
-    replayed++;
+          if (intent.changedNoteIds.length > 0) {
+            enqueue(db, {
+              workflow: INDEX_RECONCILE_WORKFLOW,
+              idempotencyKey: intent.canonicalSha,
+              payload: { noteIds: [...intent.changedNoteIds] },
+            });
+          }
+        },
+      });
+      replayed++;
+      continue;
+    }
+    // Pre-integrate: canonical did NOT advance. Fail the run at its checkpoint so
+    // it converges; the cursor is untouched, so the next cycle re-derives it.
+    const handle = await startRun(wdeps, { operation: "sync", runId: runRow.run_id, targetNoteId: null, resume: true });
+    const at = handle.hydrateFromDurable();
+    if (at === null || !canTerminateFrom(at)) {
+      // A state the terminal contract does not permit failing from — leave it for
+      // the generic orphan sweep rather than force an illegal transition.
+      continue;
+    }
+    await handle.fail(at, "sync-crash-pre-integrate: canonical unadvanced; next cycle re-derives");
+    failed++;
   }
-  return replayed;
+  return { replayed, failed };
 }
 
 async function cleanupWorktree(repo: Repo, dir: string): Promise<void> {

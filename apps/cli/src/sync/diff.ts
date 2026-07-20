@@ -43,6 +43,25 @@ export async function detectDivergence(
   if (!(await repo.isAncestor(lastOid, upstreamHead))) {
     return { state: "non-ancestral", cursorOid: lastOid, upstreamHead };
   }
+  // FIRST-PARENT ANCHORING (#289 review: MAJOR). `isAncestor` accepts ANY-parent
+  // ancestry, but the whole delta model — countBehind and commitsInRange — walks
+  // the FIRST-PARENT chain. First-parent diffs compose to tree(anchor)→tree(head)
+  // and equal tree(cursor)→tree(head) ONLY when the cursor lies ON upstreamHead's
+  // first-parent chain. A cursor reachable only through a second parent (an
+  // `ours`-merge revert, or a pull-merge whose conflict resolution discards the
+  // absorbed side) passes isAncestor but the walked diffs miss the divergent
+  // paths — the cycle would absorb an empty/broken delta and advance the cursor,
+  // silently diverging canonical from upstream forever with NO signal. That is
+  // exactly the silent-RESET outcome plan §0's OQ#5 REJECT policy forbids. So we
+  // additionally require the cursor to sit on the first-parent chain: the commit
+  // `behindBy` first-parent steps back from head (git `~N` follows first parents)
+  // must BE the cursor. A mismatch is a divergence → REJECT (recover via `sync
+  // reset`), never a silent absorb.
+  const behind = await countBehind(repo, lastOid, upstreamHead);
+  const firstParentAnchor = await repo.readRef(`${upstreamHead}~${behind}`);
+  if (firstParentAnchor !== resolved) {
+    return { state: "non-ancestral", cursorOid: lastOid, upstreamHead };
+  }
   return { state: "ok" };
 }
 
