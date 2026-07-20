@@ -419,7 +419,9 @@ mechanically enforces acceptance criterion 1 and can never drift from the regist
     { "code": "authz.payload_mismatch", "exitCode": 1 },
     { "code": "authz.schema_invalid", "exitCode": 1 },
     { "code": "authz.canonicalization_unsupported", "exitCode": 1 },
-    { "code": "authz.presence_unverified", "exitCode": 6 }
+    { "code": "authz.presence_unverified", "exitCode": 6 },
+    { "code": "diverged:non-ancestral", "exitCode": 2 },
+    { "code": "diverged:cursor-unreachable", "exitCode": 2 }
   ],
   "privilegedOps": [
     {

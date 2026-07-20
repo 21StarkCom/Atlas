@@ -1,0 +1,207 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/sync.schema.json",
+  "title": "brain sync [--dry-run] [--max-paths <n>] — --json success output",
+  "description": "Run one upstream→refs/atlas/main absorb cycle over the adopted vault (60-B). Reads the sync_cursors row, snapshots the row's upstream_ref head, REJECT-halts on a non-ancestral or unreachable cursor BEFORE computing any diff (OQ#5, exit 2, error envelope, cursor unadvanced), otherwise walks the first-parent commit range, plans every changed note path through the scan-before-persist capture pipeline, accumulates one ChangePlan, integrates via one broker CAS fast-forward of the configured canonical ref, folds projections, and finalizes cursor + pending-quarantine set + a single index:reconcile enqueue in one transaction. Success envelope on exit 0 (clean) and exit 6 (≥1 attributable path quarantined; cursor still advanced). Upstream deletions map to ProposeArchive — never ProposeDelete/erase. Atlas never writes refs/heads/main (or any upstream ref).",
+  "type": "object",
+  "unevaluatedProperties": false,
+  "required": [
+    "command",
+    "cursorFrom",
+    "cursorTo",
+    "upstreamHead",
+    "absorbed",
+    "quarantined",
+    "archived",
+    "renamed",
+    "clearedPending",
+    "appliedOps",
+    "reconcileJobId",
+    "cycleSeq",
+    "truncated"
+  ],
+  "properties": {
+    "command": { "const": "sync" },
+    "cursorFrom": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "40-hex git OID last absorbed before this cycle; null on first absorb (zero-state)."
+    },
+    "cursorTo": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "40-hex OID the cursor advanced to (= last fully-processed commit; = upstreamHead on an unbounded fully-drained cycle). Equals cursorFrom on a no-run outcome (--dry-run or behindBy == 0), where the cursor does not move."
+    },
+    "upstreamHead": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "40-hex OID of the cursor row's upstream_ref snapshotted at cycle start."
+    },
+    "absorbed": {
+      "type": "array",
+      "description": "Per-path absorb outcomes; may be empty. action 'unchanged' = identical-bytes re-observation (observation_count bumped, no ChangePlan op).",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["path", "noteId", "contentId", "action"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1, "description": "Repo-relative note path." },
+          "noteId": { "type": "string", "minLength": 1 },
+          "contentId": { "type": "string", "minLength": 1, "description": "Serialized ContentId of the absorbed bytes." },
+          "action": { "enum": ["created", "modified", "unchanged"] }
+        }
+      }
+    },
+    "quarantined": {
+      "type": "array",
+      "description": "Attributable dirty paths quarantined this cycle (skipped, recorded in pending_quarantine); may be empty.",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["path", "quarantineId"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "quarantineId": { "type": "string", "description": "Opaque quarantine handle; the empty string \"\" (sentinel: no record persisted) under --dry-run." }
+        }
+      }
+    },
+    "archived": {
+      "type": "array",
+      "description": "Notes archived because their path was deleted upstream (ProposeArchive — non-destructive); may be empty.",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["path", "noteId"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "noteId": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "renamed": {
+      "type": "array",
+      "description": "Notes renamed upstream (same contentId, blob reused); may be empty.",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["fromPath", "toPath", "noteId"],
+        "properties": {
+          "fromPath": { "type": "string", "minLength": 1 },
+          "toPath": { "type": "string", "minLength": 1 },
+          "noteId": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "clearedPending": {
+      "type": "array",
+      "description": "Paths whose stale pending_quarantine entry was removed this cycle (path scanned clean / archived / renamed away). Under --dry-run these are PLANNED removals — nothing is removed.",
+      "items": {
+        "type": "object",
+        "unevaluatedProperties": false,
+        "required": ["path", "quarantineId"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "quarantineId": { "type": "string", "description": "The quarantine handle of the entry that was (or would be) removed." }
+        }
+      }
+    },
+    "appliedOps": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Count of ChangePlan ops the cycle's single run applied: absorbed entries with action created/modified, plus archived and renamed counts. 'unchanged' re-observations and pending-entry clears are NOT counted. 0 on --dry-run, behindBy == 0, all-quarantined, and all-unchanged cycles."
+    },
+    "reconcileJobId": {
+      "type": ["string", "null"],
+      "description": "The enqueued index:reconcile job id (idempotencyKey = the run's canonical commit OID); null when appliedOps == 0 and on --dry-run (nothing enqueued)."
+    },
+    "cycleSeq": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "sync_cursors.cycle_seq after the cycle — post-increment on a finalized run (clean / mixed / all-quarantined); the current unchanged value on a no-run outcome (--dry-run or behindBy == 0)."
+    },
+    "truncated": {
+      "type": "boolean",
+      "description": "true when --max-paths stopped the cycle before head (more commits remain); false on a no-run outcome (behindBy == 0)."
+    }
+  },
+  "examples": [
+    {
+      "command": "sync",
+      "cursorFrom": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "cursorTo": "cccccccccccccccccccccccccccccccccccccccc",
+      "upstreamHead": "cccccccccccccccccccccccccccccccccccccccc",
+      "absorbed": [
+        { "path": "notes/alpha.md", "noteId": "concept-alpha", "contentId": "sha256:1f2e3d:text/markdown", "action": "modified" },
+        { "path": "notes/beta.md", "noteId": "concept-beta", "contentId": "sha256:9a8b7c:text/markdown", "action": "created" }
+      ],
+      "quarantined": [],
+      "archived": [{ "path": "notes/old.md", "noteId": "concept-old" }],
+      "renamed": [{ "fromPath": "notes/misc.md", "toPath": "notes/misc-2026.md", "noteId": "concept-misc" }],
+      "clearedPending": [],
+      "appliedOps": 4,
+      "reconcileJobId": "job-01J9Z8Q0000000000000000042",
+      "cycleSeq": 7,
+      "truncated": false
+    },
+    {
+      "command": "sync",
+      "cursorFrom": null,
+      "cursorTo": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "upstreamHead": "dddddddddddddddddddddddddddddddddddddddd",
+      "absorbed": [{ "path": "notes/clean.md", "noteId": "concept-clean", "contentId": "sha256:0aa11b:text/markdown", "action": "created" }],
+      "quarantined": [{ "path": "notes/dirty.md", "quarantineId": "3f2a9c4d5e6f708192a3b4c5d6e7f80912345678aabbccdd" }],
+      "archived": [],
+      "renamed": [],
+      "clearedPending": [{ "path": "notes/corrected.md", "quarantineId": "00112233445566778899aabbccddeeff00112233445566aa" }],
+      "appliedOps": 2,
+      "reconcileJobId": "job-01J9Z8Q0000000000000000043",
+      "cycleSeq": 1,
+      "truncated": true
+    }
+  ],
+  "x-atlas-contract": {
+    "command": "sync",
+    "phase": 5,
+    "privilege": "shared",
+    "idempotency": "intrinsic",
+    "executionClass": "ledger-writing",
+    "summary": "One upstream→refs/atlas/main absorb cycle: OQ#5 REJECT divergence guard before any diff, per-commit first-parent walk, scan-before-persist on every absorbed byte, one run / one broker CAS / one index:reconcile enqueue, cursor + pending-quarantine finalized atomically.",
+    "args": [],
+    "flags": [
+      { "flag": "--dry-run", "type": "boolean", "default": false, "description": "Compute + classify + scan preflight, mutate nothing: no run, no blob, no ref move, no cursor/cycle_seq/pending change, no quarantine record, no enqueue. quarantineId is \"\" for would-be-dirty paths; clearedPending is planned-only." },
+      { "flag": "--max-paths <n>", "type": "integer", "default": null, "description": "n ≥ 1. Bound one cycle: stop at the last fully-processed commit boundary once the cumulative changed-path count reaches n (an atomic oversize commit is processed in full). The cursor advances to that commit OID; truncated: true." }
+    ],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "locks": [
+      { "scope": "vault-maintenance", "mode": "exclusive" },
+      { "scope": "canonical-integration", "mode": "exclusive", "note": "during the cycle's single broker integrate" }
+    ],
+    "sideEffects": [
+      "one run (run.started / run.planned / run.integrated broker-signed) when behindBy > 0 and not --dry-run",
+      "one broker CAS fast-forward of the configured canonical ref (refs/atlas/main) when the ChangePlan is non-empty",
+      "sync_cursors advance (last_absorbed_oid, cycle_seq++, reconciled pending_quarantine) in the finalize transaction",
+      "one index:reconcile enqueue (idempotencyKey = run canonical OID) when appliedOps > 0, atomic with the cursor finalize",
+      "quarantine records (AEAD, ciphertext-only) for attributable dirty paths"
+    ],
+    "prohibitedEffects": [
+      "writes refs/heads/main (or any upstream ref — only the configured canonical ref advances, via the broker)",
+      "ProposeDelete/erase for an upstream deletion (archive only; destructive removal stays human-gated)",
+      "any diff computation, cursor advance, run open, ledger write, or audit append after a divergence halt",
+      "--dry-run writes to no sink (no run, no cursor/cycle_seq/pending change, no quarantine record, no enqueue)"
+    ],
+    "exitCodes": [0, 2, 3, 4, 5, 6],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "unknown flag/argument, or --max-paths < 1" },
+      { "code": "config-invalid", "exit": 2, "when": "brain.config.yaml fails schema validation, the canonical ref is not an adopted broker-owned ref, or it equals the row's upstream_ref" },
+      { "code": "vault-error", "exit": 2, "when": "the vault repo is missing/unreadable or the sync_cursors row is absent/malformed" },
+      { "code": "locked:jobs-runner", "exit": 2, "retryable": true, "when": "the jobs drain lock is held; deferred to the next cadence" },
+      { "code": "locked:vault-maintenance", "exit": 2, "retryable": true, "when": "another maintenance op holds the vault-maintenance lock" },
+      { "code": "backup-unhealthy", "exit": 2, "when": "the fail-closed backup watermark blocks ledger-writing runs; clears only on operator action" },
+      { "code": "diverged:non-ancestral", "exit": 2, "when": "the cursor OID resolves but is no longer an ancestor of the row's upstream_ref head (force-push/rewrite); halt BEFORE any diff — cursor unadvanced, no run, no ledger write, no audit append; recover via sync reset" },
+      { "code": "diverged:cursor-unreachable", "exit": 2, "when": "the cursor OID no longer resolves in the repo (upstream gc); same pre-diff halt semantics; recover via sync reset" },
+      { "code": "secret-scan", "exit": 3, "when": "a NON-attributable dirty verdict (GeneratedArtifactGuard on Atlas-generated bytes) aborts the cycle, cursor unadvanced, bytes quarantined; per-path upstream secrets are attributable and exit 6 instead" },
+      { "code": "internal", "exit": 4, "retryable": true, "when": "a non-terminal per-path error aborts the cycle; cursor and pending unchanged" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}

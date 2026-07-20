@@ -78,6 +78,7 @@ const ADAPTERS: Record<string, Adapter> = {
 
 const registry = loadRegistry(root);
 const inventory = registry.commands.filter((r) => {
+  if (!r.implemented) return false; // an unimplemented row cannot be invoked; the adapter obligation starts when the flag flips
   const schema = JSON.parse(readFileSync(join(root, r.schemaRef), "utf8"));
   return SWEEP_CLASSES.has(schema["x-atlas-contract"]?.executionClass);
 });

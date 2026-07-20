@@ -1419,7 +1419,7 @@ describe("Phase-5 cli-contract schema presence (Task 5.0)", () => {
     }
   });
 
-  it("the Phase-5 command set matches the delivered inventory (Task 5.0 + index eval)", () => {
+  it("the Phase-5 command set matches the delivered inventory (Task 5.0 + index eval + 60-B sync)", () => {
     expect(phase5.map((c) => c.name).sort()).toEqual(
       [
         "graduation audit",
@@ -1428,6 +1428,8 @@ describe("Phase-5 cli-contract schema presence (Task 5.0)", () => {
         "index eval",
         "quarantine inspect",
         "quarantine resolve",
+        "sync",
+        "sync status",
       ].sort(),
     );
   });
