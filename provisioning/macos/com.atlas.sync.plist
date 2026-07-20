@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Continuous vault sync (#60 Phase 6): the 300 s two-step auto-hook that closes
+     the ingest→index gap. Runs the wrapper as the unprivileged `atlas-agent`
+     identity (D17, network-denied) — it absorbs upstream refs/heads/main into the
+     broker-owned refs/atlas/main and then drains the enqueued index:reconcile job.
+
+     Installed by provisioning/macos/services.sh, but NOT bootstrapped by
+     `services.sh install`: it stays DISABLED until `services.sh enable-sync`
+     passes every gate (keychain-unlock, upstream puller, absolute-brain
+     resolution, atlas-agent repo-open probe). A timer enabled ahead of its gates
+     fail-closes every single cycle, silently ignores remote pushes, or dies at
+     command resolution — all of which look like "it's running fine".
+
+     NO secret in EnvironmentVariables, by contract: the capability key is fetched
+     from the Keychain inside the wrapper and handed to the drain on a
+     command-scoped file descriptor. A plist is world-readable. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.atlas.sync</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@ATLAS_INSTALL_BIN@/atlas-sync-wrapper.sh</string>
+  </array>
+  <key>UserName</key><string>atlas-agent</string>
+  <key>StartInterval</key><integer>300</integer>
+  <key>RunAtLoad</key><false/>
+  <key>ThrottleInterval</key><integer>60</integer>
+  <key>StandardOutPath</key><string>/usr/local/var/log/atlas/sync.log</string>
+  <key>StandardErrorPath</key><string>/usr/local/var/log/atlas/sync.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>

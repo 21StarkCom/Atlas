@@ -38,4 +38,25 @@ for b in atlas-broker atlas-egress; do install_one "$b"; done
 # launchers (fixed exec paths)
 install -m 0755 -o root -g "$ATLAS_ROOT_GROUP" "$HERE/bin/broker-launcher.sh" "$ATLAS_INSTALL_BIN/broker-launcher.sh"
 install -m 0755 -o root -g "$ATLAS_ROOT_GROUP" "$HERE/bin/egress-launcher.sh" "$ATLAS_INSTALL_BIN/egress-launcher.sh"
+
+# --- the sync auto-hook wrapper (#60 Phase 6, macOS/launchd only) ------------
+if [ "$ATLAS_OS" = "Darwin" ]; then
+# launchd does NOT source the operator's interactive shell, so a bare `brain`
+# fails command-not-found under the minimal launchd PATH before sync even starts.
+# Resolve the absolute brain entrypoint HERE, at provisioning time, and bake it in.
+# ATLAS_BRAIN_BIN lets the operator name it explicitly when `brain` is not on root's
+# PATH (a pnpm/nvm install usually isn't).
+BRAIN_BIN="${ATLAS_BRAIN_BIN:-$(command -v brain || true)}"
+if [ -z "$BRAIN_BIN" ] || [ ! -x "$BRAIN_BIN" ]; then
+  echo "error: cannot resolve an absolute \`brain\` executable for the sync wrapper." >&2
+  echo "       re-run with ATLAS_BRAIN_BIN=/absolute/path/to/brain (launchd has no shell PATH)." >&2
+  exit 2
+fi
+step "install atlas-sync-wrapper.sh (brain → $BRAIN_BIN)"
+rendered_wrapper="$(mktemp -t atlas-sync-wrapper)"
+sed -e "s|@ATLAS_BRAIN_BIN@|$BRAIN_BIN|g" -e "s|@ATLAS_SECURITY_BIN@|/usr/bin/security|g" \
+  "$HERE/macos/atlas-sync-wrapper.sh" > "$rendered_wrapper"
+install -m 0755 -o root -g "$ATLAS_ROOT_GROUP" "$rendered_wrapper" "$ATLAS_INSTALL_BIN/atlas-sync-wrapper.sh"
+rm -f "$rendered_wrapper"
+fi
 step "DONE — privileged binaries installed hash-verified; repo dist/ is never executed privileged"
