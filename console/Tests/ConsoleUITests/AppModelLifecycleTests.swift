@@ -214,12 +214,16 @@ final class SettingsCutoverTests: XCTestCase {
             onceHellos: [UIFx.hello(path: path)],
             exportResults: [SpawnResult(exitCode: 6, stdout: UIChallenge.gitApprove(), stderr: Data())])
         let store = makeStore(Settings(atlasRoot: "ok"))
-        let counter = NSLock()
-        nonisolated(unsafe) var factoryCalls = 0
+        final class Counter: @unchecked Sendable {
+            let lock = NSLock(); private(set) var calls = 0
+            func bump() { lock.withLock { calls += 1 } }
+            var value: Int { lock.withLock { calls } }
+        }
+        let counter = Counter()
         let model = AppModel(
             settingsStore: store, environment: [:],
             sessionFactory: { s, _ in
-                counter.withLock { factoryCalls += 1 }
+                counter.bump()
                 return try UITestSupport.session(runner: runner, settings: s)
             })
         await model.launch()
@@ -228,12 +232,12 @@ final class SettingsCutoverTests: XCTestCase {
         await model.beginAction(op: "git approve",
                                 focus: FocusContext(fields: ["runId": UIChallenge.runId]), entry: [:])
         // The flow actor is at Display now (begin awaited through export); the mirror may still lag.
-        let before = counter.withLock { factoryCalls }
+        let before = counter.value
         await model.applySettings(Settings(atlasRoot: "changed"))
 
         XCTAssertNotNil(model.settingsError, "the cutover is refused while a flow is in flight")
         XCTAssertTrue(model.settingsError?.contains("privileged flow") == true, "\(model.settingsError ?? "")")
-        XCTAssertEqual(counter.withLock { factoryCalls }, before, "no candidate probe while a flow is in flight")
+        XCTAssertEqual(counter.value, before, "no candidate probe while a flow is in flight")
         XCTAssertEqual(store.load().settings.atlasRoot, "ok", "prior settings retained")
     }
 
