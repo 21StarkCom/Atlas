@@ -25,7 +25,11 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// The sandbox worker costs seconds per normalize; the 5s default flakes under
+// parallel-suite load (review round-1 finding).
+vi.setConfig({ testTimeout: 30_000 });
 import { openStore, type Store } from "@atlas/sqlite-store";
 import { openRepo, type Repo } from "@atlas/git";
 import { PrePersistenceGuard, type QuarantineSink, type SecretFinding } from "@atlas/scan";
@@ -148,8 +152,8 @@ afterEach(() => {
 
 describe("parseLocatorRange", () => {
   it("parses char:/byte: strict integer ranges and rejects everything else", () => {
-    expect(parseLocatorRange("char:10-15")).toEqual({ start: 10, end: 15 });
-    expect(parseLocatorRange("byte:0-5")).toEqual({ start: 0, end: 5 });
+    expect(parseLocatorRange("char:10-15")).toEqual({ scheme: "char", start: 10, end: 15 });
+    expect(parseLocatorRange("byte:0-5")).toEqual({ scheme: "byte", start: 0, end: 5 });
     expect(parseLocatorRange("page:1-2")).toBeNull();
     expect(parseLocatorRange("dom:/html/body")).toBeNull();
     expect(parseLocatorRange("(none)")).toBeNull();
@@ -180,18 +184,58 @@ describeIfSandbox("recoverAnchorFrom (#217, real sandbox)", () => {
     expect(anchor!.newText).toBe(real.text);
   });
 
-  it("byte: locators recover too when the hash proves the range (ASCII text)", async () => {
+  it("byte: locators fail closed to pending — byte offsets verified in string space could stamp exact with a stale byte locator", async () => {
     const real = await realRendition();
     commitBlob(CONTENT);
     seedProjection(sha256(CONTENT), real.normalizedHash, real.extractor, real.normalizer);
     const start = real.text.indexOf("brown");
+    // Even a would-be-verifiable ASCII span is refused: nothing in production
+    // emits byte: (md/txt are char-offset), and multibyte content shifts byte
+    // offsets off string indices — recovery never approximates byte space.
     const anchor = await recoverAnchorFrom(
       env(),
       head({ locator: `byte:${start}-${start + 5}`, quote_hash: sha256("brown") }),
       rendId(real.extractor, real.normalizer),
     );
-    expect(anchor).not.toBeNull();
-    expect(anchor!.quote).toBe("brown");
+    expect(anchor).toBeNull();
+  });
+
+  it("a range splitting a surrogate pair recovers nothing even when the lossy hash matches", async () => {
+    const emojiContent = "# Alpha\n\nmark \u{1F600} end of note.\n";
+    const dir2 = mkdtempSync(join(tmpdir(), "atlas-rr-sg-"));
+    const p2 = join(dir2, "probe.md");
+    writeFileSync(p2, emojiContent, "utf8");
+    let text: string;
+    let normalizedHash: string;
+    let ext: number;
+    let norm: number;
+    try {
+      const r = await normalize({ path: p2, guard: new PrePersistenceGuard(new RecordingSink()) });
+      if (!r.ok) throw new Error(`probe rejected: ${r.rejection.code}`);
+      text = r.rendition.text;
+      normalizedHash = r.rendition.normalizedContentHash;
+      ext = r.rendition.extractorVersion;
+      norm = r.rendition.normalizerVersion;
+    } finally {
+      rmSync(dir2, { recursive: true, force: true });
+    }
+    const rawHash = sha256(emojiContent);
+    commitBlob(emojiContent);
+    seedProjection(rawHash, normalizedHash, ext, norm);
+
+    // End the range between the emoji's high and low surrogate; the recorded hash
+    // is computed over the exact LOSSY slice (what an attacker would supply) — the
+    // boundary guard must refuse regardless of the hash matching.
+    const emojiStart = text.indexOf("\u{1F600}");
+    const start = text.indexOf("mark");
+    const end = emojiStart + 1; // splits the pair
+    const lossySlice = text.slice(start, end);
+    const anchor = await recoverAnchorFrom(
+      env(),
+      head({ raw_content_hash: rawHash, locator: `char:${start}-${end}`, quote_hash: sha256(lossySlice) }),
+      rendId(ext, norm, rawHash),
+    );
+    expect(anchor).toBeNull();
   });
 
   it("a quote_hash that matches nothing at the recorded range recovers nothing (vanished/shifted ⇒ pending)", async () => {

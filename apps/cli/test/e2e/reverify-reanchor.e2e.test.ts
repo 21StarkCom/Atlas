@@ -25,7 +25,9 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PrePersistenceGuard, type QuarantineSink, type SecretFinding } from "@atlas/scan";
 import { normalize, probeSandbox } from "@atlas/sources";
+import { bindEnqueueContext, enqueue, productionEnqueueContext } from "@atlas/jobs";
 import { runCli } from "../../src/main.js";
+import { REVERIFY_WORKFLOW } from "../../src/workflows/reverify.js";
 import { makePhase2Harness, captureViaBroker, CANONICAL_REF, type Phase2Harness } from "./phase2-support.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..", "..", "..", "..");
@@ -84,9 +86,9 @@ async function cli(argv: string[]): Promise<{ code: number; out: string }> {
   }
 }
 
-/** The claims frontmatter note owning one claim with one evidence head. */
-function claimNoteRaw(noteId: string, claimId: string, renditionHandle: string, locator: string, quoteHash: string): string {
-  return [
+/** The claims frontmatter note owning one evidence head per claim. */
+function claimNoteRaw(noteId: string, claims: readonly { claimId: string; quoteHash: string }[], renditionHandle: string, locator: string): string {
+  const lines = [
     "---",
     `id: ${noteId}`,
     "type: concept",
@@ -96,18 +98,20 @@ function claimNoteRaw(noteId: string, claimId: string, renditionHandle: string, 
     "created: 2026-07-20",
     "updated: 2026-07-20",
     "claims:",
-    `  - claim_id: ${claimId}`,
-    `    text: "The fox statement."`,
-    "    evidence:",
-    `      - rendition: "${renditionHandle}"`,
-    `        locator: "${locator}"`,
-    `        quote_hash: "${quoteHash}"`,
-    "        verification: stale",
-    "---",
-    "",
-    `# ${noteId}`,
-    "",
-  ].join("\n");
+  ];
+  for (const c of claims) {
+    lines.push(
+      `  - claim_id: ${c.claimId}`,
+      `    text: "The fox statement (${c.claimId})."`,
+      "    evidence:",
+      `      - rendition: "${renditionHandle}"`,
+      `        locator: "${locator}"`,
+      `        quote_hash: "${c.quoteHash}"`,
+      "        verification: stale",
+    );
+  }
+  lines.push("---", "", `# ${noteId}`, "");
+  return lines.join("\n");
 }
 
 /** Seed the projections the fold would derive: the owning note, claim, evidence head. */
@@ -117,7 +121,7 @@ function seedClaim(noteId: string, filePath: string, claimId: string, evidenceId
     const now = "2026-07-20T00:00:00.000Z";
     store.db
       .prepare(
-        `INSERT INTO notes (note_id, slug, title, type, schema_version, status, file_path, content_hash, created, updated)
+        `INSERT OR IGNORE INTO notes (note_id, slug, title, type, schema_version, status, file_path, content_hash, created, updated)
          VALUES (?, ?, ?, 'concept', 1, 'active', ?, 'sha256:0', ?, ?)`,
       )
       .run(noteId, noteId, noteId, filePath, now, now);
@@ -211,10 +215,23 @@ describeIfSandbox("reverify re-anchor E2E (#217) — production seams, real sand
 
       // 1. The claim notes enter canonical FIRST (index still in sync with the seed
       //    commit), then the blob enters through a REAL Tier-1 capture.
-      writeFileSync(join(h.vaultDir, "note-claims.md"), claimNoteRaw("concept-claims", "c-1", renditionHandle, locator, quoteHash), "utf8");
+      writeFileSync(
+        join(h.vaultDir, "note-claims.md"),
+        claimNoteRaw(
+          "concept-claims",
+          [
+            { claimId: "c-1", quoteHash },
+            { claimId: "c-1b", quoteHash },
+            { claimId: "c-1c", quoteHash },
+          ],
+          renditionHandle,
+          locator,
+        ),
+        "utf8",
+      );
       writeFileSync(
         join(h.vaultDir, "note-parked.md"),
-        claimNoteRaw("concept-parked", "c-2", renditionHandle, locator, "f".repeat(64)),
+        claimNoteRaw("concept-parked", [{ claimId: "c-2", quoteHash: "f".repeat(64) }], renditionHandle, locator),
         "utf8",
       );
       h.git(["add", "-A"]);
@@ -229,6 +246,8 @@ describeIfSandbox("reverify re-anchor E2E (#217) — production seams, real sand
 
       // 2. Projections the fold would derive (owning notes + claims + evidence heads).
       seedClaim("concept-claims", "note-claims.md", "c-1", "ev-e2e-1", rawHash, locator, quoteHash);
+      seedClaim("concept-claims", "note-claims.md", "c-1b", "ev-e2e-1b", rawHash, locator, quoteHash);
+      seedClaim("concept-claims", "note-claims.md", "c-1c", "ev-e2e-1c", rawHash, locator, quoteHash);
       seedClaim("concept-parked", "note-parked.md", "c-2", "ev-e2e-2", rawHash, locator, "f".repeat(64));
 
       // ── Auto path: retry + drain ⇒ integrated without any human resolution.
@@ -256,6 +275,38 @@ describeIfSandbox("reverify re-anchor E2E (#217) — production seams, real sand
       // and may emit it plain-style — normalize both before asserting the pin.
       const unfolded = noteAtCanonical.replace(/\\\n\s*/g, "").replace(/"/g, "");
       expect(unfolded).toContain(`rendition: ${renditionHandle}`);
+
+      // ── Multi-head no-clobber (review round-1 finding): a job carrying SEVERAL
+      // heads on the SAME note (the shape enqueueReverification produces) must
+      // integrate them sequentially WITHOUT losing earlier integrations — each
+      // apply reads the note at CANONICAL, never the (stale) working tree.
+      {
+        const store = h.openStore();
+        try {
+          bindEnqueueContext(store.db, productionEnqueueContext());
+          enqueue(store.db, {
+            workflow: REVERIFY_WORKFLOW,
+            idempotencyKey: "e2e-multi-head",
+            payload: {
+              owningNoteId: "concept-claims",
+              contentId: { rawContentHash: rawHash, canonicalMediaType: MEDIA },
+              newRenditionId: renditionHandle,
+              evidenceIds: ["ev-e2e-1b", "ev-e2e-1c"],
+            },
+          });
+        } finally {
+          store.close();
+        }
+      }
+      const runMh = await cli(["jobs", "run", "--json"]);
+      expect(runMh.code, runMh.out).toBe(0);
+      const mhNote = h.git(["show", `${CANONICAL_REF}:note-claims.md`]);
+      // All three heads integrated — including the FIRST one, which a working-tree
+      // read would have clobbered when the later heads applied.
+      expect(mhNote).toContain("supersedes_evidence_id: ev-e2e-1b");
+      expect(mhNote).toContain("supersedes_evidence_id: ev-e2e-1c");
+      expect(mhNote.split("supersedes_evidence_id: ev-e2e-1\n").length - 1).toBe(1); // head-1 survived
+      expect(mhNote.split("verification: valid").length - 1).toBe(3);
 
       // ── Fail-closed path: an unrecoverable quote (hash matches nothing) parks.
       const preParked = h.git(["rev-parse", CANONICAL_REF]);

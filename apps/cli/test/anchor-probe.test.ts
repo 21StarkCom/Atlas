@@ -167,4 +167,29 @@ describe("deriveAnchorVerdict — status-preserving degradation", () => {
       teardown();
     }
   });
+
+  it("the SQLite cross-check ignores ledger-internal events — an evidence retry raises no false alarm (#291)", () => {
+    setup();
+    try {
+      // Two run events on the chain + one ledger-internal retry event (high seq
+      // range, git_head NULL, never on the broker chain). Pre-#291 the cross-check
+      // counted the retry event (`NOT LIKE 'db.%'`) ⇒ sqlite count 3 vs git count 2
+      // ⇒ a FALSE truncation/divergence alarm after any `brain evidence retry`.
+      const head = "b".repeat(40);
+      const ins = store.db.prepare(
+        `INSERT INTO audit_events (seq, run_id, event_type, payload_hash, git_head, created_at)
+         VALUES (?, ?, ?, 'h', ?, '2026-07-20T00:00:00.000Z')`,
+      );
+      ins.run(0, "r1", "run.started", "a".repeat(40));
+      ins.run(1, "r1", "run.integrated", head);
+      ins.run(1_000_000_000_000, "retry", "evidence.retry_enqueued", null);
+
+      const git: AuditChainStatus = { ok: true, head, count: 2 };
+      const r = deriveAnchorVerdict(store.db, "/nonexistent/anchor", {}, { kind: "answered", status: git });
+      expect(r.source).toBe("git");
+      expect(r.ok, r.detail).toBe(true);
+    } finally {
+      teardown();
+    }
+  });
 });

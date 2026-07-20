@@ -20,6 +20,9 @@ import {
   latestRunSeq,
   nextDbEventSeq,
 } from "../../src/ledger/intents.js";
+import { readCoalesceCovers } from "../../src/ledger/finalize.js";
+import { WatermarkRepo } from "../../src/backup/watermark.js";
+import { reconcileInterruptedRuns } from "../../src/ledger/reconcile.js";
 
 function seededDb() {
   const store = openStore({ path: ":memory:" });
@@ -81,6 +84,62 @@ describe("ledger seq-space partition (range, not type prefix)", () => {
     const store = seededDb();
     try {
       expect(nextDbEventSeq(store.db)).toBe(DB_EVENT_SEQ_BASE + 2);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("readCoalesceCovers ignores internal-range events — a retry event never defeats the coalesce window", () => {
+    const store = seededDb();
+    try {
+      // Chain head 2, covered through 2, all-readonly window above the cut… the
+      // internal-range retry event (BASE+1) is NOT an uncovered run event.
+      expect(readCoalesceCovers(store.db, 2)).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("a watermark poisoned into the internal range is repaired to the nothing-covered sentinel", async () => {
+    const store = seededDb();
+    try {
+      const wm = new WatermarkRepo(store.db);
+      wm.markCovered(DB_EVENT_SEQ_BASE + 5, "2026-07-20T00:00:00.000Z"); // the pre-fix poisoned cut
+      const broker = { signAndAppendAuditEvent: () => { throw new Error("no intents to drive"); } } as never;
+      await reconcileInterruptedRuns(store, broker);
+      expect(wm.get().seq).toBe(-1); // fail-closed: the next verified backup re-covers
+
+      // A HEALTHY watermark is untouched by the repair.
+      wm.markCovered(2, "2026-07-20T00:00:01.000Z");
+      await reconcileInterruptedRuns(store, broker);
+      expect(wm.get().seq).toBe(2);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("the reconcile drain finalizes a stranded internal-range intent WITHOUT a broker append (no wedge)", async () => {
+    const store = seededDb();
+    try {
+      store.db
+        .prepare(
+          `INSERT INTO audit_intents (run_id, seq, event_json, write_json, payload_hash, state, created_at, updated_at)
+           VALUES ('poisoned', ?, '{"kind":"run.started","seq":${DB_EVENT_SEQ_BASE + 2}}', '[]', 'h', 'pending', '2026-07-20T00:00:00.000Z', '2026-07-20T00:00:00.000Z')`,
+        )
+        .run(DB_EVENT_SEQ_BASE + 2);
+      // The broker MUST NOT be consulted for it — presenting a ~10^12 seq would be
+      // refused broker.audit_seq_nonmonotonic and (pre-fix) abort the whole pass.
+      const broker = {
+        signAndAppendAuditEvent: () => {
+          throw new Error("broker must not be called for a stranded internal-range intent");
+        },
+      } as never;
+      const report = await reconcileInterruptedRuns(store, broker);
+      expect(report.reconciled).toBe(1);
+      const row = store.db
+        .prepare(`SELECT state FROM audit_intents WHERE seq = ?`)
+        .get(DB_EVENT_SEQ_BASE + 2) as { state: string };
+      expect(row.state).toBe("done");
     } finally {
       store.close();
     }

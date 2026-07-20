@@ -53,7 +53,7 @@ import { buildGuard } from "../ingest/wiring.js";
 import { quarantineStoreFromContext } from "../quarantine/config.js";
 import { riskConfigFrom } from "../policies/risk.js";
 import { makeStoreValidationVault } from "../validation/store-vault.js";
-import { readVault } from "../vault/reader.js";
+import { resolveAtRef } from "../sync/resolve-at-ref.js";
 import type { RetrievalResult } from "../retrieval/layers.js";
 import { makeBrokerIntegrator } from "./index.js";
 import { applySynthesis, type SynthesisApplyDeps } from "./synthesis.js";
@@ -63,12 +63,20 @@ import type { ReanchorInput } from "./reverify-match.js";
 const sha256Hex = (input: string | Uint8Array): string => createHash("sha256").update(input).digest("hex");
 
 /**
- * Parse an evidence locator into its `[start, end)` range. Only the `char:`/`byte:`
- * schemes carry a comparable integer range; `page:`/`dom:`/`(none)`/malformed values
- * return `null` (⇒ unrecoverable ⇒ pending). Strict non-negative integers, `end`
- * strictly greater than `start` — an empty or inverted span anchors nothing.
+ * Parse an evidence locator into its scheme + `[start, end)` range. Only the
+ * `char:`/`byte:` schemes carry an integer range; `page:`/`dom:`/`(none)`/malformed
+ * values return `null` (⇒ unrecoverable ⇒ pending). Strict non-negative integers,
+ * `end` strictly greater than `start` — an empty or inverted span anchors nothing.
+ *
+ * NOTE: recovery itself proceeds ONLY for `char:` (review round-1 finding). A
+ * `byte:` range verified in UTF-16 string space can hash-match a quote whose BYTE
+ * position actually moved (multibyte content before the span shifts byte offsets
+ * off string indices), integrating an `exact` with a stale byte locator. Nothing in
+ * production emits `byte:` (md/txt normalize to `char-offset`; pdf/html have no
+ * comparable offset), so `byte:` fails closed to `pending` rather than
+ * approximating.
  */
-export function parseLocatorRange(locator: string): { start: number; end: number } | null {
+export function parseLocatorRange(locator: string): { scheme: "char" | "byte"; start: number; end: number } | null {
   const colon = locator.indexOf(":");
   if (colon === -1) return null;
   const scheme = locator.slice(0, colon);
@@ -82,8 +90,13 @@ export function parseLocatorRange(locator: string): { start: number; end: number
   const start = Number.parseInt(startText, 10);
   const end = Number.parseInt(endText, 10);
   if (end <= start) return null;
-  return { start, end };
+  return { scheme, start, end };
 }
+
+/** True iff `code` is a UTF-16 high surrogate. */
+const isHighSurrogate = (code: number): boolean => code >= 0xd800 && code <= 0xdbff;
+/** True iff `code` is a UTF-16 low surrogate. */
+const isLowSurrogate = (code: number): boolean => code >= 0xdc00 && code <= 0xdfff;
 
 /** The narrow environment `recoverAnchorFrom` needs (injectable for tests). */
 export interface RecoverAnchorEnv {
@@ -126,7 +139,7 @@ export async function recoverAnchorFrom(
   newRenditionId: string,
 ): Promise<ReanchorInput | null> {
   const range = parseLocatorRange(ev.locator);
-  if (range === null) return null;
+  if (range === null || range.scheme !== "char") return null;
 
   // The requested rendition must name THIS head's blob, be projected, and carry a
   // comparable version pair.
@@ -195,6 +208,11 @@ export async function recoverAnchorFrom(
     const newText = r.text;
     if (range.end > newText.length) return null;
     const quote = newText.slice(range.start, range.end);
+    // A slice boundary inside a surrogate pair strict-encodes lossily (a lone
+    // surrogate becomes U+FFFD in UTF-8), so its hash can collide with a recorded
+    // hash over visibly different text (review round-1 finding). A span that
+    // starts on a low surrogate or ends on a high surrogate proves nothing.
+    if (isLowSurrogate(quote.charCodeAt(0)) || isHighSurrogate(quote.charCodeAt(quote.length - 1))) return null;
     if (sha256Hex(quote) !== ev.quote_hash) return null;
 
     return { quote, previousStart: range.start, newText };
@@ -249,9 +267,14 @@ export async function applyReanchorViaBroker(deps: JobHandlerDeps, req: Reanchor
   const cfg = ctx.config.config;
   const store = deps.store; // already open + migrated by the drain — never closed here
   const provenance = new ProvenanceRepo(store.db);
+  const repo = openRepo(resolvePath(ctx, cfg.vault.path));
 
-  const snapshot = await readVault(cfg);
-  const noteById = new Map(snapshot.notes.map((n) => [n.id, n]));
+  // Notes are read AT THE CANONICAL REF, never the working tree (review round-1
+  // finding): the working tree does not advance when canonical does (#260), so a
+  // multi-head reverify integrating head N+1 from a working-tree snapshot would
+  // patch PRE-head-N text and clobber head N's integrated edit. Reading at the ref
+  // per apply keeps every integration based on the current canonical state.
+  const readNoteAtCanonical = resolveAtRef(repo, cfg.git.canonical_ref, cfg.vault.note_globs);
 
   let brokerClient: BrokerClient;
   try {
@@ -265,7 +288,7 @@ export async function applyReanchorViaBroker(deps: JobHandlerDeps, req: Reanchor
     const sdeps: SynthesisApplyDeps = {
       retrieve: (q) => Promise.resolve(stubRetrieve(req.owningNoteId, req.evidenceId + q.text.length)),
       generatePlan: () => Promise.resolve(req.plan),
-      readNote: (id) => noteById.get(id) ?? null,
+      readNote: (id) => readNoteAtCanonical(id),
       validationVault: makeStoreValidationVault(store.db),
       supportingEvidenceStates: () => ["valid"],
       inputsTrusted: () => true,
@@ -276,7 +299,7 @@ export async function applyReanchorViaBroker(deps: JobHandlerDeps, req: Reanchor
       store,
       broker: brokerClient,
       backup: backupConfig(ctx),
-      repo: openRepo(resolvePath(ctx, cfg.vault.path)),
+      repo,
       integrate: makeBrokerIntegrator(brokerClient),
       guard: new GeneratedArtifactGuard(quarantineStoreFromContext(ctx)),
       foldProjections: async () => {},
