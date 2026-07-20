@@ -23,15 +23,27 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openStore, type Store } from "@atlas/sqlite-store";
 import { openRepo, type Repo } from "@atlas/git";
 import { PrePersistenceGuard, type QuarantineSink, type SecretFinding } from "@atlas/scan";
-import { normalize } from "@atlas/sources";
+import { normalize, probeSandbox } from "@atlas/sources";
 import { recoverAnchorFrom, parseLocatorRange, type RecoverAnchorEnv } from "../src/workflows/reverify-recover.js";
 import type { EvidenceHeadRow } from "../src/workflows/reverify-handler.js";
+
+// `recoverAnchorFrom` runs the sandboxed parser worker — same #29 gate as the other
+// capture-driving suites: STRICT on a provisioned host, LOUD SKIP otherwise
+// (stock hosted Linux lacks delegated cgroups; macOS CI is the strict platform).
+const RR_SANDBOX = await probeSandbox();
+const RR_REQUIRE = process.env.ATLAS_SANDBOX_REQUIRE === "1" || (process.env.CI === "true" && platform() === "darwin");
+if (!RR_SANDBOX.supported && RR_REQUIRE) {
+  const missing = RR_SANDBOX.checks.filter((c) => !c.available).map((c) => c.guarantee).join(", ");
+  throw new Error(`[reverify-recover] provisioned host must support the sandbox but does not (${RR_SANDBOX.host}: ${missing})`);
+}
+if (!RR_SANDBOX.supported) console.warn(`[reverify-recover] SKIP sandbox-dependent tests: sandbox unsupported on ${RR_SANDBOX.host}`);
+const describeIfSandbox = RR_SANDBOX.supported ? describe : describe.skip;
 
 const CANONICAL_REF = "refs/heads/main";
 const CONTENT = "# Alpha\n\nThe quick brown fox jumps over the lazy dog.\n";
@@ -149,7 +161,7 @@ describe("parseLocatorRange", () => {
   });
 });
 
-describe("recoverAnchorFrom (#217, real sandbox)", () => {
+describeIfSandbox("recoverAnchorFrom (#217, real sandbox)", () => {
   it("recovers the exact span (hash-verified) from the re-normalized blob at the canonical ref", async () => {
     const real = await realRendition();
     commitBlob(CONTENT);

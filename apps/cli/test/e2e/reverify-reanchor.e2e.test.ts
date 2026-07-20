@@ -20,15 +20,26 @@
  */
 import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PrePersistenceGuard, type QuarantineSink, type SecretFinding } from "@atlas/scan";
-import { normalize } from "@atlas/sources";
+import { normalize, probeSandbox } from "@atlas/sources";
 import { runCli } from "../../src/main.js";
 import { makePhase2Harness, captureViaBroker, CANONICAL_REF, type Phase2Harness } from "./phase2-support.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..", "..", "..", "..");
+
+// The E2E drives the REAL sandbox (capture + recoverAnchor) — same #29 gate as the
+// other capture-driving suites: STRICT on a provisioned host, LOUD SKIP otherwise.
+const RA_SANDBOX = await probeSandbox();
+const RA_REQUIRE = process.env.ATLAS_SANDBOX_REQUIRE === "1" || (process.env.CI === "true" && platform() === "darwin");
+if (!RA_SANDBOX.supported && RA_REQUIRE) {
+  const missing = RA_SANDBOX.checks.filter((c) => !c.available).map((c) => c.guarantee).join(", ");
+  throw new Error(`[reverify-reanchor] provisioned host must support the sandbox but does not (${RA_SANDBOX.host}: ${missing})`);
+}
+if (!RA_SANDBOX.supported) console.warn(`[reverify-reanchor] SKIP sandbox-dependent E2E: sandbox unsupported on ${RA_SANDBOX.host}`);
+const describeIfSandbox = RA_SANDBOX.supported ? describe : describe.skip;
 const sha256 = (s: string | Uint8Array): string => createHash("sha256").update(s).digest("hex");
 
 const CONTENT = "# Alpha Source\n\nThe quick brown fox jumps over the lazy dog.\n";
@@ -183,7 +194,7 @@ afterEach(async () => {
   rmSync(qdir, { recursive: true, force: true });
 });
 
-describe("reverify re-anchor E2E (#217) — production seams, real sandbox, real broker", () => {
+describeIfSandbox("reverify re-anchor E2E (#217) — production seams, real sandbox, real broker", () => {
   it(
     "evidence retry on a still-present quote auto-re-anchors Tier-2 (no human resolution); an unrecoverable quote still parks",
     async () => {
