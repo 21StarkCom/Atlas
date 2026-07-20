@@ -20,10 +20,11 @@
  * doubt — offsetless scheme, unreproducible rendition, tampered blob, shifted or
  * vanished quote — returns `null`, which the handler routes fail-closed to `pending`.
  *
- * The hash verification is also what makes the `byte:` scheme safe to treat as string
- * indices (the same approximation `parseLocatorStart` makes): if byte offsets diverge
- * from UTF-16 code-unit offsets, the slice's hash cannot match and recovery fails
- * closed — never a fabricated `exact`.
+ * Recovery is `char:`-only (review round-1 finding): a `byte:` range verified in
+ * UTF-16 string space can hash-match a quote whose BYTE position moved, stamping
+ * `exact` with a stale byte locator — so `byte:` (like `page:`/`dom:`) parks to
+ * `pending`. A slice boundary inside a surrogate pair proves nothing either (lossy
+ * UTF-8 makes the hash collidable) and also recovers nothing.
  *
  * ## Why the blob is read at the CANONICAL ref
  * Canonical is the SSOT; the working tree may drift (#260). The bytes are read via
