@@ -396,8 +396,8 @@ but is **reserved and unemitted** — no code emits it; a future *interactive* p
 | `graduation migrate` | broker-signature | `op,intendedEffect{graduate,fromGeneration,toGeneration,migrationPlanDigest},nonce,expiresAt` | current generation == `fromGeneration`; re-derive migration plan digest and match; signer permitted | `generation_mismatch`,`migration_plan_mismatch`,`signature_invalid`,`payload_mismatch`,`signer_*`,`nonce_*` |
 | `source trust promote` / `source trust revoke` | broker-signature | `op,intendedEffect{trust,sourceOpaqueId,fromLevel,toLevel},nonce,expiresAt` | current trust level == `fromLevel`; signer permitted; append to `refs/trust/ledger` | `trust_level_mismatch`,`signature_invalid`,`payload_mismatch`,`signer_*`,`nonce_*` |
 | `db backup --force-unblock` (variant) | broker-signature | `op,intendedEffect{forceUnblock,latestLedgerSeq,acceptedRpoGap},nonce,expiresAt` | latest ledger seq unchanged; accepted-RPO-gap current | `rpo_gap_unaccepted`,`signature_invalid`,`payload_mismatch`,`signer_*`,`nonce_*` |
-| `quarantine inspect` | os-presence | `op,intendedEffect{quarantineInspect,quarantineItemOpaqueId},nonce,expiresAt` | item exists and is quarantined; the **challenge-bound presence-gated signature** verifies and its signer is enrolled `presence:true` + permitted (SP-3, §7.1); quarantine AEAD readable by this trusted-CLI identity | `quarantine_item_unknown`,`quarantine_key_denied`,`signer_*`,`signature_invalid`,`payload_mismatch`,`presence_unverified`(reserved),`nonce_*` |
-| `quarantine resolve` | os-presence | `op,intendedEffect{quarantineResolve,quarantineItemOpaqueId,resolution},nonce,expiresAt` | item exists and is quarantined; `resolution ∈ {release,discard}`; the **challenge-bound presence-gated signature** verifies and its signer is enrolled `presence:true` + permitted; quarantine AEAD readable | `quarantine_item_unknown`,`quarantine_key_denied`,`signer_*`,`signature_invalid`,`payload_mismatch`,`presence_unverified`(reserved),`target_mismatch`,`nonce_*` |
+| `quarantine inspect` | os-presence | `op,intendedEffect{quarantineInspect,quarantineItemOpaqueId},nonce,expiresAt` | item exists and is quarantined; the **challenge-bound presence-gated signature** verifies and its signer is enrolled `presence:true` + permitted (SP-3, §7.1); quarantine AEAD readable by this trusted-CLI identity | `quarantine_item_unknown`,`quarantine_key_denied`,`signer_*`,`signature_invalid`,`payload_mismatch`,`nonce_*` |
+| `quarantine resolve` | os-presence | `op,intendedEffect{quarantineResolve,quarantineItemOpaqueId,resolution},nonce,expiresAt` | item exists and is quarantined; `resolution ∈ {release,discard}`; the **challenge-bound presence-gated signature** verifies and its signer is enrolled `presence:true` + permitted; quarantine AEAD readable | `quarantine_item_unknown`,`quarantine_key_denied`,`signer_*`,`signature_invalid`,`payload_mismatch`,`target_mismatch`,`nonce_*` |
 
 Every privileged op therefore maps to **challenge fields + verification steps + stable error codes**
 (acceptance criterion 1). The machine-readable §7.5 block below is the SSOT; `contract-lint` asserts
@@ -551,10 +551,11 @@ mechanically enforces acceptance criterion 1 and can never drift from the regist
       "challengeFields": ["op", "intendedEffect", "nonce", "expiresAt"],
       "verificationSteps": [
         "quarantine item opaque id exists and is quarantined",
-        "OS presence assertion is present and bound to this challenge",
+        "the signer is enrolled presence:true, active, and permitted for this op (SP-3, §7.1)",
+        "the challenge-bound presence-gated signature verifies over the recomputed signingPayload",
         "quarantine AEAD key is readable by this trusted-CLI identity"
       ],
-      "driftCodes": ["authz.quarantine_item_unknown", "authz.quarantine_key_denied", "authz.presence_unverified", "authz.nonce_unknown", "authz.nonce_expired", "authz.nonce_replayed"]
+      "driftCodes": ["authz.quarantine_item_unknown", "authz.quarantine_key_denied", "authz.signer_unknown", "authz.signer_revoked", "authz.signer_not_permitted", "authz.signature_invalid", "authz.payload_mismatch", "authz.nonce_unknown", "authz.nonce_expired", "authz.nonce_replayed"]
     },
     {
       "op": "quarantine resolve",
@@ -564,10 +565,11 @@ mechanically enforces acceptance criterion 1 and can never drift from the regist
       "verificationSteps": [
         "quarantine item opaque id exists and is quarantined",
         "intendedEffect.resolution is one of release or discard",
-        "OS presence assertion is present and bound to this challenge",
+        "the signer is enrolled presence:true, active, and permitted for this op (SP-3, §7.1)",
+        "the challenge-bound presence-gated signature verifies over the recomputed signingPayload",
         "quarantine AEAD key is readable by this trusted-CLI identity"
       ],
-      "driftCodes": ["authz.quarantine_item_unknown", "authz.quarantine_key_denied", "authz.presence_unverified", "authz.target_mismatch", "authz.nonce_unknown", "authz.nonce_expired", "authz.nonce_replayed"]
+      "driftCodes": ["authz.quarantine_item_unknown", "authz.quarantine_key_denied", "authz.signer_unknown", "authz.signer_revoked", "authz.signer_not_permitted", "authz.signature_invalid", "authz.payload_mismatch", "authz.target_mismatch", "authz.nonce_unknown", "authz.nonce_expired", "authz.nonce_replayed"]
     }
   ]
 }
