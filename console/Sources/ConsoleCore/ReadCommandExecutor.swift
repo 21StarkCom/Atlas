@@ -88,6 +88,10 @@ public struct ReadCommandExecutor: ReadInvoker, Sendable {
             arguments: arguments,
             cwd: bundle.checkoutRoot,
             environment: ChildEnvironment.nonEgress(overlay: binary.baseEnv),
+            // Bound the spawn: a wedged read child (locked SQLite / stuck daemon) must throw
+            // SpawnTimeout, never hang — an unbounded read parks the serialized jobs-publish chain and
+            // strands an open `busy` utterance (R2 finding).
+            timeout: ConsoleConstants.readCommandTimeout,
             command: command,
             commandSchema: schema
         )

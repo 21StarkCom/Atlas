@@ -442,6 +442,13 @@ public final class AppModel {
         currentChallenge = nil
         supervisorState = .idle
         coordinatorState = .idle
+        // A superseded flow is cancelled on teardown AFTER its observer task is already cancelled, so
+        // its `.idle` transition is never mirrored — reset the mirror here (it is session-scoped, like
+        // supervisor/coordinator above) so `isPrivilegedFlowInFlight` cannot latch true against a fresh
+        // idle flow. If a flow was in flight, close its open busy utterance (mirroring the
+        // generation-mismatch closures in refreshJobs/runQuery) so no screen-reader user is stranded.
+        if isPrivilegedFlowInFlight { announcer.announce(.cancelled("Authorization")) }
+        flowState = .idle
     }
 
     private func handle(_ event: WatchEvent) async {
@@ -522,11 +529,21 @@ public final class AppModel {
         let prior = jobApplyTask
         jobApplyTask = Task { [weak self] in
             _ = await prior?.value
-            try? await mutate(jobs)
+            // Capture the mutate error instead of swallowing it: a FAILED reseed leaves the
+            // coordinator's `rows` at the PRIOR incarnation's membership, so republishing it after a
+            // hello-triggered re-baseline would silently show another vault's jobs. On failure, surface
+            // `jobsError` and SKIP the rows publish (leaving the surface visibly stale, never wrongly
+            // fresh); on success, publish as before.
+            var mutateError: Error?
+            do { try await mutate(jobs) } catch { mutateError = error }
             let rows = await jobs.rows
             await MainActor.run {
                 guard let self, generation == self.sessionGeneration else { return }
-                self.jobRows = rows
+                if let mutateError {
+                    self.jobsError = ControlSafeText.plain("\(mutateError)")
+                } else {
+                    self.jobRows = rows
+                }
             }
         }
     }

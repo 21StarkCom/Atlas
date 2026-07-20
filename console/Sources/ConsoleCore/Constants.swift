@@ -13,6 +13,12 @@ public enum ConsoleConstants {
     /// The two commands that mint an egress capability (P5 consumes this).
     public static let egressMintingCommands: Set<String> = ["query", "index eval"]
 
+    /// Upper bound on a read-on-focus / paginating read spawn (`ReadCommandExecutor`). A read child
+    /// that wedges (locked SQLite, stuck daemon) must NOT hang forever — an unbounded read parks the
+    /// serialized jobs-publish chain and leaves a `busy` utterance open. Generous enough for a
+    /// multi-page `jobs list`; the resolution probes use a tighter 10 s.
+    public static let readCommandTimeout: Duration = .seconds(60)
+
     /// os.Logger subsystem for every Console spawn / state-transition log line.
     public static let logSubsystem: String = "com.atlas.console"
 

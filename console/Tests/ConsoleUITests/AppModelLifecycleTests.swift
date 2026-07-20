@@ -241,6 +241,35 @@ final class SettingsCutoverTests: XCTestCase {
         XCTAssertEqual(store.load().settings.atlasRoot, "ok", "prior settings retained")
     }
 
+    /// R2 residual: a cutover must reset the `flowState` MIRROR (session-scoped, like supervisor/
+    /// coordinator) and close an open busy utterance. The superseded flow is cancelled AFTER its
+    /// observer is torn down, so its `.idle` transition is never mirrored — without the reset,
+    /// `isPrivilegedFlowInFlight` would latch true against a fresh idle flow and the "Authorization in
+    /// progress" utterance would never close. Driven deterministically via `ingestFlowState` (sets the
+    /// mirror in-flight while the flow ACTOR stays idle, so the actor-read cutover gate still proceeds).
+    func testCutoverResetsStaleFlowMirrorAndClosesBusyUtterance() async throws {
+        let box = FactoryBox()
+        let store = makeStore(Settings(atlasRoot: "ok"))
+        let announce = AnnounceBox()
+        let model = AppModel(settingsStore: store, environment: [:], announcer: announce.announcer,
+                             sessionFactory: { s, e in try box.make(s, e) })
+        await model.launch()
+        XCTAssertEqual(model.phase, .running)
+
+        // Mirror shows an in-flight flow (challenge on screen) while the flow ACTOR is still idle.
+        let challenge = try JSONDecoder().decode(AuthorizationChallenge.self, from: UIChallenge.gitApprove())
+        model.ingestFlowState(.display(challenge))
+        XCTAssertTrue(model.isPrivilegedFlowInFlight, "mirror is in-flight pre-cutover")
+
+        // The actor-read gate sees the idle actor and proceeds; the cutover's resetReducers runs.
+        await model.applySettings(Settings(atlasRoot: "ok2"))
+        XCTAssertNil(model.settingsError, "gate reads the idle flow actor, not the stale mirror")
+        XCTAssertFalse(model.isPrivilegedFlowInFlight, "flowState mirror reset to idle by the cutover")
+        XCTAssertNil(model.currentChallenge, "stale challenge cleared")
+        XCTAssertTrue(announce.events.contains { if case .cancelled = $0 { return true }; return false },
+                      "the open Authorization busy utterance is closed on cutover")
+    }
+
     /// The single-flight guard: two CONCURRENT applies produce exactly one cutover (the second returns
     /// on the `isApplyingSettings` latch), never overlapping watchers or interleaved observer handles.
     func testConcurrentAppliesSingleFlight() async throws {
