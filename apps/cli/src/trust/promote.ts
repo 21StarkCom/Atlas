@@ -24,12 +24,35 @@ export interface TrustTarget {
 /** The ordered trust levels (a promote must move strictly up this scale). */
 const RANK: Record<TrustLevel, number> = { untrusted: 0, provisional: 1, trusted: 2, authoritative: 3 };
 
+/**
+ * A source's full projected trust row — the latest transition only (the projection
+ * is one row per blob; the broker-owned trust ledger is the history SSOT, and its
+ * Phase-1 `execAuthorized` is authorize-only, so this row is everything persisted).
+ */
+export interface TrustRecord {
+  readonly level: TrustLevel;
+  readonly suspended: boolean;
+  readonly reason: string | null;
+  readonly updatedAt: string;
+}
+
+/** Read a source's full projected trust row; `null` when unprojected (⇒ untrusted). */
+export function readTrustRecord(db: SqliteDatabase, t: TrustTarget): TrustRecord | null {
+  const row = db
+    .prepare(
+      `SELECT level, suspended, reason, updated_at FROM trust_state WHERE raw_content_hash = ? AND canonical_media_type = ?`,
+    )
+    .get(t.rawContentHash, t.canonicalMediaType) as
+    | { level: TrustLevel; suspended: number; reason: string | null; updated_at: string }
+    | undefined;
+  if (row === undefined) return null;
+  return { level: row.level, suspended: row.suspended === 1, reason: row.reason, updatedAt: row.updated_at };
+}
+
 /** Read a source's projected trust state (fail-closed default when unprojected). */
 export function readTrustState(db: SqliteDatabase, t: TrustTarget): TrustState {
-  const row = db
-    .prepare(`SELECT level, suspended FROM trust_state WHERE raw_content_hash = ? AND canonical_media_type = ?`)
-    .get(t.rawContentHash, t.canonicalMediaType) as { level: TrustLevel; suspended: number } | undefined;
-  return row ? { level: row.level, suspended: row.suspended === 1 } : DEFAULT_TRUST;
+  const row = readTrustRecord(db, t);
+  return row ? { level: row.level, suspended: row.suspended } : DEFAULT_TRUST;
 }
 
 /** A trust-op failure the CLI maps to a validation exit. */

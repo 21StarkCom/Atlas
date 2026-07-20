@@ -11,9 +11,11 @@ export {
   promoteTrust,
   revokeTrust,
   readTrustState,
+  readTrustRecord,
   TrustError,
   type TrustTarget,
   type TrustDeps,
+  type TrustRecord,
 } from "./promote.js";
 export {
   revocationEffect,

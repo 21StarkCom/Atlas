@@ -9,21 +9,23 @@
  *    (`rawContentHash:canonicalMediaType`, the blob PK) is unique, so the total
  *    order is fully resolved and offset pagination is deterministic.
  *  - `source show <handle>` — one blob's captures + renditions + active pointer.
- *  - `source trust show <handle>` — the source's trust state. Trust is a Phase-4
- *    concept (`source trust promote/revoke`); pre-Phase-4 there is NO trust
- *    projection, so every source reads `effectiveTrustLevel: untrusted`,
- *    `suspended: false`, `history: []` (plan §2.9 "default untrusted pre-Phase-4").
+ *  - `source trust show <handle>` — the source's trust state, read from the
+ *    `0010_trust_state` projection that `source trust promote/revoke` write (#218).
+ *    Fail-closed: a source with NO trust row reads `untrusted`, and a suspended
+ *    (revoked) source reads EFFECTIVE `untrusted` regardless of its stored level.
  */
 import {
   parseSourceHandle,
   serializeContentId,
   serializeRenditionId,
   type SourceHandle,
+  type TrustLevel,
 } from "@atlas/contracts";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { openMigratedStore } from "./store-open.js";
 import type { SqliteDatabase } from "@atlas/sqlite-store";
+import { readTrustRecord } from "../trust/index.js";
 import {
   DEFAULT_LIMIT,
   assertOffsetInRange,
@@ -34,10 +36,14 @@ import {
 } from "./pagination.js";
 
 /**
- * The trust level in effect pre-Phase-4. There is no trust projection yet, so
- * every source is `untrusted` until `source trust promote` (Phase-4) exists.
+ * The trust level in EFFECT for a projected trust row (fail-closed): no row ⇒
+ * `untrusted`, and a suspended row (revoked) reads `untrusted` regardless of its
+ * stored level — the read surface must never display a suspended source as its
+ * pre-suspension tier.
  */
-const DEFAULT_TRUST_LEVEL = "untrusted" as const;
+function effectiveTrustLevel(row: { level: TrustLevel; suspended: boolean } | null): TrustLevel {
+  return row === null || row.suspended ? "untrusted" : row.level;
+}
 
 // ---------------------------------------------------------------------------
 // source list
@@ -63,7 +69,7 @@ function parseListArgs(argv: string[]): PageRequest {
   return { limit, offset };
 }
 
-/** A `content_blobs` row joined with its rendition count (one source-list entry). */
+/** A `content_blobs` row joined with its rendition count + trust row (one source-list entry). */
 interface SourceListRow {
   readonly raw_content_hash: string;
   readonly canonical_media_type: string;
@@ -71,6 +77,8 @@ interface SourceListRow {
   readonly active_extractor_version: number | null;
   readonly active_normalizer_version: number | null;
   readonly rendition_count: number;
+  readonly trust_level: TrustLevel | null;
+  readonly trust_suspended: number | null;
 }
 
 /**
@@ -90,10 +98,14 @@ export function querySources(
     .prepare(
       `SELECT b.raw_content_hash, b.canonical_media_type, b.first_seen_at,
               b.active_extractor_version, b.active_normalizer_version,
+              t.level AS trust_level, t.suspended AS trust_suspended,
               (SELECT COUNT(*) FROM source_renditions r
                 WHERE r.raw_content_hash = b.raw_content_hash
                   AND r.canonical_media_type = b.canonical_media_type) AS rendition_count
          FROM content_blobs b
+         LEFT JOIN trust_state t
+           ON t.raw_content_hash = b.raw_content_hash
+          AND t.canonical_media_type = b.canonical_media_type
         ORDER BY b.first_seen_at DESC, b.raw_content_hash ASC, b.canonical_media_type ASC
         LIMIT ? OFFSET ?`,
     )
@@ -112,7 +124,9 @@ function sourceListEntry(r: SourceListRow): Record<string, unknown> {
     canonicalMediaType: r.canonical_media_type,
     capturedAt: r.first_seen_at,
     renditionCount: r.rendition_count,
-    trustLevel: DEFAULT_TRUST_LEVEL,
+    trustLevel: effectiveTrustLevel(
+      r.trust_level === null ? null : { level: r.trust_level, suspended: r.trust_suspended === 1 },
+    ),
   };
   if (r.active_extractor_version !== null && r.active_normalizer_version !== null) {
     out.activeRenditionId = serializeRenditionId({
@@ -305,7 +319,12 @@ function sourceShow(ctx: RunContext): number {
       contentId,
       canonicalMediaType: blob.canonical_media_type,
       sizeBytes: blob.size_bytes,
-      trustLevel: DEFAULT_TRUST_LEVEL,
+      trustLevel: effectiveTrustLevel(
+        readTrustRecord(store.db, {
+          rawContentHash: blob.raw_content_hash,
+          canonicalMediaType: blob.canonical_media_type,
+        }),
+      ),
       captures,
       renditions,
     };
@@ -335,21 +354,44 @@ function sourceTrustShow(ctx: RunContext): number {
       canonicalMediaType: blob.canonical_media_type,
     });
     const active = activeRenditionBinding(store.db, blob);
-    // Pre-Phase-4: no trust ledger/projection exists, so trust is definitively
-    // `untrusted`, never suspended, with an empty history. `reviewedTrustLevel`,
-    // `reviewedRendition`, and `suspensionReason` are absent (no promotion exists).
+    // The `0010_trust_state` projection holds the LATEST transition only (one row
+    // per blob; the trust ledger is the history SSOT but its Phase-1 advance is
+    // authorize-only), so `history` carries at most that one entry. Fail-closed:
+    // no row ⇒ untrusted with empty history; a suspended row reads effective
+    // `untrusted`, and the only production writer of `suspended` is a revoke.
+    const record = readTrustRecord(store.db, {
+      rawContentHash: blob.raw_content_hash,
+      canonicalMediaType: blob.canonical_media_type,
+    });
+    const effective = effectiveTrustLevel(record);
     const out: Record<string, unknown> = {
       command: "source trust show",
       sourceHandle: raw,
       contentId,
-      effectiveTrustLevel: DEFAULT_TRUST_LEVEL,
-      suspended: false,
-      history: [] as unknown[],
+      effectiveTrustLevel: effective,
+      suspended: record?.suspended ?? false,
+      history:
+        record === null
+          ? []
+          : [
+              {
+                at: record.updatedAt,
+                action: record.suspended ? "revoke" : "promote",
+                toLevel: record.level,
+                ...(record.reason !== null ? { reason: record.reason } : {}),
+              },
+            ],
     };
+    // `reviewedTrustLevel` = the promoted level, present iff a live (unsuspended)
+    // promotion exists; after a revoke the projection no longer carries it.
+    if (record !== null && !record.suspended && record.level !== "untrusted") {
+      out.reviewedTrustLevel = record.level;
+    }
+    if (record?.suspended) out.suspensionReason = "revoked";
     if (active !== undefined) out.activeRendition = active;
 
     if (ctx.output.mode === "json") emitJson(out);
-    else ctx.render(`${contentId}: ${DEFAULT_TRUST_LEVEL}`);
+    else ctx.render(`${contentId}: ${effective}${record?.suspended ? " (suspended)" : ""}`);
     return EXIT.OK;
   } finally {
     store.close();
