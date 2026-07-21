@@ -1,0 +1,306 @@
+# Atlas v2 — Single-Process Simplification (Retire the Security Architecture)
+
+*Spec — 2026-07-21 · `docs/specs/2026-07-21-atlas-v2-single-process-simplification-spec.md` · **playground tier** · in-place demolition, phased PRs, merge-when-green.*
+
+## intent — Intent & Soundness
+
+**Verdict: collapse the fortress to one process so the agentic layer can finally be tested.**
+
+**The problem.** Atlas v1 is security-first, contract-first, fail-closed: two privileged broker daemons, three OS identities, socket IPC, Ed25519/Secure-Enclave authorization, per-run capability minting, a fail-closed secret scan with ciphertext quarantine, trust tiers + taint, a WORM-anchored signed audit ledger, the §2.8 four-step cross-store write, and a `refs/atlas/main` absorb-cycle. That machinery is the reason the repo exists — and it is exactly what blocks the work the owner now wants: **getting, fetching, rewriting, enhancing, and relating notes** via the agentic layer. Every agentic experiment pays a broker round-trip, a capability mint, and a scan gate before it can touch a note.
+
+**The decision (made, not open).** Tear it down **in-place**. v2 is one process: `brain <cmd>` opens the vault **working tree** directly (`~/Code/Vaults/main-vault`), opens SQLite + LanceDB, does the thing, **commits to git**, exits. No daemons, no sockets, no OS identities, no challenges, no capabilities, no scans, no quarantine, no trust tiers, no audit ledger, no absorb-cycle.
+
+**Why this solves it.** The agentic core (retrieve → LLM plan → validate → apply) runs directly against the vault with no privilege boundary in the path. **Safety collapses to git:** one commit per applied ChangePlan; undo = `git revert <sha>`. The surviving checks — grounding, section content-hash validation, ChangePlan validation — are **correctness**, not security. They stay.
+
+**Trade-off, named once.** Agents write **directly into the real second brain** with git history as the only undo. Accepted, deliberately. Granular **one-commit-per-ChangePlan** keeps every revert surgical.
+
+**Alternatives rejected.** (1) *Keep the brokers, add a dev-mode bypass* — rejected: a bypass is **more** code, not less; the goal is to delete the machinery, not gate it. (2) *Fork a fresh v2 repo* — rejected: owner chose in-place demolition; everything is revivable from the `v1-fortress` tag.
+
+**Assumptions (stated, consistent across every section below).** Single user, single trusted machine (the owner's Mac), single trusted operator. The real vault is already graduated (210 notes, 2026-07-17) — the one-time onboarding is **done and will not recur**. Gemini is the only provider. Git is present and healthy on the vault.
+
+**Success criteria (objective — an engineer can check each).**
+- Full `pnpm -r build` + `pnpm -r test` green with **zero provisioning** (no `ATLAS_PROVISIONED`, no daemons, no `atlas-*` identities); the provisioned-only suites are **deleted, not skipped**.
+- The command surface shrinks from **55 to the survivor set** owned by `commands.json`; the `contract-lint` bijection (registry ↔ fixture ↔ schemas) and `contract:check` determinism gate both pass.
+- `index eval` clears the normative gate (**recall@10 ≥ 0.85 / MRR ≥ 0.70**; current default hybrid **0.911 / 0.830**).
+- No source references a retired package, socket path, capability key, or canonical-ref env var.
+- A ChangePlan apply produces **exactly one commit** touching only the ChangePlan's paths; `git revert` on that sha restores prior state.
+- The deprovision script leaves the live Mac with no `atlas-*` users/groups, sockets, WORM anchor, launchd services, or Keychain items.
+
+**Finalized vs open.** The demolition, the kept core, the exit-code set, and the two binding contracts (`link --json`, `sync` semantics) are **finalized** here. Genuinely-open items are enumerated in `open-questions` — nothing is punted silently.
+
+## scope — Scope & Boundaries
+
+**Tier: playground.** Single-user, local, personal tooling on the owner's own Mac. The **absence** of HA, migration ceremony, audit trails, secret rotation, adversarial-input defense, and 10×-scale capacity is the **point of this spec**, not a gap. This document *removes* that machinery; do not read a missing production subsystem as a defect.
+
+**In scope.** (1) An in-place demolition of the security architecture. (2) A direct, in-process implementation of the kept core behind the existing seams. (3) A shrunken, drift-gated command surface. (4) A deprovision script for the live Mac. (5) `ADR-0002` recording the retirement + a `v1-fortress` tag on `main` before any deletion.
+
+**Kill list (all owner-confirmed).**
+
+| Kill | Extent |
+|---|---|
+| `packages/broker` — both daemons, sockets, challenges, capability minting | whole package |
+| `provisioning/` + 3 OS identities + launchd services | plus a deprovision script for the live Mac |
+| `console/` + `console/signer/` + the `watch` command | nuked — new UI comes later, once Atlas works properly |
+| `@atlas/scan` — engine, both guards, quarantine | total kill; exit code **3** retires |
+| Trust tiers, taint, `source trust *`, `PromoteTrust` / `RevokeTrust` ops | fail-closed ingest posture dies |
+| Graduation pipeline (`graduation scan\|audit\|migrate`) | onboarding done; revive from tag if ever needed |
+| Audit ledger, run-manifests-as-audit, WORM anchor, §2.8 write protocol, AEAD backup + watermark blocking, `db backup\|restore\|verify` | tamper-evidence machinery |
+| `--export-challenge` / `--authorization` flows, `--yes`-never-authorizes doctrine | broker authz UX; exit code **6** retires |
+| `refs/atlas/main` absorb-cycle, `sync reset`, canonical-ref indirection (`ATLAS_CANONICAL_REF`) | vault working tree is read/written directly |
+| Parser sandbox jail (Seatbelt / userns / seccomp / cgroup) | md/txt/pdf/html normalizers survive |
+| Issues **#60, #65, #297, #298** | close as retired |
+
+**Keep list (all owner-confirmed).**
+
+| Keep | v2 shape |
+|---|---|
+| Note model — parse, frontmatter, section tree, ChangePlan (15 ops incl. `CreateRelationship`/`SetLink`), grounding + section content-hash validation | unchanged; these are correctness, not security |
+| SQLite projection | stripped to plain migrations + rebuild-from-vault; DB disposable |
+| LanceDB retrieval — chunk/embed, hybrid FTS+vector, staleness/repair, eval harness | unchanged; **0.911 / 0.830** gate stays normative |
+| Synthesis engine — retrieve → LLM plan (`generateObject<ChangePlan>`) → validate → apply | the agentic core under test |
+| Evidence machinery — `evidence resolve\|retry\|review` + reverification | rebased onto the direct model client; run-ledger/audit deps stripped to plain SQLite state |
+| Gemini adapter | moves out of the egress broker into a direct in-process provider client; key Keychain → env; per-call cap survives |
+| Jobs queue | minimal, for reindex batching |
+| `maintain` workflow | agentic maintenance |
+| CLI-contract harness — `commands.json` + fixture + schemas + `contract-lint` | survives as the drift gate; demolition = delete rows + regenerate |
+| `withFixtureVault` testing harness | fixture vault in a throwaway git repo *is* the v2 shape; provisioned-only suites die |
+
+**Command surface: 55 → the survivor set** (membership owned by `commands.json`, §ssot). Survivors: `status` (absorbs `doctor`, `db status`, `index status`, `sync status`), `note show|add|history|related`, `query`, `enrich`, **`link`** (NEW — fronts `CreateRelationship`/`SetLink`), `ingest`, `source add|list|show`, `index rebuild|eval`, `db migrate|rebuild`, `sync` (diff working tree → reindex changed), `validate`, `maintain`, `jobs run|list`, `evidence resolve|retry|review`. Killed: `doctor`, `db backup|restore|verify|status`, all 8 `git *` commands (git log/revert **is** the review), `graduation *`, `quarantine *`, `source trust *`, `purge`, `reconcile` (folds into `sync`), `index repair|status|verify` (fold into `index rebuild` / `status`), `watch`, `sync reset|status`.
+
+**Lead decisions on the delegated-discretion commands** (the brief left `inspect` and `jobs retry|cancel` to the lead — recorded here, not silently punted): **kill `inspect`** (its read surface folds into `status` + `note show`) and **kill `jobs retry|cancel`** (a single-user reindex queue re-runs via `jobs run`; retry/cancel are ceremony). The final row count is whatever `commands.json` holds post-demolition — the brief's "~18" is a target, not a contract.
+
+**Delivery — 6 phased PRs, each independently green + mergeable.**
+
+| # | PR | Gate |
+|---|---|---|
+| 1 | `ADR-0002` + this spec; `v1-fortress` tag on `main` | docs land; tag exists |
+| 2 | In-process cutover — replace broker/egress clients with direct impls behind existing seams; daemons off | full suite green, **zero provisioning** |
+| 3 | Demolition — delete broker/provisioning/console/signer/scan/quarantine/trust/graduation; shrink `commands.json`; delete dead tests | `contract-lint` + `contract:check` green; no dangling imports |
+| 4 | Persistence strip — plain SQLite; no ledger protocol, no backup | `db rebuild` parity holds |
+| 5 | Point at `main-vault` directly + deprovision script | live Mac clean (human-run) |
+| 6 | Docs rewrite — new CLAUDE.md constitution, README; retire spec-corpus pointers | docs honest to v2 |
+
+**What this is NOT.** Not a retrieval or note-model rewrite (parse/index/retrieve internals unchanged where possible). Not a new UI (Console nuked; a new UI comes later). Not multi-provider (Gemini ported as-is; an Anthropic provider is future work). Not a security redesign (v2 intentionally has **no** security boundary beyond git history). Not touching the legacy `2nd-brain`/`brain-hub` ecosystem. **MCP server surface: out of scope** (a future agent surface).
+
+## interfaces — Interfaces & Contracts
+
+**Command membership, phase, privilege, idempotency are owned by `docs/specs/cli-contract/commands.json`** (version-bumped, still gated by the bijection). Handlers register at import time; nothing re-classifies a command outside the registry. Adding/removing/renaming a command is a `commands.json` row diff + a fixture line + a per-command schema file, then `pnpm contract:write` (§ssot).
+
+### `link` (NEW) — flag surface + `--json` schema
+
+`link` fronts two ChangePlan ops: **`CreateRelationship`** (a typed edge, `--predicate` present) and **`SetLink`** (a plain link/wikilink, no predicate).
+
+| Flag / arg | Rule |
+|---|---|
+| `<source>` (positional) | source note id — required |
+| `<target>` (positional) | target note id — required |
+| `--predicate <p>` | present ⇒ `CreateRelationship` (`action:"related"`, `predicate` set); absent ⇒ `SetLink` (`action:"added"`, `predicate:null`) |
+| `--alias <a>` | display alias; sets `alias`. Meaningful **only on add**. **`--alias` + `--remove` ⇒ exit 5 (usage)**, evaluated before anything else. |
+| `--remove` | removes the matching edge. **With `--predicate <p>`**: removes exactly that relationship edge (`source→target`, `predicate=p`), leaving the plain link and any other-predicate edges intact. **Without `--predicate`**: removes only the plain `SetLink` edge (`predicate` NULL). Matched ⇒ `action:"removed"`; no matching edge ⇒ `action:"noop"` (§behavior). |
+| `--json` | emit the machine object below to stdout |
+
+**Link-removal semantics are finalized (not open):** the selector is `(source, target)` plus `predicate` **iff** `--predicate` is passed; a remove never touches an edge the selector doesn't name; a remove that matches nothing is a **noop**, not an error (§behavior). This closes the one previously-open removal question.
+
+`link --json` output object — **owned by `docs/specs/cli-contract/link.schema.json`** (machine SSOT), `contract-lint`-gated like every command:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `action` | `"added" \| "removed" \| "related" \| "noop"` | what happened (`related` = `CreateRelationship` edge) |
+| `source` | `string` | source note id |
+| `target` | `string` | target note id |
+| `predicate` | `string \| null` | the relationship predicate; `null` for SetLink forms |
+| `alias` | `string \| null` | the display alias; `null` unless `--alias` |
+| `commit` | `string \| null` | sha of the one commit; **`null` iff `noop`** |
+| `noop` | `boolean` | `true` iff `action:"noop"` |
+
+### `sync` — `--json` schema
+
+`sync` reconciles the **working tree** against the SQLite projection by per-note content hash (§behavior). **There is no HEAD cursor** — the projection's per-note `contentHash` *is* the cursor (§ssot). Schema **owned by `docs/specs/cli-contract/sync.schema.json`** (machine SSOT); the full field set, reproduced here for the implementer:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `scannedCount` | integer | working-tree note files hashed this run |
+| `changedCount` | integer | notes whose on-disk hash ≠ projection `contentHash` → reindexed |
+| `newCount` | integer | working-tree notes with no projection row → indexed |
+| `droppedCount` | integer | projection rows with no backing file → removed |
+| `noop` | boolean | `true` iff `changedCount = newCount = droppedCount = 0` |
+
+Contract deltas from the v1 `sync --json`: **drops `head`** (no cursor), **adds `scannedCount`**. `reindexed = changedCount + newCount` is derivable and is **not** a stored field (SSOT — consumers sum; no re-derived owner).
+
+### `status` — `--json` schema (absorbs `doctor`, `db status`, `index status`, `sync status`)
+
+Schema **owned by `docs/specs/cli-contract/status.schema.json`** (machine SSOT); the full field set, reproduced for the implementer. Each folded surface is a named sub-object:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `ok` | boolean | all `checks[]` passed |
+| `vault` | object | `{ path: string, headSha: string, dirty: boolean, noteCount: integer }` |
+| `db` | object | `{ schemaVersion: integer, noteCount: integer, sectionCount: integer, linkCount: integer }` |
+| `index` | object | `{ chunkCount: integer, staleCount: integer, embeddingModel: string }` — `staleCount` = chunks whose backing note hash changed since embed |
+| `sync` | object | `{ pendingChangedCount: integer }` — notes whose on-disk hash ≠ projection `contentHash` |
+| `checks` | array | the retained `doctor` health probes: `[{ name: string, ok: boolean, detail: string \| null }]` — the surviving set is `vault-reachable`, `git-healthy`, `provider-key-present`, `index-not-stale` |
+
+Contract deltas from v1: `status.sync` **drops `lastIndexedHead`**, **adds `pendingChangedCount`**; the v1 `doctor` backup-health and signer-registry checks are **retired with their machinery** (§security) and do not appear in `checks[]`.
+
+### Exit codes
+
+The binary's `EXIT` set contracts to **`{0, 1, 2, 4, 5}`** + `7` (jobs-run aggregate only):
+
+| code | meaning |
+|---|---|
+| `0` | ok |
+| `1` | validation — includes **grounding failure** (dirty edited note) |
+| `2` | vault / lock — includes git `index.lock` present |
+| `4` | internal |
+| `5` | usage — includes `--alias` + `--remove` on `link` |
+| `7` | **only** the `jobs run` batch aggregate (a transient-but-exhausted item) |
+
+**Retired: `3` (secret-scan)** and **`6` (action-required / broker authz)** — no command emits them.
+
+### Error envelope
+
+The single error envelope is unchanged: `{ code, message, remediation, retryable, retryAfterMs }`. `retryable`/`retryAfterMs` ride the envelope at exit 4; nothing emits exit 6 or 7 through it. The **sole exception** stays the batch commands (`jobs run`), which emit `{ items[], aggregate }` with the aggregate `exitCode` (the only path to 7).
+
+### File formats & data model
+
+- **Vault note** — markdown (frontmatter + section tree). Unchanged. The vault is the **system of record** for note/section/link *content*.
+- **ChangePlan** — the **15 remaining ops** (incl. `CreateRelationship`/`SetLink`), canonical serialization, and identity-key are owned by **`@atlas/contracts`**; the CLI consumes them, never re-derives.
+- **SQLite projection** (derived cache, rebuildable via `db rebuild`): `note(id, path, title, contentHash, frontmatter)` 1:N `section(noteId, heading, contentHash, order)`; `link(sourceId, targetId, predicate NULL, alias NULL)` as an N:M edge set between notes — an edge is uniquely keyed by `(sourceId, targetId, predicate)`, so a plain link (`predicate` NULL) and a `cites` relationship between the same pair are **distinct rows**; `chunk` metadata (1 note : N chunks; the embeddings themselves live in **LanceDB**, the retrieval index, rebuildable via `index rebuild`).
+- **Operational state** (SQLite is the SoR, **not** vault-derived, retained across `db rebuild`): `jobs` / `job_attempts` (owned by `@atlas/jobs`), evidence state (below), `model_calls` (provider-call log for token/cost observability).
+- **Evidence state** (operational SQLite, retained across `db rebuild`, rebased off the v1 run-ledger/audit coupling): `evidence(id TEXT PK, noteId TEXT, sectionId TEXT NULL, claim TEXT, citation TEXT NULL, status TEXT, verdict TEXT NULL, attempts INTEGER DEFAULT 0, lastCheckedAt TEXT NULL, createdAt TEXT)` — `status ∈ {pending, resolved, failed, needs-review}`; `verdict` holds the reverification-outcome text (`NULL` until first checked); `attempts` counts `evidence retry` re-runs. Cardinality: N `evidence` rows : 1 note, where `noteId` is a **soft** reference to the note's stable id — **not** a rebuild-enforced foreign key, because evidence state outlives the vault-derived projection. Consumed by `evidence resolve|retry|review`. **This is the final, complete v2 contract — the ten columns above are the whole table.** No v1 evidence column is carried: the v1 run-ledger/audit couplings (run-id, ledger-seq, signature, and manifest back-references) are **dropped, not migrated**, because v2 starts a **fresh** `evidence` table per the no-shims doctrine (§behavior — v1 state is revived from the `v1-fortress` tag, never carried forward). A consumer implements against exactly these ten columns.
+- **Provider client** — a direct in-process Gemini client, ported from `packages/broker/src/egress/gemini.ts` (the `x-goog-api-key` HTTP path survives; the IPC/capability wrapper does not). Reads the API key from **one env var, `ATLAS_GEMINI_API_KEY`** (name owned by config, §ssot; follows the repo's established `ATLAS_*` convention), read **once at process start** and held **in-process only** — never on disk, in logs, or in git. The env var is populated out-of-process from the Keychain item **`atlas-gemini-api-key`** (a `security find-generic-password` fetch in the launcher, never by `brain` itself). Enforces the per-call cap `PLAN_GENERATION_MAX_TOKENS = 4096` (§ssot).
+
+## behavior — Behavior & Correctness
+
+**Command lifecycle (every command).** Resolve the vault path → open the working tree → open SQLite + LanceDB → do the thing → **exit**. A **mutating** command additionally: build a ChangePlan → validate it (`@atlas/contracts`) → **ground** it against the projection → apply to the working tree → **stage only the ChangePlan's touched paths** → **one commit** → exit. Read commands never write git.
+
+**Dirty-vault doctrine (binding — replaces the blanket "vault dirty ⇒ exit 2").**
+- **Read commands + `sync`:** a dirty tree is normal input, **never an error**.
+- **Mutating commands** (`link`, `enrich`, `note add`, `maintain` / `evidence` applies): allowed with **unrelated** dirt. The apply stages + commits **only the paths its ChangePlan touched**; unrelated dirt stays uncommitted in the working tree.
+- **Dirty edited/named note (binding):** grounding fails → **exit 1** (remediation `run brain sync`), **before any apply or commit**, if any note the command **edits or names** is dirty (on-disk hash ≠ projection `contentHash` at apply time). For `link`, the edge is written **into the source note**, so the **source is the edited file** — a **dirty source note must fail grounding before apply, exactly as a dirty target does.** Both the `link` source and target must be clean at apply time: the **source** because it is rewritten, the **target** because grounding binds the new edge to the target's known projection identity. Dirt on notes the command does **not** name is **unrelated dirt** and never fails grounding (per the mutating-commands rule above).
+- **git `index.lock` present** ⇒ **exit 2** (unchanged).
+
+**`link` behavior (binding — noop / duplicate / absent-edge).** `link` validates flags, then grounds, then applies against the `link` edge set; every outcome below is gated by the two prior steps.
+- **`--alias` + `--remove`** ⇒ **exit 5 (usage)**, evaluated **before** grounding — no mutation, no commit.
+- **Grounding precedes every add/remove outcome:** grounding fails → **exit 1** (never a noop), **before any apply or commit**, if `<source>` or `<target>` does not resolve to an existing note, **or the source note — the file the edge is written into — is dirty** (on-disk hash ≠ its projection `contentHash`), **or the target is dirty.** Because `link` **edits the source**, a dirty source is a grounding failure exactly like a dirty target — the file being rewritten must be clean. The noop paths below apply **only** to grounded, clean, existing notes.
+- **Add — new edge.** No edge with the selector `(source, target, predicate)` exists → create it. Plain form (no `--predicate`) → `action:"added"`; predicate form → `action:"related"`. One commit; `commit:<sha>`, `noop:false`, exit 0.
+- **Add — duplicate (noop).** An edge with the **same** `(source, target, predicate)` already exists **and** either `--alias` is absent or its value equals the stored alias → **noop**: `action:"noop"`, `commit:null`, `noop:true`, **no git write**, exit 0. Re-adding an identical edge is idempotent.
+- **Add — alias change.** The same `(source, target, predicate)` edge exists but `--alias` supplies a **different** alias → update the alias in place: one commit, `action` = the add/related form, `noop:false`. An add **without** `--alias` never clobbers a stored alias — it falls to the duplicate-noop path.
+- **Remove — matching edge.** `--remove` with an edge matching the selector (predicate-scoped iff `--predicate`, per §interfaces) → remove it: `action:"removed"`, one commit, `noop:false`, exit 0.
+- **Remove — absent edge (noop).** `--remove` whose selector matches **no** edge → **noop**: `action:"noop"`, `commit:null`, `noop:true`, no git write, exit 0. Removing an edge that is not there is idempotent, not an error.
+- **noop conditions, summarized:** exactly (a) the duplicate-identical add and (b) the absent-edge remove. Every noop emits `action:"noop"`, `commit:null`, `noop:true`, exit 0, and writes **neither** git **nor** the projection.
+
+**`sync` mechanism (binding).** No HEAD cursor — **the projection IS the cursor**; no second state marker exists. `sync` scans vault files → hashes each → compares to the projection's per-note `contentHash` → **reindexes mismatches + new files** and **drops projection rows with no backing file**. Dirty vs clean is irrelevant — **uncommitted editor edits are sync's primary input.** Idempotency is structural: an unchanged tree (clean *or* dirty) re-hashes to all-match → **`noop: true`, exit 0, no index write**.
+
+**`db rebuild`.** Regenerates the vault-derived projection (`note`/`section`/`link`/`chunk` metadata) from the vault working tree. Operational tables (`jobs`, `job_attempts`, evidence state, `model_calls`) are **retained** across rebuild (lead decision — they are not vault-derived and losing them loses history, not correctness). The DB is disposable in that a lost projection is fully regenerable; operational history is best-effort.
+
+**Fail-fast, no shims.** Grounding failure is a hard exit 1, never a silent skip-and-continue. No compatibility fallbacks, no infinite retries on a flaky provider (the per-call token cap bounds a single call; a failed plan-gen surfaces the error), no v1/v2 migration shims — v1 state is revived from the tag, not carried forward.
+
+**Concurrency & zero-state.** Single-process, single-user; the git `index.lock` is the **only** concurrency guard — two concurrent `brain` mutations serialize on it, the loser gets exit 2. Empty vault ⇒ `db rebuild` yields an empty projection; `sync` on an unchanged/empty tree ⇒ `noop`; `query` against an empty index ⇒ empty result set, exit 0.
+
+**Observability.** Structured logs to **stderr**; `--json` payloads to **stdout**. **`git log` on the vault is the mutation audit trail** — it replaces the retired ledger; `git revert <sha>` is remediation.
+
+**Deprovision (Phase 5) — destructive, human-run, not CI.** The script unloads the 3 launchd services and deletes the `atlas-*` OS users/groups, sockets, WORM-anchor dir, and Keychain items. It **mutates real host state and is irreversible without re-provisioning** — it is owner-run with `sudo`, gated on explicit confirmation, and never executed in CI.
+
+## ssot — Single Source of Truth
+
+Every value/rule/state below has exactly **one** owner; consumers consume, never re-derive.
+
+- **Command membership / phase / privilege / idempotency** → `docs/specs/cli-contract/commands.json`.
+- **`link --json` schema** → `docs/specs/cli-contract/link.schema.json`.
+- **`sync` / `status` schemas** → their respective `*.schema.json` (the `head` → `scannedCount` and `lastIndexedHead` → `pendingChangedCount` deltas live only there).
+- **ChangePlan (15 ops), canonical serialization, identity-key** → `@atlas/contracts`.
+- **The sync cursor** → the SQLite projection's per-note **`contentHash`**. There is **no** `head`, **no** `lastIndexedHead`, no second marker — the design's one dual-state risk is closed by declaring the projection the sole cursor.
+- **Eval thresholds** (recall@10 ≥ 0.85 / MRR ≥ 0.70) → the `index eval` harness config; the current score (0.911 / 0.830) is a measurement, not a duplicated constant.
+- **`PLAN_GENERATION_MAX_TOKENS = 4096`** → owned once at `apps/cli/src/workflows/index.ts`; the direct provider client reads it — no second copy.
+- **Vault path** → config (points at the working tree); no canonical-ref indirection, no `ATLAS_CANONICAL_REF`.
+- **Exit-code set** → the binary's `EXIT` set (the schema `exitCode` enums consume it).
+- **Gemini API key** → one Keychain item → one env var (config-owned name); the provider client reads that env var — no second store.
+- **Migration ownership** → each package owns its own migrations (`@atlas/sqlite-store` core projection; `@atlas/jobs` owns `jobs`/`job_attempts`).
+
+## security — Security & Trust
+
+**Verdict: v2 has NO security boundary beyond git history — by design. This is correct restraint for a single-user laptop tool, not a gap.**
+
+**Threat model: none beyond the owner's own machine account.** Single trusted user, single trusted machine, single trusted operator. There is no untrusted input path the spec must defend, because the operator *is* the only actor.
+
+**Trust model.** `brain` runs as the invoking user with that user's full filesystem privileges. No privilege separation, no OS identities, no brokers, no sockets. The v1 impossibility properties (unexported `runGit`, protected-ref mutator monopoly) are **moot** — `packages/git` becomes plain typed git ops including committing to the vault's `refs/heads/main`.
+
+**Retired security machinery (all confirmed):**
+
+| Retired | Was |
+|---|---|
+| `@atlas/scan` + both guards + quarantine | fail-closed secret detector; exit 3 |
+| Trust tiers + taint floors + `source trust *` | fail-closed ingest posture |
+| Challenges / capabilities / `atlas-signer` / Secure-Enclave P-256 | broker authorization; exit 6 |
+| Audit ledger + WORM anchor + §2.8 protocol + AEAD backup | tamper-evidence |
+| Sandbox jail (Seatbelt / userns / seccomp) | parser isolation |
+| Egress broker | sole credential/network holder |
+
+**Secrets.** The Gemini API key lives in the Keychain → is exported into **one env var** → is read **once** at process start → held **in-process only** → **never** written to disk, logs, or git. Provider calls go over TLS via the SDK/HTTP client.
+
+**Egress posture (owner's explicit choice).** Request bytes **and** released response bytes go to Gemini with **nothing between the notes and the provider** — the scan gate is retired. Note content leaves the machine on `enrich` / `query` / `maintain`. Accepted.
+
+**Data.** The vault is the user's own notes on the user's own machine. No sensitivity classification, no PII-handling ceremony, no rotation schedule — proportional to the tier.
+
+**Audit & remediation.** `git log` / `git history` **is** the audit trail; `git revert` is the remediation. There is no separate signed ledger.
+
+**Named residual risk (the one real one).** Agents write directly into the real second brain; git history is the only undo. This is the chosen trade-off; **one-commit-per-ChangePlan** keeps reverts surgical. **Do not re-introduce the retired machinery** to "close" this — the owner closed it deliberately.
+
+## test-plan — Test Plan
+
+Substrate: the `withFixtureVault` harness (a fixture vault copied into a throwaway git repo, torn down on exit). CI matrix: `ubuntu-latest` + `macos-15`, Node 26 — but **no `ATLAS_PROVISIONED`, no two-UID job, no daemons**.
+
+**Binding proving tests — dirty-vault doctrine (named rows):**
+
+| # | Test | Asserts |
+|---|---|---|
+| a | unrelated-dirt + `link` | success; the commit touches **only** `link`'s paths; the unrelated dirt is intact in the working tree afterward |
+| b | dirty-**target** + `enrich` / `link` | **exit 1** grounding failure, remediation `run brain sync` |
+| b2 | dirty-**source** + `link` (the note the edge is written into) | **exit 1** grounding failure, remediation `run brain sync` — proves the edited file's dirt fails **before apply**, symmetric with row b; **no commit, no projection write** |
+| c | dirty tree + `sync`, then immediate second `sync` | first run indexes the changed notes; second run ⇒ **`noop: true`, no index write** |
+| d | git `index.lock` present + a mutating command | **exit 2** |
+
+**Binding proving tests — `link` (add / noop / predicate-scoped remove / alias+remove):**
+
+| # | Test | Asserts |
+|---|---|---|
+| e | `link A B` on a fresh pair | `action:"added"`, `predicate:null`; **exactly one commit**, `commit` = that sha, `noop:false`; the SetLink edge is present in the projection afterward |
+| f | `link A B --predicate cites` on a fresh pair | `action:"related"`, `predicate:"cites"`; one commit, `noop:false`; the relationship edge present |
+| g | `link A B` run **twice** (duplicate add) | 2nd run ⇒ `action:"noop"`, `commit:null`, `noop:true`, exit 0; **HEAD sha unchanged** from the 1st run (no new commit, no projection write) |
+| h | given **both** a plain link and a `cites` edge A→B, run `link A B --predicate cites --remove` | removes **only** the `cites` edge; the plain link **survives** in the projection; `action:"removed"`, one commit |
+| i | `link A B --remove` when **no** A→B edge exists (absent-edge remove) | `action:"noop"`, `commit:null`, `noop:true`, exit 0; **no commit** (HEAD unchanged) |
+| j | `link A B --alias foo --remove` (alias + remove) | **exit 5 (usage)**; no mutation, no commit, no projection write — the flag conflict is caught before grounding |
+
+**Contract & drift gates.**
+- `contract-lint.test.ts` — registry ↔ fixture ↔ schema **bijection** holds after the row deletions and the new `link` row.
+- `command-registration.test.ts` — no `not-implemented`-at-live-drive class regressions.
+- `node tools/gen-cli-contract.ts --check` — determinism.
+
+**Correctness & retrieval.**
+- **`db rebuild` parity** — rebuild-from-vault produces the same projection as the incremental fold.
+- **Operational-table retention across `db rebuild`** — seed `jobs`, `job_attempts`, evidence rows, and `model_calls`; run `db rebuild`; assert the vault-derived projection (`note`/`section`/`link`/`chunk`) is regenerated **and** every seeded operational row survives unchanged. **Break scenario it catches:** a rebuild that drops or truncates operational tables (the §behavior retention contract silently violated) — the parity row above only proves the *derived* projection, so without this row a wiped `jobs`/evidence/`model_calls` table passes CI and history is lost on the next rebuild.
+- **`status --json` merged-schema conformance** — run `status --json` against a fixture vault; assert the runtime payload validates against `status.schema.json` with the four folded sub-objects (`vault`, `db`, `index`, `sync`) present at the specified field names/types and `checks[]` carrying exactly the surviving probe set (`vault-reachable`, `git-healthy`, `provider-key-present`, `index-not-stale`). **Break scenario it catches:** the merge of `doctor` + `db status` + `index status` + `sync status` emits a payload that drifts from the schema at runtime (e.g. `status.sync` still carrying the retired `lastIndexedHead`, or a missing `pendingChangedCount`) — `contract-lint` checks the schema *file*, not the live output, so without this row the runtime divergence ships green.
+- **`index eval`** — recall@10 ≥ 0.85 / MRR ≥ 0.70 (current 0.911 / 0.830).
+- **One-commit-per-ChangePlan** — an apply yields exactly one commit, touched-paths-only; `git revert` on it restores prior state.
+- **`sync` idempotency** — (covered by row c) plus the row-drop path: a deleted vault file drops its projection row on the next `sync` (`droppedCount` increments, `noop:false`).
+
+**Demolition hygiene & cutover parity.**
+- **Phase-2 cutover parity** — the direct in-process impls behind the existing seams pass the **same suite** the broker/egress clients did.
+- **Zero-provisioning green** — full `pnpm -r test` passes with no `ATLAS_PROVISIONED`; the provisioned-only suites are **deleted, not skipped** (a skipped provisioned suite is a failure of this criterion).
+- **No dangling references** — `pnpm -r build` clean; grep gates confirm no import of a killed package and no reference to a retired env var / socket path / canonical-ref.
+- **Exit-code regression** — no command emits **3** or **6**; **7** appears only from the `jobs run` aggregate.
+
+**Called-out gaps (honest, not silent).**
+- The **deprovision script is not CI-tested** — it mutates real host OS state (users, groups, launchd, Keychain) and is destructive + human-run. Verification is a one-time manual pass on the live Mac, recorded in a retro.
+- **Live provider calls** (`enrich` / `query` / `maintain` against real Gemini) are exercised in a manual live drive, not in the unit suite — the token-cap and the plan-gen path are unit-tested against a test double; the real API is verified live per the repo's "test live" rule.
+
+## accessibility — Accessibility
+
+**`n_a` — headless CLI, no user-facing GUI.** The only surfaces are the human-readable terminal render and the `--json` machine surface agents drive. The macOS Console GUI (and its VoiceOver / Full-Keyboard-Access checklist) is **nuked** in this spec; a new UI — with its own accessibility bar — is explicitly deferred until Atlas works properly, and will carry that bar when it is specced.
+
+## open-questions — Open Questions
+
+Genuinely-open items only. Every decision this spec introduces is now resolved above — recorded here so their absence from an open list reads as a decision, not a punt: the discretionary-command calls (`inspect`, `jobs retry|cancel` → killed), the `db rebuild` disposal boundary, the **`status` merged `--json` field set** (specified in §interfaces), the **`link` removal / noop semantics** (specified in §interfaces + §behavior), the **final evidence-state schema** (the ten-column table in §interfaces — a fresh v2 table, no v1 column carried, per the no-shims doctrine), and the **Gemini config names** (`ATLAS_GEMINI_API_KEY` + Keychain item `atlas-gemini-api-key`, named in §interfaces). No decision required to implement v2 remains open.
+
+**Deferred (tracked, not V1):** an **Anthropic provider** (future work — Gemini ported as-is for v2); the **MCP server surface** (a future agent surface, out of scope here).
