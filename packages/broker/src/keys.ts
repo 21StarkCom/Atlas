@@ -197,12 +197,25 @@ export function loadBrokerConfigFromEnv(env: NodeJS.ProcessEnv = process.env): B
   // Anchor path defaults to the D8 per-OS location; overridable for tests/non-standard installs.
   const anchorPath = env.ATLAS_AUDIT_ANCHOR_PATH ?? defaultAnchorPath();
 
+  // Live-vault adoption (60-A): the DAEMON must learn the adopted canonical ref the
+  // same way the CLI does via `protectedRefsFor`. Without this the daemon falls back
+  // to `refs/heads/main` and every scope-"sync" integrate either CAS-mismatches
+  // against the real canonical (`refs/atlas/main`) or — worse — targets the upstream
+  // branch the adoption invariant forbids Atlas from ever writing. Only `canonical`
+  // is overridable; `audit`/`trust` are never (mirrors `protectedRefsFor`). A blank
+  // env value falls through to the default rather than installing an empty ref name.
+  const canonicalRef = env.ATLAS_CANONICAL_REF;
+  const refs =
+    canonicalRef !== undefined && canonicalRef.length > 0
+      ? { ...DEFAULT_PROTECTED_REFS, canonical: canonicalRef }
+      : DEFAULT_PROTECTED_REFS;
+
   const signers = loadSignerRegistry(keysDir);
   const attestation = loadAttestationKey(keysDir, DEFAULT_ATTESTATION_SIGNER_ID);
 
   return {
     repoDir,
-    refs: DEFAULT_PROTECTED_REFS,
+    refs,
     anchorPath,
     signers,
     attestation,

@@ -64,7 +64,7 @@ UID/GID: `free_id_at_or_above` claims the first FREE id ≥ `ATLAS_UID_BASE` (de
 
 ## Launcher-exported env — the daemon contracts
 
-- **Broker** (`bin/broker-launcher.sh:12-18`): `ATLAS_BROKER_SOCKET`, `ATLAS_BROKER_KEYS_DIR`, `ATLAS_AUDIT_ANCHOR_PATH` (broker also defaults per-OS), `ATLAS_VAULT_REPO_DIR` (default `/var/lib/atlas/vault`, **deployment-specific, overridable**).
+- **Broker** (`bin/broker-launcher.sh:12-18`): `ATLAS_BROKER_SOCKET`, `ATLAS_BROKER_KEYS_DIR`, `ATLAS_AUDIT_ANCHOR_PATH` (broker also defaults per-OS), `ATLAS_VAULT_REPO_DIR` (default `/var/lib/atlas/vault`, **deployment-specific, overridable**), `ATLAS_CANONICAL_REF` (**live-vault adoption**: set to `refs/atlas/main` so the daemon mutates the adopted canonical ref, not `refs/heads/main`; unset ⇒ the plain-vault default. The launcher passes it through only when set).
 - **Egress** (`bin/egress-launcher.sh:30-42`): `ATLAS_EGRESS_SOCKET`, `ATLAS_EGRESS_KEYS_DIR`, `ATLAS_GEMINI_KEY_FILE`, `ATLAS_EGRESS_CAPABILITY_KEY` (shared 0640: CLI mints/group-read, egress verifies/owner-read), `ATLAS_EGRESS_QUARANTINE_PUBKEY` (shared 0644), `ATLAS_EGRESS_QUARANTINE_SPOOL` (state, 2770 setgid), `ATLAS_EGRESS_BUDGET_STATE` (`budget-state.json`, egress-owned + egress-writable, 0660).
 
 ## Egress capability key custody (#60 Phase 6)
