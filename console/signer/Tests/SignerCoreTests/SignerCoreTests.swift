@@ -1,5 +1,6 @@
 import XCTest
 import CryptoKit
+import LocalAuthentication
 @testable import SignerCore
 
 /// A thread-safe capture buffer for the injected stdout/stderr sinks.
@@ -316,5 +317,44 @@ struct InvalidatedBackend: SigningBackend {
     func generate() throws -> GeneratedKey { GeneratedKey(blob: Data(), publicKeyPEM: "") }
     func signDER(blob: Data, payload: Data, reason: String) throws -> Data {
         throw SignerError(.keyInvalidated, "biometry re-enrollment invalidated the key")
+    }
+}
+
+/// SP-3 P6 #297 — the exit-4 diagnostic must name the real cause. The real
+/// Secure-Enclave path never runs in CI (no SEP), but `laDetail` is a pure
+/// function over the NSError the enclave path would surface, so its rendering IS
+/// unit-testable with a synthetic error.
+final class LADetailTests: XCTestCase {
+    func testSystemCancelSurfacesTheClamshellDebugDescription() {
+        // The exact error observed on the P6 drive: a closed-lid Touch ID attempt.
+        let e = NSError(domain: LAError.errorDomain, code: LAError.Code.systemCancel.rawValue, userInfo: [
+            NSLocalizedDescriptionKey: "Authentication canceled.",
+            NSDebugDescriptionErrorKey: "Touch ID is not available in closed clamshell mode.",
+        ])
+        let detail = laDetail(e)
+        // The generic localized string alone must NOT be the whole message.
+        XCTAssertNotEqual(detail, "Authentication canceled.")
+        // It must distinguish systemCancel from a user cancel…
+        XCTAssertTrue(detail.contains("systemCancel"), detail)
+        // …and surface the actionable cause the localized string hides.
+        XCTAssertTrue(detail.contains("closed clamshell"), detail)
+    }
+
+    func testUserCancelRendersCodeNameAndDescription() {
+        let e = NSError(domain: LAError.errorDomain, code: LAError.Code.userCancel.rawValue, userInfo: [
+            NSLocalizedDescriptionKey: "Authentication canceled.",
+        ])
+        let detail = laDetail(e)
+        XCTAssertTrue(detail.contains("userCancel"), detail)
+        XCTAssertTrue(detail.contains("Authentication canceled."), detail)
+    }
+
+    func testNoRedundantDebugDescriptionWhenEqualToLocalized() {
+        let e = NSError(domain: LAError.errorDomain, code: LAError.Code.authenticationFailed.rawValue, userInfo: [
+            NSLocalizedDescriptionKey: "same",
+            NSDebugDescriptionErrorKey: "same",
+        ])
+        // Duplicate debug string is not appended twice.
+        XCTAssertEqual(laDetail(e).components(separatedBy: "same").count - 1, 1)
     }
 }

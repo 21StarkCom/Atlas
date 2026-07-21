@@ -19,7 +19,7 @@
         "properties": {
           "id": { "type": "string", "minLength": 1 },
           "title": { "type": "string", "minLength": 1 },
-          "status": { "enum": ["ok", "warning", "degraded", "action-required"] },
+          "status": { "enum": ["ok", "skipped", "warning", "degraded", "action-required"] },
           "detail": { "type": "string" }
         }
       }
