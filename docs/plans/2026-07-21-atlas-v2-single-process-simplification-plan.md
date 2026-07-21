@@ -1,0 +1,440 @@
+# Atlas v2 — Single-Process Simplification · Implementation Plan
+
+*Plan — 2026-07-21 · `docs/plans/2026-07-21-atlas-v2-single-process-simplification-plan.md` · **playground tier** · from `docs/specs/2026-07-21-atlas-v2-single-process-simplification-spec.md` · in-place demolition, 6 phased PRs, merge-when-green.*
+
+## 1. Overview
+
+**Approach: cutover, then demolish, then strip — never the other way around.** The single non-negotiable ordering constraint is that the runtime must stop *needing* the security machinery **before** the machinery is deleted, and within the demolition PR every call site of a package is removed **before** that package is deleted. So Phase 2 rewires every daemon-backed seam to an in-process implementation *behind the existing seam signatures*, shedding the broker **and** the capability/budget/scan wrapper from the provider path in one move, and proves the whole suite green with **zero provisioning**. Only then does Phase 3 remove the remaining trust-tier / scan-gate / artifact-guard semantics from the app code, collapse the mutation order onto a direct working-tree commit, land the one new command (`link`), rewrite `sync`/`status`, shrink `commands.json`, and — last, once nothing references them — delete the broker/provisioning/console/scan/quarantine/trust/graduation trees. Phase 4 strips persistence to plain SQLite (destructive links/evidence/source migrations, no ledger/backup protocol). Phase 5 points config at the real `main-vault` and ships the human-run deprovision script. Phase 6 rewrites the docs to be honest to v2.
+
+**Key architectural decisions (made by the spec, honored here):**
+- **Three already-injected seams make the cutover a same-signature swap** (verified against the code): the egress transport is `ModelsClient`'s `Invoker` (`packages/models/src/client.ts`); the commit path is the `RunIntegrator` seam (`makeBrokerIntegrator`, `apps/cli/src/workflows/broker-integrator.ts`) + the `CaptureIntegration` seam (`brokerSignedIntegration`/`buildCaptureDeps`, `apps/cli/src/ingest/wiring.ts`); serialization is the vault lock (`apps/cli/src/locks/manager.ts`). Every `commands/*` and `workflows/*` call site takes these as injected deps, so Phase 2 swaps the transport under them without touching orchestration. Everything else in the kill list is *consequence*, deleted once nothing calls it.
+- **Both broker-backed seams shed their broker dependency in Phase 2** (this is how Phase 3 deletes `@atlas/broker`/`@atlas/scan` with nothing dangling). The commit path cannot be a pure transport swap: Phase 2's in-process integrator drops the attestation-signed `refs/audit/runs` append + WORM anchor (they need OS key custody, which "zero provisioning" removes) and advances the canonical ref in-process. The provider path **also** sheds its wrapper: the direct in-process `Invoker` carries **no capability mint, no per-run budget, and no egress scan gate** (all retired-security — spec §security egress posture: "nothing between the notes and the provider"). Only the per-call token cap (`req.maxTokens = PLAN_GENERATION_MAX_TOKENS`) survives. So `ATLAS_EGRESS_CAPABILITY_KEY` leaves the provider path **in Phase 2**, and after Phase 2 no runtime *provider* path references `@atlas/broker`. The remaining `@atlas/scan` call sites (the CLI-side `GeneratedArtifactGuard`/`PrePersistenceGuard` in synthesis/ingest) are removed in Phase 3 **before** the package deletion.
+- **The ported Gemini adapter lands in `@atlas/models`** (lead call — spec left the home open). `@atlas/models` is already the seam the CLI consumes for provider calls and already owns `model_calls` persistence; folding `GeminiAdapter` (pure files `gemini.ts`/`types.ts`/`provider-error.ts`/`prompt-registry.ts`, the `serialize`/`transmit`/`parse`/`callOnce`/`costMicros` surface) into it preserves every CLI call site. See §flags.
+- **The canonical ref is config (`git.canonical_ref`), not an env var.** The spec names it `ATLAS_CANONICAL_REF`; the code has no such env var — the ref is config-supplied (`apps/cli/src/config/schema.ts`, default `refs/atlas/main` in `apps/cli/src/config/canonical-ref.ts` `DEFAULT_CANONICAL_REF`). Phase 3 removes the config key + `canonical-ref.ts`; the direct mutation order commits to `refs/heads/main`. The no-reference gate greps for `git.canonical_ref` / `refs/atlas/main` / `ATLAS_CANONICAL_REF`.
+- **Safety collapses to git + the `v1-fortress` tag.** One commit per applied ChangePlan; undo = `git revert <sha>` **followed by `brain sync`**. Revival of any retired subsystem = check out the tag. There is no rollback machinery to build — that is the point of the spec.
+- **The reconciliation routine is one SSOT owned by the sync engine;** `sync` consumes it to reconcile, `status` consumes it read-only for the four pending counts. No second differ.
+
+**Six phases, each an independently-green, independently-mergeable PR** (mirrors the spec's delivery table):
+
+| # | Phase | Delivers | Gate | Effort |
+|---|---|---|---|---|
+| 1 | Decision record + safety net | `v1-fortress` tag, ADR-0003, spec | docs land; tag exists | S |
+| 2 | In-process cutover | direct provider (no capability/scan) + direct commit + vault-lock; daemons off | full suite green, **zero provisioning** | L |
+| 3 | Demolition + command surface | remove trust/scan semantics → collapse mutation order → `link`/`sync`/`status` → shrink `commands.json` → delete retired trees | `contract-lint` + `contract:check` green; no dangling imports | L |
+| 4 | Persistence strip | plain SQLite; destructive links/evidence/source migrations; no ledger/backup | `db rebuild` parity + operational-table retention | M |
+| 5 | Point at `main-vault` + deprovision | config → real vault; `deprovision-macos.sh` + allowlist gate | live Mac clean (human-run) | S |
+| 6 | Docs rewrite | CLAUDE.md constitution, README, doc map | docs honest to v2 | M |
+
+## 2. Prerequisites
+
+- **The `v1-fortress` tag (Phase 1, Task 1) must exist on `main` before any deletion lands.** It is the sole revival path for every retired subsystem; the entire "revive from the tag" doctrine depends on it. This is a hard gate on Phases 3–5.
+- Node ≥ 24, pnpm ≥ 11 (pin **11.15.0** — the SP-1 gotcha; a broken 11.12.0 exited 127/1). CI is Node 26.
+- The real vault at `~/Code/Vaults/main-vault` is already graduated (210 notes, 2026-07-17); one-time onboarding is **done and will not recur**. Phase 5 only re-points config at it.
+- The Keychain item `atlas-gemini-api-key` exists on the owner's Mac and stays; the retired v1 signer/capability Keychain + host state exist and are removed in Phase 5.
+
+**Parallelizable with Phase 1:** Phase 6's docs *drafting* can begin any time (it lands last, but the new CLAUDE.md can be written against the spec in parallel). No code phase may start before Phase 1's tag exists.
+
+## 2.5 Global Constraints
+
+Every task's requirements implicitly include this section. Values are copied verbatim from the spec / repo constitution.
+
+- **Tier:** playground. Single-user, single trusted machine (the owner's Mac), single trusted operator. **No** HA, migration ceremony, audit trails, secret rotation, adversarial-input defense, or 10×-scale capacity — their absence is the point, not a gap.
+- **Platform:** **macOS is the only supported target** (the Keychain read is macOS-only; env-var override elsewhere). The `ubuntu-latest` runner is retained purely as a **portability canary** for the platform-neutral suite — not a support commitment.
+- **Toolchain:** TypeScript **strict / ESM / NodeNext** (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `verbatimModuleSyntax`, `isolatedModules`); compile with `tsc`, no runtime type-stripping in prod; narrow types over `any`. Bash: `set -euo pipefail`, lowercase-with-dashes filenames.
+- **Deps** pinned **once** in the `catalog:` of `pnpm-workspace.yaml`; packages reference `"zod": "catalog:"`. Never a floating version in a package.
+- **CI** (`.github/workflows/ci.yml`): `ubuntu-latest` + `macos-15`, Node 26; **no `ATLAS_PROVISIONED`, no two-UID job, no daemons** (Phase 2 flips this). Steps: `pnpm install --frozen-lockfile` → `pnpm -r build` → `pnpm -r test` → `node tools/gen-cli-contract.ts --check`.
+- **Exit-code set** contracts to **`{0, 1, 2, 4, 5}`** + **`7`** (jobs-run aggregate only). `1` includes grounding failure; `2` includes vault-lock contention or a pre-existing git `index.lock`; `5` includes `--alias` + `--remove` on `link`. **`3` (secret-scan) and `6` (action-required) retire — no command emits them; the `EXIT` constant in `apps/cli/src/errors/envelope.ts` drops `SECRET_SCAN` and `ACTION_REQUIRED`.** Owned by the binary's `EXIT` set; schema `exitCode` enums consume it.
+- **Error envelope** unchanged: `{ code, message, remediation, retryable, retryAfterMs }`; `retryable`/`retryAfterMs` ride exit 4. Sole exception stays `jobs run` batch: `{ items[], aggregate }` (only path to 7).
+- **`PLAN_GENERATION_MAX_TOKENS = 4096`** — owned once (currently `apps/cli/src/workflows/model-plan-generator.ts:40`, re-exported from `workflows/index.ts`); the direct provider client reads it, no second copy.
+- **Eval gate (normative):** recall@10 **≥ 0.85** / MRR **≥ 0.70** (current default hybrid **0.911 / 0.830**). Owned by the `index eval` harness config; the current score is a measurement, not a constant.
+- **Vault path** → config (points at the working tree, `~/Code/Vaults/main-vault` post-Phase-5). **No** canonical-ref indirection, **no** `ATLAS_CANONICAL_REF`.
+- **Gemini API key** → one Keychain item `atlas-gemini-api-key`, read **directly by `brain`** at process start (`security find-generic-password -s atlas-gemini-api-key -w`); env var `ATLAS_GEMINI_API_KEY` is the CI/test override path (**precedence: env wins**). Held **in-process only** — never disk, logs, or git. **No launcher.**
+- **Command membership / phase / privilege / idempotency** → `docs/specs/cli-contract/commands.json` (version-bumped). Handlers register at import time; nothing re-classifies outside the registry.
+- **ChangePlan — the finalized 15 ops** (`CreateNote`, `UpdateSection`, `AppendSection`, `SetFrontmatterField`, `AddAlias`, `SetLink`, `CreateRelationship`, `CreateClaim`, `AttachEvidence`, `UpdateEvidenceVerification`, `ProposeMerge`, `ProposeRename`, `ProposeArchive`, `CreateTask`, `UpdateTaskState`) — canonical serialization (`atlas-jcs-v1`), identity-key → `@atlas/contracts`. The live union is **17** (the 15 + the retired `PromoteTrust`/`RevokeTrust`); Phase 3 removes the two trust ops. The CLI consumes; never re-derives.
+- **Migration ownership** → each package owns its own migrations (`@atlas/sqlite-store` core projection; `@atlas/jobs` owns `jobs`/`job_attempts`). New v2 migrations take the next free monotonic ids after `0012`: `0013_links_v2` (Phase 3), `0014_evidence_v2`, `0015_source_registry` (Phase 4).
+- **Version/authorship:** `version 0.0.0`, `private: true` everywhere (no semver). **Commits authored `Aryeh Stark <aryeh@21stark.com>`.** **Branch + PR for everything — no direct-to-main, ever.** Every review finding posted on the PR (inline or summary).
+
+## 3. Phases
+
+---
+
+## Phase 1: Decision record + safety net
+**Goal:** Make the retirement revivable and recorded before a single line is deleted.
+**Dependencies:** none.
+**Estimated effort:** S
+
+### Tasks
+1. **Tag `v1-fortress` on `main`.**
+   - What: create an annotated tag on the current `main` HEAD (the last full-fortress commit) and push it. This is the revival anchor for every kill-list subsystem.
+   - Files/components: none (git ref only).
+   - Interfaces — **Produces:** git tag `v1-fortress` pointing at pre-demolition `main`.
+   - Test: n/a (git-ref assertion, verified in-phase).
+   - Acceptance: `git tag --list v1-fortress` resolves; the tag is pushed to origin; it predates every deletion PR.
+2. **ADR-0003 — retire the security architecture.**
+   - What: author `docs/adr/0003-retire-security-architecture.md` (MADR-lite, immutable). Record the decision, the two rejected alternatives (dev-mode bypass; fork a fresh repo), the accepted residual risks (direct writes to the real brain; unsandboxed ingest), and that it **supersedes** ADR-0001 (egress-response-scan) and ADR-0002 (P-256 signer). ADRs are immutable — supersede, don't edit the older two.
+   - Files/components: `docs/adr/0003-retire-security-architecture.md`.
+   - Interfaces — **Consumes:** ADR conventions + the two existing ADRs. **Produces:** ADR-0003 (the retirement SSOT, per §ssot).
+   - Acceptance: monotonic number `0003`; names both superseded ADRs; states the revival-from-tag path.
+3. **Land the spec.**
+   - What: commit `docs/specs/2026-07-21-atlas-v2-single-process-simplification-spec.md` (this plan's source).
+   - Acceptance: spec present at the dated path.
+
+### Risks
+- **Tag forgotten before deletion** → revival becomes archaeology. Mitigation: Phase 1's gate *is* the tag; Phases 3–5 must not merge until it exists (prerequisite check).
+
+### Verification
+Exact commands (run in the repo root):
+```bash
+git rev-parse v1-fortress                                   # resolves
+[ "$(git rev-parse v1-fortress)" = "$(git rev-parse origin/main)" ] && echo "tag == pre-demolition main"
+git ls-remote --tags origin | grep -q 'refs/tags/v1-fortress' && echo "pushed"
+test -f docs/adr/0003-retire-security-architecture.md && echo "ADR present"
+test -f docs/specs/2026-07-21-atlas-v2-single-process-simplification-spec.md && echo "spec present"
+pnpm -r build                                               # docs-only PR: unaffected
+```
+
+---
+
+## Phase 2: In-process cutover — daemons off
+**Goal:** The runtime stops needing daemons, sockets, OS identities, or `ATLAS_PROVISIONED`. Every daemon-backed seam is swapped to a **direct in-process** implementation **behind its existing signature**; command surface + reconciliation semantics are unchanged (those are Phase 3). Full suite green with zero provisioning.
+**Dependencies:** Phase 1 (tag).
+**Estimated effort:** L
+
+> **Ordering note.** This phase changes *transport*, not command surface or reconciliation semantics — the surface is still 55, the derived-store folds are unchanged, `sync` still reconciles the way v1 did. The two unavoidable behavior changes both flow from "zero provisioning removes OS key custody": the in-process integrator **drops the attestation-signed audit append + WORM anchor** and advances the canonical ref in-process, and the in-process provider `Invoker` **drops capability minting + per-run budget + the egress scan gate** (the egress-side scan lived in the egress daemon we no longer call). The CLI-side `GeneratedArtifactGuard`/`PrePersistenceGuard` scan calls in synthesis/ingest are **untouched here** — they are removed in Phase 3 before `@atlas/scan` is deleted. The command-surface shrink, the v2 `sync`/`status` rewrite, and the working-tree mutation-order collapse are all Phase 3.
+
+### Tasks
+1. **In-process Gemini provider behind the `Invoker` seam; key read directly; wrapper dropped.**
+   - What: move `GeminiAdapter` + its pure deps (`types.ts`, `provider-error.ts`, `prompt-registry.ts`, and the `schema-registry.ts` bits `parse` needs) from `packages/broker/src/egress/` into `@atlas/models`. Add key resolution: read `ATLAS_GEMINI_API_KEY`; **else** shell `security find-generic-password -s atlas-gemini-api-key -w`. Replace `ModelsClient.connect`'s socket `EgressClient` with an **in-process `Invoker`** that calls the ported adapter directly — with **no capability mint, no per-run budget, and no egress scan gate** (all retired-security). The only surviving control is the per-call cap `req.maxTokens = PLAN_GENERATION_MAX_TOKENS` (already how it flows). Rewire the egress-bearing commands — `query` (`apps/cli/src/commands/query.ts`), `index rebuild`/`index eval` (`apps/cli/src/commands/index-ops.ts`, `index-eval.ts`) — to call the direct `Invoker` **without minting a capability**; `ATLAS_EGRESS_CAPABILITY_KEY` leaves the provider path entirely. Keep `model_calls` persistence.
+   - **Re-home the broker-egress type/schema *definitions* `@atlas/models` currently re-exports from `@atlas/broker`, so they survive broker's Phase-3 deletion (verified gap — else Phase 3's `pnpm -r build` breaks).** Today `packages/models/src/{types.ts,client.ts,ledger.ts,receipt-journal.ts}` import ~20 symbols from `@atlas/broker`. The ones v2 **keeps** move *into* `@atlas/models` and are **defined (not re-exported)** there: the IPC shapes `EgressInvokeParams`/`EgressInvokeParamsSchema` + `EgressInvokeResult`; the request/result/receipt types + their zod schemas — `GenerateObjectRequest`, `GenerateTextRequest`, `GenerateTextResult(Schema)`, `EmbedRequest`, `EmbedResult(Schema)`, `ModelCallReceipt(Schema)` (**`model_calls` persistence depends on `ModelCallReceiptSchema`** — a survivor), `PromptRef`, `Usage`, `TransmissionOutcome`; and the `ProviderCallError` / `EgressRefusal` classes. The **capability-only** types (`EgressCapability`, `EgressLimits`, `EgressOperation`, `CapabilitySensitivity`) are **dropped** — they leave the call path in this task and die with the broker in Phase 3. After this task no runtime file in `@atlas/models` imports `@atlas/broker`.
+   - Files/components: `packages/models/src/` (new adapter home), `packages/models/src/client.ts` (`Invoker` impl + `connect`), `packages/models/src/types.ts` (own the re-homed shapes, drop the `@atlas/broker` re-exports), `packages/models/src/{ledger.ts,receipt-journal.ts}` (retarget `ModelCallReceipt(Schema)` to the local definition), `packages/models/src/index.ts` (exports); `apps/cli/src/commands/{query.ts,index-ops.ts,index-eval.ts}` (drop the capability mint). The `x-goog-api-key` HTTP path in `gemini.ts` (`callOnce`, line 493) survives verbatim.
+   - Interfaces — **Consumes:** `GeminiAdapter` / `GeminiAdapterConfig` (`{ apiKey, transport?, maxRetries?, host?, promptRegistry? }`, moved from broker egress); `ModelsClient`, `Invoker = (params: EgressInvokeParams, signal?) => Promise<EgressInvokeResult>`, `GenerateObjectClientRequest` (`@atlas/models/client`); `PLAN_GENERATION_MAX_TOKENS`. **Produces:** `resolveGeminiApiKey(): string` (env-then-Keychain, env wins); an in-process `Invoker` factory (no capability, no budget, no scan) feeding `ModelsClient`; `@atlas/models` owning both the adapter **and** the provider/IPC type+schema definitions (no `@atlas/broker` runtime import).
+   - Test: **`packages/models/test/gemini-adapter.direct.test.ts`** — the ported adapter matrix (auth / rate-limit / quota / timeout / validation / partial-batch / model-incompatible / cancellation) passes against the in-process invoker with a stubbed `Transport` (no live key); **`packages/models/test/key-resolution.test.ts`** — asserts **env override beats Keychain** and in-process-only handling (never written to disk/log); a `maxTokens`-cut (`finishReason MAX_TOKENS`) surfaces as validation, not a silent success; a runtime grep asserts no `mintEgressCapability`/`ATLAS_EGRESS_CAPABILITY_KEY` on the provider path.
+   - Acceptance: `brain query` / `enrich` make provider calls with **no egress daemon, no capability key, and zero provisioning**.
+2. **In-process integrator behind the `RunIntegrator` / `CaptureIntegration` seams (audit/WORM dropped).**
+   - What: replace `BrokerClient.connect` with in-process advance behind the two existing integration seams — `makeBrokerIntegrator(client)` (the `RunIntegrator` consumed by `enrich`/`reconcile`/`maintain`/`git-refresh` synthesis applies) and `brokerSignedIntegration`/`buildCaptureDeps` (the `CaptureIntegration` consumed by `ingest`/`note add`/`sync`). The in-process advance FF-advances the canonical ref (still `git.canonical_ref` this phase) to the agent commit **without** the attestation-signed `refs/audit/runs` append or WORM anchor. The agent-branch/worktree apply mechanism and the run state-machine stay for now; only the broker-CAS integrate step is swapped. Deterministic authorship `Aryeh Stark <aryeh@21stark.com>`.
+   - Files/components: `apps/cli/src/workflows/broker-integrator.ts`, `apps/cli/src/workflows/engine.ts` (`RunHandle.integrate`, §2.8 step), `apps/cli/src/ingest/wiring.ts` (`brokerSignedIntegration`, `connectBrokerIntegration`, `buildCaptureDeps`), `packages/git/src/refs.ts`/`worktree.ts` (in-process FF advance).
+   - Interfaces — **Consumes:** the `RunIntegrator` seam (`makeBrokerIntegrator(client, auth?)` → `client.signAndAdvanceProtectedRef({ref, expectedOld, newCommit, manifest, event})`) and the `CaptureIntegration` seam (`brokerSignedIntegration(client, scope)` → `client.signAndIntegrateSourceCapture`), both consumed unchanged by their call sites; `Repo`/`Worktree` (`@atlas/git`). **Produces:** in-process integrator + capture-integration factories with the identical signatures the workflow engine and `buildCaptureDeps` consume today (no call-site change).
+   - Test: an apply produces **exactly one commit** touching only the ChangePlan's paths (partial proof of one-commit-per-ChangePlan; the full working-tree mutation order + restoration lands in Phase 3); the run integrates with **no broker daemon and no audit/WORM append**.
+   - Acceptance: ChangePlan applies + `sync`/`ingest` captures advance the canonical ref daemon-free with zero provisioning.
+3. **Vault lock spans the full mutation order, taken by every derived-store writer (proofs d/d2/d3 are this phase's gate).**
+   - What: confirm/extend the brain-owned advisory `flock` (`apps/cli/src/locks/manager.ts`) so it is held across grounding → apply → commit → projection+index refresh, and is acquired by **every** derived-store writer — mutating commands, `sync`, `db migrate|rebuild`, `index rebuild`, `jobs run`. Read commands never take it. A writer that cannot take the lock **exits 2** (no queueing). A pre-existing external git `index.lock` at apply time is a separate preflight **exit 2**. This phase establishes the lock scope against the Phase-2 (worktree-integrate) mutation path; Phase 3 re-runs the same proofs against the collapsed direct-commit path (regression, not new).
+   - Files/components: `apps/cli/src/locks/manager.ts`, the mutating command handlers, `sync`, `db`/`index`/`jobs` runners.
+   - Interfaces — **Consumes:** the existing lock manager API. **Produces:** a lock-scope guarantee consumed by Phase 3's canonical mutation order.
+   - Test: **`apps/cli/test/locks.mutation-order.test.ts`** — proving rows **d** (git `index.lock` present + mutating command ⇒ exit 2), **d2** (two overlapping mutations — the harness pauses invocation 1 **after grounding** holding the vault lock, releases both concurrently; **exactly one** commits, the loser **exits 2** with **no** working-tree/projection/HEAD change), **d3** (`sync` launched while a mutation holds the vault lock ⇒ `sync` **exits 2**, no partial index write). **All three are required for this phase's gate — none deferred.**
+   - Acceptance: the lock demonstrably spans the whole mutation order (not just git's transient `index.lock`) and is contended by every derived-store writer; d/d2/d3 green.
+4. **CI flip to zero-provisioning.**
+   - What: edit `.github/workflows/ci.yml` and `provisioning/ci/setup.sh` to drop `ATLAS_PROVISIONED=1`, drop the two-UID / daemon / key-custody setup, and run `pnpm -r test` daemon-free. Keep the `ubuntu-latest` + `macos-15` matrix (ubuntu = portability canary).
+   - Files/components: `.github/workflows/ci.yml`, `provisioning/ci/setup.sh`.
+   - Interfaces — **Consumes:** current CI config. **Produces:** a zero-provisioning CI.
+   - Test: n/a (CI config; proven by the green run itself).
+   - Acceptance: CI is green with no `ATLAS_PROVISIONED`, no daemons started.
+
+### Risks
+- **Dep-cycle when folding the adapter into `@atlas/models`.** `@atlas/models` re-exports many broker types today; moving the adapter in must not create a cycle. Mitigation: move the *pure* egress files (`gemini.ts`/`types.ts`/`provider-error.ts`/`prompt-registry.ts`) wholesale so `@atlas/models` owns them; no reverse import into `@atlas/broker` remains.
+- **Semantic drift into Phase 2.** Rewriting `sync`/apply *behavior*, shrinking the surface, or collapsing the working-tree mutation order here would balloon the PR and break the green transport-only swap. Mitigation: this phase is transport + the two forced drops (audit/WORM; capability/budget/egress-scan) only; the surface stays 55, `sync` stays v1-shaped, the CLI-side `GeneratedArtifactGuard` scan calls stay until Phase 3.
+- **Provisioned-only suites subset-skip in Phase 2.** With `ATLAS_PROVISIONED` unset, the two-UID/key-custody/audit suites run their in-process subset (they are *deleted* in Phase 3). Confirm none of them *hard-fail* daemon-free (vs. cleanly subsetting) before merging Phase 2.
+
+### Verification
+Exact commands:
+```bash
+env -u ATLAS_PROVISIONED pnpm -r build
+env -u ATLAS_PROVISIONED pnpm -r test                       # green, no daemons started
+pnpm --filter @atlas/models exec vitest run test/gemini-adapter.direct.test.ts test/key-resolution.test.ts
+pnpm --filter @atlas/cli exec vitest run test/locks.mutation-order.test.ts
+# no socket / daemon-client reference remains on the provider path:
+! grep -rnE "EgressClient\.connect|BrokerClient\.connect|ATLAS_EGRESS_CAPABILITY_KEY|mintEgressCapability" apps/cli/src/commands/query.ts apps/cli/src/commands/index-ops.ts apps/cli/src/commands/index-eval.ts packages/models/src
+# no runtime @atlas/broker import survives in @atlas/models:
+! grep -rn "@atlas/broker" packages/models/src
+```
+
+---
+
+## Phase 3: Demolition + command surface (incl. `link`, v2 `sync`/`status`)
+**Goal:** Remove the trust-tier / scan-gate / artifact-guard semantics from the app code, collapse the mutation order onto a direct working-tree commit, land the one new command (`link`), rewrite `sync`/`status` to v2 semantics, remove canonical-ref indirection and the two trust ChangePlan ops, shrink the command surface — and only then delete every retired subsystem, once nothing references it.
+**Dependencies:** Phase 2 (nothing references the retired code on the provider path first).
+**Estimated effort:** L
+
+> **Task ordering is dependency-driven** (resolves the wing's call-site-before-deletion and `link`-before-its-primitives ordering findings): the 15-op contract demolition and the trust/scan semantic removal come first; then the commit primitive (`commitPaths`) + the v2 `link` migration land **before** the `link` handler; the sync routine lands **before** `status` (which reads it); the package/subtree deletion is **last** (task 9), after every call site is gone; the registry shrink + drift gates close the phase.
+
+### Tasks
+1. **Contract demolition — the finalized 15-op ChangePlan union.**
+   - What: remove the two retired trust ops from `@atlas/contracts`. Delete `packages/contracts/src/ops/trust.ts`; remove its two imports + the two union members (`PromoteTrustOpSchema`, `RevokeTrustOpSchema`) in `changeplan.ts` (lines 38, 60–61); remove `"PromoteTrust"`/`"RevokeTrust"` from `CHANGE_PLAN_OPS` in `ops/op-result.ts`; update the load-time coverage invariant comment + count in `changeplan.ts` (17→15); drop the `ops/index.ts` barrel re-exports of the trust op schemas/results. Update the byte-identity fixtures (`packages/contracts/test/serialize-op-worker.mjs`) to the 15-op set.
+   - Files/components: `packages/contracts/src/ops/trust.ts` (delete), `packages/contracts/src/changeplan.ts`, `packages/contracts/src/ops/op-result.ts`, `packages/contracts/src/ops/index.ts`, `packages/contracts/test/serialize-op-worker.mjs`.
+   - Interfaces — **Consumes:** `CHANGE_PLAN_OPS`, `ChangePlanOperationSchema`. **Produces:** the finalized 15-op union (the SSOT the CLI consumes).
+   - Test: **`packages/contracts/test/contracts.operations.test.ts`** extended (or a new `changeplan.op-set.test.ts`) — asserts `CHANGE_PLAN_OPERATION_NAMES` sorted equals exactly the 15 finalized names, `PromoteTrust`/`RevokeTrust` are **absent**, and the load-time union-coverage invariant still holds; the cross-process byte-identity worker runs over the 15-op set.
+   - Acceptance: the union is exactly the 15 ops; `pnpm --filter @atlas/contracts build` clean; no export names `PromoteTrust`/`RevokeTrust`.
+2. **Retire the trust-tier / scan-gate / generated-artifact-guard semantics (call-site removal, before any package delete).**
+   - What: strip every surviving trust/taint/risk/scan *behavior* from the app code so the grep gate (task 10) can pass on semantics, not just imports.
+     - **Rewrite the synthesis apply path** (`apps/cli/src/workflows/synthesis.ts`): delete the `GeneratedArtifactGuard` dep + all four `deps.guard.assertClean(...)` calls (sqlite / worktree / git-object ×2); delete the `inputsTrusted`/`evidenceValid`/`tier`/`tier2Eligible`/`review-pending` branch and the `isDestructive`→Tier-3 escalation. The apply path collapses to: validate → ground → apply → **`commitPaths`** (task 3) → refresh projection+index → exit 0. There is **no** tier gate, **no** `review-pending`, **no** exit 6 — every validated + grounded plan applies as one commit.
+     - **Delete the risk/taint policy machinery**: `apps/cli/src/policies/risk.ts` (`effectiveRisk`), `apps/cli/src/policies/mutation-policy.ts` (`mutationPolicyFor`), `apps/cli/src/policies/sensitivity.ts`. Replace `apps/cli/src/policies/operation-gate.ts` with a minimal gate that keeps **only** the `reserved`-op rejection (`CreateTask`/`UpdateTaskState` ⇒ `reserved-operation`, exit 1) + fail-closed unknown-op rejection; the `capture`/`synthesis`/`trust` classes and the Phase-2/Phase-4 phasing are removed (there are no privilege phases in v2).
+     - **Strip scan-before-persist** from `apps/cli/src/ingest/wiring.ts` (`buildGuard`/`PrePersistenceGuard` wiring), `apps/cli/src/ingest/capture.ts`, `apps/cli/src/ingest/note-add.ts`, and the re-normalization scan in `apps/cli/src/workflows/reverify-recover.ts` (the `SecretDetectedError` rethrow path). Ingest now normalizes bytes → notes with no scan gate.
+     - **Remove the `EXIT.SECRET_SCAN` (3) and `EXIT.ACTION_REQUIRED` (6) members** from `apps/cli/src/errors/envelope.ts` and every emission site (the review-pending exit 6 is gone with the tier branch; exit 3 is gone with the scan calls).
+   - Files/components: `apps/cli/src/workflows/synthesis.ts`, `apps/cli/src/policies/{risk.ts,mutation-policy.ts,sensitivity.ts,operation-gate.ts}`, `apps/cli/src/ingest/{wiring.ts,capture.ts,note-add.ts}`, `apps/cli/src/workflows/reverify-recover.ts`, `apps/cli/src/errors/envelope.ts`.
+   - Interfaces — **Consumes:** the direct `commitPaths` op (task 3). **Produces:** a tier-free, scan-free synthesis apply path (validate → ground → apply → one commit) consumed by every mutating command.
+   - Test: **`apps/cli/test/synthesis.no-tier.test.ts`** — a plan that v1 would route to Tier-3 (e.g. multi-note or a non-`auto` mutation-policy cell) now **applies directly** (exit 0, one commit, **never** exit 6, no `review-pending` payload); **`apps/cli/test/operation-gate.reserved-only.test.ts`** — only `CreateTask`/`UpdateTaskState` are refused (`reserved-operation`, exit 1); every other op passes the gate; a scan-triggering byte sequence in a note body now persists (no exit 3).
+   - Acceptance: no runtime code reads a trust tier, taint floor, or scan verdict; exit 3 and exit 6 are unreachable.
+3. **`commitPaths` + the canonical mutation order + dirty-vault doctrine + canonical-ref removal.**
+   - What: add a narrow pathspec-scoped **`commitPaths(repo, paths, message): string`** op in `@atlas/git` (the working-tree `git commit -- <paths>`, returning the commit sha — this is where the direct commit is *born*; Phase 2's integrator only FF-advanced a pre-existing agent commit). Enforce the binding sequence in every mutating handler — take vault lock → validate ChangePlan (`@atlas/contracts`) → ground against projection → apply to working tree → `commitPaths` → refresh projection + index for touched notes → release lock → exit. Commit **precedes** refresh (a post-commit crash leaves a stale projection the next `sync` heals; the reverse strands a committed-but-unmirrored tree). Dirty-vault doctrine: read commands + `sync` treat dirt as normal; mutating commands allow **unrelated** dirt (commit only touched paths, leaving pre-existing staged entries for other files untouched) but **fail grounding at exit 1** if any note they edit/name is dirty — dirty = on-disk hash ≠ projection `contentHash` (remediation `run brain sync`) **OR** an uncommitted git diff vs HEAD (remediation `commit or stash`). **Also fold out the canonical-ref indirection**: delete `apps/cli/src/config/canonical-ref.ts` + the `git.canonical_ref` field (`config/schema.ts`) + the `broker.{socket_path, egress_socket_path}` config fields; the mutation order commits to `refs/heads/main` directly.
+   - Files/components: `packages/git/src/` (new `commitPaths`), the mutating command handlers (`link`, `enrich`, `note add`, `maintain`, `evidence` applies), the grounding module (`apps/cli/src/validation/` + `synthesis/`), `apps/cli/src/config/{schema.ts,canonical-ref.ts}`.
+   - Interfaces — **Consumes:** the vault lock (Phase 2); grounding against the projection; `Repo`/`Worktree` (`@atlas/git`). **Produces:** **`commitPaths(repo, paths, message): string`** (consumed by `link` task 7 + every mutating handler) + the enforced canonical mutation order + a config with no canonical-ref / broker-socket fields.
+   - Test: **`apps/cli/test/dirty-vault.test.ts`** — proving rows **a** (unrelated dirt = unstaged edit **and** a pre-staged unrelated file + `link` ⇒ success, commit touches only `link`'s paths, the pre-staged file excluded, both dirt kinds intact), **b** (dirty target + `enrich`/`link` ⇒ exit 1, remediation `commit or stash`), **b2** (dirty source + `link` ⇒ exit 1 before apply, no commit/projection write), **b3** (edit source on disk → `brain sync` → `link` ⇒ still exit 1 because an uncommitted git diff vs HEAD remains, no commit); **`apps/cli/test/mutation-order.restoration.test.ts`** — one-commit-per-ChangePlan + `git revert <sha>` + `brain sync` restores working tree, SQLite projection, **and** LanceDB index (asserted on all three).
+   - Acceptance: mutation never precedes validation+grounding; a git-only revert leaving derived stores stale is caught by the restoration test; no source references `git.canonical_ref` / `refs/atlas/main` / `ATLAS_CANONICAL_REF`.
+4. **v2 `note_links` projection — the table-rebuild forward migration (`0013_links_v2`).**
+   - What: the live `note_links(source_note_id, target_note_id, predicate NOT NULL, ordinal)` (3-col PK, no alias) cannot represent a plain (NULL-predicate) link, an alias, or the two-partial-index uniqueness. Ship a **table-rebuild** forward migration `0013_links_v2` (not merely additive — it changes `predicate` nullability and adds `alias`): create `note_links_v2(source_note_id TEXT NOT NULL, target_note_id TEXT NOT NULL, predicate TEXT, alias TEXT, FOREIGN KEY(source_note_id) REFERENCES notes(note_id) ON DELETE CASCADE, FOREIGN KEY(target_note_id) REFERENCES notes(note_id) ON DELETE CASCADE) STRICT;` → **existing-row handling:** `INSERT INTO note_links_v2(source_note_id,target_note_id,predicate,alias) SELECT source_note_id,target_note_id,predicate,NULL FROM note_links;` (every v1 row carries a non-null predicate, so each migrates as a relationship edge with `alias` NULL; there are no NULL-predicate rows to dedupe) → `DROP TABLE note_links; ALTER TABLE note_links_v2 RENAME TO note_links;` → the **two partial unique indexes** `CREATE UNIQUE INDEX ux_note_links_plain ON note_links(source_note_id,target_note_id) WHERE predicate IS NULL;` and `CREATE UNIQUE INDEX ux_note_links_pred ON note_links(source_note_id,target_note_id,predicate) WHERE predicate IS NOT NULL;` → recreate `CREATE INDEX idx_note_links_reverse ON note_links(target_note_id, predicate);`. The rebuild is FK-safe because `note_links` has only *outbound* FKs (no table references it, so no RESTRICT trips). Update the `note_links` rebuild fold (`packages/sqlite-store/src/rebuild.ts` / the projections repo) to emit the v2 shape: a plain `[[wikilink]]` → `predicate` NULL + `alias` from the display text; a typed relationship → `predicate` set. Registered by `openStore` (retained set, alongside `0001`).
+   - Files/components: `packages/sqlite-store/migrations/0013_links_v2.ts`, `packages/sqlite-store/src/rebuild.ts` (fold update), `packages/sqlite-store/src/store.ts` (register in default set), `packages/sqlite-store/src/index.ts` (re-export).
+   - Interfaces — **Consumes:** the v1 `note_links` shape (`0001_core.ts`). **Produces:** the v2 `note_links(source_note_id, target_note_id, predicate NULL, alias NULL)` table + the two partial unique indexes (consumed by `link` task 7 + `status` task 8).
+   - Test: **`packages/sqlite-store/test/migrate.links-v2.test.ts`** — seed v1 `note_links` rows (predicate-bearing) → run the migration → assert the v2 column set (`predicate`/`alias` nullable, no `ordinal`, no 3-col PK), both partial unique indexes present, and existing rows preserved as predicate-edges with `alias` NULL; assert a duplicate plain-link insert is rejected by `ux_note_links_plain` and a duplicate predicate-edge by `ux_note_links_pred`.
+   - Acceptance: `db migrate` yields the v2 `note_links` shape; the partial indexes make duplicate-add-noop + exact-remove well-defined.
+5. **Rewrite the sync engine to v2 + the one reconciliation routine (SSOT).**
+   - What: replace the absorb-cycle with the single reconciliation routine owned by the sync engine: scan vault note files → hash each → classify vs the projection's per-note `contentHash` into **changed / new / dropped / moved** (matched by stable frontmatter `id`, never path). `sync` consumes it to reindex changed+new, purge dropped **across both stores invisibility-first** (delete the note's projection row + identity keys + `note_links` rows in one SQLite transaction — retrieval joins against live projection rows, so the note is unreturnable the instant that transaction commits — **then** delete its LanceDB vectors), and update `path` in place for pure moves (no re-embed). **No HEAD cursor — the projection `contentHash` IS the cursor.** Unchanged tree (clean or dirty) ⇒ `noop:true`, exit 0, no index write. The orphan-vector sweep belongs to `index rebuild` **alone** (never `sync` — a sweep inside `sync` would make an unchanged-tree run write the index and break the structural-noop invariant).
+   - Files/components: `apps/cli/src/sync/` — rewrite `diff.ts` (= the routine), `pending.ts`, `plan.ts`, `reconcile-handler.ts`; `docs/specs/cli-contract/sync.schema.json` (rewrite to the 6-field flat schema: `scannedCount`, `changedCount`, `newCount`, `droppedCount`, `movedCount`, `noop`; **drop `head`**, add `scannedCount`+`movedCount`; `additionalProperties:false`).
+   - Interfaces — **Consumes:** the projection `notes(note_id, file_path, content_hash)` + `note_links` (`@atlas/sqlite-store`); LanceDB vector delete (`@atlas/lancedb-index`); the vault lock (Phase 2). **Produces:** **`reconcile(vault, projection): { changed[], new[], dropped[], moved[] }`** (the one routine, consumed by `sync` + `status`); `sync.schema.json`; `reindexed = changedCount + newCount` is **derivable, not stored** (consumers sum).
+   - Test: **`apps/cli/test/sync.v2.test.ts`** — proving row **c** (dirty tree + `sync`, then immediate 2nd `sync` ⇒ 1st indexes, 2nd `noop:true` no index write); the four-state runtime contract (unchanged / changed / new / deleted, each `--json` validates against `sync.schema.json`, `head` absent, exact counts + `scannedCount`, stdout clean JSON / logs on stderr, 2nd run `noop`); the dropped-note cross-store purge (delete file → `sync` → projection row + `note_links` rows + LanceDB vectors gone, `query` cannot return it) + the failpoint variant (interrupt after the SQLite txn before the vector delete: `query` still can't return it, next `sync` on the unchanged tree still `noop:true` no index write, `index rebuild` sweeps the orphan); move/rename (`git mv` same-id same-content → `movedCount:1`, `changedCount:0`, `file_path` updated in place, no re-embed, links resolve by id).
+   - Acceptance: `sync` and `status` never disagree about the pending set (both read the one routine); a pure move is never counted in `reindexed`.
+6. **`link` — new command (row + fixture + 7-field schema + handler).**
+   - What: add the `link` row to `commands.json` (name-sorted), its `cli-surface.fixture.txt` line under its phase heading, and `docs/specs/cli-contract/link.schema.json`. Implement the handler fronting `CreateRelationship` (predicate present) and `SetLink` (no predicate), wired through the `commitPaths` mutation order (task 3) against the v2 `note_links` table (task 4). Flag surface + rules per §interfaces: positional `<source> <target>`, `--predicate`, `--alias`, `--remove`, `--json`. **`--alias` + `--remove` ⇒ exit 5, evaluated before grounding.** Noop set = exactly (duplicate-identical add) + (absent-edge remove); each emits `action:"noop"`, `commit:null`, `noop:true`, exit 0, and writes neither git nor projection.
+   - **`link.schema.json` is a 7-field object** (the wing's field-count fix): the exact contract is `{ "type":"object", "additionalProperties":false, "required":["action","source","target","predicate","alias","commit","noop"], "properties": { "action": {"enum":["added","updated","removed","related","noop"]}, "source":{"type":"string"}, "target":{"type":"string"}, "predicate":{"type":["string","null"]}, "alias":{"type":["string","null"]}, "commit":{"type":["string","null"]}, "noop":{"type":"boolean"} } }`. `commit` is `null` **iff** `noop:true`.
+   - Files/components: `docs/specs/cli-contract/commands.json`, `docs/specs/cli-contract/cli-surface.fixture.txt`, `docs/specs/cli-contract/link.schema.json`, a new `apps/cli/src/commands/link.ts` + handler registration (barrel import in `commands/index.ts` + `registerCommand("link", …)`).
+   - Interfaces — **Consumes:** `CreateRelationship` / `SetLink` ChangePlan ops + canonical serialization (`@atlas/contracts`); `commitPaths` (task 3); the grounding routine; the v2 `note_links` partial indexes (task 4). **Produces:** the `link` command + `link.schema.json` (the machine SSOT for its `--json`).
+   - Test: **`apps/cli/test/link.test.ts`** — proving rows **e** (fresh add ⇒ `added`, `predicate:null`, one commit, edge present), **f** (`--predicate cites` ⇒ `related`, edge present), **g** (duplicate add ⇒ `noop`, `commit:null`, HEAD unchanged, no projection write), **h** (given plain + `cites` edges, `--predicate cites --remove` removes only `cites`, plain survives), **i** (absent-edge `--remove` ⇒ `noop`, no commit), **j** (`--alias foo --remove` ⇒ **exit 5**, no mutation), **k** (unknown source/target ⇒ **exit 1** grounding, no commit), **l** (alias change ⇒ `updated`, one in-place mutation + one commit, no duplicate edge), **m** (aliasless re-add ⇒ `noop`, stored alias preserved), **n** (identical-alias re-add ⇒ `noop`, HEAD unchanged). Every payload validates against `link.schema.json`.
+   - Acceptance: the noop set is exactly (duplicate-identical add) + (absent-edge remove); every `link --json` payload validates against the 7-field schema.
+7. **v2 `status` (merged) — reads the one reconciliation routine.**
+   - What: implement `status` absorbing `doctor` + `db status` + `index status` + `sync status` into the merged `--json` (sub-objects `vault`, `db`, `index`, `sync` + `checks[]`), owned by `docs/specs/cli-contract/status.schema.json`. `status.sync` carries the **four** pending counts (`pendingChangedCount`, `pendingNewCount`, `pendingDroppedCount`, `pendingMovedCount`) from the **same** `reconcile` routine (task 5), read-only; **drops `lastIndexedHead`**. `checks[]` = exactly `vault-reachable`, `git-healthy`, `provider-key-present`, `index-not-stale` (the retired backup-health + signer-registry checks do not appear). Exit contract: **0 whenever a payload is produced (including `ok:false`)**; **2** only when vault/config is unresolvable.
+   - Files/components: `apps/cli/src/commands/status.ts` (merged), `apps/cli/src/health/`, `docs/specs/cli-contract/status.schema.json` (`additionalProperties:false` at every level).
+   - Interfaces — **Consumes:** `reconcile` (task 5) for `status.sync`; the projection counts (`@atlas/sqlite-store`); the provider-key resolver `resolveGeminiApiKey` (Phase 2) for `provider-key-present`; the index staleness read (`@atlas/lancedb-index`). **Produces:** `status.schema.json`.
+   - Test: **`apps/cli/test/status.merged.test.ts`** — `status --json` validates against `status.schema.json`, four sub-objects present, `checks[]` = the exact surviving probe set; a new unindexed note ⇒ `pendingNewCount:1` with `pendingChangedCount:0`; a deleted file ⇒ `pendingDroppedCount:1`; a failed probe (no provider key) ⇒ `ok:false` at **exit 0**; an unresolvable vault ⇒ **exit 2**.
+   - Acceptance: the `status` exit contract holds (unhealth never leaks into the exit code); `status.sync` never disagrees with `sync` (shared routine).
+8. **Shrink `commands.json` to the survivor set + regenerate.**
+   - What: bump `version`; delete the rows (and each row's `*.schema.json` + `cli-surface.fixture.txt` line, atomically with its handler deletion) for every killed command — `doctor`, `db backup|restore|verify|status`, all 8 `git *`, `graduation *`, `quarantine *`, `source trust show|promote|revoke`, `purge`, `reconcile`, `index repair|status|verify`, `watch`, `sync reset|status`, `inspect`, `jobs retry|cancel`. Record the folds in the survivor rows: `doctor`+`db status`+`index status`+`sync status` → `status`; `reconcile` → `sync`; `index repair|status|verify` → `index rebuild`/`status`. Add the `link` row (task 6). Then `pnpm contract:write`.
+   - Files/components: `docs/specs/cli-contract/commands.json`, the killed `*.schema.json` files, `docs/specs/cli-contract/cli-surface.fixture.txt`, generated `commands-overview.md`, the deleted command handlers under `apps/cli/src/commands/`.
+   - Interfaces — **Consumes:** `commands.json` (the membership SSOT). **Produces:** the survivor registry (final count = whatever the file holds; the brief's "~18" is a target, not a contract).
+   - Test: `pnpm exec vitest run tools/contract-lint.test.ts` (registry ↔ fixture ↔ schema bijection holds after the deletions + the new `link` row), `pnpm --filter @atlas/cli exec vitest run test/command-registration.test.ts` (no `not-implemented`-at-live-drive regressions), `node tools/gen-cli-contract.ts --check` (determinism).
+   - Acceptance: the three drift gates pass; every surviving row is `implemented:true` with a registered handler.
+9. **Delete the retired packages and app subtrees (last — nothing references them now).**
+   - What: remove `packages/broker`, `packages/scan`, the `packages/sources` sandbox jail (keep + re-export the md/txt/pdf/html normalizers), `console/`, `console/signer/`, and the security parts of `provisioning/` (everything except what Phase 5's deprovision script needs — see Phase 5). Delete the `apps/cli/src/` subtrees for the retired flows: `broker/`, `graduation/`, `quarantine/`, `trust/`, `audit/`, `retention/`, `purge/`, `watch/` (if present), plus the absorb-cycle files in `sync/` (`cursor.ts`, `cycle.ts`, `reset.ts`, `resolve-at-ref.ts`, `seed.ts`, `seed-cli.ts`) and the deleted command handlers (`reconcile.ts`, `sync-reset.ts`, `source-trust-*.ts`, `inspect.ts`, the `git-*` command handlers). Remove the `@atlas/broker`/`@atlas/scan` `catalog:`/workspace membership; update `pnpm-workspace.yaml` and `apps/cli/package.json` deps.
+   - Files/components: whole trees per the kill list.
+   - Interfaces — **Consumes:** the Phase-2 + tasks 1–8 removals (proof nothing depends on the deleted code). **Produces:** a workspace with no `packages/broker`, `packages/scan`, `console*`, or provisioning security code.
+   - Test: `pnpm -r build` clean; the no-dangling-reference grep gate (task 10) passes.
+   - Acceptance: no runtime source imports a killed package; `pnpm install` + `pnpm -r build` clean with the workspace shrunk.
+10. **No-dangling + semantic-regression grep gate + delete dead tests.**
+    - What: add `tools/no-retired-reference.test.ts` that greps runtime source (`apps/*/src`, `packages/*/src`, `tools`) and **fails** on (a) any import of a killed package (`@atlas/broker`, `@atlas/scan`), a socket path, `ATLAS_EGRESS_CAPABILITY_KEY`, `ATLAS_CANONICAL_REF`/`refs/atlas/main`/`git.canonical_ref`; **and** (b) any surviving retired *semantic* symbol — `effectiveRisk`, `mutationPolicyFor`, `GeneratedArtifactGuard`, `PrePersistenceGuard`, `assertClean`, `taint`, `inputsTrusted`, `evidenceValid`, `PromoteTrust`, `RevokeTrust`, `review-pending`, `tier-3` (this is the wing's fix — the gate checks semantics, not only imports). The gate **excludes the Phase-5 deprovision script's path** (the single exempt location). Delete the now-vestigial provisioned-only + broker/scan/trust suites (`doctor.provisioning.test.ts`, `doctor.signer-registry.test.ts`, `e2e/phase1.e2e.test.ts`, `e2e/phase2-non-integration.e2e.test.ts`, `observability-matrix.test.ts`, `adopt-vault-bootstrap.test.ts`, `tools/provisioning-acl.test.ts`, the broker/scan/quarantine/trust package + CLI harnesses, the `sync-reset`/`canonical-ref` tests) — **deleted, not skipped**. Add `apps/cli/test/exit-codes.test.ts` asserting no command emits 3 or 6 and 7 only from `jobs run`.
+    - Files/components: `tools/no-retired-reference.test.ts`, `apps/cli/test/exit-codes.test.ts`, deletion of the listed suites.
+    - Interfaces — **Consumes:** the workspace source tree. **Produces:** the grep gate consumed by the intent success criteria + Phase 5's companion allowlist check.
+    - Test: the grep gate itself (a planted retired reference/symbol fails it); a **skipped** (not deleted) provisioned suite counts as a failure of the zero-provisioning criterion; the exit-code regression test.
+    - Acceptance: `pnpm -r test` green with no provisioned/broker/scan suites present; grep gate green; no command emits 3/6, 7 only from `jobs run`.
+
+### Risks
+- **Bijection breakage mid-deletion.** Deleting a row without its schema+fixture line (or vice-versa) fails `contract-lint`. Mitigation: treat each command's row+schema+fixture+handler as one atomic edit; run `pnpm contract:write` after task 8.
+- **`sources` sandbox removal vs normalizer survival.** The jail and the md/txt/pdf/html normalizers live in the same package. Mitigation: delete only the sandbox worker + seccomp/Seatbelt/userns/cgroup code; keep and re-export the normalizers.
+- **`note_links` rebuild vs an in-flight `db rebuild`.** The migration drops+rebuilds the projection table. Mitigation: `note_links` is a rebuildable projection with only outbound FKs; the fold refolds it from Markdown on the next `db rebuild`, and the migration's row-copy keeps it non-empty in the interim.
+
+### Verification
+Exact commands:
+```bash
+pnpm -r build
+pnpm --filter @atlas/contracts exec vitest run test/contracts.operations.test.ts
+pnpm --filter @atlas/cli exec vitest run test/synthesis.no-tier.test.ts test/operation-gate.reserved-only.test.ts test/dirty-vault.test.ts test/mutation-order.restoration.test.ts test/sync.v2.test.ts test/link.test.ts test/status.merged.test.ts test/exit-codes.test.ts
+pnpm --filter @atlas/sqlite-store exec vitest run test/migrate.links-v2.test.ts
+pnpm exec vitest run tools/contract-lint.test.ts tools/no-retired-reference.test.ts
+pnpm --filter @atlas/cli exec vitest run test/command-registration.test.ts
+node tools/gen-cli-contract.ts --check
+env -u ATLAS_PROVISIONED pnpm -r test                       # full suite, zero provisioning, no deleted suites skipped
+```
+
+---
+
+## Phase 4: Persistence strip
+**Goal:** Reduce `@atlas/sqlite-store` to plain migrations + rebuild-from-vault; delete the ledger write-protocol + backup/watermark/AEAD machinery; ship the destructive evidence + source-registry cutover migrations; rebase the evidence machinery onto plain SQLite state.
+**Dependencies:** Phase 3 (broker/audit consumers gone).
+**Estimated effort:** M
+
+### Tasks
+1. **Strip the §2.8 ledger write-protocol + backup/watermark/AEAD from `@atlas/sqlite-store`.**
+   - What: remove the four-step cross-store write protocol, the AEAD backup/restore, the watermark blocking (`backup-unhealthy`), and `db verify`'s backup checks. Retain the migration runner, projection rebuild, and connection/store plumbing. Delete the `backup/` and `ledger/` subtrees + the ledger harness (`test/ledger/`). Drop the ledger/backup **tables** in the forward migration below (`audit_events`, `audit_intents`, `backup_watermark`, `raw_payloads`). Keep `model_calls` + `agent_runs` as plain operational tables (`model_calls`'s FK to `agent_runs(run_id)` is preserved); `change_plans`/`patches`/`git_operations`/`validation_results`/`retrieval_*` stay as harmless vestigial operational tables (playground — no ceremony to prune every vestige).
+   - Files/components: `packages/sqlite-store/src/` (`store.ts`, `migrate.ts`, `verify.ts`, `connection.ts`), delete `packages/sqlite-store/src/{ledger,backup}/`, delete `packages/sqlite-store/test/ledger/`.
+   - Interfaces — **Consumes:** the migration runner. **Produces:** a `@atlas/sqlite-store` with no ledger/backup surface; `db migrate` / `db rebuild` only.
+   - Test: the store's own suite green without the ledger/backup tests; `db rebuild` parity (task 4).
+   - Acceptance: no `db backup|restore|verify` code path; nothing references the watermark or AEAD key.
+2. **Destructive evidence cutover migration (`0014_evidence_v2`) — v1 claims model → v2 flat evidence; drop dead ledger + cursor tables.**
+   - What: add forward migration `0014_evidence_v2.ts` that **creates** the v2 `evidence(id TEXT PK, noteId TEXT, sectionPath TEXT NULL, claim TEXT, citation TEXT NULL, status TEXT CHECK(status IN ('pending','resolved','failed','needs-review')), verdict TEXT NULL, attempts INTEGER NOT NULL DEFAULT 0, lastCheckedAt TEXT NULL, createdAt TEXT) STRICT;` (the whole table — no other evidence columns; `noteId` is a **soft** reference, not a rebuild-enforced FK), and **drops** the v1 evidence model (`claims`, `claim_evidence` — 0004, the v1 evidence + its run-ledger/audit couplings) plus the ledger/backup tables from task 1 (`audit_events`, `audit_intents`, `backup_watermark`, `raw_payloads`) and the **dead `sync_cursors` table** (`0012` — `source_id`, `upstream_ref`, `last_absorbed_oid`, `cycle_seq`, `pending_quarantine`: pure absorb-cycle cursor state; the SSOT is emphatic that v2 has no second cursor marker, so the retired table must not survive in the schema, only its already-deleted reader). v1 evidence/claims rows are **discarded by design** (playground data, revivable from the tag) — no migration shim. Forward-migration drops, never edits `0004`/`0012` (migrations are append-only).
+   - Files/components: `packages/sqlite-store/migrations/0014_evidence_v2.ts`, `packages/sqlite-store/src/store.ts` (register), `packages/sqlite-store/src/index.ts` (re-export), the migration test dir.
+   - Interfaces — **Consumes:** the v1 `claims`/`claim_evidence` shape (`0004_claims.ts`); the `sync_cursors` table (`0012`); the ledger tables (`0001`/`0005`). **Produces:** the v2 ten-column `evidence` table; a schema with **no** `claims`/`claim_evidence`/`sync_cursors`/ledger tables.
+   - Test: **`packages/sqlite-store/test/migrate.evidence-v2.test.ts`** — seed a DB with the v1 `claims`/`claim_evidence` shape + a `sync_cursors` row + the ledger tables → `db migrate` → assert the exact ten-column v2 `evidence` schema, the v1 claims/audit-coupling tables gone, `sync_cursors` **absent**, and (accepted) v1 rows discarded.
+   - Acceptance: `db migrate` on a v1-shaped DB yields the v2 evidence schema with no `sync_cursors`/`claims`/ledger tables.
+3. **v2 `source` registry migration (`0015_source_registry`) + `source`/`ingest` rebase.**
+   - What: the spec's operational `source` registry is uncovered by v1 (v1 uses the content-addressed provenance model `content_blobs`/`source_captures`/`source_renditions`/`note_sources`). Add forward migration `0015_source_registry.ts` that **creates** `source(id TEXT NOT NULL PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('file','url')), locator TEXT NOT NULL UNIQUE, title TEXT, addedAt TEXT NOT NULL, lastIngestedAt TEXT) STRICT;` and **drops** the v1 provenance model (`content_blobs`, `source_captures`, `source_renditions`, `note_sources`). Rewrite the source/ingest commands onto the registry (dropping the retired scan/broker/capture path already removed in Phase 3):
+     - **`source add <locator>`** — insert a row (`kind` inferred `file`|`url`); a **duplicate `locator` is a noop success** returning the existing `id` (no error).
+     - **`source list`** / **`source show <id>`** — read the registry.
+     - **`ingest <id>`** — normalize the source's bytes into notes (md/txt/pdf/html normalizers survive), stamp `lastIngestedAt`, and write each produced note's frontmatter `sources:` list with the source `id` (vault = SoR for note content; the registry = SoR for the source row).
+     - Rebase the validation provenance check (`apps/cli/src/validation/provenance.ts` / `store-vault.ts` `hasSourceRef`): a note's `sources:` id resolves to a `source` registry row (correctness, not trust).
+   - Files/components: `packages/sqlite-store/migrations/0015_source_registry.ts`, `packages/sqlite-store/src/store.ts` (register) + `index.ts`, `apps/cli/src/commands/source-add.ts`, `apps/cli/src/commands/source.ts` (`source list`/`show`), the `ingest` handler + `apps/cli/src/ingest/`, `apps/cli/src/validation/{provenance.ts,store-vault.ts}`.
+   - Interfaces — **Consumes:** the v1 provenance tables (`0003`). **Produces:** the v2 `source(id, kind, locator, title, addedAt, lastIngestedAt)` table (operational SoR, retained across `db rebuild`); the `sources:` frontmatter linkage.
+   - Test: **`packages/sqlite-store/test/migrate.source-registry.test.ts`** — v1 provenance tables gone, v2 `source` table present with the `locator` UNIQUE + `kind` CHECK; **`apps/cli/test/source.registry.test.ts`** — `source add` twice with the same locator ⇒ 2nd is a noop success returning the 1st `id` (one row); `ingest` normalizes bytes → notes, stamps `lastIngestedAt`, and writes frontmatter `sources:`; `source list`/`show` read the registry.
+   - Acceptance: the registry backs `source add|list|show` + `ingest`; duplicate-locator is a noop; ingested notes carry `sources:`.
+4. **Rebase the evidence machinery onto plain SQLite state.**
+   - What: rewire `evidence resolve|retry|review` off the v1 run-ledger/audit coupling onto the plain v2 `evidence` table (task 2) + the direct model client (Phase 2). `evidence review` surfaces a `noteId`/`sectionPath` that no longer resolves as `target: missing` (eligible for `needs-review`) — never a crash, never silently dropped. `attempts` counts `evidence retry` re-runs.
+   - Files/components: `apps/cli/src/commands/evidence-*.ts`, the evidence state accessors (a new plain `evidence` repo in `@atlas/sqlite-store`), `apps/cli/src/workflows/reverify-recover.ts` (already scan-stripped in Phase 3).
+   - Interfaces — **Consumes:** the v2 `evidence` table (task 2); the direct model client (`@atlas/models`, Phase 2). **Produces:** ledger-free evidence commands.
+   - Test: **`apps/cli/test/evidence.v2.test.ts`** — an `evidence review` against a deleted note surfaces `target: missing` (not a crash); a `retry` increments `attempts`; no evidence path reads a run-id/ledger-seq/signature.
+   - Acceptance: evidence commands operate on the flat v2 table with no ledger dependency.
+5. **`db rebuild` retention contract.**
+   - What: ensure `db rebuild` regenerates the vault-derived projection (`notes`/`note_identity_keys`/`note_links`) from the working tree while **retaining** the operational tables (`jobs`, `job_attempts`, `source`, `evidence`, `model_calls`, `agent_runs`) unchanged.
+   - Files/components: `packages/sqlite-store/src/rebuild.ts`.
+   - Interfaces — **Consumes:** the vault working tree + the migration schema. **Produces:** a rebuild that touches only vault-derived tables.
+   - Test: **`packages/sqlite-store/test/db.rebuild.retention.test.ts`** — seed `jobs`/`job_attempts`/`source`/`evidence`/`model_calls`; `db rebuild`; assert the derived projection is regenerated **and** every seeded operational row survives unchanged (catches a rebuild that truncates operational tables — the break the derived-only parity test misses).
+   - Acceptance: derived projection regenerated; operational history survives a rebuild.
+
+### Risks
+- **The parity test alone hides operational-table loss** — it only proves the derived projection. Mitigation: the retention row (task 5) is mandatory, not optional.
+- **Migration number collision.** The chain has gaps (no `0002`/`0007` here) and Phase 3 took `0013`; Phase 4 uses the next free monotonic ids `0014`/`0015`, never a gap.
+
+### Verification
+Exact commands:
+```bash
+pnpm --filter @atlas/sqlite-store exec vitest run test/migrate.evidence-v2.test.ts test/migrate.source-registry.test.ts test/db.rebuild.test.ts test/db.rebuild.retention.test.ts
+pnpm --filter @atlas/cli exec vitest run test/source.registry.test.ts test/evidence.v2.test.ts test/agentic.e2e.test.ts
+pnpm --filter @atlas/cli exec vitest run test/empty-vault.test.ts        # empty-vault zero-state
+# retrieval regression gate against a fixture vault (recall@10 ≥ 0.85 / MRR ≥ 0.70):
+pnpm --filter @atlas/cli exec vitest run test/index-eval.test.ts
+# no ledger/backup symbol survives:
+! grep -rnE "finalizeLedgerWrite|backup_watermark|takeBackup|backup-unhealthy|sync_cursors|claim_evidence" packages/sqlite-store/src apps/cli/src
+env -u ATLAS_PROVISIONED pnpm -r test
+```
+
+---
+
+## Phase 5: Point at `main-vault` + deprovision script
+**Goal:** Config points at the real vault; the live Mac is cleaned of all v1 host state by a human-run script; the surviving Gemini key is preserved.
+**Dependencies:** Phases 2–4 (the runtime must be fully v2 before the live Mac is deprovisioned).
+**Estimated effort:** S
+
+### Tasks
+1. **Config → `~/Code/Vaults/main-vault`.**
+   - What: set the default/config vault path to the real working tree. No canonical-ref indirection (removed in Phase 3).
+   - Files/components: `apps/cli/src/config/` default, `docs/install.md`.
+   - Interfaces — **Consumes:** the config vault-path field. **Produces:** a default pointing at the real vault.
+   - Test: a config-resolution test asserts the working-tree path resolves (fixture vault in tests; real path in the live drive).
+   - Acceptance: `brain status` against `main-vault` produces a well-formed payload.
+2. **`deprovision-macos.sh` + the allowlist companion gate (exact enumeration).**
+   - What: author `provisioning/deprovision-macos.sh` (`set -euo pipefail`, gated on explicit `--confirm`, `sudo`, **never CI**) whose deletion set is an **exact, exhaustive allowlist** — an engineer can implement + verify exact-match deletion from this list. The allowlist enumerates precisely:
+     - **launchd services** (`launchctl bootout system/<label>` then `rm -f /Library/LaunchDaemons/<label>.plist`): `com.atlas.broker`, `com.atlas.egress`, `com.atlas.sync`.
+     - **OS users** (`sysadminctl -deleteUser <u>`): `atlas-agent`, `atlas-broker`, `atlas-egress`.
+     - **OS group** (`dscl . -delete /Groups/atlas-git`): `atlas-git`.
+     - **Sockets** (`rm -f`): `/usr/local/var/run/atlas/broker.sock`, `/usr/local/var/run/atlas/egress.sock`.
+     - **Host directories** (`rm -rf`): `/usr/local/etc/atlas/keys` (contains `signers.json`, `audit-attestation.key`/`.pub`, `approval-verify.pub`, `backup-aead.key`, `quarantine-aead.key`, `atlas-test-approver.key`, and the retired v1 provider **file** `atlas.gemini.key`), `/usr/local/var/atlas/audit-anchor` (WORM anchor), `/usr/local/var/atlas/egress` (egress state + quarantine spool), `/usr/local/var/run/atlas` (run dir, after socket removal), `/usr/local/lib/atlas/bin` (installed broker/egress launchers), then the now-empty parents `/usr/local/etc/atlas` and `/usr/local/var/atlas`.
+     - **Operator-home signer store** (removed as the operator, not `sudo`): `~/Library/Application Support/atlas-signer/` (`approver.key` SE-wrapped blob + `config.json`).
+     - **Keychain generic-password items** (`security delete-generic-password -s <service> [-a <account>]` from `/Library/Keychains/System.keychain`): DELETE **`atlas-egress-capability`** (account `atlas-agent`) — the retired capability secret. **PRESERVE `atlas-gemini-api-key`** — it is explicitly **excluded** from the deletion set (the credential `brain` reads directly, §interfaces).
+   - Add `tools/deprovision-allowlist.test.ts` asserting: (1) the script's deletion allowlist enumerates **exactly** the resources above (exact-match, no more/less); (2) **`atlas-gemini-api-key` is NOT in the deletion set** (explicit negative assertion); (3) the no-retired-reference grep gate (Phase 3, task 10) **excludes this script's path** — so the gate and the cleanup script (which legitimately names retired resources) both hold.
+   - Files/components: `provisioning/deprovision-macos.sh`, `tools/deprovision-allowlist.test.ts`.
+   - Interfaces — **Consumes:** the enumerated retired-resource list. **Produces:** the deprovision allowlist (the single grep-gate-exempt location).
+   - Test: the companion allowlist gate (enumeration exact-match + `atlas-gemini-api-key` exclusion + grep-gate exclusion). The script itself is **not** CI-tested (it mutates real host state) — verified by a one-time manual pass, recorded in a retro.
+   - Acceptance: the allowlist gate is green; the script preserves `atlas-gemini-api-key` and enumerates every retired resource.
+3. **Live drive on `main-vault` (human-gated, BEFORE deprovision — the "test live" rule).**
+   - What: with the v2 binary and the daemons still untouched, drive the real vault end-to-end: `db migrate` (the destructive 0013–0015 cutover on the live DB — record evidence/claims row counts before/after in the retro) → `db rebuild` → `index rebuild` → **`index eval` on the real corpus (≥ 0.85 / ≥ 0.70 gate)** → `query`/`note show`/`status` spot checks → one live `link` + one live `enrich` against real Gemini (key resolved from the Keychain, no env var) → the restore drill: `git revert <sha>` + `brain sync`, assert tree/projection/index all restored. Only a green drive authorizes task 4.
+   - Interfaces — **Consumes:** the full v2 runtime (Phases 2–4). **Produces:** the live-drive record in the Phase-5 retro; the go/no-go for deprovision.
+   - Test: manual, recorded in `docs/retros/2026-07-21-atlas-v2-live-drive-retro.md` (per the live-drive-gotcha convention: the retro is the authoritative runbook source for any re-run).
+   - Acceptance: eval gate green on the real corpus; live link/enrich round trips committed + reverted cleanly; no daemon was involved.
+4. **Live-Mac deprovision (human-run, last).**
+   - What: the owner runs `deprovision-macos.sh --confirm` with `sudo` on the live Mac; verify no `atlas-*` users/groups, sockets, WORM anchor, launchd services, or retired Keychain items remain, and that `atlas-gemini-api-key` survives.
+   - Interfaces — **Consumes:** the script + a green task-3 drive. **Produces:** a clean live Mac + the retro recording the pass.
+   - Test: manual (recorded in the same Phase-5 retro).
+   - Acceptance: the success criterion holds on the live Mac; retro committed.
+
+### Risks
+- **Irreversible host mutation.** The script deletes users/groups/Keychain items. Mitigation: explicit `--confirm` gate, `sudo`-only, human-run, never CI; the `v1-fortress` tag + re-provisioning is the only "undo" and that is accepted.
+- **Deleting the wrong Keychain item.** Mitigation: the allowlist companion gate asserts `atlas-gemini-api-key` is **not** in the deletion set and every retired item **is**.
+
+### Verification
+Exact commands:
+```bash
+pnpm exec vitest run tools/deprovision-allowlist.test.ts
+# live-Mac pass (human-run, recorded in the retro) — post-run assertions:
+! dscl . -list /Users     | grep -qE '^atlas-(agent|broker|egress)$'
+! dscl . -list /Groups    | grep -qx 'atlas-git'
+! launchctl print system/com.atlas.broker 2>/dev/null
+! test -e /usr/local/var/atlas/audit-anchor
+! test -e /usr/local/var/run/atlas/broker.sock
+! security find-generic-password -s atlas-egress-capability /Library/Keychains/System.keychain 2>/dev/null
+security find-generic-password -s atlas-gemini-api-key -w >/dev/null && echo "gemini key preserved"
+brain status --json | head            # brain still resolves the Gemini key post-deprovision
+```
+
+---
+
+## Phase 6: Docs rewrite
+**Goal:** Every doc is honest to v2 — one process, no security boundary beyond git.
+**Dependencies:** Phases 2–5 (docs describe the shipped state).
+**Estimated effort:** M
+
+### Tasks
+1. **Rewrite the root + package `CLAUDE.md` constitution.**
+   - What: rewrite `/CLAUDE.md` (Atlas) to the v2 model — single process, `brain <cmd>` opens the working tree + SQLite + LanceDB, commits to git, exits; no brokers/daemons/identities/scan/audit; safety = git history + `v1-fortress` tag. Remove the monorepo-map rows for deleted packages; update the survivor packages' `CLAUDE.md` (esp. `@atlas/models` — now the direct provider client; `@atlas/git` — now plain committing incl. `commitPaths`; `@atlas/sqlite-store` — no ledger/backup, the v2 `note_links`/`evidence`/`source` shapes; `apps/cli` sync engine). Delete `console*` / `provisioning` security rows.
+   - Files/components: `/CLAUDE.md`, surviving `packages/*/CLAUDE.md`, `apps/cli/CLAUDE.md`.
+   - Acceptance: no CLAUDE.md references a killed package/flow as live.
+2. **Rewrite `README.md` + `docs/install.md` + retire the spec-corpus pointers.**
+   - What: README to the v2 runbook (no provision step); `docs/install.md` to the trivial "clone → `pnpm install` → point config at the vault" flow; update `docs/CLAUDE.md` doc-map to drop the retired specs (`security-broker-contract`, `ledger-backup-contract`, `sandbox-contract`, the provider-interface egress framing, etc.) and mark them superseded by ADR-0003. Do not hand-edit generated `commands-overview.md`/`failpoints.generated.md` — regenerate.
+   - Files/components: `README.md`, `docs/install.md`, `docs/CLAUDE.md`.
+   - Acceptance: install docs contain no provisioning/daemon steps; the doc map is honest.
+3. **Update `docs/specs/2026-07-11-atlas-v1-design.md` pointer + the exit-code table.**
+   - What: mark the v1 design SSOT superseded by the v2 spec + ADR-0003 (immutable — supersede, don't rewrite history); ensure the exit-code table everywhere reflects `{0,1,2,4,5,7}`.
+   - Acceptance: no doc claims exit 3 or 6 is emitted.
+4. **Issue hygiene — close the retired arcs.**
+   - What: close **#60** (live-vault-adoption/absorb-cycle — machinery deleted Phase 3), **#65** (ledger/backup DR residuals — machinery deleted Phase 4), **#297** (signer polish) and **#298** (Console↔broker access) — each with a one-line comment linking ADR-0003 and the `v1-fortress` tag as the revival path.
+   - Acceptance: all four issues closed as retired, none silently dropped.
+
+### Risks
+- **Docs drifting from code** if written before the phases land. Mitigation: Phase 6 lands last; re-read the shipped state from disk (the SP-2 lesson: wing commits invalidate in-context copies).
+
+### Verification
+Exact commands:
+```bash
+# only historical/ADR mentions of retired terms may remain in prose (not in live CLAUDE.md/install docs):
+! grep -rnE 'atlas-broker|atlas-egress|WORM|refs/atlas/main|ATLAS_EGRESS_CAPABILITY_KEY|exit 3|exit 6' CLAUDE.md README.md docs/install.md apps/cli/CLAUDE.md packages/*/CLAUDE.md
+node tools/gen-cli-contract.ts --check                       # regenerated overview matches commands.json
+grep -RnE '\b7\b' docs | grep -i 'jobs run' >/dev/null && echo "exit 7 documented as jobs-run-only"
+```
+
+---
+
+## 4. Integration Points
+
+The whole plan turns on three shared seams; each phase either preserves or removes one.
+
+| Seam | Owner | Phase 2 (swap transport) | Phase 3+ (final v2 shape) |
+|---|---|---|---|
+| **Provider I/O** | `@atlas/models` `ModelsClient` / `Invoker` | direct in-process `GeminiAdapter` invoker; **capability mint + per-run budget + egress scan gate all dropped**; `ATLAS_EGRESS_CAPABILITY_KEY` leaves the path; key read directly; only the per-call `maxTokens` cap survives | unchanged (adapter lives here permanently) |
+| **ChangePlan apply/commit** | the synthesis integrator (Phase 2) → `@atlas/git` `commitPaths` (born Phase 3, task 3) | in-process **FF-advance of the pre-existing agent commit** behind `makeBrokerIntegrator`'s signature (worktree/agent-branch apply **retained**); audit/WORM append dropped | mutation-order collapse — `commitPaths` (`git commit -- <paths>`) into the working tree → `refs/heads/main` directly; worktree + canonical-ref indirection gone; no tier gate, no review-pending |
+| **Serialization** | vault lock (`apps/cli/src/locks/manager.ts`) | spans grounding→apply→commit→refresh; every derived-store writer takes it (proofs d/d2/d3 are Phase 2's gate) | unchanged (re-proven against the direct-commit path) |
+| **Command registry** | `docs/specs/cli-contract/commands.json` | unchanged | shrunk to survivors + `link`; bijection re-gated |
+| **Reconciliation** | the sync engine's one `reconcile` routine | v1 absorb-cycle (transport-swapped) | the single changed/new/dropped/moved routine; `sync` + `status` both consume it |
+| **ChangePlan ops** | `@atlas/contracts` | consumed as-is (17-op union) | the finalized **15**-op union (`PromoteTrust`/`RevokeTrust` removed); `link` fronts `CreateRelationship`/`SetLink` |
+
+## 5. Testing Strategy
+
+Substrate: the `withFixtureVault` harness (fixture vault copied into a throwaway git repo, torn down on exit) — the fixture-vault-in-a-git-repo *is* the v2 shape. CI: `ubuntu-latest` + `macos-15`, Node 26, **zero provisioning**. Provider calls are unit-tested against a stubbed `Transport`/deterministic Gemini double; the real API is exercised in a manual live drive per the repo's "test live" rule (called-out gap, not silent).
+
+**What to test first, per phase (all with exact commands in each phase's Verification):**
+1. **Phase 2** — the ported adapter matrix + key-resolution + the lock rows (d/d2/d3, this phase's gate) + the one-commit partial proof. Proves daemon-free, capability-free operation.
+2. **Phase 3** — the 15-op contract assertion + the no-tier/scan regression + the drift gates (bijection/registration/determinism) + `link` (e–n) + sync (c + four-state + purge + move) + dirty-vault (a–b3) + the full one-commit restoration + the no-retired-reference semantic grep + exit-code regression.
+3. **Phase 4** — the agentic e2e through a deterministic Gemini double (`apps/cli/test/agentic.e2e.test.ts`): a **valid** grounded plan (one touched-paths-only commit, projection+index refreshed, HEAD advanced); a **malformed** response (**exit 4**, no mutation); a **schema-invalid** plan (**exit 1**, no mutation); a **grounding-failed** plan (**exit 1**, no mutation); a **provider error/timeout** (envelope at exit 4, no commit) — together proving mutation never precedes validation+grounding and never follows a provider failure. Plus `db rebuild` parity + operational-table retention + evidence/source cutover + empty-vault zero-state.
+4. **Retrieval** — `index eval` clears recall@10 ≥ 0.85 / MRR ≥ 0.70 (regression guard; retrieval internals unchanged).
+
+No integration/E2E pyramid, no load/capacity testing, no crash-consistency matrix beyond the two named failpoints (dropped-note purge interrupt; the mutation-order commit-before-refresh heal) — playground tier, and both failpoints are behavior contracts the spec explicitly requires.
+
+## 6. Rollback Plan
+
+Playground tier — reverts are the spec's stated safety model, not manufactured ceremony:
+- **Per-PR:** `git revert` the merge; each phase is an independently-green PR.
+- **Any retired subsystem:** check out the `v1-fortress` tag (Phase 1) — the sole revival path, by design.
+- **A live ChangePlan apply:** `git revert <sha>` on the vault **followed by `brain sync`** (the revert restores the tree; the sync refolds the SQLite projection + LanceDB index — a git-only revert leaves the derived stores stale, which is why the restoration test asserts all three).
+- **The one irreversible step — Phase 5's live-Mac deprovision** — is human-run, `sudo`-gated on explicit `--confirm`, never CI; its "undo" is re-provisioning from the tag, accepted deliberately.
+
+## Flags — spec ambiguities resolved as lead decisions
+
+1. **Home of the ported Gemini adapter** (spec left it open): **`@atlas/models`.** It is already the CLI's provider seam and owns `model_calls` persistence; folding `GeminiAdapter` in preserves every call site and avoids a new package. Alternative (a new `@atlas/provider` package) was rejected as more surface for no benefit at this tier.
+2. **`note_links` → v2 migration is a table rebuild, not additive, and rides Phase 3** with the `link` command: it changes `predicate` nullability + adds `alias` + swaps the 3-col PK for two partial unique indexes (`0013_links_v2`). It lands with `link` (which needs it) rather than in Phase 4's persistence strip, so `link` is reviewable end-to-end (migration + fold + handler + tests) in one phase; the FK-safe rebuild is possible because `note_links` has only outbound FKs.
+3. **`sync` semantic rewrite phase:** **Phase 3**, not Phase 2. Phase 2 is transport-only (behavior preserved); the v2 `reconcile` routine + `sync`/`status` schema rewrite + canonical-ref removal land in Phase 3 once the absorb-cycle machinery is being deleted. Keeps Phase 2 a small, green, transport-only PR.
+4. **`@atlas/git` `runGit` exposure:** v2 has no privilege boundary, so the "`runGit` unexported" invariant is **moot**; the plan adds a narrow `commitPaths` op rather than re-exporting raw argv, purely for a clean API — not for security.
+5. **`model_calls` survives; capability minting, the per-run budget, and the egress scan gate do not — all three leave the provider call path in Phase 2.** The provider-call log stays for token/cost observability (operational SQLite, retained across `db rebuild`); `mintEgressCapability` + the run-bound budget + the egress-side scan are removed from the direct `Invoker` in Phase 2 (nothing between the notes and Gemini but the per-call token cap), so the broker/scan packages they lived in are deleted in Phase 3 with nothing dangling.
+6. **RESOLVED (verified in-repo): the in-process path exists — collapse onto it.** The unprovisioned test mode already drives the full workflow engine against an **in-process `BrokerService`** (`apps/cli/test/workflows-core.test.ts` proves apply → integrate → reconcile against `new BrokerService({...})` over the fixture vault, F4 internal signing). Phase 2 task 2's direct integrator collapses onto that in-process service shape (minus the attestation/audit append), not a net-new path.
+7. **Discretionary-command calls (spec §scope left to the lead):** kill `inspect` (folds into `status` + `note show`) and kill `jobs retry|cancel` (a single-user reindex queue re-runs via `jobs run`; retry/cancel are ceremony) — both removed in Phase 3 task 8.
