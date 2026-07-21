@@ -286,7 +286,7 @@ What the script does (idempotent — safe to re-run):
 5. **Seeds `sync_cursors`** — inserts the zero-state row via `node dist/sync/seed-cli.js` (INSERT OR IGNORE, so re-running never clobbers an advanced cursor).
 6. **Validates** — `refs/atlas/main` resolves, upstream ref is unchanged, re-seeding is a no-op, config `git.canonical_ref` matches.
 
-**Config requirement:** set `git.canonical_ref: refs/atlas/main` in `brain.config.yaml` before adoption. A config with the default routes Atlas writes onto the live upstream.
+**Config requirement (BOTH sides):** set `git.canonical_ref: refs/atlas/main` in `brain.config.yaml` (the CLI/plan side) **and** set `ATLAS_CANONICAL_REF=refs/atlas/main` in the **broker daemon's** environment — add it to `EnvironmentVariables` in `provisioning/macos/com.atlas.broker.plist` and re-`install`. The daemon loads its config from env, not `brain.config.yaml`; without the env var it defaults to `refs/heads/main` and every `sync` integrate CAS-mismatches against the real canonical (or, worst case, targets the upstream branch adoption forbids Atlas to write). A config with the default on either side routes Atlas writes onto the live upstream.
 
 **Packed-refs caveat (60-F):** `git pack-refs` by a non-broker user can pack `refs/atlas/main` into `.git/packed-refs`, bypassing the per-directory ACL. Restrict `gc`/`pack-refs` to `atlas-broker` until the bare-mirror variant (60-F) ships.
 

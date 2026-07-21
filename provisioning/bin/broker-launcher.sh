@@ -16,6 +16,10 @@ export ATLAS_AUDIT_ANCHOR_PATH="${ATLAS_AUDIT_ANCHOR_PATH:-$ANCHOR}"
 # The vault git repo the broker mutates (deployment-specific; overridable). The
 # broker is the sole protected-ref writer over this repo.
 export ATLAS_VAULT_REPO_DIR="${ATLAS_VAULT_REPO_DIR:-/var/lib/atlas/vault}"
+# The canonical protected ref (60-A live-vault adoption). Pass through the deployment
+# override so an adopted vault's broker mutates `refs/atlas/main`, not `refs/heads/main`.
+# Unset ⇒ the broker's own default (`refs/heads/main`) for a plain (non-adopted) vault.
+[ -n "${ATLAS_CANONICAL_REF:-}" ] && export ATLAS_CANONICAL_REF
 # ATLAS_TEST_MODE is intentionally NOT set here (D20): the production launcher never
 # enables the test signer. Test runs set it explicitly in the CI fixture environment.
 exec "$BIN" "$@"
