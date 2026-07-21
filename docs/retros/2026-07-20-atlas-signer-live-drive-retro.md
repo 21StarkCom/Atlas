@@ -13,7 +13,7 @@ The drive also surfaced **four defects that CI structurally could not catch** �
 | p256/SE authorization proven live | ✅ promote → revoke, both Touch-ID'd, broker-verified |
 | Vault left exactly as found | ✅ `trust_state` back to `untrusted` |
 | Defects filed | #297, #298 (and #296 — **retracted**, see below) |
-| Console GUI round trip | ❌ blocked — #298, structural |
+| Console GUI round trip | ❌ not driven — was blocked by #298 (now FIXED, PR #303); needs the launcher install + a human GUI pass |
 | Quarantine `os-presence` round trip | ⏸️ deliberately deferred |
 
 ## What was proven
@@ -94,10 +94,10 @@ Plus the one that cost the most: **Touch ID is unavailable in closed-clamshell m
 
 ## Residuals
 
-- **Console GUI round trip — not done, blocked by #298.** A shim (`ATLAS_BRAIN_PATH` → a wrapper re-exec'ing brain as `atlas-agent`) made `brain` reachable and the probes pass, but the assembled `.app` then **produced no window, no process, no log lines, and no crash report** when exec'd outside LaunchServices. Three distinct failure modes in one leg; not worth further chasing until #298 is decided, since the shim is papering over a gap that should not exist.
+- **Console GUI round trip — not driven.** Was blocked by #298; **#298 is now fixed** (PR #303 — a real `brainLauncher` privilege-drop mode in `BinaryResolution`, replacing the ad-hoc drive shim). The remaining work is human-led: `sudo provisioning/install-console-launcher.sh "$(id -un)"`, set `brainLauncher` in Console Settings, then drive the export→sign→authorize path in the GUI (Touch ID). During the drive the ad-hoc shim made `brain` reachable and the probes passed, but the assembled `.app` then **produced no window, no process, no log lines, and no crash report** when exec'd outside LaunchServices — re-verify the `.app` actually launches (via `open` / LaunchServices, not a bare exec) as part of the GUI pass.
 - **Quarantine `os-presence` round trip — deliberately skipped.** There are zero quarantine items on the instance, and seeding one means deliberately triggering a scan violation. The `--presence` grant is therefore **enrolled and registry-verified but never exercised live**; the gate remains unit-tested only. Worth doing when a quarantine item next appears naturally.
 - The broker log retains two historical `seq 0 breaks continuity` lines from the 19-Jul duplicate-genesis incident. Harmless — the daemon starts clean — but they cost a few minutes of doubt during the upgrade. `recover-audit-chain.sh` already fixed the underlying state.
 
 ## Bottom line
 
-The signing half of the Console arc is real and proven against production. The GUI half is blocked on an architectural contradiction that predates SP-3 and needs a decision (#298). SP-3 itself needs nothing further. The one thing I got wrong — a false #296, caused by driving with a stale feature-branch binary — is the drive's sharpest process lesson: **a live drive is only as honest as the binary it runs; build from `main`.** (The prod broker was itself reinstalled from a main-based artifact post-drive for the same reason.)
+The signing half of the Console arc is real and proven against production. The GUI half was blocked on an architectural contradiction that predates SP-3 (#298) — **now fixed** (PR #303, the `brainLauncher` privilege-drop mode), leaving only the human-led GUI/VoiceOver pass. SP-3 itself needs nothing further. The one thing I got wrong — a false #296, caused by driving with a stale feature-branch binary — is the drive's sharpest process lesson: **a live drive is only as honest as the binary it runs; build from `main`.** (The prod broker was itself reinstalled from a main-based artifact post-drive for the same reason.)
