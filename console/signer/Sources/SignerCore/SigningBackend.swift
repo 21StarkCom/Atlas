@@ -136,11 +136,50 @@ public struct SecureEnclaveSigningBackend: SigningBackend {
             case .biometryNotEnrolled, .biometryNotAvailable, .invalidContext:
                 return SignerError(.keyInvalidated, keyInvalidatedHint)
             default:
-                return SignerError(.cancelled, "authentication cancelled or failed: \(e.localizedDescription)")
+                // `localizedDescription` alone is uselessly generic — every LAError
+                // renders "Authentication canceled." A `systemCancel` when the prompt
+                // could not even be presented (SP-3 P6 #297: closed-clamshell mode,
+                // no Touch ID sensor) is indistinguishable from a user cancel without
+                // the code name + `NSDebugDescription`, which names the real cause.
+                return SignerError(.cancelled, "authentication cancelled or failed: \(laDetail(e))")
             }
         }
-        return SignerError(.cancelled, "signing failed: \(e.localizedDescription)")
+        return SignerError(.cancelled, "signing failed: \(laDetail(e))")
     }
+}
+
+/// The LAError code → name map for operator-legible diagnostics. Kept exhaustive
+/// for the codes `sign` can plausibly surface; unknowns fall through to nil.
+func laCodeName(_ code: Int) -> String? {
+    switch LAError.Code(rawValue: code) {
+    case .some(.authenticationFailed): return "authenticationFailed"
+    case .some(.userCancel): return "userCancel"
+    case .some(.userFallback): return "userFallback"
+    case .some(.systemCancel): return "systemCancel"
+    case .some(.passcodeNotSet): return "passcodeNotSet"
+    case .some(.biometryNotAvailable): return "biometryNotAvailable"
+    case .some(.biometryNotEnrolled): return "biometryNotEnrolled"
+    case .some(.biometryLockout): return "biometryLockout"
+    case .some(.appCancel): return "appCancel"
+    case .some(.invalidContext): return "invalidContext"
+    case .some(.notInteractive): return "notInteractive"
+    default: return nil
+    }
+}
+
+/// A useful one-line rendering of an LAError/NSError for the exit stderr line: the
+/// LAError case name (so `systemCancel` is distinguishable from a real `userCancel`),
+/// the localized description, and `NSDebugDescription` when it carries the actual
+/// cause the localized string hides (SP-3 P6 #297 — e.g. "Touch ID is not available
+/// in closed clamshell mode"). No challenge-derived bytes flow through here.
+func laDetail(_ e: NSError) -> String {
+    var parts: [String] = []
+    if e.domain == LAError.errorDomain, let name = laCodeName(e.code) { parts.append("\(name):") }
+    parts.append(e.localizedDescription)
+    if let dbg = e.userInfo[NSDebugDescriptionErrorKey] as? String, !dbg.isEmpty, dbg != e.localizedDescription {
+        parts.append("— \(dbg)")
+    }
+    return parts.joined(separator: " ")
 }
 
 /// The exit-5 stderr runbook pointer (spec §7.3): rotate + re-enroll.

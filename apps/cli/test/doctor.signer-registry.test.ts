@@ -5,7 +5,7 @@
  * dir via `ATLAS_BROKER_KEYS_DIR`.
  */
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { generateKeyPairSync } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -59,6 +59,34 @@ describe("signer-registry doctor check (R2)", () => {
     const c = checkSignerRegistry(ctx());
     expect(c.status).toBe("ok");
     expect(c.detail).toMatch(/derivation in effect/);
+  });
+
+  // #297 (SP-3 P6): a check that verified NOTHING must not read green. The
+  // broker keys dir is 0700/atlas-broker, so the operator UID that normally runs
+  // `doctor` cannot resolve or read it — that is `skipped`, never a vacuous `ok`.
+  it("skipped (not ok) when no broker keys dir can be resolved", () => {
+    // No ATLAS_BROKER_KEYS_DIR and a cwd with no provisioning/keys.acl.json.
+    const c = checkSignerRegistry({
+      cwd: base,
+      env: {},
+      config: { config: {} },
+    } as unknown as RunContext);
+    expect(c.status).toBe("skipped");
+    expect(c.status).not.toBe("ok");
+    expect(c.detail).toMatch(/atlas-broker/);
+  });
+
+  it("skipped (not a false ok, not action-required) when the keys dir is unreadable to this user", () => {
+    if (typeof process.getuid === "function" && process.getuid() === 0) return; // root bypasses perms
+    writeSigners([ATTEST]); // a real registry exists…
+    chmodSync(keysDir, 0o000); // …but this UID can't read the dir
+    try {
+      const c = checkSignerRegistry(ctx());
+      expect(c.status).toBe("skipped"); // NOT "ok" (green-wash) and NOT "action-required" (false alarm)
+      expect(c.detail).toMatch(/not readable/);
+    } finally {
+      chmodSync(keysDir, 0o700); // restore so afterEach can clean up
+    }
   });
 
   it("ok for a valid registry: attestation + a presence p256 signer", () => {

@@ -19,7 +19,7 @@
  * warns/degrades), and 6 (action-required) when any check reports an operator
  * action is required — NAMING the failing check in its `detail`.
  */
-import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { accessSync, constants as fsConstants, existsSync, lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { platform } from "node:os";
@@ -45,7 +45,12 @@ import { isBundleFilename, isTempFilename, validateBundleStructure } from "../qu
 import { verifyAuditAnchor, type AuditChainProbe } from "../audit/anchor-check.js";
 import { probeDaemon, isReachable } from "../health/probe.js";
 
-type CheckStatus = "ok" | "warning" | "degraded" | "action-required";
+// `skipped` = the check could not run from this process's vantage (e.g. a
+// broker-owned keys dir unreadable to the operator UID) — NOT a pass. It is
+// neutral in the aggregate (never green-washes, never alarms): only `warning`/
+// `degraded` degrade and only `action-required` fails. A vacuous `ok` would let
+// an unverifiable check read as verified (SP-3 P6 finding #297).
+type CheckStatus = "ok" | "skipped" | "warning" | "degraded" | "action-required";
 
 interface Check {
   id: string;
@@ -296,7 +301,10 @@ function checkBackupWatermark(ctx: RunContext): Check {
       return { id, title, status: "action-required", detail: `backup-unhealthy: watermark blocked at covered seq ${Math.max(0, h.coveredSeq)} of ${Math.max(0, h.seq)}` };
     }
     if (h.coveredSeq < h.seq) {
-      return { id, title, status: "degraded", detail: `watermark seq ${Math.max(0, h.coveredSeq)} < latest ledger seq ${Math.max(0, h.seq)}` };
+      // Field names match `db status`'s backup block (coveredSeq/watermarkSeq) so
+      // the two surfaces read consistently — and say "healthy, lagging" so this
+      // isn't mistaken for the exit-2 `backup-unhealthy` block above (#297).
+      return { id, title, status: "degraded", detail: `backup healthy but lagging: coveredSeq ${Math.max(0, h.coveredSeq)} < watermarkSeq ${Math.max(0, h.seq)}` };
     }
     return { id, title, status: "ok" };
   } finally {
@@ -683,8 +691,26 @@ function checkSignerRegistry(ctx: RunContext): Check {
     const base = acl?.paths?.keysDir?.[os];
     if (base !== undefined) keysDir = join(base, "atlas-broker");
   }
-  if (keysDir === undefined || !existsSync(keysDir)) {
-    return { id, title, status: "ok", detail: "no broker keys dir resolved — nothing to verify" };
+  // No path to check at all (dev host / no ACL matrix from cwd / no env): the
+  // check verified NOTHING — report `skipped`, never a green `ok` (#297). The
+  // broker-owned keys dir is 0700, so the operator UID that normally runs
+  // `doctor` cannot resolve or read it; only running as atlas-broker (or setting
+  // ATLAS_BROKER_KEYS_DIR at a readable copy) can actually verify the registry.
+  const asBroker = "run `doctor` as atlas-broker (or set ATLAS_BROKER_KEYS_DIR to a readable keys dir) to verify the enrolled signers";
+  if (keysDir === undefined) {
+    return { id, title, status: "skipped", detail: `broker keys dir not resolved from here — ${asBroker}` };
+  }
+  if (!existsSync(keysDir)) {
+    return { id, title, status: "ok", detail: "no broker keys dir at the resolved path — key-file derivation in effect" };
+  }
+  // The dir exists but may be unreadable to this UID (0700, broker-owned). An
+  // unreadable dir makes `existsSync(signers.json)` return a false negative
+  // (no traverse), which would masquerade as "no explicit signers.json → ok" —
+  // probe readability first and report `skipped` rather than green-wash it.
+  try {
+    accessSync(keysDir, fsConstants.R_OK | fsConstants.X_OK);
+  } catch {
+    return { id, title, status: "skipped", detail: `broker keys dir exists but is not readable as this user — ${asBroker}` };
   }
 
   const signersPath = join(keysDir, "signers.json");
@@ -697,6 +723,11 @@ function checkSignerRegistry(ctx: RunContext): Check {
     entries = JSON.parse(readFileSync(signersPath, "utf8")) as unknown[];
     if (!Array.isArray(entries)) throw new Error("signers.json is not an array");
   } catch (e) {
+    // A permission error is "cannot verify from here", not "corrupt": `skipped`,
+    // not the alarming `action-required` that a real parse/shape failure earns.
+    if ((e as NodeJS.ErrnoException).code === "EACCES") {
+      return { id, title, status: "skipped", detail: `signers.json exists but is not readable as this user — ${asBroker}` };
+    }
     return { id, title, status: "action-required", detail: `signers.json unreadable/invalid: ${e instanceof Error ? e.message : String(e)}` };
   }
 
@@ -803,7 +834,7 @@ async function doctor(ctx: RunContext): Promise<number> {
     ctx.render(lines.join("\n"));
   }
 
-  // Exit 0 when all checks pass (or only warn/degrade); 6 when any needs an action.
+  // Exit 0 when all checks pass (or only skip/warn/degrade); 6 when any needs an action.
   return anyActionRequired ? EXIT.ACTION_REQUIRED : EXIT.OK;
 }
 
