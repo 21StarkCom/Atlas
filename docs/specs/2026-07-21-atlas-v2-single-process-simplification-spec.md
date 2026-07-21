@@ -220,7 +220,7 @@ Every value/rule/state below has exactly **one** owner; consumers consume, never
 
 - **Command membership / phase / privilege / idempotency** → `docs/specs/cli-contract/commands.json`.
 - **`link --json` schema** → `docs/specs/cli-contract/link.schema.json`.
-- **`sync` / `status` schemas** → their respective `*.schema.json` (the `head` → `scannedCount` and `lastIndexedHead` → `pendingChangedCount` deltas live only there).
+- **`sync` / `status` schemas** → their respective `*.schema.json` (the retirements of `head` / `lastIndexedHead` and the additions of `scannedCount` + `movedCount` and the **four** `status.sync` pending counts live only there).
 - **ChangePlan (15 ops), canonical serialization, identity-key** → `@atlas/contracts`.
 - **The sync cursor** → the SQLite projection's per-note **`contentHash`**. There is **no** `head`, **no** `lastIndexedHead`, no second marker — the design's one dual-state risk is closed by declaring the projection the sole cursor.
 - **The vault↔projection diff** → **one reconciliation routine owned by the sync engine** — file discovery, the note-file filter, hashing, and changed/new/dropped/moved classification live there and nowhere else. `sync` consumes its result to reconcile; `status` consumes the **same** routine read-only for the three pending counts. Two commands can never disagree about the pending set because neither re-derives it.
