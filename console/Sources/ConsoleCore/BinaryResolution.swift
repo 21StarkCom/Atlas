@@ -8,10 +8,18 @@ public struct ResolutionInputs: Sendable, Equatable {
     public let atlasRoot: String?
     public let brainPathOverride: String?
     public let signerPathOverride: String?
-    public init(atlasRoot: String? = nil, brainPathOverride: String? = nil, signerPathOverride: String? = nil) {
+    /// A privilege-drop launcher for `brain` (#298). On a multi-identity install the Console runs as
+    /// the operator, but `brain` must run as `atlas-agent` to reach the broker socket + capability key
+    /// (the operator is normatively not in `atlas-git`). When set, this absolute path wraps the brain
+    /// invocation (it re-execs `brain` as `atlas-agent`); the contract bundle is STILL bound from
+    /// `atlasRoot`, so the exec identity is decoupled from the schema source. The signer is unaffected —
+    /// it runs as the operator (its SE key lives in the operator's home, Touch-ID gated).
+    public let brainLauncher: String?
+    public init(atlasRoot: String? = nil, brainPathOverride: String? = nil, signerPathOverride: String? = nil, brainLauncher: String? = nil) {
         self.atlasRoot = atlasRoot
         self.brainPathOverride = brainPathOverride
         self.signerPathOverride = signerPathOverride
+        self.brainLauncher = brainLauncher
     }
 }
 
@@ -62,6 +70,7 @@ public struct ResolvedBinary: Sendable {
 public enum ResolutionEnv {
     public static let atlasRoot = "ATLAS_ROOT"
     public static let brainPath = "ATLAS_BRAIN_PATH"
+    public static let brainLauncher = "ATLAS_BRAIN_LAUNCHER"
     public static let signerPath = "ATLAS_SIGNER_PATH"
 }
 
@@ -112,6 +121,12 @@ public enum BinaryResolution {
         runner: ProcessRunner,
         probeTimeout: Duration
     ) async throws -> ResolvedBinary {
+        // 0. privilege-drop launcher (#298): wraps brain to run it as atlas-agent while the Console
+        // stays the operator. Bundle binds from atlasRoot (the launcher is outside the checkout), so
+        // this is a DISTINCT mode from a standalone in-checkout binary — checked first when configured.
+        if let launcher = inputs.brainLauncher ?? env[ResolutionEnv.brainLauncher] {
+            return try await resolveLauncherBrain(launcher: launcher, inputs: inputs, env: env, runner: runner, probeTimeout: probeTimeout)
+        }
         // 1. settings override — a standalone in-checkout `brain` binary.
         if let override = inputs.brainPathOverride {
             return try await resolveStandaloneBrain(path: override, env: env, runner: runner, probeTimeout: probeTimeout)
@@ -142,6 +157,40 @@ public enum BinaryResolution {
             )
         }
         let launch = [nodeAbs, binJs.path]
+        let baseEnv = [ResolutionEnv.atlasRoot: atlasRoot]
+        let bundle = try ContractBundle.resolve(fromAnchor: binJs)
+        try await probeBrain(launch: launch, env: env, baseEnv: baseEnv, bundle: bundle, anchorPath: binJs.path, runner: runner, probeTimeout: probeTimeout)
+        return try ResolvedBinary(launch: launch, contractAnchor: binJs, baseEnv: baseEnv, bundle: bundle)
+    }
+
+    /// Launcher mode (#298): `launch[0]` is a privilege-drop wrapper that re-execs brain as
+    /// `atlas-agent`, but the contract bundle + anchor are bound from `atlasRoot`'s `apps/cli/dist/bin.js`
+    /// (the launcher lives OUTSIDE the checkout — deriving the bundle from it would fail). The wrapper
+    /// receives `ATLAS_ROOT` via `baseEnv` so it knows which checkout to run. The probe spawns the
+    /// launcher end to end, so it verifies the privilege drop AND the broker reachability, not just a path.
+    private static func resolveLauncherBrain(
+        launcher: String,
+        inputs: ResolutionInputs,
+        env: [String: String],
+        runner: ProcessRunner,
+        probeTimeout: Duration
+    ) async throws -> ResolvedBinary {
+        let launcherAbs = try requireExecutable(launcher, kindLabel: "brain launcher")
+        guard let atlasRoot = inputs.atlasRoot ?? env[ResolutionEnv.atlasRoot] else {
+            throw BlockingResolutionError(
+                path: "atlasRoot",
+                remediation: "A brain launcher is configured but no atlasRoot/ATLAS_ROOT. The launcher runs brain as another identity, yet the Console still binds the contract bundle from the checkout — set atlasRoot to your atlas checkout."
+            )
+        }
+        let rootURL = URL(fileURLWithPath: atlasRoot).standardizedFileURL
+        let binJs = rootURL.appendingPathComponent("apps/cli/dist/bin.js")
+        guard FileManager.default.fileExists(atPath: binJs.path) else {
+            throw BlockingResolutionError(
+                path: binJs.path,
+                remediation: "atlasRoot does not contain apps/cli/dist/bin.js. Run `pnpm -r build` in the atlas checkout, or fix atlasRoot."
+            )
+        }
+        let launch = [launcherAbs]
         let baseEnv = [ResolutionEnv.atlasRoot: atlasRoot]
         let bundle = try ContractBundle.resolve(fromAnchor: binJs)
         try await probeBrain(launch: launch, env: env, baseEnv: baseEnv, bundle: bundle, anchorPath: binJs.path, runner: runner, probeTimeout: probeTimeout)

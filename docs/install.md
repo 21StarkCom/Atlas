@@ -411,6 +411,25 @@ tail -f /usr/local/var/log/atlas/sync.log
 
 ---
 
+### 5.7 Atlas Console brain privilege-drop launcher (SP-3 / #298)
+
+The SP-2 Console runs as the **operator** and drives the privileged flow by spawning `brain`. On a provisioned multi-identity host that fails: the broker socket dir is `atlas-git`-group-only (§3) and the operator is **not** in `atlas-git`, so `brain` must run as `atlas-agent`. Rather than add the operator to `atlas-git` (which would weaken D17/D18), install a **privilege-drop launcher** and point the Console at it:
+
+```bash
+# root-owned wrapper + a visudo-validated NOPASSWD rule (operator may run brain as atlas-agent)
+sudo provisioning/install-console-launcher.sh "$(id -un)"
+# then, in the Console Settings (or the env): brainLauncher = the installed path
+export ATLAS_BRAIN_LAUNCHER=/usr/local/lib/atlas/bin/brain-as-agent.sh   # or set it in Settings → Paths
+```
+
+The launcher (`brain-as-agent.sh`) re-execs `brain` as `atlas-agent`, forwarding `ATLAS_ROOT` (and, only when the Console injects it for the two minting commands, `ATLAS_EGRESS_CAPABILITY_KEY`). The Console still binds its **contract bundle from `atlasRoot`** — the wrapper lives outside the checkout, so the exec identity is decoupled from the schema source. The **signer is unaffected**: it runs as the operator (Touch-ID-gated SE key in the operator's home), never dropped.
+
+**Security posture** (SP-3 spec §5.2 — single operator, single personal Mac): the sudoers rule grants the operator the ability to act as `atlas-agent`, a **deliberately less-privileged** UID (network-denied at the UID per D17, holds no credential, is not root, and is not the operator being added to `atlas-git`). The boundary that matters — broker / root / the attestation key — is untouched. Tighter per-command sudoers scoping is possible but deferred (fragile across node-path/arg variance). A **single-identity dev host** (the operator owns the vault + socket) needs no launcher — leave `brainLauncher` unset.
+
+Verify: `sudo -n -u atlas-agent true` succeeds with no prompt, then launch the Console — the dashboard should populate and the Actions privileged flow should reach the broker.
+
+---
+
 ## 6. Verification
 
 ```bash

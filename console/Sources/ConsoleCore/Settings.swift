@@ -21,6 +21,10 @@ public struct Settings: Codable, Sendable, Equatable {
     public var atlasRoot: String?
     public var brainPathOverride: String?
     public var signerPathOverride: String?
+    /// A privilege-drop launcher for `brain` (#298) — an absolute path that re-execs brain as
+    /// `atlas-agent` so the operator-run Console can reach the broker on a multi-identity install. The
+    /// contract bundle still binds from `atlasRoot`. Optional ⇒ absent decodes to `nil` on older blobs.
+    public var brainLauncher: String?
     public var pollMs: Int?
     public var heartbeatSeconds: Int?
     public var egressCapabilityKeySource: EgressKeySource
@@ -30,6 +34,7 @@ public struct Settings: Codable, Sendable, Equatable {
         atlasRoot: String? = nil,
         brainPathOverride: String? = nil,
         signerPathOverride: String? = nil,
+        brainLauncher: String? = nil,
         pollMs: Int? = nil,
         heartbeatSeconds: Int? = nil,
         egressCapabilityKeySource: EgressKeySource = .env,
@@ -38,6 +43,7 @@ public struct Settings: Codable, Sendable, Equatable {
         self.atlasRoot = atlasRoot
         self.brainPathOverride = brainPathOverride
         self.signerPathOverride = signerPathOverride
+        self.brainLauncher = brainLauncher
         self.pollMs = pollMs
         self.heartbeatSeconds = heartbeatSeconds
         self.egressCapabilityKeySource = egressCapabilityKeySource
@@ -56,7 +62,8 @@ extension Settings {
         ResolutionInputs(
             atlasRoot: atlasRoot,
             brainPathOverride: brainPathOverride,
-            signerPathOverride: signerPathOverride
+            signerPathOverride: signerPathOverride,
+            brainLauncher: brainLauncher
         )
     }
 }
