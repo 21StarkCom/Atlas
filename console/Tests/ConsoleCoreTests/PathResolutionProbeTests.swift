@@ -33,6 +33,49 @@ final class PathResolutionProbeTests: XCTestCase {
         XCTAssertEqual(resolved.launch, [brain])
     }
 
+    // #298 — launcher mode: `launch[0]` is a privilege-drop wrapper (runs brain as atlas-agent),
+    // but the contract bundle + anchor bind from atlasRoot's bin.js, NOT the launcher. The launcher
+    // lives OUTSIDE the checkout here, proving the exec identity is decoupled from the schema source.
+    func testLauncherModeLaunchesWrapperButBindsBundleFromAtlasRoot() async throws {
+        let root = try TestSupport.makeFixtureCheckout()
+        let binJs = root.appendingPathComponent("apps/cli/dist/bin.js")
+        let launcherDir = TestSupport.tempDir("launcher-outside-checkout")
+        let launcher = try TestSupport.writeJSONEmitter(launcherDir, name: "brain-as-agent", json: try TestSupport.dbStatusExampleJSON())
+        let resolved = try await BinaryResolution.resolve(
+            .brain,
+            inputs: ResolutionInputs(atlasRoot: root.path, brainLauncher: launcher),
+            env: [:], runner: runner, probeTimeout: fastProbe
+        )
+        XCTAssertEqual(resolved.launch, [launcher], "launch[0] is the launcher wrapper")
+        XCTAssertEqual(resolved.contractAnchor.standardizedFileURL.path, binJs.standardizedFileURL.path, "anchor is bin.js, not the launcher")
+        XCTAssertEqual(resolved.bundle.checkoutRoot.standardizedFileURL.path, root.standardizedFileURL.path, "bundle binds from atlasRoot")
+        XCTAssertEqual(resolved.baseEnv[ResolutionEnv.atlasRoot], root.path, "the wrapper is told the checkout via ATLAS_ROOT")
+    }
+
+    func testLauncherViaEnvVarHits() async throws {
+        let root = try TestSupport.makeFixtureCheckout()
+        let launcherDir = TestSupport.tempDir("launcher-env")
+        let launcher = try TestSupport.writeJSONEmitter(launcherDir, name: "brain-as-agent", json: try TestSupport.dbStatusExampleJSON())
+        let resolved = try await BinaryResolution.resolve(
+            .brain, inputs: ResolutionInputs(atlasRoot: root.path),
+            env: [ResolutionEnv.brainLauncher: launcher], runner: runner, probeTimeout: fastProbe
+        )
+        XCTAssertEqual(resolved.launch, [launcher])
+    }
+
+    func testLauncherWithoutAtlasRootIsBlockingNamingAtlasRoot() async throws {
+        let launcherDir = TestSupport.tempDir("launcher-no-root")
+        let launcher = try TestSupport.writeJSONEmitter(launcherDir, name: "brain-as-agent", json: try TestSupport.dbStatusExampleJSON())
+        do {
+            _ = try await BinaryResolution.resolve(
+                .brain, inputs: ResolutionInputs(brainLauncher: launcher),
+                env: [:], runner: runner, probeTimeout: fastProbe)
+            XCTFail("expected blocking — a launcher needs atlasRoot for the bundle")
+        } catch let b as BlockingResolutionError {
+            XCTAssertTrue(b.path.contains("atlasRoot"), b.path)
+        }
+    }
+
     func testMissingBrainOverrideIsBlockingNamingPath() async {
         let missing = "/nonexistent/path/brain-xyz"
         do {

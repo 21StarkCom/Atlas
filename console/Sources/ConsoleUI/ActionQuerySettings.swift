@@ -256,6 +256,8 @@ public struct SettingsView: View {
                 TextField("Atlas root", text: optionalBinding(\.atlasRoot))
                     .accessibilityLabel("Atlas checkout root")
                 TextField("brain override", text: optionalBinding(\.brainPathOverride))
+                TextField("brain launcher (run-as wrapper)", text: optionalBinding(\.brainLauncher))
+                    .accessibilityLabel("brain privilege-drop launcher path")
                 TextField("signer override", text: optionalBinding(\.signerPathOverride))
             }
             Section("Watch") {
