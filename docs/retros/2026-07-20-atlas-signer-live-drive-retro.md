@@ -98,6 +98,15 @@ Plus the one that cost the most: **Touch ID is unavailable in closed-clamshell m
 - **Quarantine `os-presence` round trip — deliberately skipped.** There are zero quarantine items on the instance, and seeding one means deliberately triggering a scan violation. The `--presence` grant is therefore **enrolled and registry-verified but never exercised live**; the gate remains unit-tested only. Worth doing when a quarantine item next appears naturally.
 - The broker log retains two historical `seq 0 breaks continuity` lines from the 19-Jul duplicate-genesis incident. Harmless — the daemon starts clean — but they cost a few minutes of doubt during the upgrade. `recover-audit-chain.sh` already fixed the underlying state.
 
+## Post-drive completion (2026-07-21)
+
+After the findings landed, `~/Code/.scratch/p6-finish.sh` completed the two root-side remainders in one pass:
+
+- **Prod broker/egress reinstalled from a current-main artifact** (broker `30c82255…`, egress `cf39c43d…`) — the P6 drive had installed a feature-branch build missing main's #289/#293/#295; prod is now on **true main**. The enrolled SE signer survived the binary swap (keys dir untouched).
+- **The #298 launcher installed** (`/usr/local/lib/atlas/bin/brain-as-agent.sh`, root-owned, + `/etc/sudoers.d/atlas-console`), and **live-verified through its production path**: the `db status` probe is green, `source list` reaches the broker as `atlas-agent` (4 sources, trust reads correct), and `source trust promote --export-challenge` returns a valid challenge (exit 6). The Console's entire brain-side path is proven **up to the Touch ID boundary**.
+
+**The only remaining step is human:** launch the rebuilt `.app` via `open` (LaunchServices — a bare exec produced no window) with `ATLAS_BRAIN_LAUNCHER` set, then Actions → Begin → Touch ID → Done → revoke, plus the #254 VoiceOver/Full-Keyboard-Access checklist. Tracked by #286.
+
 ## Bottom line
 
 The signing half of the Console arc is real and proven against production. The GUI half was blocked on an architectural contradiction that predates SP-3 (#298) — **now fixed** (PR #303, the `brainLauncher` privilege-drop mode), leaving only the human-led GUI/VoiceOver pass. SP-3 itself needs nothing further. The one thing I got wrong — a false #296, caused by driving with a stale feature-branch binary — is the drive's sharpest process lesson: **a live drive is only as honest as the binary it runs; build from `main`.** (The prod broker was itself reinstalled from a main-based artifact post-drive for the same reason.)
