@@ -12,7 +12,7 @@ The drive also surfaced **four defects that CI structurally could not catch** �
 |---|---|
 | p256/SE authorization proven live | ✅ promote → revoke, both Touch-ID'd, broker-verified |
 | Vault left exactly as found | ✅ `trust_state` back to `untrusted` |
-| Defects filed | #296, #297, #298 |
+| Defects filed | #297, #298 (and #296 — **retracted**, see below) |
 | Console GUI round trip | ❌ blocked — #298, structural |
 | Quarantine `os-presence` round trip | ⏸️ deliberately deferred |
 
@@ -36,10 +36,10 @@ export challenge (exit 6)  →  atlas-signer sign (Touch ID, exit 0)  →  --aut
 
 | # | Finding | Severity |
 |---|---|---|
-| **#296** | **`source trust` read surface is hardcoded to `untrusted`.** `source list` / `source show` / `source trust show` return a constant; nothing reads `trust_state` back. A successful, broker-authorized promotion is **invisible** to every read command. Stale "pre-Phase-4" comments predict a state that shipped long ago. | real bug, pre-existing |
+| ~~#296~~ | ~~`source trust` read surface hardcoded to `untrusted`.~~ **RETRACTED — false finding.** Already fixed on `main` by **#218** (`6ed6b85`, PR #288); `source.ts` reads `trust_state` via `readTrustRecord`, with a promote→read round-trip test. The live symptom was a **stale binary**: the drive ran the SP-3 *feature-branch* brain (based at the SP-2 merge, pre-#218), not `main`. The `trust_state` write was always correct. Closed as already-fixed. **Lesson: drive live with a main-based binary, never a feature branch behind main** — the same class as the "re-read from disk after a review loop" rule. | not a bug |
 | **#298** | **The Console cannot reach the broker on a spec-compliant install.** The cockpit spec says it runs as the *operator* and is "exactly as privileged as the operator's terminal"; `install.md:103` says `atlas-git` is `atlas-agent` + `atlas-broker` **only**. Both are reasonable; together they are unsatisfiable — the operator's terminal *also* cannot run `brain`. | architectural contradiction |
 | **#297** | Signer swallows the actionable cause of exit 4 (see below); `doctor`'s `signer-registry` reports a **vacuous `ok`** ("no broker keys dir resolved — nothing to verify"); `doctor` and `db status` **disagree** on backup health (`degraded` vs `healthy: true`). | polish, cost real time |
-| open Q | `trustLedgerHead` returned all-zero and `refs/trust/ledger` does not exist in the live vault, though `trust/promote.ts` documents advancing it. Logged as a question in #296, not asserted. | unknown |
+| open Q | `trustLedgerHead` returned all-zero and `refs/trust/ledger` does not exist in the live vault, though `trust/promote.ts` documents advancing it. On `main` the projection is written by `execAuthorized` (authorize-only in Phase 1), so the all-zero head is likely the intended Phase-1 sentinel rather than a bug — but unconfirmed. Not re-filed after the #296 retraction; note for whoever wires the git-side trust ledger. | unknown |
 
 **None are SP-3 regressions.** SP-3 changed only the signature algorithm, and that part worked on the first non-clamshell attempt.
 
@@ -100,4 +100,4 @@ Plus the one that cost the most: **Touch ID is unavailable in closed-clamshell m
 
 ## Bottom line
 
-The signing half of the Console arc is real and proven against production. The GUI half is blocked on an architectural contradiction that predates SP-3 and needs a decision (#298), and the trust *read* surface never shipped its Phase-4 half (#296). SP-3 itself needs nothing further.
+The signing half of the Console arc is real and proven against production. The GUI half is blocked on an architectural contradiction that predates SP-3 and needs a decision (#298). SP-3 itself needs nothing further. The one thing I got wrong — a false #296, caused by driving with a stale feature-branch binary — is the drive's sharpest process lesson: **a live drive is only as honest as the binary it runs; build from `main`.** (The prod broker was itself reinstalled from a main-based artifact post-drive for the same reason.)
