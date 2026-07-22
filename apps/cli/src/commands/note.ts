@@ -312,6 +312,22 @@ const VIA_RANK: Record<RelatedEntry["via"], number> = { link: 0, backlink: 1, re
  * edge). Exported for the pagination contract test.
  */
 export function traverseRelated(db: SqliteDatabase, seedId: string, depth: number): RelatedEntry[] {
+  // Migration-frontier detection, ONCE per traversal (mirrors verify.ts's
+  // migrationApplied): after `0013_links_v2` a plain [[wikilink]] carries a NULL
+  // predicate and every non-null predicate is a deliberate typed edge (migrated
+  // "references" rows intentionally stay typed). BEFORE 0013 the schema had no
+  // NULL predicates — plain links carry the synthetic DEFAULT_LINK_PREDICATE —
+  // so classifying on nullability alone would emit them as via="relationship".
+  const linksV2 =
+    (
+      db
+        .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`)
+        .get("db_schema_migrations") !== undefined
+    ) &&
+    db.prepare(`SELECT 1 FROM db_schema_migrations WHERE id = ?`).get("0013_links_v2") !==
+      undefined;
+  const isPlainLink = (predicate: string | null): boolean =>
+    linksV2 ? predicate === null : predicate === null || predicate === DEFAULT_LINK_PREDICATE;
   const found = new Map<string, RelatedEntry>();
   let frontier: string[] = [seedId];
   const seen = new Set<string>([seedId]);
@@ -323,11 +339,20 @@ export function traverseRelated(db: SqliteDatabase, seedId: string, depth: numbe
       const edges: { target: string; via: RelatedEntry["via"]; predicate?: string }[] = [];
       for (const r of db
         .prepare(`SELECT target_note_id, predicate FROM note_links WHERE source_note_id = ?`)
-        .all(node) as { target_note_id: string; predicate: string }[]) {
+        .all(node) as { target_note_id: string; predicate: string | null }[]) {
+        // Classification is migration-frontier-aware (see `isPlainLink` above):
+        // post-0013 a NULL predicate is a PLAIN `[[wikilink]]` and every non-null
+        // predicate is a typed relationship edge; pre-0013 the synthetic
+        // DEFAULT_LINK_PREDICATE marks a plain link. Either way a plain link never
+        // emits via="relationship" with a null predicate (JSON-schema violation).
         edges.push(
-          r.predicate === DEFAULT_LINK_PREDICATE
+          isPlainLink(r.predicate)
             ? { target: r.target_note_id, via: "link" }
-            : { target: r.target_note_id, via: "relationship", predicate: r.predicate },
+            : {
+                target: r.target_note_id,
+                via: "relationship",
+                predicate: r.predicate as string,
+              },
         );
       }
       for (const r of db

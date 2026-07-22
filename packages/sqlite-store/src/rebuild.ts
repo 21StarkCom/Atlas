@@ -47,7 +47,13 @@ import { deriveAndPersistNote } from "./note-derivation.js";
 /** The normalization-contract version stamped into `note_identity_keys.normalizer_version`. */
 export const IDENTITY_NORMALIZER_VERSION = 1;
 
-/** Default predicate for a plain (untyped) `[[wiki-link]]` until typed links land. */
+/**
+ * The v1 synthetic predicate a plain `[[wiki-link]]` was forced to carry (v1
+ * `note_links.predicate` was `NOT NULL`). The v2 rebuild (`0013_links_v2`) emits
+ * a plain link as `predicate NULL` instead, so this is NO LONGER written by the
+ * fold; it is retained only for the read-side link/relationship classifier that
+ * task 3-6 (`link`) replaces.
+ */
 export const DEFAULT_LINK_PREDICATE = "references";
 
 /** Outcome of a {@link rebuildProjections} call. */
@@ -259,17 +265,21 @@ export function rebuildProjections(
     // An unresolved target is a dangling reference: throw so the transaction
     // rolls back and the prior projection survives (dictionary §2 `note_links`).
     for (const note of snapshot.notes) {
-      let ordinal = 0;
       for (const link of note.links) {
         const target = resolveTarget(link.target);
         if (target === undefined) {
           throw new DanglingLinkError(note.id, link.target, link.raw);
         }
+        // A parsed `[[wiki-link]]` is a PLAIN link in the v2 shape (0013): no
+        // relationship type, so `predicate` is NULL and the optional
+        // `[[target|display]]` text lands in `alias`. Typed relationship edges
+        // (`predicate` set) are authored by the `link` command (task 3-6), not
+        // projected from wiki-links here.
         repo.insertLink({
           source_note_id: note.id,
           target_note_id: target,
-          predicate: DEFAULT_LINK_PREDICATE,
-          ordinal: ordinal++,
+          predicate: null,
+          alias: link.alias ?? null,
         });
         report.links++;
       }

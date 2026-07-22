@@ -20,7 +20,8 @@ import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import _Ajv2020 from "ajv/dist/2020.js";
 import { runCli } from "../src/main.js";
-import { openStore, type Store } from "@atlas/sqlite-store";
+import { openStore, rebuildProjections, type Store } from "@atlas/sqlite-store";
+import type { ParsedNote, VaultSnapshot } from "@atlas/contracts";
 import { querySources } from "../src/commands/source.js";
 import { queryOpenRuns } from "../src/commands/git-status.js";
 import { traverseRelated } from "../src/commands/note.js";
@@ -219,6 +220,94 @@ describe("deterministic ordering + unique tie-breaker", () => {
       expect(byId.size).toBe(related.length); // each noteId at most once
       expect(related.find((r) => r.noteId === "b")?.predicate).toBe("depends-on");
       expect(related.find((r) => r.noteId === "d")?.via).toBe("backlink");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("pre-0013 frontier: the synthetic DEFAULT_LINK_PREDICATE is via=link; typed predicates stay relationships", async () => {
+    // Regression (round-3 finding): `note related` must stay readable against a
+    // valid PRE-0013 database, where plain links carry the synthetic
+    // "references" predicate (the v1 schema had predicate NOT NULL — NULL could
+    // not occur). Classifying on nullability alone would emit those plain links
+    // as via="relationship". Post-0013, migrated "references" rows are
+    // deliberately typed edges — covered by the v2 test below.
+    await cli(["db", "migrate", "--json"]);
+    const store = openStore({ path: dbPath });
+    try {
+      // Simulate the pre-0013 frontier honestly: un-record 0013 and restore the
+      // v1 note_links shape (3-col PK, predicate NOT NULL).
+      store.db.exec(`
+        DELETE FROM db_schema_migrations WHERE id = '0013_links_v2';
+        DROP TABLE note_links;
+        CREATE TABLE note_links (
+          source_note_id TEXT NOT NULL,
+          target_note_id TEXT NOT NULL,
+          predicate TEXT NOT NULL,
+          PRIMARY KEY (source_note_id, target_note_id, predicate)
+        );
+        INSERT INTO note_links VALUES ('vseed', 'vplain', 'references');
+        INSERT INTO note_links VALUES ('vseed', 'vtyped', 'supports');
+      `);
+
+      const related = traverseRelated(store.db, "vseed", 1);
+      const plain = related.find((r) => r.noteId === "vplain");
+      expect(plain?.via).toBe("link");
+      expect(plain?.predicate).toBeUndefined();
+      const typed = related.find((r) => r.noteId === "vtyped");
+      expect(typed?.via).toBe("relationship");
+      expect(typed?.predicate).toBe("supports");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("rebuild → note related: a plain [[wikilink]] (predicate NULL) is via=link, never a null-predicate relationship", async () => {
+    // Regression (0013 v2 shape): `rebuildProjections` stores a parsed
+    // `[[wikilink]]` with predicate NULL. `traverseRelated` MUST classify a NULL
+    // predicate as a PLAIN link (via "link", no `predicate`) — not via
+    // "relationship" with `predicate: null`, which violates the note-related JSON
+    // schema (predicate is a string, only present when via=relationship).
+    await cli(["db", "migrate", "--json"]);
+    const store = openStore({ path: dbPath });
+    try {
+      const mkNote = (id: string, links: ParsedNote["links"]): ParsedNote => ({
+        id, path: `${id}.md`, type: "concept", schemaVersion: 1, title: id, status: "active",
+        created: iso(0), updated: iso(0), aliases: [], sources: [], declaredSensitivity: "internal",
+        links, sections: { heading: "", level: 0, path: "", children: [] },
+        contentHash: `sha256:${hash(1)}`, raw: `# ${id}\n`,
+      });
+      // `pseed` plainly wiki-links `ptarget` (with a display alias) — no predicate.
+      const snapshot: VaultSnapshot = {
+        notes: [
+          mkNote("pseed", [{ target: "ptarget", alias: "The Target", raw: "[[ptarget|The Target]]" }]),
+          mkNote("ptarget", []),
+        ],
+        errors: [],
+      };
+      rebuildProjections(store.db, snapshot);
+
+      // The persisted link carries a NULL predicate (the v2 plain-link shape).
+      const row = store.db
+        .prepare(`SELECT predicate, alias FROM note_links WHERE source_note_id = 'pseed' AND target_note_id = 'ptarget'`)
+        .get() as { predicate: string | null; alias: string | null };
+      expect(row.predicate).toBeNull();
+      expect(row.alias).toBe("The Target");
+
+      const related = traverseRelated(store.db, "pseed", 1);
+      const edge = related.find((r) => r.noteId === "ptarget");
+      expect(edge?.via).toBe("link");
+      expect(edge?.predicate).toBeUndefined();
+
+      // The full `note related` --json envelope validates against the committed schema
+      // (a `predicate: null` on a via="link" entry would fail `predicate: string`).
+      const r = await cli(["note", "related", "pseed", "--json"]);
+      expect(r.code, r.out).toBe(0);
+      const out = JSON.parse(r.out);
+      validateSchema("note-related", out);
+      expect(out.related.find((e: { noteId: string }) => e.noteId === "ptarget")).toEqual({
+        noteId: "ptarget", via: "link", distance: 1,
+      });
     } finally {
       store.close();
     }

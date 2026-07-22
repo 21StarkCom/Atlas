@@ -6,7 +6,13 @@
  * slug keys; a terminal run with no terminal audit event) and pass a clean DB.
  */
 import { describe, expect, it } from "vitest";
-import { openStore } from "../src/index.js";
+import {
+  checkQueryPlans,
+  migration0001Core,
+  openConnection,
+  openStore,
+  runMigrations,
+} from "../src/index.js";
 import { makeNote, snapshot } from "./helpers.js";
 
 function migrated() {
@@ -40,6 +46,68 @@ describe("db.verify — query plans", () => {
         .join(" | ");
       expect(plan).toContain("idx_note_links_reverse");
       expect(plan).not.toMatch(/\bSCAN note_links\b/);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("the forward note_links traversal uses idx_note_links_forward (symmetric to reverse)", () => {
+    // v2 (`0013_links_v2`) dropped the 3-column PK whose autoindex gave forward
+    // traversal its free SEARCH, so the migration recreates an explicit
+    // `idx_note_links_forward`. The data dictionary §6 requires `db verify` to
+    // enforce it BY NAME — assert the plan names the index, not merely "a SEARCH".
+    const store = migrated();
+    try {
+      const plan = (
+        store.db
+          .prepare(`EXPLAIN QUERY PLAN SELECT target_note_id FROM note_links WHERE source_note_id = ?`)
+          .all("x") as { detail: string }[]
+      )
+        .map((r) => r.detail)
+        .join(" | ");
+      expect(plan).toContain("idx_note_links_forward");
+      expect(plan).not.toMatch(/\bSCAN note_links\b/);
+      // And the aggregate verify surfaces no query-plan violation for it.
+      expect(store.verify().queryPlanViolations).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("is migration-frontier-aware: accepts the v1 PK autoindex SEARCH before 0013", () => {
+    // A valid pre-0013 DB (only `0001_core` applied) has the 3-column PK whose
+    // autoindex serves forward traversal via `sqlite_autoindex_note_links_1`;
+    // there is no `idx_note_links_forward` yet, so requiring it by name would fail
+    // a legitimate old schema. `resolveIndex` must accept the PK SEARCH there.
+    const db = openConnection({ path: ":memory:" });
+    try {
+      runMigrations(db, [migration0001Core], () => "2026-01-01T00:00:00Z");
+      expect(
+        db
+          .prepare(`SELECT 1 FROM db_schema_migrations WHERE id = '0013_links_v2'`)
+          .get(),
+      ).toBeUndefined();
+      expect(
+        db
+          .prepare(`SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_note_links_forward'`)
+          .get(),
+      ).toBeUndefined();
+      const { violations } = checkQueryPlans(db);
+      expect(violations.some((v) => v.pattern === "note-links-forward")).toBe(false);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("is migration-frontier-aware: requires idx_note_links_forward BY NAME after 0013", () => {
+    // After 0013 the PK autoindex is gone; only the explicit forward index can
+    // serve the lookup. Dropping it must be caught as a violation (a partial
+    // `ux_note_links_plain` cannot serve an unfiltered forward lookup).
+    const store = migrated();
+    try {
+      store.db.exec(`DROP INDEX idx_note_links_forward`);
+      const { violations } = checkQueryPlans(store.db);
+      expect(violations.some((v) => v.pattern === "note-links-forward")).toBe(true);
     } finally {
       store.close();
     }

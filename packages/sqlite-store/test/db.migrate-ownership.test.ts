@@ -15,8 +15,12 @@ describe("db.migrate-ownership", () => {
     const store = openStore({ path: ":memory:" });
     try {
       const report = store.migrate();
+      // `0013_links_v2` is in `openStore`'s default set (it reshapes the
+      // `0001_core` `note_links` projection), so a fresh `migrate` applies it too.
+      // It creates NO new table (it rebuilds `note_links` in place), so the
+      // fresh-DB table diff below is unchanged from the §2.7 core set.
       expect(new Set(report.newlyApplied)).toEqual(
-        new Set(["0001_core", "0003_provenance", "0004_claims", "0005_ledger_finalize"]),
+        new Set(["0001_core", "0003_provenance", "0004_claims", "0005_ledger_finalize", "0013_links_v2"]),
       );
 
       const expected = dictionaryTablesFor("0001_core");

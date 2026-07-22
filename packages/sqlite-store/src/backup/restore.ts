@@ -29,6 +29,7 @@ import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import type { Store } from "../store.js";
 import { openConnection } from "../connection.js";
+import { runMigrations } from "../migrate.js";
 import { LedgerRepo } from "../repos/ledger.js";
 import { runPostRestoreRebuild } from "../rebuild.js";
 import {
@@ -176,6 +177,13 @@ export async function restoreBackup(
 
   const preRestoreSeq = latestRunSeq(store.db);
 
+  // Capture THIS store's migration frontier BEFORE the swap closes `store.db`. A
+  // pre-0013 backup restores a v1 `note_links` table; the post-restore projection
+  // rebuild's fold now emits the v2 shape (an `alias` column + partial-index
+  // conflict targets), so the restored DB must be forward-migrated through
+  // `0013_links_v2` first. Applied post-swap, inside the all-or-nothing try below.
+  const migrations = store.listMigrations();
+
   const dir = dirname(livePath);
   mkdirSync(dir, { recursive: true });
   const tmpDb = join(dir, `.restore-${process.pid}-${randomBytes(8).toString("hex")}.db`);
@@ -241,6 +249,16 @@ export async function restoreBackup(
     // Post-replace steps run on a FRESH connection to the restored DB.
     const db = openConnection({ path: livePath });
     try {
+      // §10.7 (pre-rebuild): forward-migrate the restored DB to this store's
+      // frontier BEFORE the post-restore rebuild. A backup taken before
+      // `0013_links_v2` carries a v1 `note_links`; the projection rebuild's fold
+      // now emits the v2 shape, so without this the rebuild throws
+      // `table note_links has no column named alias` and the whole restore rolls
+      // back. `runMigrations` is gap-tolerant + checksum-guarded + idempotent, so
+      // a backup already at head is a no-op. A migration throw is caught below and
+      // rolls the prior DB back (all-or-nothing, F6).
+      runMigrations(db, migrations, now);
+
       const ledger = new LedgerRepo(db);
       const wm = new WatermarkRepo(db);
       const createdAt = now();

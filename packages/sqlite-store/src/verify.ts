@@ -40,6 +40,20 @@ function tableExists(db: SqliteDatabase, name: string): boolean {
   );
 }
 
+/**
+ * Whether a migration id has been applied, per the runner-owned
+ * `db_schema_migrations` table. Used to make an index-contract assertion
+ * migration-frontier-aware (a table's expected index can change across a
+ * table-rebuild migration). A DB with no runner table (or the id unapplied) is
+ * treated as being BEFORE that migration.
+ */
+function migrationApplied(db: SqliteDatabase, id: string): boolean {
+  if (!tableExists(db, "db_schema_migrations")) return false;
+  return (
+    db.prepare(`SELECT 1 FROM db_schema_migrations WHERE id = ?`).get(id) !== undefined
+  );
+}
+
 interface InvariantSpec {
   readonly name: string;
   readonly tables: readonly string[];
@@ -134,6 +148,15 @@ interface QueryPlanSpec {
   readonly table: string;
   /** The index that MUST appear in the plan; `null` = the table's PK (autoindex). */
   readonly index: string | null;
+  /**
+   * Migration-frontier-aware override of {@link index}, resolved against the live
+   * DB at check time. Returns the index that MUST appear (or `null` to require
+   * only a PK-autoindex SEARCH). Used where the expected index depends on which
+   * migrations have been applied (e.g. `note_links` forward traversal: the v1
+   * 3-column PK autoindex before `0013_links_v2`, the explicit
+   * `idx_note_links_forward` after). When set, it takes precedence over `index`.
+   */
+  readonly resolveIndex?: (db: SqliteDatabase) => string | null;
   readonly sql: string;
   readonly params: readonly unknown[];
 }
@@ -150,7 +173,17 @@ const QUERY_PLANS: readonly QueryPlanSpec[] = [
   {
     pattern: "note-links-forward",
     table: "note_links",
-    index: null,
+    // Migration-frontier-aware. v2 (`0013_links_v2`) dropped the 3-column PK
+    // whose autoindex gave forward traversal a free `SEARCH` and recreated an
+    // EXPLICIT `idx_note_links_forward(source_note_id, target_note_id)`; the data
+    // dictionary §6 requires `db verify` to enforce that index BY NAME after 0013
+    // (a partial `ux_note_links_plain` can never serve this unfiltered forward
+    // lookup). BEFORE 0013 a valid pre-migration DB correctly serves the same
+    // lookup via the PK autoindex (`sqlite_autoindex_note_links_1`), so we accept
+    // any PK `SEARCH` there (`null`) rather than failing a legitimate old schema.
+    index: "idx_note_links_forward",
+    resolveIndex: (db) =>
+      migrationApplied(db, "0013_links_v2") ? "idx_note_links_forward" : null,
     sql: `SELECT target_note_id FROM note_links WHERE source_note_id = ?`,
     params: ["n1"],
   },
@@ -211,7 +244,8 @@ export function checkQueryPlans(db: SqliteDatabase): {
     const plan = rows.map((r) => r.detail).join(" | ");
     const usesSearch = /\bSEARCH\b/.test(plan);
     const scansTarget = new RegExp(`\\bSCAN ${spec.table}\\b`).test(plan);
-    const usesIndex = spec.index === null ? true : plan.includes(spec.index);
+    const expectedIndex = spec.resolveIndex ? spec.resolveIndex(db) : spec.index;
+    const usesIndex = expectedIndex === null ? true : plan.includes(expectedIndex);
     if (!usesSearch || scansTarget || !usesIndex) {
       violations.push({ pattern: spec.pattern, plan });
     }

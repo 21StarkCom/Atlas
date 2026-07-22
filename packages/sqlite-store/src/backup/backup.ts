@@ -51,6 +51,7 @@ import { migration0009RunSupersessions } from "../../migrations/0009_run_superse
 import { migration0010TrustState } from "../../migrations/0010_trust_state.js";
 import { migration0011RunInputs } from "../../migrations/0011_run_inputs.js";
 import { migration0012SyncCursors } from "../../migrations/0012_sync_cursors.js";
+import { migration0013LinksV2 } from "../../migrations/0013_links_v2.js";
 
 /**
  * The schema-migration heads THIS binary understands (§8 compatibility check). A
@@ -81,6 +82,10 @@ const KNOWN_SCHEMA_HEADS: Set<string> = new Set([
   migration0011RunInputs.id,
   // The 60-A per-source sync cursor (registered by the CLI at store-open): same rationale.
   migration0012SyncCursors.id,
+  // The v2 note-link reshape (task 3-4, in `openStore`'s DEFAULT set): once applied it
+  // is the lexicographically-highest head, so this binary's own backups stamp `0013_links_v2`
+  // and must be recognized as KNOWN (not future/unknown) schema.
+  migration0013LinksV2.id,
 ]);
 
 /**

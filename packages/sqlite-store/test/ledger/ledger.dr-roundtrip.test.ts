@@ -6,18 +6,28 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { PrivilegedOpDescriptor } from "@atlas/broker";
 import {
   BackupIntegrityError,
   _resetPostRestoreRebuild,
   finalizeLedgerWrite,
+  migration0001Core,
+  migration0003Provenance,
+  migration0004Claims,
+  migration0005LedgerFinalize,
+  openConnection,
+  openStore,
   readBundleHeader,
+  rebuildProjections,
   registerPostRestoreRebuild,
   restoreBackup,
+  runMigrations,
   takeBackup,
   verifyBackup,
 } from "../../src/index.js";
+import type { ParsedNote, VaultSnapshot } from "@atlas/contracts";
 import { createLedgerHarness, runId, type LedgerHarness } from "./harness.js";
 
 let h: LedgerHarness;
@@ -25,6 +35,27 @@ afterEach(() => {
   _resetPostRestoreRebuild();
   h?.cleanup();
 });
+
+/** A minimal `ParsedNote` with the given links (for the pre-0013 restore rebuild). */
+function makeNoteWithLinks(id: string, path: string, links: ParsedNote["links"]): ParsedNote {
+  return {
+    id,
+    path,
+    type: "concept",
+    schemaVersion: 1,
+    title: id,
+    status: "active",
+    created: "2026-07-22",
+    updated: "2026-07-22",
+    aliases: [],
+    sources: [],
+    declaredSensitivity: "internal",
+    links,
+    sections: { heading: "", level: 0, path: "", children: [] },
+    contentHash: "0".repeat(64),
+    raw: "",
+  };
+}
 
 /** The serializable step-3 business write for a `refresh` run. */
 function writeRun(rid: string) {
@@ -165,6 +196,110 @@ describe("ledger.dr-roundtrip (§12)", () => {
     expect(() => verifyBackup(wrongKeyCfg, backupRef)).toThrow(BackupIntegrityError);
     await expect(restoreBackup(store, backupRef, wrongKeyCfg)).rejects.toThrow(BackupIntegrityError);
     store.close();
+  });
+
+  it("restores a PRE-0013 backup: forward-migrates through 0013 BEFORE the rebuild, both succeed", async () => {
+    h = await createLedgerHarness();
+
+    // Build a genuine pre-`0013_links_v2` ledger DB at a separate path: only the
+    // core PR-A migrations applied, so `note_links` is the v1 shape (3-col PK,
+    // NOT NULL predicate, `ordinal`, NO `alias`). Seed a v1 link so the pre-0013
+    // schema is realistic. `openStore` (used to snapshot it) does NOT auto-migrate,
+    // so the file stays at the v1 frontier.
+    const prePath = join(h.dir, "pre0013.db");
+    {
+      const raw = openConnection({ path: prePath });
+      runMigrations(
+        raw,
+        [migration0001Core, migration0003Provenance, migration0004Claims, migration0005LedgerFinalize],
+        () => "2026-07-22T00:00:00Z",
+      );
+      const insertNote = raw.prepare(
+        `INSERT INTO notes
+           (note_id, slug, title, type, schema_version, status, file_path, content_hash, created, updated)
+         VALUES (?, ?, ?, 'concept', 1, 'active', ?, ?, '2026-07-22', '2026-07-22')`,
+      );
+      insertNote.run("n1", "n1", "n1", "n1.md", `sha256:${"a".repeat(64)}`);
+      insertNote.run("n2", "n2", "n2", "n2.md", `sha256:${"b".repeat(64)}`);
+      // A v1 row (predicate NOT NULL, ordinal present) — the shape 0013 rebuilds.
+      raw.prepare(
+        `INSERT INTO note_links (source_note_id, target_note_id, predicate, ordinal) VALUES ('n1', 'n2', 'references', 0)`,
+      ).run();
+      // Sanity: this really is the v1 table (no `alias` column, no forward index).
+      const preCols = (raw.prepare(`PRAGMA table_info(note_links)`).all() as { name: string }[]).map((c) => c.name);
+      expect(preCols).toContain("ordinal");
+      expect(preCols).not.toContain("alias");
+      raw.close();
+    }
+
+    // Snapshot the pre-0013 DB into an encrypted backup (schemaHead 0005 — a KNOWN,
+    // compatible head). `openStore` does not migrate, so the bundle is genuinely v1.
+    const preStore = openStore({ path: prePath });
+    let backupRef: string;
+    try {
+      ({ backupRef } = await takeBackup(preStore, h.backup));
+    } finally {
+      preStore.close();
+    }
+
+    // The post-restore projection rebuild emits the v2 link shape (predicate NULL +
+    // `alias`). Registered against the fresh restore connection — it would throw
+    // `table note_links has no column named alias` if the restored DB were NOT
+    // forward-migrated through 0013 first.
+    const link = { target: "n2", raw: "[[n2]]", alias: "the second" } as ParsedNote["links"][number];
+    const rebuildSnapshot: VaultSnapshot = {
+      notes: [
+        makeNoteWithLinks("n1", "n1.md", [link]),
+        makeNoteWithLinks("n2", "n2.md", []),
+      ],
+      errors: [],
+    };
+    let rebuildThrew: unknown = null;
+    registerPostRestoreRebuild(async (ctx) => {
+      try {
+        rebuildProjections(ctx.db, rebuildSnapshot);
+      } catch (e) {
+        rebuildThrew = e;
+        throw e;
+      }
+    });
+
+    // Restore the pre-0013 bundle over the (fully-migrated) live store.
+    const store = h.openStore();
+    const contentHash = readBundleHeader(h.backup, backupRef).contentHash;
+    await restoreBackup(store, backupRef, h.backup, { expectedContentHash: contentHash });
+
+    expect(rebuildThrew).toBeNull();
+
+    // Re-open: the restored DB is now at the v2 frontier and carries v2 rows.
+    const after = h.openStore();
+    try {
+      // 0013 was applied to the restored DB.
+      expect(
+        after.db.prepare(`SELECT 1 FROM db_schema_migrations WHERE id = '0013_links_v2'`).get(),
+      ).toBeDefined();
+      // note_links is the v2 shape.
+      const cols = (after.db.prepare(`PRAGMA table_info(note_links)`).all() as { name: string }[]).map((c) => c.name);
+      expect(cols).toContain("alias");
+      expect(cols).not.toContain("ordinal");
+      const idx = new Set(
+        (after.db.prepare(`SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='note_links'`).all() as {
+          name: string;
+        }[]).map((r) => r.name),
+      );
+      for (const name of ["ux_note_links_plain", "ux_note_links_pred", "idx_note_links_forward"]) {
+        expect(idx.has(name), `missing index ${name}`).toBe(true);
+      }
+      // The rebuild's v2 row: a plain wiki-link is predicate NULL + alias from display text.
+      const row = after.db
+        .prepare(`SELECT predicate, alias FROM note_links WHERE source_note_id='n1' AND target_note_id='n2'`)
+        .get() as { predicate: string | null; alias: string | null };
+      expect(row).toEqual({ predicate: null, alias: "the second" });
+      // db verify is clean at the v2 frontier (forward index required BY NAME).
+      expect(after.verify().queryPlanViolations).toEqual([]);
+    } finally {
+      after.close();
+    }
   });
 
   it("a truncated/corrupt bundle fails verify (exit-1 class)", async () => {

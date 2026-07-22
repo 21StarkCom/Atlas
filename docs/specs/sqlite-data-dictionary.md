@@ -62,6 +62,7 @@ Migration ownership (verbatim from §2.7):
 | `0003_provenance` | `sqlite-store` | 2 PR-A (retained) | `content_blobs`, `source_captures`, `source_renditions`, `note_sources` |
 | `0004_claims` | `sqlite-store` | 4 PR-A (retained) | `claims`, `claim_evidence` |
 | `0008_index_config_revision` | `sqlite-store` (feature migration) | 3 (Task 3.2) | `index_config_revisions` |
+| `0013_links_v2` | `sqlite-store` (default set) | 3 (task 3-4) | *(no new table — table-rebuilds `note_links` into the v2 shape)* |
 | (runner bootstrap) | `sqlite-store` | 1 | `db_schema_migrations` |
 
 ---
@@ -151,31 +152,43 @@ CREATE INDEX idx_note_identity_keys_note ON note_identity_keys(note_id, kind);
   (design), never a silent re-point.
 - **Invariant:** exactly one `kind='slug'` row per `note_id` (§7).
 
-### `note_links` — `0001_core` (vault projection)
+### `note_links` — `0001_core`, reshaped by `0013_links_v2` (vault projection)
 
-Typed relationships (`CreateRelationship`), rebuilt from canonical typed wikilinks in frontmatter.
-Supports **bidirectional traversal** (§6).
+Plain `[[wiki-link]]`s (rebuilt from canonical wikilinks — `predicate NULL`, optional display text in
+`alias`) **and** typed relationships (`predicate` set, authored by the `link` command). Supports
+**bidirectional traversal** (§6). The shape below is the **v2** shape after `0013_links_v2` (a
+table-rebuild forward migration): `0001_core` created a 3-column-PK, `NOT NULL predicate`, `ordinal`-carrying,
+alias-less table; `0013_links_v2` drops the PK + `ordinal`, makes `predicate` nullable, adds `alias`, and
+replaces the PK with two partial unique indexes. Migrations are append-only — `0001_core` is not edited.
 
 ```sql
 CREATE TABLE note_links (
   source_note_id  TEXT    NOT NULL,
   target_note_id  TEXT    NOT NULL,
-  predicate       TEXT    NOT NULL,
-  ordinal         INTEGER NOT NULL DEFAULT 0,             -- authoring order within (source, predicate)
-  PRIMARY KEY (source_note_id, target_note_id, predicate),
+  predicate       TEXT,                                   -- NULL = a plain [[wiki-link]]; set = a typed relationship
+  alias           TEXT,                                   -- the [[target|alias]] display text (NULL when absent)
   FOREIGN KEY (source_note_id) REFERENCES notes(note_id) ON DELETE CASCADE,
   FOREIGN KEY (target_note_id) REFERENCES notes(note_id) ON DELETE CASCADE
 ) STRICT;
 
+CREATE UNIQUE INDEX ux_note_links_plain ON note_links(source_note_id, target_note_id)
+  WHERE predicate IS NULL;
+CREATE UNIQUE INDEX ux_note_links_pred ON note_links(source_note_id, target_note_id, predicate)
+  WHERE predicate IS NOT NULL;
 CREATE INDEX idx_note_links_reverse ON note_links(target_note_id, predicate);
+CREATE INDEX idx_note_links_forward ON note_links(source_note_id, target_note_id);
 ```
 
 - **FK:** both `→ notes(note_id)` **`ON DELETE CASCADE`** (a link is structural detail; a deleted note's
-  links are meaningless). Validation rejects dangling `noteId` references before commit.
-- **Upsert:** conflict target **`(source_note_id, target_note_id, predicate)`** —
-  `ON CONFLICT(source_note_id, target_note_id, predicate) DO UPDATE SET ordinal = excluded.ordinal`.
-- **Traversal:** forward via the PK prefix `(source_note_id, …)`; reverse via
-  `idx_note_links_reverse(target_note_id, predicate)`.
+  links are meaningless). `note_links` has ONLY outbound FKs — nothing references it — which is what makes
+  the `0013_links_v2` drop-and-rebuild FK-safe. Validation rejects dangling `noteId` references before commit.
+- **Uniqueness:** at most one **plain** edge per `(source, target)` (`ux_note_links_plain`, partial
+  `WHERE predicate IS NULL`) AND at most one **typed** edge per `(source, target, predicate)`
+  (`ux_note_links_pred`, partial `WHERE predicate IS NOT NULL`). The two are disjoint, so a plain link and a
+  typed edge between the same pair coexist. The rebuild fold upserts against the matching partial index
+  (conflict target names the partial `WHERE`), refreshing `alias`.
+- **Traversal:** forward via `idx_note_links_forward(source_note_id, target_note_id)` (v1 got this from the
+  dropped PK prefix); reverse via `idx_note_links_reverse(target_note_id, predicate)`.
 
 ### `vault_schema_migrations` — `0001_core` (vault projection)
 
@@ -857,7 +870,7 @@ construction (config `indexing.dimensions` / `indexing.chunker_version`); this c
 | # | Access pattern | Index | EQP assertion |
 |---|---|---|---|
 | 1 | Job eligibility scan (drain: next runnable job) | `idx_jobs_eligibility(state, next_run_at)` | `SELECT … FROM jobs WHERE state = ? AND (next_run_at IS NULL OR next_run_at <= ?) ORDER BY next_run_at` → `SEARCH jobs USING INDEX idx_jobs_eligibility (state=?)` — **no `SCAN jobs`**. |
-| 2 | `note_links` forward traversal | PK prefix `(source_note_id, …)` | `… WHERE source_note_id = ?` → `SEARCH note_links USING … (source_note_id=?)` (PK/index). |
+| 2 | `note_links` forward traversal | `idx_note_links_forward(source_note_id, target_note_id)` | `… WHERE source_note_id = ?` → `SEARCH note_links USING INDEX idx_note_links_forward (source_note_id=?)` — **no `SCAN`** (v1 used the dropped PK prefix; `0013_links_v2` recreates the forward index explicitly). |
 | 3 | `note_links` reverse (bidirectional) traversal | `idx_note_links_reverse(target_note_id, predicate)` | `… WHERE target_note_id = ?` → `SEARCH note_links USING INDEX idx_note_links_reverse (target_note_id=?)` — **no `SCAN`**. |
 | 4 | Run lookup by status | `idx_agent_runs_status(status)` | `… FROM agent_runs WHERE status = ?` → `SEARCH agent_runs USING INDEX idx_agent_runs_status (status=?)`. |
 | 5 | Identity resolution | PK `note_identity_keys(normalized_key)` | `… WHERE normalized_key = ?` → `SEARCH note_identity_keys USING … (normalized_key=?)` (PK). |
@@ -871,7 +884,8 @@ CREATE INDEX idx_notes_needs_index ON notes(active_generation, content_hash);
 ```
 
 All other required indexes are declared inline with their tables (§2–§5): `idx_jobs_eligibility`,
-`idx_note_links_reverse`, `idx_agent_runs_status`, `idx_audit_events_run`,
+`idx_note_links_forward`, `idx_note_links_reverse`, `ux_note_links_plain`, `ux_note_links_pred`,
+`idx_agent_runs_status`, `idx_audit_events_run`,
 `idx_note_identity_keys_note`, `idx_model_calls_run`, `idx_claim_evidence_payload`. `db verify`'s
 query-plan assertion suite (Task 1.4) runs each EQP above and fails on any `SCAN` where a `SEARCH … USING
 INDEX` is asserted.

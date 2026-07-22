@@ -2,10 +2,11 @@
  * `store` — `openStore(cfg): Store`, the package's public handle.
  *
  * `Store` bundles the connection with the migration runner, the projection
- * rebuild pipeline, `verify`, and the repositories. The `0001_core` and the
- * retained-PR-A `0003_provenance` + `0004_claims` migrations are registered on
- * open (so the public `migrate()`/`rebuildProjections()` path creates the
- * provenance + claims tables and neither fold is ever a silent no-op, §2.7 /
+ * rebuild pipeline, `verify`, and the repositories. The `0001_core`, the
+ * retained-PR-A `0003_provenance` + `0004_claims`, the `0005_ledger_finalize`,
+ * and the core `0013_links_v2` (v2 `note_links` reshape) migrations are
+ * registered on open (so the public `migrate()`/`rebuildProjections()` path
+ * creates the provenance + claims tables and neither fold is ever a silent no-op, §2.7 /
  * §4.1); `@atlas/jobs` registers `0002` via {@link Store.registerMigration}
  * before calling {@link Store.migrate}. The gap-tolerant runner (Task 1.4)
  * applies `0003`/`0004` even though `0002` is absent — do NOT assume contiguous
@@ -27,6 +28,7 @@ import { migration0004Claims } from "../migrations/0004_claims.js";
 import { migration0005LedgerFinalize } from "../migrations/0005_ledger_finalize.js";
 import { migration0008IndexConfigRevision } from "../migrations/0008_index_config_revision.js";
 import { migration0012SyncCursors } from "../migrations/0012_sync_cursors.js";
+import { migration0013LinksV2 } from "../migrations/0013_links_v2.js";
 // Side-effect imports: register the retained-PR-A projection folds into the
 // rebuild pipeline (§2.7 / §4.1) so `rebuildProjections`/`db rebuild` reproduce
 // the provenance + claims projections from canonical Markdown. Provenance is
@@ -83,6 +85,14 @@ export interface Store {
   adoptConfig(configKey: string): number;
   /** Register a migration (jobs registers `0002` here). */
   registerMigration(m: Migration): void;
+  /**
+   * The migrations registered on this store, in id order. Exposed so `db restore`
+   * can bring a restored (possibly older-schema) backup DB up to THIS store's
+   * migration frontier — through `0013_links_v2` — BEFORE running the post-restore
+   * projection rebuild, whose fold now emits the v2 `note_links` shape (an `alias`
+   * column + partial-index conflict targets a pre-0013 table cannot satisfy).
+   */
+  listMigrations(): Migration[];
   /** Apply all registered-but-unapplied migrations (gap-tolerant). */
   migrate(): MigrationReport;
   /** Transactionally rebuild the vault projections from a snapshot. */
@@ -108,6 +118,10 @@ export function openStore(cfg: SqliteConfig, clock: Clock = rfc3339Now): Store {
   migrations.set(migration0003Provenance.id, migration0003Provenance);
   migrations.set(migration0004Claims.id, migration0004Claims);
   migrations.set(migration0005LedgerFinalize.id, migration0005LedgerFinalize);
+  // `0013_links_v2` is a CORE table-rebuild (it reshapes the `0001_core`
+  // `note_links` projection into the v2 link shape), NOT a feature migration —
+  // so it belongs in the default retained set, applied by every `db migrate`.
+  migrations.set(migration0013LinksV2.id, migration0013LinksV2);
 
   const generation = new GenerationRepo(db, clock);
 
@@ -141,6 +155,9 @@ export function openStore(cfg: SqliteConfig, clock: Clock = rfc3339Now): Store {
         );
       }
       migrations.set(m.id, m);
+    },
+    listMigrations(): Migration[] {
+      return [...migrations.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     },
     migrate(): MigrationReport {
       return runMigrations(db, [...migrations.values()], clock);
