@@ -14,7 +14,7 @@ dirs). Nothing else in the build does. Review the scripts, then run the commands
 | `keys.acl.json` | machine-readable ACL matrix (the contract `provisioning.separation.test` checks) |
 | `lib.sh` | shared helpers (OS-portable user/group/key creation) |
 | `dev/setup.sh` · `dev/teardown.sh` | dev host provision / reverse |
-| `ci/setup.sh` | CI provision + sudoers drop-in (D1) |
+| `ci/setup.sh` | retired no-op stub — CI is zero-provisioning (#312); deleted in Phase 3 |
 | `bin/broker-launcher.sh` · `bin/egress-launcher.sh` | fixed-path privileged launchers (D16) |
 | `install-artifact.sh` | hash-verified install of the privileged binaries (D16) — built by `tools/build-artifact.sh` |
 | `macos/services.sh` · `macos/com.atlas.{broker,egress}.plist` | launchd system services (KeepAlive, per-identity UserName, logs in `/usr/local/var/log/atlas/`) |

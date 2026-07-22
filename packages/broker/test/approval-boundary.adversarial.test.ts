@@ -109,10 +109,12 @@ describe("adversarial authorization paths → typed refusals", () => {
  * broker-owned and group/other-unwritable. Establishing that layout (chown to
  * `atlas-broker`, drop group/other write) and dropping to `atlas-agent` both
  * need `sudo`, so the test is gated on passwordless `sudo -n` to both root and
- * `atlas-agent` in addition to `ATLAS_PROVISIONED=1`. It runs in CI (provisioned
- * runner, passwordless sudo) and skips on a dev box without it — running the
- * mutation as the repo-owning user, as the prior version did, could never
- * produce EACCES and so proved nothing.
+ * `atlas-agent` in addition to `ATLAS_PROVISIONED=1`. CI is **zero-provisioning**
+ * (#312), so this individual case is SKIPPED there (as is the OQ#2 boundary case
+ * in `apps/cli/test/adopt-vault-bootstrap.test.ts`) while the surrounding
+ * in-process tests still run; it executes only on a manual provisioned host with
+ * passwordless sudo — running the mutation as the repo-owning user, as the prior
+ * version did, could never produce EACCES and so proved nothing.
  */
 describe("agent direct protected-ref write (provisioned only)", () => {
   const sudoN = (args: string[]): { ok: boolean; stderr: string } => {

@@ -85,14 +85,14 @@ pnpm -r test                     # vitest across the monorepo
 
 **Ordering is load-bearing:** `pnpm -r build` **must** precede `pnpm -r test`. The contract harness (`tools/contract-lint.test.ts`, `tools/test-signer.ts`) imports built `@atlas/broker` + `@atlas/contracts`, and `apps/cli` depends on every package's `dist/`.
 
-**`ATLAS_PROVISIONED` gates the OS-level suites.** Without it, `pnpm -r test` runs the full in-process suite and **skips** the live two-identity suite `approval-boundary.adversarial` (`packages/broker/test/approval-boundary.adversarial.test.ts`), which gates on `process.env.ATLAS_PROVISIONED === "1"`. To exercise it, provision first (§3) then:
+**`ATLAS_PROVISIONED` gates two OS-boundary cases.** Without it, `pnpm -r test` runs the full in-process suite and **skips** exactly two live cases (their surrounding files still execute in-process): the two-identity protected-ref case in `packages/broker/test/approval-boundary.adversarial.test.ts` (gated on `ATLAS_PROVISIONED=1` **plus** passwordless `sudo -n`) and the OQ#2 root-only boundary case in `apps/cli/test/adopt-vault-bootstrap.test.ts:238` (gated on `ATLAS_PROVISIONED=1` **plus** root). CI is zero-provisioning (#312), so both are skipped in CI. To exercise them, provision first (§3) then:
 
 ```bash
 export ATLAS_PROVISIONED=1
 pnpm -r test                     # now the provisioning-gated suite runs instead of skip
 ```
 
-The `approval-boundary.adversarial` two-UID case additionally needs passwordless `sudo -n` to **both** root and `atlas-agent` (`packages/broker/test/approval-boundary.adversarial.test.ts`). CI always provisions, so nothing skips there.
+The `approval-boundary.adversarial` two-UID case additionally needs passwordless `sudo -n` to **both** root and `atlas-agent` (`packages/broker/test/approval-boundary.adversarial.test.ts`). This is a **local/manual provisioned-host** path only — CI is zero-provisioning (#312) and runs the daemon-free in-process subset instead.
 
 > **The executable is `dist/bin.js`, not `dist/index.js`.** `apps/cli/src/index.ts` is a pure re-export (the `@atlas/cli` library surface) — running `node apps/cli/dist/index.js <cmd>` does nothing and exits 0. The `brain` bin maps to `dist/bin.js` (`void main()`). For readability the rest of this doc assumes an alias:
 > ```bash
@@ -128,7 +128,7 @@ Read directly from the script (`provisioning/dev/setup.sh`, 8 numbered steps):
 | **Preview** (no mutation) | `sudo ATLAS_DRY_RUN=1 provisioning/dev/setup.sh` |
 | **Dev host** | `sudo provisioning/dev/setup.sh` |
 | **Reverse** | `sudo provisioning/dev/teardown.sh` |
-| **CI** | `sudo -E provisioning/ci/setup.sh` — runs dev setup, then writes `/etc/sudoers.d/atlas-ci` (0440, `visudo -cf`-validated) scoping the runner to `sudo -u atlas-broker`/`atlas-egress` the **two launchers only** (D1). |
+| **CI parity (local, manual)** | `sudo -E provisioning/ci/setup.sh` — **retired no-op stub** (#312); real CI is zero-provisioning. To reproduce the old two-UID host locally use `sudo provisioning/dev/setup.sh` (the dev host row above). |
 | **macOS D17 kernel half** | `AGENT_UID=$(id -u atlas-agent); sed "s/<AGENT_UID>/$AGENT_UID/" provisioning/macos/agent-pf.conf \| sudo pfctl -a atlas/agent -f -` then `sudo pfctl -e` (pf has no name→UID variable; the anchor ships a literal `<AGENT_UID>` placeholder). |
 | **Linux D17** | `sudo provisioning/linux/netns.sh setup` + `sudo provisioning/linux/agent-cgroup.sh setup`. |
 
@@ -428,15 +428,16 @@ Exit codes (stable, from `apps/cli/src/errors/envelope.ts`): `0` ok · `1` valid
 
 ## 7. CI parity
 
-[`../.github/workflows/ci.yml`](../.github/workflows/ci.yml) is the reference sequence — mirror it locally to reproduce a CI result:
+[`../.github/workflows/ci.yml`](../.github/workflows/ci.yml) is the reference sequence — CI is **zero-provisioning, daemon-free** (phase-2-in-process-cutover, #312). Mirror it locally to reproduce a CI result:
 
 ```bash
-sudo -E provisioning/ci/setup.sh          # dev provision + sudoers drop-in (D1)
 pnpm install --frozen-lockfile
 pnpm -r build
-ATLAS_PROVISIONED=1 pnpm -r test          # provisioning-gated suites run, don't skip
+env -u ATLAS_PROVISIONED pnpm -r test     # ATLAS_PROVISIONED explicitly unset — provisioning-gated boundary cases subset out
 node tools/gen-cli-contract.ts --check    # command-registry drift gate (must be clean)
 ```
+
+`env -u ATLAS_PROVISIONED` is load-bearing: if you exported it earlier (§2's provisioned-suite step) it stays set in your shell, and a bare `pnpm -r test` would run the provisioned two-UID paths instead of the CI subset. Unset it (or `unset ATLAS_PROVISIONED` first) to actually mirror CI. No provisioning, no daemons, no `ATLAS_PROVISIONED`. To additionally exercise the real two-UID / key-custody paths, provision a host with `sudo provisioning/dev/setup.sh` and re-run the tests with `ATLAS_PROVISIONED=1`.
 
 Matrix: `ubuntu-latest` + `macos-15`, Node **26**, both with passwordless sudo. `gen-cli-contract.ts --check` is the only tool invoked as an explicit CI step; failpoints/state-table drift is caught inside `pnpm -r test`.
 

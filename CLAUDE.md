@@ -40,8 +40,8 @@ node tools/gen-cli-contract.ts --check    # CLI-contract determinism gate (also 
 ```
 
 - Deps are pinned **once** in the `catalog:` of `pnpm-workspace.yaml`; packages reference them as `"zod": "catalog:"`. Never add a floating version in a package.
-- **CI** (`.github/workflows/ci.yml`): `ubuntu-latest` + `macos-15` matrix, Node 26 → `sudo -E provisioning/ci/setup.sh` → `pnpm install --frozen-lockfile` → `pnpm -r build` → `pnpm -r test` (with `ATLAS_PROVISIONED=1`, so provisioning-gated suites never skip) → `node tools/gen-cli-contract.ts --check`.
-- **`ATLAS_PROVISIONED=1`** unlocks the real two-UID / key-custody / WORM suites. Without it (local), tests run an in-process subset (in-process `BrokerService` + local fixture vault). `pnpm failpoints:check` gates the crash-recovery matrix (rides `pnpm -r test`, not a separate CI step).
+- **CI** (`.github/workflows/ci.yml`): **zero-provisioning, daemon-free** (phase-2-in-process-cutover, #312). `ubuntu-latest` + `macos-15` matrix, Node 26 → `pnpm install --frozen-lockfile` → `pnpm -r build` → `pnpm -r test` (`ATLAS_PROVISIONED` unset — no two-UID / daemon / key-custody setup) → `node tools/gen-cli-contract.ts --check`. The ubuntu leg is retained purely as a portability canary for the platform-neutral suite. (`provisioning/ci/setup.sh` is a retired no-op stub; the provisioned-only suites are deleted, not skipped, in Phase 3.)
+- **`ATLAS_PROVISIONED=1`** unlocks the real two-UID / key-custody / WORM suites for a **local/manual** provisioned host. With it unset (CI, and local by default), tests run their daemon-free in-process subset (in-process `BrokerService` + local fixture vault). `pnpm failpoints:check` gates the crash-recovery matrix (rides `pnpm -r test`, not a separate CI step).
 - The `brain` binary is `apps/cli` `bin.brain → dist/bin.js`. Root resolution walks up for `docs/specs/cli-contract/commands.json`; a packaged install off the repo layout needs `ATLAS_ROOT` set. Full runbook (provision, keys, live drive) in [`docs/install.md`](docs/install.md).
 
 ## Conventions

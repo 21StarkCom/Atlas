@@ -11,7 +11,7 @@ pnpm -r test                              # vitest per package
 node tools/gen-cli-contract.ts --check    # CLI-contract determinism gate
 ```
 
-Deps are pinned once in the `catalog:` of `pnpm-workspace.yaml`. `ATLAS_PROVISIONED=1` unlocks the real two-UID / key-custody suites (CI provisions via `sudo -E provisioning/ci/setup.sh`; locally an in-process subset runs).
+Deps are pinned once in the `catalog:` of `pnpm-workspace.yaml`. **CI is zero-provisioning, daemon-free** (#312): it leaves `ATLAS_PROVISIONED` unset, so the provisioning-gated suites run their in-process subset. Set `ATLAS_PROVISIONED=1` only on a local/manual provisioned host (`provisioning/dev/setup.sh`) to unlock the real two-UID / key-custody suites.
 
 ## Rules
 

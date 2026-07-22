@@ -24,13 +24,13 @@ jobs:
           node-version: 26
           cache: pnpm
 
-      # Host provisioning (Task 1.0 / #16): create the two runtime identities, the
-      # agent UID, atlas-git group, per-identity keys, WORM anchor, sockets, install
-      # dir + sudoers drop-in. Both runners have passwordless sudo. CI always
-      # provisions, so ATLAS_PROVISIONED-gated suites never skip here.
-      - name: Provision host
-        run: sudo -E provisioning/ci/setup.sh
-
+      # Zero-provisioning cutover (phase-2-in-process-cutover, #312): CI no longer
+      # provisions the two-UID / daemon / key-custody host layout. The suite runs
+      # daemon-free in-process; ATLAS_PROVISIONED is unset, so provisioning-gated
+      # suites cleanly subset (run their in-process subset) rather than hard-fail.
+      # The ubuntu-latest + macos-15 matrix is retained purely as a portability
+      # canary for the platform-neutral suite. (Provisioned-only suites are deleted,
+      # not skipped, in Phase 3.)
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
@@ -39,8 +39,6 @@ jobs:
 
       - name: Test
         run: pnpm -r test
-        env:
-          ATLAS_PROVISIONED: "1"
 
       - name: CLI-contract determinism (--check clean)
         run: node tools/gen-cli-contract.ts --check
