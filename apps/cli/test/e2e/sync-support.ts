@@ -23,14 +23,19 @@ import { bindEnqueueContext } from "@atlas/jobs";
 import { registerJobsMigration } from "@atlas/jobs";
 import { scanBytes, SecretDetectedError } from "@atlas/scan";
 import { registerSyncCursorsMigration, type LedgerBackupConfig, type Store } from "@atlas/sqlite-store";
-import { openWorkflowStore, makeInProcessBrokerClient } from "../../src/workflows/index.js";
-import { brokerSignedIntegration } from "../../src/ingest/wiring.js";
+import { openWorkflowStore } from "../../src/workflows/index.js";
+import { makeDirectCaptureIntegration } from "../../src/workflows/direct-integrator.js";
 import { seedSyncCursor } from "../../src/sync/seed.js";
 import type { SyncCycleDeps } from "../../src/sync/cycle.js";
 import type { ScanOutcome } from "../../src/sync/plan.js";
 
-export const SYNC_CANONICAL_REF = "refs/atlas/main";
-export const DEFAULT_UPSTREAM_REF = "refs/heads/main";
+// Post-#325 the direct integrator pins canonical to `refs/heads/main` (the
+// canonical-ref indirection is gone), so the harness's canonical follows it and
+// the fixture "live writer" moves a DISTINCT upstream branch — the old
+// upstream==canonical topology would trip the integrator's CAS on every cycle.
+// This keeps the surviving absorb engine testable until #329 rewrites sync v2.
+export const SYNC_CANONICAL_REF = "refs/heads/main";
+export const DEFAULT_UPSTREAM_REF = "refs/heads/upstream";
 export const SOURCE_ID = "main-vault";
 export const AUDIT_REF = "refs/audit/runs";
 export const TRUST_REF = "refs/trust/ledger";
@@ -251,7 +256,9 @@ export async function makeSyncHarness(opts: SyncHarnessOptions = {}): Promise<Sy
       return {
         store,
         repo,
-        connectIntegration: async () => brokerSignedIntegration(makeInProcessBrokerClient(repo, SYNC_CANONICAL_REF), "sync"),
+        // Post-#325: the direct capture integration (scope "sync") replaces the
+        // retired Phase-2 brokerSignedIntegration/makeInProcessBrokerClient pair.
+        connectIntegration: async () => makeDirectCaptureIntegration(repo, "sync"),
         backup,
         worktreesPath,
         canonicalRef: SYNC_CANONICAL_REF,

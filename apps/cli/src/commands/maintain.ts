@@ -14,7 +14,8 @@ import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { openWorkflowStore } from "../workflows/index.js";
 import { makeRetrieveSeam } from "../retrieval/wiring.js";
-import { makeModelPlanGenerator, PLAN_GENERATION_MAX_TOKENS, makeBrokerIntegrator, makeInProcessBrokerClient } from "../workflows/index.js";
+import { makeModelPlanGenerator, PLAN_GENERATION_MAX_TOKENS } from "../workflows/index.js";
+import { makeCanonicalIntegrator, inProcessAuditBroker, CANONICAL_BRANCH } from "../workflows/direct-integrator.js";
 import { makeStoreValidationVault } from "../validation/store-vault.js";
 import { detectMaintenanceIssues, type MaintenanceIssue } from "../workflows/maintain.js";
 import { applySynthesis, type SynthesisApplyDeps } from "../workflows/synthesis.js";
@@ -100,7 +101,7 @@ async function maintain(ctx: RunContext): Promise<number> {
     try {
       const issues = detectMaintenanceIssues(store.db);
       const repo = openRepo(vaultPath);
-      const broker = makeInProcessBrokerClient(repo, cfg.git.canonical_ref);
+      const broker = inProcessAuditBroker();
       // The in-process model boundary (no egress daemon, no capability mint).
       const receipts: ModelCallReceipt[] = [];
       const models = new ModelsClient(createInProcessInvoker({ env: ctx.env }), (r) => { receipts.push(r); });
@@ -127,11 +128,16 @@ async function maintain(ctx: RunContext): Promise<number> {
           evidenceValid: () => true,
           config: { packBudgetTokens: PACK_BUDGET, requireSourcesForSynthesis: cfg.policies.require_sources_for_synthesis, risk: riskConfigFrom(cfg.policies) },
           store, broker, backup: backupConfig(ctx), repo,
-          integrate: makeBrokerIntegrator(broker),
+          integrate: makeCanonicalIntegrator(repo),
           guard: new GeneratedArtifactGuard(quarantineStoreFromContext(ctx)),
-          foldProjections: async () => {},
+          foldProjections: async () => {
+            const { foldNotesForPaths } = await import("@atlas/sqlite-store");
+            const { resolveAtRef } = await import("../sync/resolve-at-ref.js");
+            const resolve = resolveAtRef(repo, CANONICAL_BRANCH, cfg.vault.note_globs);
+            foldNotesForPaths(store, [issue.noteId], resolve);
+          },
           worktreesPath: resolvePath(ctx, cfg.git.worktrees_path),
-          canonicalRef: cfg.git.canonical_ref,
+          canonicalRef: CANONICAL_BRANCH,
           now: () => new Date().toISOString(),
           // Threaded INTO applySynthesis so the index.lock re-check fires at the
           // true post-grounding boundary (after retrieval + model planning, before

@@ -113,17 +113,11 @@ export {
 } from "./rebuild-from-git.js";
 
 export {
-  makeBrokerIntegrator,
-  type BrokerIntegratorAuth,
-  type RefAdvanceClient,
-} from "./broker-integrator.js";
-
-export {
-  makeInProcessBrokerClient,
-  InProcessAuditKindNotSignable,
-  type InProcessBrokerClient,
-  type CaptureClient,
-} from "./in-process-broker.js";
+  makeCanonicalIntegrator,
+  makeDirectCaptureIntegration,
+  inProcessAuditBroker,
+  CANONICAL_BRANCH,
+} from "./direct-integrator.js";
 
 export {
   makeModelPlanGenerator,

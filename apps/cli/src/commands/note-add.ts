@@ -11,9 +11,9 @@
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { addNote, NoteAddRejectedError } from "../ingest/note-add.js";
-import { buildCaptureDeps, buildGuard } from "../ingest/wiring.js";
-import { resolvePath } from "./backup-config.js";
-import { withVaultMutation } from "../locks/mutation-guard.js";
+import { buildGuard } from "../ingest/wiring.js";
+import { openWorkflowStore } from "../workflows/index.js";
+import { ledgerDbPath } from "./backup-config.js";
 
 interface ParsedArgs {
   readonly path: string;
@@ -57,18 +57,12 @@ async function noteAdd(ctx: RunContext): Promise<number> {
   // PREFLIGHT guard is built here; addNote runs the scan-before-persist BEFORE
   // assembling any mutating dep (DEFECT #1 ordering, same as source add).
   const guard = buildGuard(ctx);
-  const deps = buildCaptureDeps(ctx, "note add", args.idempotencyKey, "note");
-  const vaultPath = resolvePath(ctx, ctx.config.config.vault.path);
-
+  // The mutation order (runMutation, inside addNote) owns the vault lock across
+  // grounding → apply → commit → refresh — the handler must NOT pre-acquire it.
+  const store = openWorkflowStore({ path: ledgerDbPath(ctx) });
   let result;
   try {
-    // Hold the vault lock across the whole note-add (grounding → apply → commit →
-    // refresh). `preApply` is threaded INTO addNote so the pre-apply index.lock
-    // re-check fires at the true post-grounding boundary (after scan + frontmatter
-    // validation, before the first durable mutation), not before grounding.
-    result = await withVaultMutation(ctx, vaultPath, (preApply) =>
-      addNote({ path: args.path, dest: args.dest, guard, deps, preApply }),
-    );
+    result = await addNote(ctx, { path: args.path, dest: args.dest, deps: { guard, store } });
   } catch (e) {
     if (e instanceof NoteAddRejectedError) {
       throw new CliError({
@@ -80,6 +74,8 @@ async function noteAdd(ctx: RunContext): Promise<number> {
       });
     }
     throw e;
+  } finally {
+    store.close();
   }
 
   const out = {

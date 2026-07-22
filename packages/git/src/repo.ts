@@ -285,6 +285,31 @@ export interface Repo {
    * whole change set, exactly as the broker does.
    */
   changedStatusesInRange(from: string | null, to: string): Promise<RawStatusChange[]>;
+  /**
+   * The fully-qualified ref `HEAD` is attached to (`refs/heads/main`), or `null`
+   * when `HEAD` is detached. Read via `git rev-parse --symbolic-full-name HEAD`
+   * (NOT `git symbolic-ref`, which the source-audit forbids outside `refs.ts`);
+   * git prints the literal `HEAD` for a detached head, which maps to `null`. The
+   * v2 mutation-order wrapper asserts this equals `refs/heads/main` before any
+   * mutation — a feature-branch / detached-HEAD checkout must never be mutated.
+   */
+  headRef(): Promise<string | null>;
+  /**
+   * The porcelain working-tree status (`git status --porcelain=v1 -z`) restricted
+   * to `paths` — the RAW two-letter XY code + path for every touched entry
+   * (staged, unstaged, or untracked). Empty ⇒ the paths match `HEAD` with nothing
+   * uncommitted. The v2 dirty-vault doctrine reads this to refuse mutating a note
+   * whose on-disk state diverges from the committed tree. An empty `paths` scans
+   * the whole working tree.
+   */
+  worktreeStatus(paths: readonly string[]): Promise<WorktreeStatusEntry[]>;
+}
+
+/** One `git status --porcelain` entry: the 2-char XY code and the repo-relative path. */
+export interface WorktreeStatusEntry {
+  /** The two-column porcelain status code (e.g. ` M`, `A `, `??`, `MM`). */
+  readonly code: string;
+  readonly path: string;
 }
 
 class RepoImpl implements Repo {
@@ -398,6 +423,38 @@ class RepoImpl implements Repo {
     const range = from === null ? to : `${from}..${to}`;
     const raw = await runGit(this.dir, ["log", "--name-status", "-z", "--format=", "-m", range]);
     return dedupeRawStatuses(parseRawNameStatusZ(raw));
+  }
+
+  async headRef(): Promise<string | null> {
+    // `--symbolic-full-name` prints the attached branch ref (`refs/heads/main`)
+    // or the literal `HEAD` for a detached head. Deliberately NOT `git
+    // symbolic-ref` — the no-protected-write source audit treats that token as a
+    // ref-write subcommand and refuses it outside `refs.ts`; this is a pure read.
+    const out = (await runGit(this.dir, ["rev-parse", "--symbolic-full-name", "HEAD"])).trim();
+    return out === "" || out === "HEAD" ? null : out;
+  }
+
+  async worktreeStatus(paths: readonly string[]): Promise<WorktreeStatusEntry[]> {
+    // `-z` NUL-terminates records so paths with spaces/newlines survive; each
+    // record is `XY<space>path`. Renames carry a second NUL-separated origin
+    // path we skip (the current path is what a dirty-vault check keys on). The
+    // `--literal-pathspecs` guard keeps a `*`/`[ab]` filename a literal, never a glob.
+    // `--literal-pathspecs` is a MAIN git option — it must precede the subcommand.
+    const args = ["--literal-pathspecs", "status", "--porcelain=v1", "-z"];
+    if (paths.length > 0) args.push("--", ...paths);
+    const raw = await runGit(this.dir, args);
+    const out: WorktreeStatusEntry[] = [];
+    const records = raw.split("\0");
+    for (let i = 0; i < records.length; i++) {
+      const rec = records[i]!;
+      if (rec.length < 4) continue; // "XY path" is at least 4 chars
+      const code = rec.slice(0, 2);
+      out.push({ code, path: rec.slice(3) });
+      // A rename/copy (`R`/`C` in either column) is followed by its origin path
+      // as the NEXT NUL record — consume it so it is not misread as an entry.
+      if (code[0] === "R" || code[0] === "C") i++;
+    }
+    return out;
   }
 
   async createAgentBranch(runId: string, base: string): Promise<string> {

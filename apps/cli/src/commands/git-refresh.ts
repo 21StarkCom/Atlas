@@ -15,7 +15,8 @@ import { registerCommand, type RunContext } from "../handlers.js";
 import { openWorkflowStore } from "../workflows/index.js";
 import { readAgentRunStatus } from "../workflows/checkpoints.js";
 import { makeRetrieveSeam } from "../retrieval/wiring.js";
-import { makeModelPlanGenerator, PLAN_GENERATION_MAX_TOKENS, refreshRun, makeInProcessBrokerClient, type SynthesisRefreshDeps } from "../workflows/index.js";
+import { makeModelPlanGenerator, PLAN_GENERATION_MAX_TOKENS, refreshRun, type SynthesisRefreshDeps } from "../workflows/index.js";
+import { inProcessAuditBroker, CANONICAL_BRANCH } from "../workflows/direct-integrator.js";
 import { makeStoreValidationVault } from "../validation/store-vault.js";
 import { readRunInput } from "../workflows/synthesis.js";
 import { readVault } from "../vault/reader.js";
@@ -70,7 +71,7 @@ async function gitRefresh(ctx: RunContext): Promise<number> {
     // run stays review-pending), so the in-process client only appends the
     // non-installing `run.refreshed` event (audit/WORM dropped).
     const repo = openRepo(resolvePath(ctx, cfg.vault.path));
-    const broker = makeInProcessBrokerClient(repo, cfg.git.canonical_ref);
+    const broker = inProcessAuditBroker();
 
     {
       const receipts: ModelCallReceipt[] = [];
@@ -95,7 +96,7 @@ async function gitRefresh(ctx: RunContext): Promise<number> {
         store, broker, backup: backupConfig(ctx), repo,
         guard: new GeneratedArtifactGuard(quarantineStoreFromContext(ctx)),
         worktreesPath: resolvePath(ctx, cfg.git.worktrees_path),
-        canonicalRef: cfg.git.canonical_ref,
+        canonicalRef: CANONICAL_BRANCH,
       };
 
       const res = await refreshRun(p.runId, kind, input, deps);

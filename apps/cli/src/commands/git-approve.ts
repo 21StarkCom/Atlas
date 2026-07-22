@@ -14,7 +14,8 @@ import { registerCommand, type RunContext } from "../handlers.js";
 import { openWorkflowStore } from "../workflows/index.js";
 import { ledgerDbPath, backupConfig, resolvePath } from "./backup-config.js";
 import { readGitOp, readAgentRunStatus } from "../workflows/checkpoints.js";
-import { approveRun, makeBrokerIntegrator, type ApproveDeps } from "../workflows/index.js";
+import { approveRun, type ApproveDeps } from "../workflows/index.js";
+import { makeCanonicalIntegrator, CANONICAL_BRANCH } from "../workflows/direct-integrator.js";
 import { foldProvenanceFromCanonical } from "../ingest/manifests.js";
 import { readFileSync } from "node:fs";
 
@@ -39,7 +40,7 @@ function parseArgs(argv: string[]): Parsed {
 
 async function gitApprove(ctx: RunContext): Promise<number> {
   const p = parseArgs(ctx.argv);
-  const canonicalRef = ctx.config.config.git.canonical_ref;
+  const canonicalRef = CANONICAL_BRANCH;
   const repo = openRepo(resolvePath(ctx, ctx.config.config.vault.path));
   const store = openWorkflowStore({ path: ledgerDbPath(ctx) });
   const connectBroker = async (): Promise<BrokerClient> => {
@@ -81,7 +82,7 @@ async function gitApprove(ctx: RunContext): Promise<number> {
     try {
       const deps: ApproveDeps = {
         store, broker: client, backup: backupConfig(ctx), repo,
-        integrate: makeBrokerIntegrator(client, { authorization, op: op.op, intendedEffect: op.intendedEffect }),
+        integrate: makeCanonicalIntegrator(repo),
         foldProjections: async () => { await foldProvenanceFromCanonical(store, repo, canonicalRef); },
         canonicalRef,
       };

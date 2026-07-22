@@ -29,6 +29,7 @@ import { registerCommand, type RunContext } from "../handlers.js";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { buildCaptureDeps } from "../ingest/wiring.js";
 import { DEFAULT_CANONICAL_REF } from "../ingest/capture.js";
+import { CANONICAL_BRANCH } from "../workflows/direct-integrator.js";
 import { quarantineStoreFromContext } from "../quarantine/config.js";
 import { resolvePath } from "./backup-config.js";
 import { openMigratedStore } from "./store-open.js";
@@ -252,7 +253,7 @@ async function syncStatusHandler(ctx: RunContext): Promise<number> {
   const store = openMigratedStore(ctx);
   try {
     const repo = openRepo(resolvePath(ctx, ctx.config.config.vault.path));
-    const env = await readSyncStatus(store, repo, ctx.config.config.vault.note_globs, ctx.config.config.git.canonical_ref);
+    const env = await readSyncStatus(store, repo, ctx.config.config.vault.note_globs, CANONICAL_BRANCH);
     if (ctx.output.mode === "json") {
       emitJson(env);
     } else {

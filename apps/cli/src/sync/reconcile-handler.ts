@@ -46,6 +46,7 @@ import type { JobHandlerDeps } from "../commands/job-handlers.js";
 import { buildEmbedder, indexingConfig } from "../commands/index-ops.js";
 import { resolvePath } from "../commands/backup-config.js";
 import { resolveAtRef } from "./resolve-at-ref.js";
+import { CANONICAL_BRANCH } from "../workflows/direct-integrator.js";
 
 /** Enqueue-side SSOT workflow name for the scoped per-cycle reindex (60-B). Bound to the
  * production registry + the completeness gate; the sync cycle enqueues under this name. */
@@ -99,7 +100,7 @@ async function runScopedReconcile(deps: JobHandlerDeps, noteIds: string[]): Prom
   const table = await openSearchTable(conn, cfg);
 
   const repo = openRepo(resolvePath(ctx, ctx.config.config.vault.path));
-  const canonicalRef = ctx.config.config.git.canonical_ref;
+  const canonicalRef = CANONICAL_BRANCH;
   const resolve = resolveAtRef(repo, canonicalRef, ctx.config.config.vault.note_globs);
 
   const { embed, close } = await buildEmbedder(ctx, cfg, ctx.runId);

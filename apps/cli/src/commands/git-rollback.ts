@@ -19,6 +19,7 @@ import { readFileSync } from "node:fs";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { openWorkflowStore, classifyRollback, rollbackRun, type RunToRollback } from "../workflows/index.js";
+import { CANONICAL_BRANCH } from "../workflows/direct-integrator.js";
 import { readGitOp, readAgentRunStatus } from "../workflows/checkpoints.js";
 import { foldProvenanceFromCanonical } from "../ingest/manifests.js";
 import { ledgerDbPath, backupConfig, resolvePath } from "./backup-config.js";
@@ -45,7 +46,7 @@ function parseArgs(argv: string[]): Parsed {
 
 async function gitRollback(ctx: RunContext): Promise<number> {
   const p = parseArgs(ctx.argv);
-  const CANONICAL_REF = ctx.config.config.git.canonical_ref;
+  const CANONICAL_REF = CANONICAL_BRANCH;
   const vaultPath = resolvePath(ctx, ctx.config.config.vault.path);
   const repo = openRepo(vaultPath);
   const store = openWorkflowStore({ path: ledgerDbPath(ctx) });

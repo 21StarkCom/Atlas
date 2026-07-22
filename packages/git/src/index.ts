@@ -15,6 +15,7 @@ export {
   type PathChange,
   type RawStatusChange,
   type CommitChanges,
+  type WorktreeStatusEntry,
 } from "./repo.js";
 export { type Worktree } from "./worktree.js";
 export { commitPaths } from "./commit-paths.js";

@@ -162,21 +162,19 @@ export function readSingleCursor(store: Store): SyncCursor {
   }
 }
 
-/** The step-2 preconditions shared by `sync` and `sync status`. */
-export function assertAdoptedConfig(deps: Pick<SyncCycleDeps, "canonicalRef" | "defaultCanonicalRef">, row: SyncCursor): void {
+/**
+ * The step-2 precondition shared by `sync` and `sync status`. v2 (#325): the
+ * canonical ref is `refs/heads/main`; sync absorbs a DISTINCT upstream ref into
+ * it, so the sole remaining guard is that the two are not the same ref — syncing
+ * a ref into itself would rewrite the live upstream. The pre-v2 "un-adopted
+ * default" check is gone (there is no config knob to leave un-adopted anymore).
+ */
+export function assertAdoptedConfig(deps: Pick<SyncCycleDeps, "canonicalRef">, row: SyncCursor): void {
   if (deps.canonicalRef === row.upstreamRef) {
     throw new CliError({
       code: "config-invalid",
-      message: `git.canonical_ref (${deps.canonicalRef}) equals the sync upstream ref — sync would write the live upstream`,
-      hint: "An adopted vault's canonical ref must be a broker-owned ref distinct from upstream (e.g. refs/atlas/main).",
-      exitCode: EXIT.CONFIG,
-    });
-  }
-  if (deps.canonicalRef === deps.defaultCanonicalRef) {
-    throw new CliError({
-      code: "config-invalid",
-      message: `git.canonical_ref is still the un-adopted default (${deps.defaultCanonicalRef})`,
-      hint: "Set git.canonical_ref to the adopted broker-owned ref (refs/atlas/main) before syncing.",
+      message: `the canonical ref (${deps.canonicalRef}) equals the sync upstream ref — sync would write the live upstream`,
+      hint: "sync absorbs a DISTINCT upstream ref into the canonical ref; point the sync cursor at a different upstream branch.",
       exitCode: EXIT.CONFIG,
     });
   }

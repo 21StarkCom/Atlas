@@ -281,7 +281,7 @@ export async function makePhase2Harness(): Promise<Phase2Harness> {
           broker: { socket_path: socketPath, egress_socket_path: join(root, "egress.sock") },
           sqlite: { path: dbPath, ledger_backup: { dir: backupDir, key_id: CAPABILITY_KEY_ID, keep: 10 } },
           vault: { path: vaultDir },
-          git: { worktrees_path: worktreesPath, canonical_ref: CANONICAL_REF },
+          git: { worktrees_path: worktreesPath },
         },
       },
     }) as unknown as RunContext;

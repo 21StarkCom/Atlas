@@ -663,10 +663,13 @@ describe("runSyncCycle — the absorb engine (Tasks 4.4–4.7, 4.10)", () => {
     expect(h.cursorRow().last_absorbed_oid).toBe(head);
   }, 60_000);
 
-  it("config guard: canonical_ref == upstream_ref (or the un-adopted default) refuses config-invalid", async () => {
+  it("config guard: canonical == the cursor's upstream ref refuses config-invalid", async () => {
+    // Post-#325 the only surviving precondition is canonical ≠ upstream (syncing
+    // a ref into itself would rewrite the live upstream). The pre-v2
+    // "un-adopted default" branch is deliberately gone — there is no
+    // canonical-ref config knob left to mis-set (see assertAdoptedConfig's doc).
     h = await makeSyncHarness();
     await expectCliError(runSyncCycle(h.deps({ canonicalRef: h.upstreamRef })), "config-invalid");
-    await expectCliError(runSyncCycle(h.deps({ canonicalRef: "refs/heads/main", defaultCanonicalRef: "refs/heads/main" })), "config-invalid");
   }, 60_000);
 });
 

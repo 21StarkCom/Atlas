@@ -18,7 +18,8 @@ import { GeneratedArtifactGuard } from "@atlas/scan";
 import { ProvenanceRepo } from "@atlas/sqlite-store";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
-import { openWorkflowStore, makeBrokerIntegrator, makeInProcessBrokerClient } from "../workflows/index.js";
+import { openWorkflowStore } from "../workflows/index.js";
+import { makeCanonicalIntegrator, inProcessAuditBroker, CANONICAL_BRANCH } from "../workflows/direct-integrator.js";
 import { makeStoreValidationVault } from "../validation/store-vault.js";
 import { classifyReanchor, type ReanchorMatch } from "../workflows/reverify.js";
 import { applySynthesis, type SynthesisApplyDeps } from "../workflows/synthesis.js";
@@ -142,11 +143,11 @@ async function evidenceResolve(ctx: RunContext): Promise<number> {
 
     const snapshot = await readVault(cfg);
     const noteById = new Map(snapshot.notes.map((n) => [n.id, n]));
-    // In-process apply behind the UNCHANGED makeBrokerIntegrator seam (no broker
-    // daemon; ADR-0003) — mirrors enrich/reconcile/maintain. Evidence resolve is a
-    // Tier-2/Tier-3 ChangePlan apply and must be daemon-free with zero provisioning.
+    // Daemon-free canonical integrator (v2) — mirrors enrich/reconcile/maintain.
+    // Evidence resolve is a Tier-2/Tier-3 ChangePlan apply, FF-advanced in-process
+    // via makeCanonicalIntegrator with zero provisioning.
     const repo = openRepo(vaultPath);
-    const broker = makeInProcessBrokerClient(repo, cfg.git.canonical_ref);
+    const broker = inProcessAuditBroker();
     {
       const deps: SynthesisApplyDeps = {
         retrieve: (q) => Promise.resolve(stubRetrieve(owningNoteId, runId + q.text.length)),
@@ -160,11 +161,16 @@ async function evidenceResolve(ctx: RunContext): Promise<number> {
         evidenceValid: () => verification === "valid",
         config: { packBudgetTokens: 6000, requireSourcesForSynthesis: false, risk: riskConfigFrom(cfg.policies) },
         store, broker, backup: backupConfig(ctx), repo,
-        integrate: makeBrokerIntegrator(broker),
+        integrate: makeCanonicalIntegrator(repo),
         guard: new GeneratedArtifactGuard(quarantineStoreFromContext(ctx)),
-        foldProjections: async () => {},
+        foldProjections: async () => {
+          const { foldNotesForPaths } = await import("@atlas/sqlite-store");
+          const { resolveAtRef } = await import("../sync/resolve-at-ref.js");
+          const resolve = resolveAtRef(repo, CANONICAL_BRANCH, cfg.vault.note_globs);
+          foldNotesForPaths(store, [owningNoteId], resolve);
+        },
         worktreesPath: resolvePath(ctx, cfg.git.worktrees_path),
-        canonicalRef: cfg.git.canonical_ref,
+        canonicalRef: CANONICAL_BRANCH,
         now: () => new Date().toISOString(),
         resolveRendition: (h) => {
           try {

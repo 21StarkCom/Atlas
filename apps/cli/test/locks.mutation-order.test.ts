@@ -118,7 +118,8 @@ function setup(): Ctx {
     "git:",
     "  worktrees_path: ./.atlas/worktrees",
     "  auto_commit_risk_levels: [1, 2]",
-    `  canonical_ref: ${CANONICAL_REF}`,
+    // Post-#325 `git.canonical_ref` is gone from the strict schema — canonical
+    // is ALWAYS refs/heads/main; CANONICAL_REF above is assertion shorthand only.
     `  audit_anchor_path: ${anchorPath}`,
     "models:",
     "  generation_model: gemini-3.5-flash",

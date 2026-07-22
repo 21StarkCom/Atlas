@@ -9,6 +9,7 @@ import { openRepo } from "@atlas/git";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { openWorkflowStore, rejectRun, type ApproveDeps } from "../workflows/index.js";
+import { CANONICAL_BRANCH } from "../workflows/direct-integrator.js";
 import { readGitOp, readAgentRunStatus } from "../workflows/checkpoints.js";
 import { ledgerDbPath, backupConfig, resolvePath } from "./backup-config.js";
 
@@ -37,7 +38,7 @@ async function gitReject(ctx: RunContext): Promise<number> {
       throw new CliError({ code: "broker-unreachable", message: `the broker is unreachable at ${ctx.config.config.broker.socket_path}`, hint: "Start the broker daemon before rejecting.", exitCode: EXIT.CONFIG, cause: e });
     }
     try {
-      const deps: ApproveDeps = { store, broker: client, backup: backupConfig(ctx), repo, integrate: async () => { throw new Error("reject does not integrate"); }, foldProjections: async () => {}, canonicalRef: ctx.config.config.git.canonical_ref };
+      const deps: ApproveDeps = { store, broker: client, backup: backupConfig(ctx), repo, integrate: async () => { throw new Error("reject does not integrate"); }, foldProjections: async () => {}, canonicalRef: CANONICAL_BRANCH };
       await rejectRun(runId, "rejected at review", deps);
       const out = { command: "git reject", runId, state: "rejected" as const, worktreeRemoved: true, retainedCommit: committed.commitSha };
       if (ctx.output.mode === "json") emitJson(out);

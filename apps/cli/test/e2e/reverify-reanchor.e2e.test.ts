@@ -172,7 +172,6 @@ beforeEach(async () => {
     "git:",
     `  worktrees_path: ${h.worktreesPath}`,
     `  audit_anchor_path: ${h.anchorPath}`,
-    `  canonical_ref: ${CANONICAL_REF}`,
     "models: {}",
     "policies: {}",
     "logs:",

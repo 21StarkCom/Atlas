@@ -55,7 +55,7 @@ import { riskConfigFrom } from "../policies/risk.js";
 import { makeStoreValidationVault } from "../validation/store-vault.js";
 import { resolveAtRef } from "../sync/resolve-at-ref.js";
 import type { RetrievalResult } from "../retrieval/layers.js";
-import { makeBrokerIntegrator, makeInProcessBrokerClient } from "./index.js";
+import { makeCanonicalIntegrator, inProcessAuditBroker, CANONICAL_BRANCH } from "./direct-integrator.js";
 import { applySynthesis, type SynthesisApplyDeps } from "./synthesis.js";
 import type { EvidenceHeadRow, ReanchorApplyRequest, ReanchorApplyResult } from "./reverify-handler.js";
 import type { ReanchorInput } from "./reverify-match.js";
@@ -231,7 +231,7 @@ export function recoverReverifyAnchor(
   return recoverAnchorFrom(
     {
       repo: openRepo(resolvePath(deps.ctx, cfg.vault.path)),
-      canonicalRef: cfg.git.canonical_ref,
+      canonicalRef: CANONICAL_BRANCH,
       guard: buildGuard(deps.ctx),
       db: deps.store.db,
     },
@@ -268,7 +268,7 @@ export async function applyReanchorViaBroker(deps: JobHandlerDeps, req: Reanchor
   const store = deps.store; // already open + migrated by the drain — never closed here
   const provenance = new ProvenanceRepo(store.db);
   const repo = openRepo(resolvePath(ctx, cfg.vault.path));
-  const broker = makeInProcessBrokerClient(repo, cfg.git.canonical_ref);
+  const broker = inProcessAuditBroker();
 
   // Notes are read AT THE CANONICAL REF, never the working tree (review round-1
   // finding): the working tree does not advance when canonical does (#260), so a
@@ -278,7 +278,7 @@ export async function applyReanchorViaBroker(deps: JobHandlerDeps, req: Reanchor
   // broker.cas_failed integration against the ADVANCED canonical, and a resolver
   // cached across attempts would serve the pre-retry text — silently reverting the
   // concurrent edit the CAS retry exists to accommodate.
-  const readNoteAtCanonical = (id: string) => resolveAtRef(repo, cfg.git.canonical_ref, cfg.vault.note_globs)(id);
+  const readNoteAtCanonical = (id: string) => resolveAtRef(repo, CANONICAL_BRANCH, cfg.vault.note_globs)(id);
 
   // In-process re-anchor (ADR-0003): the canonical FF-advance + run state-machine
   // run in-process — no broker daemon, no audit/WORM append. A `broker.cas_failed`
@@ -299,11 +299,11 @@ export async function applyReanchorViaBroker(deps: JobHandlerDeps, req: Reanchor
     broker,
     backup: backupConfig(ctx),
     repo,
-    integrate: makeBrokerIntegrator(broker),
+    integrate: makeCanonicalIntegrator(repo),
     guard: new GeneratedArtifactGuard(quarantineStoreFromContext(ctx)),
     foldProjections: async () => {},
     worktreesPath: resolvePath(ctx, cfg.git.worktrees_path),
-    canonicalRef: cfg.git.canonical_ref,
+    canonicalRef: CANONICAL_BRANCH,
     now: () => new Date().toISOString(),
     resolveRendition: (h) => {
       try {

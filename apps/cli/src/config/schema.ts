@@ -7,7 +7,6 @@
  * and malformed values fail startup with a `ConfigError` (plan §2.5 exit code 2).
  */
 import { z } from "zod";
-import { DEFAULT_CANONICAL_REF, DEFAULT_PROTECTED_REFS } from "@atlas/broker";
 
 /** Content sensitivity classes (plan §2.5; default `internal` for unlabeled content). */
 export const Sensitivity = z.enum(["public", "internal", "confidential", "restricted"]);
@@ -15,26 +14,6 @@ export type Sensitivity = z.infer<typeof Sensitivity>;
 
 /** Risk tiers 0–3 (plan §2.5); `auto_commit_risk_levels` lists the auto-integrated tiers. */
 export const RiskTier = z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(3)]);
-
-/**
- * A canonical-ref value the operator may configure (60-A live-vault adoption). It
- * must be a real `refs/` ref and must NOT collide with the audit or trust anchors —
- * redirecting the canonical ref onto the audit/trust namespace would let ordinary
- * canonical moves land under a ledger/trust ref, breaking the security model. `audit`
- * and `trust` are never config-supplied; only `canonical` is overridable.
- */
-const CanonicalRef = z
-  .string()
-  .min(1, "git.canonical_ref must not be empty")
-  .refine((r) => r.startsWith("refs/"), {
-    message: "git.canonical_ref must be a fully-qualified ref under refs/ (e.g. refs/heads/main)",
-  })
-  .refine((r) => r !== DEFAULT_PROTECTED_REFS.audit && r !== DEFAULT_PROTECTED_REFS.trust, {
-    message: `git.canonical_ref must not collide with the audit (${DEFAULT_PROTECTED_REFS.audit}) or trust (${DEFAULT_PROTECTED_REFS.trust}) ref`,
-  })
-  .refine((r) => !r.startsWith("refs/audit/") && !r.startsWith("refs/trust/"), {
-    message: "git.canonical_ref must not be under the refs/audit/ or refs/trust/ namespaces",
-  });
 
 /**
  * Which vault-relative paths are treated as notes (60-A task 1.1). Defaults to
@@ -126,10 +105,6 @@ const GitConfig = z
     worktrees_path: z.string().min(1),
     auto_commit_risk_levels: z.array(RiskTier).default([1, 2]), // Tier-1/2 auto-integrate; Tier-3 review
     audit_anchor_path: z.string().min(1), // D8 (broker-owned, outside vault+repo)
-    // The canonical protected ref (60-A). Defaults to the single shared fallback;
-    // adoption overrides it (e.g. refs/atlas/main). Threaded to the broker via
-    // `protectedRefsFor` and to every workflow via deps — never re-inlined.
-    canonical_ref: CanonicalRef.default(DEFAULT_CANONICAL_REF),
   })
   .strict();
 

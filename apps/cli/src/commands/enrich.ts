@@ -14,7 +14,8 @@ import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { openWorkflowStore } from "../workflows/index.js";
 import { makeRetrieveSeam } from "../retrieval/wiring.js";
-import { makeModelPlanGenerator, PLAN_GENERATION_MAX_TOKENS, makeBrokerIntegrator, makeInProcessBrokerClient } from "../workflows/index.js";
+import { makeModelPlanGenerator, PLAN_GENERATION_MAX_TOKENS } from "../workflows/index.js";
+import { makeCanonicalIntegrator, inProcessAuditBroker, CANONICAL_BRANCH } from "../workflows/direct-integrator.js";
 import { makeStoreValidationVault } from "../validation/store-vault.js";
 import { applySynthesis, previewSynthesis, type SynthesisApplyDeps, type SynthesisPlanDeps } from "../workflows/synthesis.js";
 import { readVault } from "../vault/reader.js";
@@ -101,10 +102,10 @@ async function enrich(ctx: RunContext): Promise<number> {
       const generatePlan = makeModelPlanGenerator({ models, model: cfg.models.generation_model, maxTokens: PLAN_GENERATION_MAX_TOKENS });
       const snapshot = await readVault(cfg);
       const noteById = new Map(snapshot.notes.map((n) => [n.id, n]));
-      // Wire the in-process broker client behind the UNCHANGED
-      // `makeBrokerIntegrator(client)` seam (no broker daemon; ADR-0003).
+      // Daemon-free canonical integrator (v2): FF-advance refs/heads/main in-process
+      // via makeCanonicalIntegrator — no broker socket, no audit/WORM append.
       const repo = openRepo(vaultPath);
-      const broker = makeInProcessBrokerClient(repo, cfg.git.canonical_ref);
+      const broker = inProcessAuditBroker();
       const applyDeps: SynthesisApplyDeps = {
         retrieve, generatePlan,
         readNote: (id) => noteById.get(id) ?? null,
@@ -114,11 +115,16 @@ async function enrich(ctx: RunContext): Promise<number> {
         evidenceValid: () => true,
         config: planConfig,
         store, broker, backup: backupConfig(ctx), repo,
-        integrate: makeBrokerIntegrator(broker),
+        integrate: makeCanonicalIntegrator(repo),
         guard: new GeneratedArtifactGuard(quarantineStoreFromContext(ctx)),
-        foldProjections: async () => {},
+        foldProjections: async () => {
+          const { foldNotesForPaths } = await import("@atlas/sqlite-store");
+          const { resolveAtRef } = await import("../sync/resolve-at-ref.js");
+          const resolve = resolveAtRef(repo, CANONICAL_BRANCH, cfg.vault.note_globs);
+          foldNotesForPaths(store, [p.note], resolve);
+        },
         worktreesPath: resolvePath(ctx, cfg.git.worktrees_path),
-        canonicalRef: cfg.git.canonical_ref,
+        canonicalRef: CANONICAL_BRANCH,
         // Threaded INTO applySynthesis so the index.lock re-check fires at the true
         // post-grounding boundary (after retrieval + model planning, before the
         // first durable mutation), on every CAS-rebase retry — not before grounding.
