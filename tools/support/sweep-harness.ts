@@ -5,81 +5,36 @@
  *  - a seeded git vault (two canonical Markdown notes),
  *  - a real `BrokerService` over its Unix-socket server (test mode; the fixture
  *    `atlas-test-approver` signer enrolled for the privileged read ops),
- *  - a real `EgressService` over its socket server with a DETERMINISTIC fake
- *    provider adapter (hash-derived embeddings — identical text ⇒ identical
- *    vector, so retrieval ranks an exact-text eval query at 1),
- *  - a `brain.config.yaml` + env (test mode, custody seam, capability key file),
+ *  - the gated in-process fake provider (`ATLAS_FAKE_PROVIDER=1`): post the Phase-2
+ *    cutover the Gemini adapter runs in-process in the `brain` child, so there is no
+ *    egress daemon to inject an adapter into — the same DETERMINISTIC hash-embedding
+ *    fake (identical text ⇒ identical vector, so retrieval ranks an exact-text eval
+ *    query at 1) is selected by env instead,
+ *  - a `brain.config.yaml` + env (test mode, custody seam, fake-provider flag),
  *
  * then arranges state THROUGH THE REAL BINARY (`db migrate` → `db rebuild` →
  * `index rebuild`) plus targeted SQL seeding for row-addressed commands. The
  * sweep itself only consumes `run()` + the seeded ids.
  */
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   BrokerService,
-  EgressService,
   generateEd25519,
   parsePrivateKeyFlexible,
   signBytes,
   startBrokerServer,
-  startEgressServer,
-  ProviderCallError,
-  providerError,
   type AttestationKey,
-  type ProviderAdapter,
-  type Usage,
 } from "@atlas/broker";
 
 const REPO_ROOT = join(import.meta.dirname, "..", "..");
 const BIN = join(REPO_ROOT, "apps", "cli", "dist", "bin.js");
 const DIMENSIONS = 768;
 
-/** Deterministic pseudo-embedding: identical text ⇒ identical unit-ish vector. */
-function hashVector(text: string): number[] {
-  const v: number[] = [];
-  let seed = createHash("sha256").update(text, "utf8").digest();
-  while (v.length < DIMENSIONS) {
-    for (const b of seed) {
-      if (v.length >= DIMENSIONS) break;
-      v.push((b - 127.5) / 127.5);
-    }
-    seed = createHash("sha256").update(seed).digest();
-  }
-  return v;
-}
-
-/** A deterministic fake Gemini adapter: text ops return "ok"; embed hashes the texts. */
-function sweepAdapter(): ProviderAdapter {
-  return {
-    provider: "gemini",
-    host: "generativelanguage.googleapis.com",
-    serialize: (_op, req) => ({ path: "/fake", bytes: Buffer.from(JSON.stringify(req), "utf8") }),
-    transmit: (s, signal) =>
-      signal?.aborted
-        ? Promise.reject(new ProviderCallError(providerError("cancelled", { message: "aborted" })))
-        : Promise.resolve({ rawResponse: s.bytes, retries: 0 }),
-    parse: (op, req, raw) => {
-      const usage: Usage = { inputTokens: 10, outputTokens: 5 };
-      if (op === "embed") {
-        const parsed = JSON.parse(Buffer.from(raw).toString("utf8")) as { texts: string[] };
-        return {
-          result: { vectors: parsed.texts.map(hashVector), dimensions: DIMENSIONS, usage, model: req.model },
-          usage,
-          model: req.model,
-        };
-      }
-      if (op === "generateObject") return { result: {}, usage, model: req.model };
-      return { result: { text: "ok", usage, model: req.model }, usage, model: req.model };
-    },
-    costMicros: (_m: string, u: Usage) => u.inputTokens + (u.outputTokens ?? 0),
-  };
-}
-
-/** A completed child invocation (async — the broker/egress servers live in THIS process). */
+/** A completed child invocation (async — the broker server lives in THIS process). */
 export interface RunResult {
   status: number | null;
   stdout: string;
@@ -175,16 +130,9 @@ export async function makeSweepHarness(): Promise<SweepHarness> {
   await service.start();
   const brokerServer = await startBrokerServer(service, brokerSocket);
 
-  // --- egress (deterministic fake adapter over the real socket) -------------
-  const capabilitySecretText = randomBytes(32).toString("hex");
-  const capabilityKeyPath = join(custodyDir, "egress-capability.key");
-  writeFileSync(capabilityKeyPath, `${capabilitySecretText}\n`, "utf8");
-  const egress = new EgressService({
-    adapter: sweepAdapter(),
-    quarantine: { quarantine: () => Promise.resolve() },
-    capabilitySecret: Buffer.from(capabilitySecretText, "utf8"),
-  });
-  const egressServer = await startEgressServer(egress, egressSocket);
+  // --- provider: the gated in-process fake (selected by env below) ----------
+  // No egress daemon post-cutover; `egressSocket` is a dead config value the schema
+  // still requires (`broker.egress_socket_path`, `.min(1)`) but nothing dials.
 
   // --- config + env ---------------------------------------------------------
   const backupKey = randomBytes(32);
@@ -209,7 +157,9 @@ export async function makeSweepHarness(): Promise<SweepHarness> {
     NO_COLOR: "1",
     ATLAS_TEST_MODE: "1",
     ATLAS_CUSTODY_TEST_DIR: custodyDir,
-    ATLAS_EGRESS_CAPABILITY_KEY: capabilityKeyPath,
+    // Select the gated in-process fake provider (no key, no network) — the Phase-2
+    // replacement for the pre-cutover socket EgressService fake adapter.
+    ATLAS_FAKE_PROVIDER: "1",
   };
 
   // ASYNC by necessity, not preference: the broker/egress socket servers run in
@@ -357,7 +307,6 @@ export async function makeSweepHarness(): Promise<SweepHarness> {
     run,
     authorize,
     async cleanup(): Promise<void> {
-      await egressServer.close();
       await brokerServer.close();
       rmSync(root, { recursive: true, force: true });
       rmSync(quarantineDir, { recursive: true, force: true });

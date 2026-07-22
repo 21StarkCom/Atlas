@@ -8,25 +8,23 @@
  * models client (the credential + network live INSIDE the egress broker; this never touches either).
  */
 import { SCHEMA_REGISTRY, type ChangePlan } from "@atlas/contracts";
-import { PROMPT_REFS, type EgressCapability } from "@atlas/broker";
+import { PROMPT_REFS, type RunBinding } from "@atlas/models";
 import type { PlanGenerationInput } from "./synthesis.js";
 
 /** The minimal `generateObject` surface the generator needs (a `ModelsClient`). */
 export interface PlanModelsClient {
   generateObject<T>(
     req: { model: string; prompt: { ref: string }; input: string; schema: unknown; schemaId: string; maxTokens?: number },
-    cap: EgressCapability,
+    run: RunBinding,
   ): Promise<T>;
 }
 
-/** Options binding the generator to a model + the per-generation capability minter. */
+/** Options binding the generator to a model + the prompt registry. */
 export interface PlanGeneratorDeps {
   readonly models: PlanModelsClient;
-  /** Mint an egress capability bound to this generation (the run/retrieval correlation id). */
-  mintCapability(correlationId: string): EgressCapability;
   readonly model: string;
   readonly maxTokens?: number;
-  /** The prompt ref (a stable id, never the prompt body — it lives broker-side). */
+  /** The prompt ref (a stable id, never the prompt body). */
   readonly promptRef?: string;
 }
 
@@ -57,20 +55,20 @@ function planInput(input: PlanGenerationInput): string {
  */
 export function makeModelPlanGenerator(deps: PlanGeneratorDeps): (input: PlanGenerationInput) => Promise<ChangePlan> {
   return async (input: PlanGenerationInput): Promise<ChangePlan> => {
-    const cap = deps.mintCapability(input.retrievalRunId);
     return deps.models.generateObject<ChangePlan>(
       {
         model: deps.model,
-        // The default MUST come from the broker's PROMPT_REFS SSOT — a hand-typed
-        // ref here shipped unregistered and killed every synthesis command at the
-        // first live daemon (#210).
+        // The default MUST come from the PROMPT_REFS SSOT — a hand-typed ref here
+        // shipped unregistered and killed every synthesis command at the first live
+        // daemon (#210).
         prompt: { ref: deps.promptRef ?? PROMPT_REFS.synthesisPlan },
         input: planInput(input),
         schema: SCHEMA_REGISTRY.ChangePlan,
         schemaId: "ChangePlan",
         ...(deps.maxTokens !== undefined ? { maxTokens: deps.maxTokens } : {}),
       },
-      cap,
+      // The transmission binds to the retrieval correlation id (no capability mint).
+      { runId: input.retrievalRunId },
     );
   };
 }

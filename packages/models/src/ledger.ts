@@ -24,7 +24,7 @@ import {
   type RunContext,
   type FinalizeResult,
 } from "@atlas/sqlite-store";
-import { ModelCallReceiptSchema, type ModelCallReceipt } from "@atlas/broker";
+import { ModelCallReceiptSchema, type ModelCallReceipt } from "./types.js";
 
 /**
  * Map the IPC operation to the `model_calls.operation` domain (data dictionary:
@@ -126,7 +126,7 @@ export async function persistModelCalls(
 
 /**
  * The allowlisted per-call audit record schema — DERIVED from the SSOT
- * {@link ModelCallReceiptSchema} (`@atlas/broker`) so it can never drift from the
+ * {@link ModelCallReceiptSchema} (`./types.js`) so it can never drift from the
  * receipt contract. The audit record drops the receipt's `runId` (folded into the
  * deterministic `callId`) and adds `callId`; EVERY carried field keeps the receipt's
  * strict validation — `sha256:` request/response hashes, the operation/outcome/

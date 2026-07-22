@@ -6,11 +6,11 @@
  * a derived instruction → retrieval-first plan → validate → Tier-2 auto-commit / Tier-3
  * review-pending (destructive maintenance is always Tier-3 ⇒ exit 6). Output ⇒ `maintain.schema.json`.
  */
-import { BrokerClient, EgressClient } from "@atlas/broker";
+import { BrokerClient } from "@atlas/broker";
 import { newRunId } from "@atlas/contracts";
 import { openRepo } from "@atlas/git";
 import { GeneratedArtifactGuard } from "@atlas/scan";
-import { ModelsClient, mintEgressCapability, type EgressLimits, type ModelCallReceipt } from "@atlas/models";
+import { ModelsClient, createInProcessInvoker, type ModelCallReceipt } from "@atlas/models";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { openWorkflowStore } from "../workflows/index.js";
@@ -25,7 +25,6 @@ import { quarantineStoreFromContext } from "../quarantine/config.js";
 import { backupConfig, ledgerDbPath, resolvePath } from "./backup-config.js";
 
 const PACK_BUDGET = 6000;
-const EGRESS = { maxBytes: 1_000_000, maxTokens: 200_000, costCeiling: 1_000_000 } as const;
 
 type Tier = "tier-0" | "tier-1" | "tier-2" | "tier-3";
 const TIER_RANK: Record<Tier, number> = { "tier-0": 0, "tier-1": 1, "tier-2": 2, "tier-3": 3 };
@@ -83,25 +82,19 @@ async function maintain(ctx: RunContext): Promise<number> {
       return EXIT.OK;
     }
 
-    // APPLY: drive each issue's remediation through the risk-tiered synthesis pipeline. Connect
-    // the egress model boundary + the broker; assemble the SAME seams `enrich` uses.
-    let egressClient: EgressClient;
-    try {
-      egressClient = await EgressClient.connect(cfg.broker.egress_socket_path);
-    } catch (e) {
-      throw new CliError({ code: "broker-unreachable", message: `the egress broker is unreachable at ${cfg.broker.egress_socket_path}`, hint: "Start the egress broker daemon before --apply.", exitCode: EXIT.CONFIG, cause: e });
-    }
+    // APPLY: drive each issue's remediation through the risk-tiered synthesis pipeline. Assemble
+    // the SAME seams `enrich` uses — the in-process model boundary + the broker.
     let brokerClient: BrokerClient;
     try {
       brokerClient = await BrokerClient.connect(cfg.broker.socket_path);
     } catch (e) {
-      egressClient.close();
       throw new CliError({ code: "broker-unreachable", message: `the broker is unreachable at ${cfg.broker.socket_path}`, hint: "Start the broker daemon before --apply.", exitCode: EXIT.CONFIG, cause: e });
     }
 
     try {
+      // The in-process model boundary (no egress daemon, no capability mint).
       const receipts: ModelCallReceipt[] = [];
-      const models = new ModelsClient((params, signal) => egressClient.invoke(params, signal), (r) => { receipts.push(r); });
+      const models = new ModelsClient(createInProcessInvoker({ env: ctx.env }), (r) => { receipts.push(r); });
       const indexingCfg = { chunker_version: cfg.indexing.chunker_version, embedding_model: cfg.indexing.embedding_model, dimensions: cfg.indexing.dimensions };
       const snapshot = await readVault(cfg);
       const noteById = new Map(snapshot.notes.map((n) => [n.id, n]));
@@ -109,7 +102,6 @@ async function maintain(ctx: RunContext): Promise<number> {
         models,
         model: cfg.models.generation_model,
         maxTokens: PLAN_GENERATION_MAX_TOKENS,
-        mintCapability: (correlationId) => mintEgressCapability({ runId: correlationId }, { operation: "generateObject", model: cfg.models.generation_model, maxBytes: EGRESS.maxBytes, maxTokens: EGRESS.maxTokens, costCeiling: EGRESS.costCeiling, allowedSensitivity: cfg.policies.default_sensitivity } satisfies EgressLimits),
       });
 
       const findings: { kind: string; target: string; destructive: boolean; risk: Tier }[] = [];
@@ -144,7 +136,6 @@ async function maintain(ctx: RunContext): Promise<number> {
       return anyReviewPending ? EXIT.ACTION_REQUIRED : EXIT.OK;
     } finally {
       brokerClient.close();
-      egressClient.close();
     }
   } finally {
     store.close();

@@ -42,8 +42,7 @@ import {
   type UnresolvedNote,
 } from "@atlas/lancedb-index";
 import type { IndexRebuildReport } from "@atlas/lancedb-index";
-import { ModelsClient, mintEgressCapability, type EgressLimits, type ModelCallReceipt } from "@atlas/models";
-import { EgressClient } from "@atlas/broker";
+import { ModelsClient, createInProcessInvoker, type ModelCallReceipt } from "@atlas/models";
 import { GenerationRepo, type SqliteDatabase, type Store } from "@atlas/sqlite-store";
 import { readVault } from "../vault/reader.js";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
@@ -54,9 +53,6 @@ import { runReadAudit } from "../audit/readonly.js";
 
 // Per-run egress ceilings for the index-embedding capability (D19) — generous; the
 // payload scan + capability enforce the real limits.
-const EGRESS_MAX_BYTES = 8_000_000;
-const EGRESS_MAX_TOKENS = 2_000_000;
-const EGRESS_COST_CEILING = 10_000_000;
 
 function noFlags(cmd: string, argv: string[]): void {
   for (const a of argv) throw CliError.usage(`unknown flag/argument for \`${cmd}\`: ${a}`);
@@ -138,44 +134,23 @@ async function readNotes(ctx: RunContext): Promise<readonly ParsedNote[]> {
   return snapshot.notes;
 }
 
-/** Build the batch {@link Embedder} over the egress broker (repair/rebuild + the
- * `index:reconcile` job handler). Returns a disposer to close the egress socket. */
+/** Build the batch {@link Embedder} over the IN-PROCESS model boundary (repair/rebuild
+ * + the `index:reconcile` job handler). No egress daemon, no capability mint; the
+ * credential resolves lazily on the first call. Returns a no-op disposer. */
 export async function buildEmbedder(
   ctx: RunContext,
   cfg: IndexingConfig,
   runId: string,
 ): Promise<{ embed: Embedder; close: () => void }> {
-  const socketPath = ctx.config.config.broker.egress_socket_path;
-  let egress: EgressClient;
-  try {
-    egress = await EgressClient.connect(socketPath);
-  } catch (e) {
-    throw new CliError({
-      code: "internal",
-      message: `the egress broker is unreachable at ${socketPath}: ${e instanceof Error ? e.message : String(e)}`,
-      hint: "Start the egress broker daemon before `brain index repair`/`rebuild`.",
-      exitCode: EXIT.INTERNAL,
-      retryable: true,
-      cause: e,
-    });
-  }
   const receipts: ModelCallReceipt[] = [];
   const models = new ModelsClient(
-    (params, signal) => egress.invoke(params, signal),
+    createInProcessInvoker({ env: ctx.env }),
     (r: ModelCallReceipt) => {
       receipts.push(r);
     },
   );
-  const limits: EgressLimits = {
-    operation: "embed",
-    model: cfg.embedding_model,
-    maxBytes: EGRESS_MAX_BYTES,
-    maxTokens: EGRESS_MAX_TOKENS,
-    costCeiling: EGRESS_COST_CEILING,
-    allowedSensitivity: "internal",
-  };
-  const cap = mintEgressCapability({ runId }, limits);
-  return { embed: embedderFromClient(models, cap, cfg), close: () => egress.close() };
+  // The embed transmission binds to the run id (no capability mint).
+  return { embed: embedderFromClient(models, { runId }, cfg), close: () => {} };
 }
 
 /** Build the reconcile {@link IndexDeps} shared by repair + rebuild. */

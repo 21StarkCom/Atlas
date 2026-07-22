@@ -6,11 +6,11 @@
  * model-plan generator (generateObject<ChangePlan>), the store-backed validation vault, and — on
  * apply — the broker integrator. Output matches `enrich.schema.json`.
  */
-import { BrokerClient, EgressClient } from "@atlas/broker";
+import { BrokerClient } from "@atlas/broker";
 import { newRunId } from "@atlas/contracts";
 import { openRepo } from "@atlas/git";
 import { GeneratedArtifactGuard } from "@atlas/scan";
-import { ModelsClient, mintEgressCapability, type EgressLimits, type ModelCallReceipt } from "@atlas/models";
+import { ModelsClient, createInProcessInvoker, type ModelCallReceipt } from "@atlas/models";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { openWorkflowStore } from "../workflows/index.js";
@@ -24,7 +24,6 @@ import { quarantineStoreFromContext } from "../quarantine/config.js";
 import { backupConfig, ledgerDbPath, resolvePath } from "./backup-config.js";
 
 const PACK_BUDGET = 6000;
-const EGRESS = { maxBytes: 1_000_000, maxTokens: 200_000, costCeiling: 1_000_000 } as const;
 
 interface Parsed { note: string; apply: boolean; dryRun: boolean }
 function parseArgs(argv: string[]): Parsed {
@@ -51,16 +50,10 @@ async function enrich(ctx: RunContext): Promise<number> {
   const now = (): string => new Date().toISOString();
   const store = openWorkflowStore({ path: ledgerDbPath(ctx) });
 
-  // Connect the egress model boundary (retrieval embed + plan generateObject).
-  let egressClient: EgressClient;
-  try {
-    egressClient = await EgressClient.connect(cfg.broker.egress_socket_path);
-  } catch (e) {
-    store.close();
-    throw new CliError({ code: "broker-unreachable", message: `the egress broker is unreachable at ${cfg.broker.egress_socket_path}`, hint: "Start the egress broker daemon.", exitCode: EXIT.CONFIG, cause: e });
-  }
+  // The in-process model boundary (retrieval embed + plan generateObject) — no egress
+  // daemon, no capability mint. The credential is resolved lazily on the first call.
   const receipts: ModelCallReceipt[] = [];
-  const models = new ModelsClient((params, signal) => egressClient.invoke(params, signal), (r) => { receipts.push(r); });
+  const models = new ModelsClient(createInProcessInvoker({ env: ctx.env }), (r) => { receipts.push(r); });
 
   try {
     const indexingCfg = { chunker_version: cfg.indexing.chunker_version, embedding_model: cfg.indexing.embedding_model, dimensions: cfg.indexing.dimensions };
@@ -69,7 +62,6 @@ async function enrich(ctx: RunContext): Promise<number> {
       models,
       model: cfg.models.generation_model,
       maxTokens: PLAN_GENERATION_MAX_TOKENS,
-      mintCapability: (correlationId) => mintEgressCapability({ runId: correlationId }, { operation: "generateObject", model: cfg.models.generation_model, maxBytes: EGRESS.maxBytes, maxTokens: EGRESS.maxTokens, costCeiling: EGRESS.costCeiling, allowedSensitivity: cfg.policies.default_sensitivity } satisfies EgressLimits),
     });
     const snapshot = await readVault(cfg);
     const noteById = new Map(snapshot.notes.map((n) => [n.id, n]));
@@ -121,7 +113,6 @@ async function enrich(ctx: RunContext): Promise<number> {
       brokerClient.close();
     }
   } finally {
-    egressClient.close();
     store.close();
   }
 }

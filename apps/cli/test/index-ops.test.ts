@@ -20,14 +20,11 @@ import { join } from "node:path";
 import * as lancedb from "@lancedb/lancedb";
 import { newRunId, type ParsedNote } from "@atlas/contracts";
 import {
-  EgressService,
-  mintEgressCapability,
-  type EgressInvokeParams,
+  ModelsClient,
+  createInProcessInvoker,
   type ProviderAdapter,
   type Usage,
-} from "@atlas/broker";
-import type { QuarantineSink } from "@atlas/scan";
-import { ModelsClient } from "@atlas/models";
+} from "@atlas/models";
 import { openStore, registerGenerationMigration, type Store } from "@atlas/sqlite-store";
 import {
   assembleRows,
@@ -69,10 +66,6 @@ function fakeEmbedAdapter(): ProviderAdapter {
     },
     costMicros: (_m, u) => u.inputTokens + 1,
   };
-}
-
-function memQuarantine(): QuarantineSink {
-  return { quarantine: () => Promise.resolve() };
 }
 
 function makeNote(id: string, body: string, hash: string): ParsedNote {
@@ -130,24 +123,9 @@ describe("index-ops — status/verify/repair/rebuild (Task 3.5)", () => {
   }
 
   function embedFor(runId: string): Embedder {
-    // A dedicated egress over the deterministic embed adapter (the harness's own adapter
-    // serves the capture path, not `embed`).
-    const egress = new EgressService({ adapter: fakeEmbedAdapter(), quarantine: memQuarantine(), capabilitySecret: h.capabilitySecret });
-    const models = new ModelsClient(
-      (params: EgressInvokeParams, signal?: AbortSignal) =>
-        egress.invoke(params, signal).then((out) => {
-          if (out.ok) return { ok: true as const, result: out.result, receipt: out.receipt };
-          if (out.providerError) return { ok: false as const, providerError: out.error, receipt: out.receipt };
-          return { ok: false as const, refusal: out.refusal, ...(out.receipt !== undefined ? { receipt: out.receipt } : {}) };
-        }),
-      () => {},
-    );
-    const cap = mintEgressCapability(
-      { runId },
-      { operation: "embed", model: CFG.embedding_model, maxBytes: 8_000_000, maxTokens: 2_000_000, costCeiling: 10_000_000, allowedSensitivity: "internal" },
-      { secret: h.capabilitySecret },
-    );
-    return embedderFromClient(models, cap, CFG);
+    // A ModelsClient over the in-process invoker driving the deterministic embed adapter.
+    const models = new ModelsClient(createInProcessInvoker({ adapter: fakeEmbedAdapter() }), () => {});
+    return embedderFromClient(models, { runId }, CFG);
   }
 
   function depsFor(notes: readonly ParsedNote[], runId: string): IndexDeps {

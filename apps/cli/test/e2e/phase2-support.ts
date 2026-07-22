@@ -8,7 +8,8 @@
  *   - a started {@link BrokerService} exposed over its REAL Unix-socket server
  *     ({@link startBrokerServer}) so every capture/audit interaction goes through the
  *     genuine {@link BrokerClient} IPC transport (protocol framing, dispatch, refusals);
- *   - a real {@link EgressService} + a {@link ModelsClient} driven over it, so a
+ *   - a {@link ModelsClient} over the in-process invoker ({@link createInProcessInvoker}
+ *     with a stubbed adapter), so a
  *     model-transmitting run's requests go through the ACTUAL model boundary (each
  *     transmission emits one receipt → one `model_calls` row) — no fabricated receipts;
  *   - a file-backed workflow store + a git-backed fixture vault + REAL AEAD backup
@@ -53,7 +54,6 @@ import {
   type AuditEvent,
   type ChangePlan,
   type ChangePlanOpName,
-  type ChangePlanOperation,
   type RiskTier,
   type RunManifest,
   type SignedAuditEvent,
@@ -61,27 +61,24 @@ import {
 import {
   BrokerClient,
   BrokerService,
-  EgressService,
   generateEd25519,
-  mintEgressCapability,
-  providerError,
   signRaw,
   startBrokerServer,
-  ProviderCallError,
   type AttestationKey,
-  type EgressInvokeParams,
-  type EgressInvokeResult,
-  type ModelCallReceipt,
-  type ProviderAdapter,
-  type Usage,
 } from "@atlas/broker";
 import {
   DurableReceiptSink,
   ModelsClient,
   buildModelCallStatement,
+  createInProcessInvoker,
   loadJournaledReceipts,
   modelCallAuditRecord,
+  providerError,
+  ProviderCallError,
+  type ModelCallReceipt,
+  type ProviderAdapter,
   type ReceiptSink,
+  type Usage,
 } from "@atlas/models";
 import {
   type LedgerBackupConfig,
@@ -122,10 +119,6 @@ export interface Phase2Harness {
   readonly service: BrokerService;
   /** The REAL broker socket path the CLI seams connect to via {@link BrokerClient}. */
   readonly socketPath: string;
-  /** The real egress service the {@link ModelsClient} transmits through (finding 5). */
-  readonly egress: EgressService;
-  /** The capability-mint secret shared with {@link egress}. */
-  readonly capabilitySecret: Buffer;
   /** The per-run durable receipt-journal dir (paired with {@link DurableReceiptSink}). */
   readonly receiptsDir: string;
   readonly attestation: AttestationKey;
@@ -154,10 +147,9 @@ class RecordingQuarantine implements QuarantineSink {
 
 /**
  * A deterministic fake provider adapter (no network) implementing the
- * serialize→transmit→parse trio the egress service drives — so the service scans the
- * EXACT serialized request bytes and the EXACT raw response bytes and produces a REAL
+ * serialize→transmit→parse trio the in-process invoker drives — so it produces a REAL
  * receipt (mirrors `@atlas/models` test harness). A model-transmitting run drives this
- * through the production {@link EgressService} + {@link ModelsClient}.
+ * through {@link createInProcessInvoker} + {@link ModelsClient}.
  */
 function fakeAdapter(): ProviderAdapter {
   return {
@@ -181,15 +173,10 @@ function fakeAdapter(): ProviderAdapter {
   };
 }
 
-/** An in-memory egress quarantine sink (never trips on the fake adapter's clean bytes). */
-function memQuarantine(): QuarantineSink {
-  return { quarantine: () => Promise.resolve() };
-}
-
 /**
  * Stand up a Phase-2 harness: a seeded git vault (two canonical Markdown notes + a
  * non-Markdown asset), a started `BrokerService` EXPOSED OVER ITS REAL SOCKET SERVER,
- * a real `EgressService`, a migrated workflow store, and an AEAD backup config whose
+ * a migrated workflow store, and an AEAD backup config whose
  * key is ALSO provisioned in the production custody test seam so `backupConfig(ctx)`
  * resolves the identical key.
  */
@@ -279,10 +266,6 @@ export async function makePhase2Harness(): Promise<Phase2Harness> {
   writeFileSync(join(custodyDir, `${CAPABILITY_KEY_ID}.key`), Buffer.from(backupKey).toString("base64"), "utf8");
   const backup: LedgerBackupConfig = { dir: backupDir, key: backupKey, keyId: CAPABILITY_KEY_ID, keep: 10 };
 
-  // The real egress service (fake adapter, no network) the ModelsClient transmits through.
-  const capabilitySecret = randomBytes(32);
-  const egress = new EgressService({ adapter: fakeAdapter(), quarantine: memQuarantine(), capabilitySecret });
-
   // Migrate the ledger up front (0001 core + 0003 provenance + 0006 idempotency).
   {
     const store = openWorkflowStore({ path: dbPath });
@@ -311,8 +294,6 @@ export async function makePhase2Harness(): Promise<Phase2Harness> {
     anchorPath,
     service,
     socketPath,
-    egress,
-    capabilitySecret,
     receiptsDir,
     attestation,
     backup,
@@ -891,8 +872,8 @@ export interface ModelTransmittingRun {
  *   1. `startRun` (`run.started`) → `checkpoint("planned")` (`run.planned`) through the
  *      production workflow engine.
  *   2. Transmit to the model N times through the PRODUCTION model boundary
- *      ({@link ModelsClient} over the real {@link EgressService}), each call minting a
- *      real egress capability and each transmission emitting ONE receipt through a
+ *      ({@link ModelsClient} over the in-process invoker), each call binding to the run
+ *      and each transmission emitting ONE receipt through a
  *      {@link DurableReceiptSink} (one durable `model_calls` intent per transmission).
  *   3. The run FAILS (Phase 2 cannot integrate a model-derived synthesis): terminate
  *      through the PRODUCTION workflow API `RunHandle.fail()`, folding all N receipts'
@@ -905,13 +886,7 @@ export async function driveModelTransmittingRun(h: Phase2Harness, transmissions 
   const client = await BrokerClient.connect(h.socketPath);
   const now = (): string => FIXED_NOW;
   const receiptSink: ReceiptSink = new DurableReceiptSink(h.receiptsDir).sink;
-  const models = new ModelsClient((params: EgressInvokeParams, signal?: AbortSignal): Promise<EgressInvokeResult> => {
-    return h.egress.invoke(params, signal).then((out) => {
-      if (out.ok) return { ok: true, result: out.result, receipt: out.receipt };
-      if (out.providerError) return { ok: false, providerError: out.error, receipt: out.receipt };
-      return { ok: false, refusal: out.refusal, ...(out.receipt !== undefined ? { receipt: out.receipt } : {}) };
-    });
-  }, receiptSink);
+  const models = new ModelsClient(createInProcessInvoker({ adapter: fakeAdapter() }), receiptSink);
   try {
     const base = h.git(["rev-parse", CANONICAL_REF]);
     const deps: WorkflowDeps = { store, broker: client, backup: h.backup, repo: h.repo(), now };
@@ -927,15 +902,10 @@ export async function driveModelTransmittingRun(h: Phase2Harness, transmissions 
       baseRef: base,
     });
 
-    // ── Transmit N times through the REAL model boundary. Each call mints a fresh
-    // capability BOUND to this run and emits exactly one receipt via the sink.
+    // ── Transmit N times through the REAL in-process model boundary. Each call binds
+    // to this run and emits exactly one receipt via the sink.
     for (let i = 0; i < transmissions; i++) {
-      const cap = mintEgressCapability(
-        { runId },
-        { operation: "generateText", model: MODEL, maxBytes: 100_000, maxTokens: 100_000, costCeiling: 100_000, allowedSensitivity: "restricted" },
-        { secret: h.capabilitySecret },
-      );
-      await models.generateText({ model: MODEL, prompt: { ref: `p@${i}` }, input: `transmission ${i}`, maxTokens: 16 }, cap);
+      await models.generateText({ model: MODEL, prompt: { ref: `p@${i}` }, input: `transmission ${i}`, maxTokens: 16 }, { runId });
     }
 
     // Load the DURABLY-journaled receipts (one per transmission) and fold them into

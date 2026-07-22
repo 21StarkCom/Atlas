@@ -17,7 +17,7 @@
  */
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";
-import type { ModelCallReceipt } from "@atlas/broker";
+import type { ModelCallReceipt } from "./types.js";
 import { finalizeLedgerWrite, type Store, type AuditBroker, type FinalizeResult } from "@atlas/sqlite-store";
 import type { ReceiptSink } from "./types.js";
 import { persistModelCalls, type PersistModelCallsOptions } from "./ledger.js";

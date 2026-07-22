@@ -18,9 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as lancedb from "@lancedb/lancedb";
 import { newRunId, type ChangePlan, type ParsedNote } from "@atlas/contracts";
-import { EgressService, mintEgressCapability, type EgressInvokeParams, type ProviderAdapter, type Usage } from "@atlas/broker";
-import type { QuarantineSink } from "@atlas/scan";
-import { ModelsClient, setCapabilityMintSecretResolver, type EgressLimits, type ModelCallReceipt } from "@atlas/models";
+import { ModelsClient, createInProcessInvoker, type ModelCallReceipt, type ProviderAdapter, type Usage } from "@atlas/models";
 import { openStore, registerGenerationMigration, type Store } from "@atlas/sqlite-store";
 import { assembleRows, chunkNote, generationId, indexingConfigKey, openSearchTable, writeGeneration, type IndexingConfig, type SearchTable } from "@atlas/lancedb-index";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -66,20 +64,9 @@ function fakeEmbedObjectAdapter(): ProviderAdapter {
   };
 }
 
-function memQuarantine(): QuarantineSink {
-  return { quarantine: () => Promise.resolve() };
-}
-function modelsOver(egress: EgressService): { models: ModelsClient; receipts: ModelCallReceipt[] } {
+function modelsOver(adapter: ProviderAdapter): { models: ModelsClient; receipts: ModelCallReceipt[] } {
   const receipts: ModelCallReceipt[] = [];
-  const models = new ModelsClient(
-    (params: EgressInvokeParams, signal?: AbortSignal) =>
-      egress.invoke(params, signal).then((out) => {
-        if (out.ok) return { ok: true as const, result: out.result, receipt: out.receipt };
-        if (out.providerError) return { ok: false as const, providerError: out.error, receipt: out.receipt };
-        return { ok: false as const, refusal: out.refusal, ...(out.receipt !== undefined ? { receipt: out.receipt } : {}) };
-      }),
-    (r: ModelCallReceipt) => { receipts.push(r); },
-  );
+  const models = new ModelsClient(createInProcessInvoker({ adapter }), (r: ModelCallReceipt) => { receipts.push(r); });
   return { models, receipts };
 }
 
@@ -98,10 +85,6 @@ describe("enrich.e2e — retrieval-first plan over a real index + egress (Task 4
 
   beforeEach(async () => {
     h = await makePhase2Harness();
-    // Route makeRetrieveSeam's internally-minted embed capability through the harness secret
-    // (the command relies on the same shared resolver in production).
-    setCapabilityMintSecretResolver(() => h.capabilitySecret);
-
     store = openStore({ path: h.dbPath });
     registerGenerationMigration(store);
     store.migrate();
@@ -124,7 +107,6 @@ describe("enrich.e2e — retrieval-first plan over a real index + egress (Task 4
   });
 
   afterEach(async () => {
-    setCapabilityMintSecretResolver(); // restore the default resolver
     store.close();
     await h.cleanup();
     if (dir) await rm(dir, { recursive: true, force: true });
@@ -142,7 +124,7 @@ describe("enrich.e2e — retrieval-first plan over a real index + egress (Task 4
 
   it("previewSynthesis('enrich') grounds on the real index, generates + validates a ChangePlan, and materializes a patch — no sinks touched", async () => {
     const canonicalBefore = h.git(["rev-parse", "refs/heads/main"]);
-    const { models, receipts } = modelsOver(new EgressService({ adapter: fakeEmbedObjectAdapter(), quarantine: memQuarantine(), capabilitySecret: h.capabilitySecret }));
+    const { models, receipts } = modelsOver(fakeEmbedObjectAdapter());
     const runId = newRunId();
 
     const retrieve = await makeRetrieveSeam({
@@ -152,7 +134,6 @@ describe("enrich.e2e — retrieval-first plan over a real index + egress (Task 4
     });
     const generatePlan = makeModelPlanGenerator({
       models, model: GEN_MODEL, maxTokens: 4096,
-      mintCapability: (cid) => mintEgressCapability({ runId: cid }, { operation: "generateObject", model: GEN_MODEL, maxBytes: 1_000_000, maxTokens: 200_000, costCeiling: 1_000_000, allowedSensitivity: "internal" } satisfies EgressLimits, { secret: h.capabilitySecret }),
     });
     const note = alphaNote();
     const deps: SynthesisPlanDeps = {

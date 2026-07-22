@@ -1,17 +1,26 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { DEFAULT_PROMPT_REGISTRY, PROMPT_REFS } from "@atlas/broker";
+import { DEFAULT_PROMPT_REGISTRY, PROMPT_REFS } from "@atlas/models";
+import {
+  DEFAULT_PROMPT_REGISTRY as BROKER_PROMPT_REGISTRY,
+  PROMPT_REFS as BROKER_PROMPT_REFS,
+} from "@atlas/broker";
 import { findRepoRoot } from "./cli-contract.js";
 
 /**
  * #210 — prompt-ref drift gate. The CLI once sent the hand-typed ref
- * "synthesis-plan" that no egress registry entry backed, so every synthesis
- * command (enrich/reconcile/maintain/git refresh) died at the FIRST live daemon
+ * "synthesis-plan" that no registry entry backed, so every synthesis command
+ * (enrich/reconcile/maintain/git refresh) died at the FIRST live provider call
  * with `unknown prompt reference` while the in-process suites (which stub the
  * plan generator) stayed green. This test binds the two sides at CI time:
- * every ref the CLI can send must resolve in the egress DEFAULT_PROMPT_REGISTRY,
- * and call sites must go through the PROMPT_REFS SSOT, never a string literal.
+ * every ref the CLI can send must resolve in the PRODUCTION registry, and call
+ * sites must go through the PROMPT_REFS SSOT, never a string literal.
+ *
+ * Post the Phase-2 in-process cutover the production prompt registry is the
+ * in-process `@atlas/models` one the runtime adapter resolves against — NOT the
+ * (now vestigial, Phase-3-deleted) `@atlas/broker` copy. Targeting the broker copy
+ * would let the gate pass while the runtime registry rejects a CLI prompt.
  */
 
 const root = findRepoRoot();
@@ -105,6 +114,22 @@ describe("prompt-ref drift (#210)", () => {
     for (const file of cliSourceFiles()) {
       const src = readFileSync(file, "utf8");
       expect(src.includes('"synthesis-plan"'), `${file} contains the unregistered bare ref "synthesis-plan"`).toBe(false);
+    }
+  });
+
+  // The runtime provider path resolves prompts against @atlas/models (above). The
+  // @atlas/broker copy is now a vestigial compatibility shim (Phase-3-deleted) and
+  // cannot import @atlas/models without pulling @atlas/sqlite-store into the
+  // ledger-free broker (invariant #2). So this gate mechanically DERIVES the broker
+  // copy from the models SSOT: any divergence in refs or content fails CI, which
+  // keeps the two byte-identical until the broker copy is deleted — a stale broker
+  // copy can never silently mask a runtime rejection.
+  it("the @atlas/broker prompt registry is byte-identical to the @atlas/models SSOT (no divergence)", () => {
+    expect(BROKER_PROMPT_REFS, "@atlas/broker PROMPT_REFS drifted from @atlas/models").toEqual(PROMPT_REFS);
+    for (const ref of Object.values(PROMPT_REFS)) {
+      const models = DEFAULT_PROMPT_REGISTRY.resolve(ref);
+      const broker = BROKER_PROMPT_REGISTRY.resolve(ref);
+      expect(broker?.content, `@atlas/broker content for ${ref} drifted from @atlas/models`).toBe(models?.content);
     }
   });
 });

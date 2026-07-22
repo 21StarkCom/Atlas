@@ -12,7 +12,8 @@
   },
   "dependencies": {
     "@atlas/broker": "workspace:*",
-    "@atlas/contracts": "workspace:*"
+    "@atlas/contracts": "workspace:*",
+    "@atlas/models": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "catalog:",

@@ -25,8 +25,7 @@ import {
   type EvalQuerySet,
   type RetrievalEvalResult,
 } from "@atlas/lancedb-index";
-import { ModelsClient } from "@atlas/models";
-import { EgressClient, EgressRefusal } from "@atlas/broker";
+import { ModelsClient, createInProcessInvoker, EgressRefusal } from "@atlas/models";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { openMigratedStore } from "./store-open.js";
@@ -202,20 +201,8 @@ async function indexEvalCmd(ctx: RunContext): Promise<number> {
     throw e;
   }
 
-  let egress: EgressClient;
-  try {
-    egress = await EgressClient.connect(cfg.broker.egress_socket_path);
-  } catch (e) {
-    store.close();
-    throw new CliError({
-      code: "broker-unreachable",
-      message: `the egress broker is unreachable at ${cfg.broker.egress_socket_path}`,
-      hint: "Start the egress broker daemon (provisioning/bin/egress-launcher.sh) before `brain index eval`.",
-      exitCode: EXIT.CONFIG,
-      cause: e,
-    });
-  }
-  const models = new ModelsClient((params, signal) => egress.invoke(params, signal), () => {});
+  // The in-process model boundary (no egress daemon, no capability mint).
+  const models = new ModelsClient(createInProcessInvoker({ env: ctx.env }), () => {});
 
   try {
     const runId = ctx.runId; // ONE id: egress capability + audit event + logs (query.ts pattern)
@@ -294,7 +281,6 @@ async function indexEvalCmd(ctx: RunContext): Promise<number> {
       );
     return out.pass ? EXIT.OK : EXIT.VALIDATION;
   } finally {
-    egress.close();
     store.close();
   }
 }

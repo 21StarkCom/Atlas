@@ -21,16 +21,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as lancedb from "@lancedb/lancedb";
 import { newRunId, type ParsedNote } from "@atlas/contracts";
+import { BrokerClient } from "@atlas/broker";
 import {
-  BrokerClient,
-  EgressService,
-  mintEgressCapability,
-  type EgressInvokeParams,
+  ModelsClient,
+  createInProcessInvoker,
+  type ModelCallReceipt,
   type ProviderAdapter,
   type Usage,
-} from "@atlas/broker";
-import type { QuarantineSink } from "@atlas/scan";
-import { ModelsClient, type ModelCallReceipt } from "@atlas/models";
+} from "@atlas/models";
 import { openStore, registerGenerationMigration, type Store } from "@atlas/sqlite-store";
 import {
   assembleRows,
@@ -81,24 +79,12 @@ function fakeEmbedGenAdapter(answer: string, finishReason?: string): ProviderAda
   };
 }
 
-function memQuarantine(): QuarantineSink {
-  return { quarantine: () => Promise.resolve() };
-}
-
-/** Build a ModelsClient over an in-process EgressService, collecting every receipt. */
-function modelsOver(egress: EgressService): { models: ModelsClient; receipts: ModelCallReceipt[] } {
+/** Build a ModelsClient over the in-process invoker, collecting every receipt. */
+function modelsOver(adapter: ProviderAdapter): { models: ModelsClient; receipts: ModelCallReceipt[] } {
   const receipts: ModelCallReceipt[] = [];
-  const models = new ModelsClient(
-    (params: EgressInvokeParams, signal?: AbortSignal) =>
-      egress.invoke(params, signal).then((out) => {
-        if (out.ok) return { ok: true as const, result: out.result, receipt: out.receipt };
-        if (out.providerError) return { ok: false as const, providerError: out.error, receipt: out.receipt };
-        return { ok: false as const, refusal: out.refusal, ...(out.receipt !== undefined ? { receipt: out.receipt } : {}) };
-      }),
-    (r: ModelCallReceipt) => {
-      receipts.push(r);
-    },
-  );
+  const models = new ModelsClient(createInProcessInvoker({ adapter }), (r: ModelCallReceipt) => {
+    receipts.push(r);
+  });
   return { models, receipts };
 }
 
@@ -173,18 +159,13 @@ describe("query.audit-readonly — audited Tier-0 read (Task 3.4)", () => {
   const noteMeta = (): NoteMeta => ({ type: "concept", sensitivity: "internal", trust: "verified" });
 
   function retrievalDeps(models: ModelsClient, runId: string): Omit<RetrievalDeps, "recorder" | "runId"> {
-    const embedCap = mintEgressCapability(
-      { runId },
-      { operation: "embed", model: CFG.embedding_model, maxBytes: 1_000_000, maxTokens: 100_000, costCeiling: 1_000_000, allowedSensitivity: "internal" },
-      { secret: h.capabilitySecret },
-    );
     return {
       config: { rrf: { k: 60, weights: { fts: 1, vector: 1 } }, fts: { enabled: false } },
       resolver,
       table,
       activeGenerationIds: () => store.generation.activeGenerationIds(),
       activeGenerationId: (id) => store.generation.activeGenerationId(id),
-      embed: embedderFromClient(models, embedCap, CFG),
+      embed: embedderFromClient(models, { runId }, CFG),
       noteMeta,
       indexGeneration: store.generation.configRevisionFor(indexingConfigKey(CFG)),
       newRetrievalId: () => `rr-${runId}`,
@@ -193,17 +174,9 @@ describe("query.audit-readonly — audited Tier-0 read (Task 3.4)", () => {
   }
 
   function generateWith(models: ModelsClient, runId: string): QueryExecDeps["generate"] {
-    // Mirror production (F4): the capability's `allowedSensitivity` ceiling AND the
-    // transmission's declared sensitivity are both bound to the effective sensitivity
-    // handed in by `executeQuery`.
-    return (input, declaredSensitivity) => {
-      const cap = mintEgressCapability(
-        { runId },
-        { operation: "generateText", model: GEN_MODEL, maxBytes: 1_000_000, maxTokens: 100_000, costCeiling: 1_000_000, allowedSensitivity: declaredSensitivity },
-        { secret: h.capabilitySecret },
-      );
-      return models.generateText({ model: GEN_MODEL, prompt: { ref: "prompts/synthesize@1" }, input, maxTokens: 256 }, cap, { declaredSensitivity });
-    };
+    // The transmission binds to the run id (no capability mint).
+    return (input) =>
+      models.generateText({ model: GEN_MODEL, prompt: { ref: "prompts/synthesize@1" }, input, maxTokens: 256 }, { runId });
   }
 
   function ledgerCounts(runId: string): Record<string, number> {
@@ -219,7 +192,7 @@ describe("query.audit-readonly — audited Tier-0 read (Task 3.4)", () => {
 
   it("an answered query records exactly one run.readonly + complete correlated rows; no canonical/worktree mutation", async () => {
     const canonicalBefore = h.git(["rev-parse", "refs/heads/main"]);
-    const { models, receipts } = modelsOver(new EgressService({ adapter: fakeEmbedGenAdapter("Meridian is discussed in [[alpha]]."), quarantine: memQuarantine(), capabilitySecret: h.capabilitySecret }));
+    const { models, receipts } = modelsOver(fakeEmbedGenAdapter("Meridian is discussed in [[alpha]]."));
     const runId = newRunId();
 
     const exec = await executeQuery({
@@ -229,7 +202,6 @@ describe("query.audit-readonly — audited Tier-0 read (Task 3.4)", () => {
       generate: generateWith(models, runId),
       getReceipts: () => receipts,
       packBudget: 6000,
-      baseSensitivity: "internal",
       now: NOW,
     });
 
@@ -282,8 +254,7 @@ describe("query.audit-readonly — audited Tier-0 read (Task 3.4)", () => {
   });
 
   it("a non-STOP finish surfaces `truncated: true`; STOP/absent stays clean (#211)", async () => {
-    const cut = new EgressService({ adapter: fakeEmbedGenAdapter("cut answ [[alpha", "MAX_TOKENS"), quarantine: memQuarantine(), capabilitySecret: h.capabilitySecret });
-    const { models } = modelsOver(cut);
+    const { models } = modelsOver(fakeEmbedGenAdapter("cut answ [[alpha", "MAX_TOKENS"));
     const runId = newRunId();
     const exec = await executeQuery({
       runId,
@@ -292,13 +263,11 @@ describe("query.audit-readonly — audited Tier-0 read (Task 3.4)", () => {
       generate: generateWith(models, runId),
       getReceipts: () => [],
       packBudget: 6000,
-      baseSensitivity: "internal",
       now: NOW,
     });
     expect(exec.output.truncated).toBe(true);
 
-    const clean = new EgressService({ adapter: fakeEmbedGenAdapter("done [[alpha]].", "STOP"), quarantine: memQuarantine(), capabilitySecret: h.capabilitySecret });
-    const { models: models2 } = modelsOver(clean);
+    const { models: models2 } = modelsOver(fakeEmbedGenAdapter("done [[alpha]].", "STOP"));
     const runId2 = newRunId();
     const exec2 = await executeQuery({
       runId: runId2,
@@ -307,14 +276,13 @@ describe("query.audit-readonly — audited Tier-0 read (Task 3.4)", () => {
       generate: generateWith(models2, runId2),
       getReceipts: () => [],
       packBudget: 6000,
-      baseSensitivity: "internal",
       now: NOW,
     });
     expect(exec2.output.truncated).toBeUndefined();
   });
 
   it("--no-answer STILL records the embed model_call (every provider call accounted), and no generation row", async () => {
-    const { models, receipts } = modelsOver(new EgressService({ adapter: fakeEmbedGenAdapter("unused"), quarantine: memQuarantine(), capabilitySecret: h.capabilitySecret }));
+    const { models, receipts } = modelsOver(fakeEmbedGenAdapter("unused"));
     const runId = newRunId();
 
     const exec = await executeQuery({
@@ -324,7 +292,6 @@ describe("query.audit-readonly — audited Tier-0 read (Task 3.4)", () => {
       generate: generateWith(models, runId),
       getReceipts: () => receipts,
       packBudget: 6000,
-      baseSensitivity: "internal",
       now: NOW,
     });
 
@@ -373,18 +340,11 @@ describe("query.audit-readonly — audited Tier-0 read (Task 3.4)", () => {
   });
 
   it("F3: a transmission that happened before a failure is STILL accounted — model_calls under a run.failed terminal, verify-clean", async () => {
-    const { models, receipts } = modelsOver(
-      new EgressService({ adapter: fakeEmbedGenAdapter("unused"), quarantine: memQuarantine(), capabilitySecret: h.capabilitySecret }),
-    );
+    const { models, receipts } = modelsOver(fakeEmbedGenAdapter("unused"));
     const runId = newRunId();
-    const embedCap = mintEgressCapability(
-      { runId },
-      { operation: "embed", model: CFG.embedding_model, maxBytes: 1_000_000, maxTokens: 100_000, costCeiling: 1_000_000, allowedSensitivity: "internal" },
-      { secret: h.capabilitySecret },
-    );
-    // Two real transmissions reach the broker (each emits a receipt) before the failure.
-    await models.embed({ texts: ["meridian"], dimensions: DIMS, model: CFG.embedding_model }, embedCap);
-    await models.embed({ texts: ["again"], dimensions: DIMS, model: CFG.embedding_model }, embedCap);
+    // Two real transmissions reach the provider (each emits a receipt) before the failure.
+    await models.embed({ texts: ["meridian"], dimensions: DIMS, model: CFG.embedding_model }, { runId });
+    await models.embed({ texts: ["again"], dimensions: DIMS, model: CFG.embedding_model }, { runId });
     expect(receipts).toHaveLength(2);
 
     await recordFailedTransmissions(h.runContext(), store, runId, receipts, "provider exploded", NOW);

@@ -224,9 +224,6 @@ importers:
 
   packages/models:
     dependencies:
-      '@atlas/broker':
-        specifier: workspace:*
-        version: link:../broker
       '@atlas/contracts':
         specifier: workspace:*
         version: link:../contracts
@@ -237,9 +234,6 @@ importers:
         specifier: 'catalog:'
         version: 3.25.76
     devDependencies:
-      '@atlas/scan':
-        specifier: workspace:*
-        version: link:../scan
       '@atlas/testing':
         specifier: workspace:*
         version: link:../testing
@@ -342,6 +336,9 @@ importers:
       '@atlas/contracts':
         specifier: workspace:*
         version: link:../packages/contracts
+      '@atlas/models':
+        specifier: workspace:*
+        version: link:../packages/models
     devDependencies:
       '@atlas/sqlite-store':
         specifier: workspace:*

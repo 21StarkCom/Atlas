@@ -8,17 +8,13 @@
  */
 import * as lancedb from "@lancedb/lancedb";
 import { openSearchTable, embedderFromClient, indexingConfigKey, type SearchTable, type IndexingConfig } from "@atlas/lancedb-index";
-import { mintEgressCapability, ModelsClient, type EgressLimits } from "@atlas/models";
+import { ModelsClient } from "@atlas/models";
 import { newRunId } from "@atlas/contracts";
 import type { Store } from "@atlas/sqlite-store";
 import { CliError, EXIT } from "../errors/envelope.js";
 import { resolvePath } from "../commands/backup-config.js";
 import type { RunContext } from "../handlers.js";
 import { retrieve, type IdentityResolver, type NoteMeta, type RetrievalDeps, type RetrievalResult } from "./layers.js";
-
-const EGRESS_MAX_BYTES = 1_000_000;
-const EGRESS_MAX_TOKENS = 200_000;
-const EGRESS_COST_CEILING = 1_000_000;
 
 /** The projection-backed identity resolver (id / slug / alias). */
 export function storeResolver(store: Store): IdentityResolver {
@@ -76,8 +72,8 @@ export interface RetrieveSeamDeps {
  */
 export async function makeRetrieveSeam(deps: RetrieveSeamDeps): Promise<(query: { text: string; k?: number; filters?: { type?: string } }) => Promise<RetrievalResult>> {
   const table = await openTableForCtx(deps.ctx, deps.indexingCfg);
-  const embedLimits: EgressLimits = { operation: "embed", model: deps.indexingCfg.embedding_model, maxBytes: EGRESS_MAX_BYTES, maxTokens: EGRESS_MAX_TOKENS, costCeiling: EGRESS_COST_CEILING, allowedSensitivity: "internal" };
-  const embed = embedderFromClient(deps.models, mintEgressCapability({ runId: deps.runId }, embedLimits), deps.indexingCfg);
+  // The embed transmission binds to the run id (no capability mint).
+  const embed = embedderFromClient(deps.models, { runId: deps.runId }, deps.indexingCfg);
   const base: Omit<RetrievalDeps, "recorder" | "runId"> = {
     config: { rrf: deps.rrf, fts: deps.fts },
     resolver: storeResolver(deps.store),
