@@ -1015,8 +1015,13 @@ describe("Phase-4 workflow-risk-contract (Task 4.0)", () => {
     const declared = [...mutationPolicy.ops.map((o: { op: string }) => o.op)].sort();
     // no duplicate op rows
     expect(declared.length).toBe(new Set(declared).size);
-    // equals the @atlas/contracts SSOT of op discriminants (15 active + 2 reserved)
+    // equals the @atlas/contracts SSOT of op discriminants (13 active + 2 reserved
+    // task ops = the finalized 15; the trust ops were retired in v2)
     expect(declared).toEqual([...CHANGE_PLAN_OPS].sort());
+    // the retired trust ops must be absent from the policy table
+    for (const retired of ["PromoteTrust", "RevokeTrust"]) {
+      expect(declared).not.toContain(retired);
+    }
     // and the invented ops the round-2 finding flagged are absent
     for (const bogus of ["AddFrontmatterField", "UpdateFrontmatterField", "AddLink", "RemoveLink"]) {
       expect(declared).not.toContain(bogus);
@@ -1035,7 +1040,7 @@ describe("Phase-4 workflow-risk-contract (Task 4.0)", () => {
     }
   });
 
-  it("the load-bearing invariants hold: sources immutable (except trust), decisions never in-place-replace, reserved denied", () => {
+  it("the load-bearing invariants hold: sources immutable, decisions never in-place-replace, reserved denied", () => {
     const byOp = new Map(
       (mutationPolicy.ops as { op: string; policy: Record<string, string> }[]).map((o) => [o.op, o.policy]),
     );
@@ -1043,10 +1048,12 @@ describe("Phase-4 workflow-risk-contract (Task 4.0)", () => {
     for (const op of ["CreateNote", "UpdateSection", "AppendSection", "SetFrontmatterField", "SetLink", "CreateClaim"]) {
       expect(byOp.get(op)!.source, `${op} on source`).toBe("immutable");
     }
-    // trust ops are the sole source-touching ops (review), immutable elsewhere
-    for (const op of ["PromoteTrust", "RevokeTrust"]) {
-      expect(byOp.get(op)!.source, `${op} on source`).toBe("review");
-      expect(byOp.get(op)!.concept, `${op} on concept`).toBe("immutable");
+    // the trust ops were retired in v2 — no policy row touches a source as `review`
+    for (const retired of ["PromoteTrust", "RevokeTrust"]) {
+      expect(byOp.has(retired), `${retired} must be absent`).toBe(false);
+    }
+    for (const [op, policy] of byOp) {
+      expect(policy.source, `${op} on source`).not.toBe("review");
     }
     // reserved task ops are reserved for every target type
     for (const op of ["CreateTask", "UpdateTaskState"]) {

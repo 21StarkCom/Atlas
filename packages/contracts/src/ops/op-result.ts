@@ -21,7 +21,7 @@ import { parseSourceHandle } from "../ids.js";
  * `contracts.operations.test` fixture matrix are both checked against, so a new
  * op cannot be added to one without the other.
  *
- * 17 operations total (plan Task 2.0): 15 active + the 2 reserved task ops.
+ * 15 operations total (v2 contract demolition): 13 active + the 2 reserved task ops.
  * `ProposeDelete` is intentionally NOT part of this gate — it is the Tier-3
  * deletion-*proposal* op the Phase-4 `maintain`/`reconcile` loop emits and is
  * gated with that phase (its op file is not in the Task 2.0 file list).
@@ -40,8 +40,6 @@ export const CHANGE_PLAN_OPS = [
   "ProposeMerge",
   "ProposeRename",
   "ProposeArchive",
-  "PromoteTrust",
-  "RevokeTrust",
   // reserved forward-compatible surface (schemas ship + validate; policy-rejected in V1)
   "CreateTask",
   "UpdateTaskState",
@@ -159,7 +157,11 @@ export const RELATIONSHIP_PREDICATES = [
 export type RelationshipPredicate = (typeof RELATIONSHIP_PREDICATES)[number];
 export const RelationshipPredicate = z.enum(RELATIONSHIP_PREDICATES);
 
-/** Trust levels a source capture can hold (spec: `PromoteTrust`/`RevokeTrust`). */
+/**
+ * Trust levels a source capture can hold. The mutating trust ChangePlan ops were
+ * retired in v2 (contract demolition); this enum survives only for the read-only
+ * trust surface (`source trust show`) still consumed by the CLI.
+ */
 export const TRUST_LEVELS = ["untrusted", "provisional", "trusted", "authoritative"] as const;
 export type TrustLevel = (typeof TRUST_LEVELS)[number];
 export const TrustLevel = z.enum(TRUST_LEVELS);

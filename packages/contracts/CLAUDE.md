@@ -2,7 +2,7 @@
 
 **Zero-dependency (Zod-only) leaf** owning every value/type that must serialize
 **byte-identically across the CLI ↔ broker process boundary**: stable IDs, canonical
-serialization, the identity-key algorithm, the ChangePlan envelope + all 17 op payloads,
+serialization, the identity-key algorithm, the ChangePlan envelope + all 15 op payloads,
 the run manifest, the audit/WORM/signer/authorization Zod mirrors, the provider-error
 taxonomy, the `generateObject` schema registry, the note-type registry, and the shared
 cross-boundary DTOs (D14).
@@ -44,11 +44,11 @@ see guardrails). `private`, `version 0.0.0`, ESM, single export `.` → `dist/` 
 - `primitives.ts` — shared string-shape Zod: `Ulid`, `OpaqueId`, `CommitHash` (SHA-1),
   `Rfc3339Ms`, `Nonce`, `Ed25519Sig`/`Ed25519PubKey`, `Sha256Digest`, `SchemaVersion1`.
 - `changeplan-envelope.ts` / `changeplan.ts` — stable Phase-1 wrapper + `RISK_TIERS`;
-  `ChangePlanSchema` = `.strict()` envelope over the discriminated union of all 17 ops, with a
+  `ChangePlanSchema` = `.strict()` envelope over the discriminated union of all 15 ops, with a
   load-time coverage invariant + a `superRefine` cross-field dispatcher.
-- `ops/op-result.ts` — cross-op primitives: `CHANGE_PLAN_OPS` (SSOT list of 17 names),
+- `ops/op-result.ts` — cross-op primitives: `CHANGE_PLAN_OPS` (SSOT list of 15 names),
   `RESERVED_OPS`, the enums, the generic `OpResult<Name,ErrorCode>` envelope.
-- `ops/*` (14 files, barrel `ops/index.ts`) — one file per op-group. Each exports
+- `ops/*` (13 files, barrel `ops/index.ts`) — one file per op-group. Each exports
   `<Op>OpSchema`, `<OP>_ERROR_CODES`, `<Op>Result`.
 - `schema-registry.ts` — `SCHEMA_REGISTRY` (`schemaId`→Zod) + `resolveRegisteredSchema`. A Zod
   schema can't cross IPC, so `generateObject` carries a `schemaId` string both sides resolve
@@ -75,8 +75,8 @@ see guardrails). `private`, `version 0.0.0`, ESM, single export `.` → `dist/` 
 - **`ChangePlanSchema` is `.strict()` at BOTH envelope and payload levels (R3-F2).** An unknown
   key is a hard rejection, never silently stripped — a stripped stowaway would make the two seam
   processes disagree on canonical bytes.
-- **Load-time union-coverage invariant** (`changeplan.ts:78-87`): the union must cover *exactly*
-  the 17 `CHANGE_PLAN_OPS` names — a mismatch throws at module load, not a silent gap. Adding or
+- **Load-time union-coverage invariant** (`changeplan.ts`): the union must cover *exactly*
+  the 15 `CHANGE_PLAN_OPS` names — a mismatch throws at module load, not a silent gap. Adding or
   removing an op means updating `CHANGE_PLAN_OPS` **and** the union together.
 - **Canonical rules** (`canonical.ts`, pinned by `contracts.canonical.test.ts`): UTF-8 no BOM;
   keys normalized to **NFC before sorting** (sort-then-normalize orders differently across

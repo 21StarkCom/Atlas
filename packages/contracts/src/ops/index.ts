@@ -17,5 +17,4 @@ export * from "./evidence.js";
 export * from "./merge.js";
 export * from "./rename.js";
 export * from "./archive.js";
-export * from "./trust.js";
 export * from "./task.js";

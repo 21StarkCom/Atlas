@@ -10,16 +10,12 @@
  * throws a typed {@link OperationForbiddenError} (exit 1) — it never returns a
  * boolean a caller could forget to check.
  *
- * Classification of the 17 `ChangePlanOperation`s (contracts `CHANGE_PLAN_OPS`):
+ * Classification of the 15 `ChangePlanOperation`s (contracts `CHANGE_PLAN_OPS`).
+ * The two trust-ledger ops (`PromoteTrust`/`RevokeTrust`) were retired in v2
+ * (contract demolition) — there is no `trust` operation class any more.
  *   - `capture`   — source-lifecycle maintenance over already-captured sources
  *     (deterministic, operator-authorized; NOT model synthesis). Allowed in Phase 2.
  *     Ordinary source *capture* is a deterministic non-`ChangePlan` path.
- *   - `trust`     — the trust-ledger ops (`PromoteTrust`/`RevokeTrust`). Their owning
- *     contract (`@atlas/contracts` ops/trust.ts) marks EXECUTION as a privileged,
- *     broker-authorized change at PHASE-4 time — so, like synthesis, they are
- *     FORBIDDEN in Phase 2 (fail-closed) and permitted (tier-gated) in Phase 4. They
- *     are NOT `capture`: classifying them as capture let Phase 2 execute a Phase-4-only
- *     privileged trust mutation (the finding).
  *   - `synthesis` — every model-derivable knowledge mutation. FORBIDDEN in Phase 2
  *     (fail-closed), permitted (tier-gated) in Phase 4.
  *   - `reserved`  — the forward-compatible task ops. FORBIDDEN in every phase.
@@ -36,7 +32,7 @@ import {
 } from "@atlas/contracts";
 
 /** The operation classes the gate branches on (single source for Phase 2 + 4). */
-export type OperationClass = "capture" | "projection" | "synthesis" | "trust" | "reserved";
+export type OperationClass = "capture" | "projection" | "synthesis" | "reserved";
 
 /** The phase whose allowlist is being enforced (2 = ingest; 4 = synthesis/integration). */
 export type GatePhase = 2 | 4;
@@ -48,10 +44,6 @@ export type GatePhase = 2 | 4;
  * newly-added op is refused until it is deliberately classified.
  */
 const OPERATION_CLASS: Readonly<Record<ChangePlanOpName, OperationClass>> = {
-  // Trust-ledger ops — privileged, broker-authorized, EXECUTION PHASE-4-ONLY per
-  // their owning contract (ops/trust.ts). Rejected in Phase 2 (fail-closed).
-  PromoteTrust: "trust",
-  RevokeTrust: "trust",
   // Model-derivable knowledge mutations — synthesis.
   CreateNote: "synthesis",
   UpdateSection: "synthesis",
@@ -104,15 +96,15 @@ export class OperationForbiddenError extends Error {
 
 /**
  * Assert an operation is permitted in `phase`, throwing {@link OperationForbiddenError}
- * otherwise. Phase 2: `capture`/`projection` allowed, `synthesis` AND `trust`
- * fail-closed, `reserved` always rejected. Phase 4: everything except `reserved`
- * allowed here (Phase-4 tier gating layers ON TOP of this same owner — it does not
- * relax the reserved rejection).
+ * otherwise. Phase 2: `capture`/`projection` allowed, `synthesis` fail-closed,
+ * `reserved` always rejected. Phase 4: everything except `reserved` allowed here
+ * (Phase-4 tier gating layers ON TOP of this same owner — it does not relax the
+ * reserved rejection).
  */
 export function assertOperationAllowed(op: ChangePlanOperation, phase: GatePhase): void {
   const opClass = classifyOperation(op.op);
   if (opClass === "reserved") throw new OperationForbiddenError(op.op, opClass, phase);
-  if (phase === 2 && (opClass === "synthesis" || opClass === "trust")) {
+  if (phase === 2 && opClass === "synthesis") {
     throw new OperationForbiddenError(op.op, opClass, phase);
   }
 }

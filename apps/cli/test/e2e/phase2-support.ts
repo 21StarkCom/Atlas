@@ -354,7 +354,6 @@ export async function assertBrokerIntegrationWired(h: Phase2Harness): Promise<vo
  * newly-added op can never silently escape the exit test.
  */
 const HASH = "a".repeat(64);
-const CONTENT_ID = `sha256:${HASH}:text/markdown`;
 const RENDITION_ID = `sha256:${HASH}:text/markdown:1:1`;
 const OP_FIXTURES: Readonly<Record<ChangePlanOpName, Record<string, unknown>>> = {
   CreateNote: { op: "CreateNote", opVersion: 1, noteType: "concept", title: "Model Derived", frontmatter: { status: "active" }, body: "# Model\n\nbody", expectedAbsent: true },
@@ -370,8 +369,6 @@ const OP_FIXTURES: Readonly<Record<ChangePlanOpName, Record<string, unknown>>> =
   ProposeMerge: { op: "ProposeMerge", opVersion: 1, survivor: "note/2026/survivor", sourceNotes: ["note/2026/dup"] },
   ProposeRename: { op: "ProposeRename", opVersion: 1, newTitle: "Renamed", newAliases: ["Old Name"] },
   ProposeArchive: { op: "ProposeArchive", opVersion: 1, reason: "superseded by a newer note" },
-  PromoteTrust: { op: "PromoteTrust", opVersion: 1, sourceHandle: CONTENT_ID, toLevel: "trusted", reason: "vetted origin" },
-  RevokeTrust: { op: "RevokeTrust", opVersion: 1, sourceHandle: CONTENT_ID, reason: "origin compromised" },
   CreateTask: { op: "CreateTask", opVersion: 1, title: "Reserved task", state: "open", due: "2026-08-01" },
   UpdateTaskState: { op: "UpdateTaskState", opVersion: 1, taskId: "note/2026/task", toState: "done" },
 };

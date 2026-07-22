@@ -14,14 +14,13 @@ import {
 
 /** Minimal well-typed op payloads (only `op` matters to the gate). */
 const createNote = { op: "CreateNote" } as unknown as ChangePlanOperation;
-const promoteTrust = { op: "PromoteTrust" } as unknown as ChangePlanOperation;
 const createTask = { op: "CreateTask" } as unknown as ChangePlanOperation;
 const updateSection = { op: "UpdateSection" } as unknown as ChangePlanOperation;
 
 describe("classifyOperation", () => {
-  it("classifies trust-ledger ops as trust (execution Phase-4-only per ops/trust.ts)", () => {
-    expect(classifyOperation("PromoteTrust")).toBe("trust");
-    expect(classifyOperation("RevokeTrust")).toBe("trust");
+  it("classifies the retired trust ops as unknown ⇒ synthesis (fail-closed; v2 has no trust ops)", () => {
+    expect(classifyOperation("PromoteTrust")).toBe("synthesis");
+    expect(classifyOperation("RevokeTrust")).toBe("synthesis");
   });
   it("classifies knowledge mutations as synthesis", () => {
     expect(classifyOperation("CreateNote")).toBe("synthesis");
@@ -37,13 +36,6 @@ describe("classifyOperation", () => {
 });
 
 describe("assertOperationAllowed — Phase 2", () => {
-  it("rejects a trust-ledger op (Phase-4-only execution per its owning contract)", () => {
-    const err = catchErr(() => assertOperationAllowed(promoteTrust, 2));
-    expect(err).toBeInstanceOf(OperationForbiddenError);
-    expect(err).toMatchObject({ code: "operation-forbidden", opClass: "trust", exitCode: 1 });
-    const revoke = catchErr(() => assertOperationAllowed({ op: "RevokeTrust" } as unknown as ChangePlanOperation, 2));
-    expect(revoke).toMatchObject({ opClass: "trust" });
-  });
   it("rejects a synthesis op FAIL-CLOSED", () => {
     const err = catchErr(() => assertOperationAllowed(createNote, 2));
     expect(err).toBeInstanceOf(OperationForbiddenError);
@@ -59,9 +51,6 @@ describe("assertOperationAllowed — Phase 4", () => {
   it("permits a synthesis op (tier gating layers on top elsewhere)", () => {
     expect(() => assertOperationAllowed(createNote, 4)).not.toThrow();
     expect(() => assertOperationAllowed(updateSection, 4)).not.toThrow();
-  });
-  it("permits a trust-ledger op (its execution phase)", () => {
-    expect(() => assertOperationAllowed(promoteTrust, 4)).not.toThrow();
   });
   it("still rejects a reserved op", () => {
     expect(() => assertOperationAllowed(createTask, 4)).toThrow(OperationForbiddenError);

@@ -2,7 +2,7 @@
  * `contracts.operations.test` — the Phase-2 op-schema seam contract (Task 2.0).
  *
  * Two guarantees:
- *   1. Every operation in `CHANGE_PLAN_OPS` (all 17) has a validating sample that
+ *   1. Every operation in `CHANGE_PLAN_OPS` (all 15) has a validating sample that
  *      the `ChangePlanSchema` union accepts, and the union covers exactly those
  *      op names — no missing member, no stray.
  *   2. Each op sample round-trips canonical serialization BYTE-IDENTICALLY across
@@ -63,10 +63,61 @@ function runWorker(): string {
 
 const samples = OP_SAMPLES as unknown[];
 
+/**
+ * The finalized 15-op ChangePlan union (v2 contract demolition) written as a
+ * LITERAL tuple — the anti-drift anchor. Comparing the two coupled internal
+ * lists to each other would pass even if a finalized op were swapped out in
+ * BOTH; pinning to this literal set catches that. The two retired trust ops
+ * (`PromoteTrust`/`RevokeTrust`) must be absent from every surface.
+ */
+const FINALIZED_15_OPS = [
+  "AddAlias",
+  "AppendSection",
+  "AttachEvidence",
+  "CreateClaim",
+  "CreateNote",
+  "CreateRelationship",
+  "CreateTask",
+  "ProposeArchive",
+  "ProposeMerge",
+  "ProposeRename",
+  "SetFrontmatterField",
+  "SetLink",
+  "UpdateEvidenceVerification",
+  "UpdateSection",
+  "UpdateTaskState",
+].sort();
+const RETIRED_TRUST_OPS = ["PromoteTrust", "RevokeTrust"];
+
 describe("op sample coverage", () => {
-  it("the union declares exactly the 17 CHANGE_PLAN_OPS names", () => {
-    expect([...CHANGE_PLAN_OPERATION_NAMES].sort()).toEqual([...CHANGE_PLAN_OPS].sort());
-    expect(CHANGE_PLAN_OPS.length).toBe(17);
+  it("the union declares EXACTLY the 15 finalized op names (literal), trust ops absent", () => {
+    // Pin both the name list and the union to a LITERAL tuple, not to each other.
+    expect([...CHANGE_PLAN_OPS].sort()).toEqual(FINALIZED_15_OPS);
+    expect([...CHANGE_PLAN_OPERATION_NAMES].sort()).toEqual(FINALIZED_15_OPS);
+    expect(CHANGE_PLAN_OPS.length).toBe(15);
+    // The retired trust ops are gone from the name list AND the runtime union.
+    for (const op of RETIRED_TRUST_OPS) {
+      expect(CHANGE_PLAN_OPS as readonly string[]).not.toContain(op);
+      expect(CHANGE_PLAN_OPERATION_NAMES as readonly string[]).not.toContain(op);
+    }
+  });
+
+  it("rejects a retired trust op as an unknown discriminant, and drops its public exports", async () => {
+    const base = ChangePlanSchema.parse(samples[0]);
+    for (const op of RETIRED_TRUST_OPS) {
+      expect(() => ChangePlanSchema.parse({ ...base, operation: { op, opVersion: 1 } })).toThrow();
+    }
+    // The op-schema/result exports the retired ops carried are no longer part of
+    // the public surface (byte-source demolition, not merely union-narrowing).
+    const contracts = (await import("../src/index.js")) as Record<string, unknown>;
+    for (const name of [
+      "PromoteTrustOpSchema",
+      "RevokeTrustOpSchema",
+      "PromoteTrustResult",
+      "RevokeTrustResult",
+    ]) {
+      expect(contracts[name], `export ${name} must be absent`).toBeUndefined();
+    }
   });
 
   it("has exactly one validating sample per op", () => {

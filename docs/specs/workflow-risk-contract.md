@@ -77,10 +77,11 @@ Escalation triggers (each independently forces Tier-3):
   `reserved-operation`).
 
 The operation column is **exactly** the `@atlas/contracts` `CHANGE_PLAN_OPS` set (the SSOT of op
-discriminants — 15 active + the 2 reserved task ops), one row per op. It does **not** invent op names:
-the frontmatter op is `SetFrontmatterField` (not `Add/UpdateFrontmatterField`), the link op is
-`SetLink` (not `Add/RemoveLink`), and the structural-proposal ops `ProposeMerge`, `ProposeRename`,
-`ProposeArchive` and the trust ops `PromoteTrust`, `RevokeTrust` are enumerated explicitly.
+discriminants — the finalized 15 ops: 13 active + the 2 reserved task ops), one row per op. It does
+**not** invent op names: the frontmatter op is `SetFrontmatterField` (not `Add/UpdateFrontmatterField`),
+the link op is `SetLink` (not `Add/RemoveLink`), and the structural-proposal ops `ProposeMerge`,
+`ProposeRename`, `ProposeArchive` are enumerated explicitly. The two trust ops (`PromoteTrust`,
+`RevokeTrust`) were retired in v2 (contract demolition) — trust tiers no longer exist.
 `CreateTask`/`UpdateTaskState` are reserved forward-compatible surface (§Scope). A bijection test
 (`contract-lint`, "mutation-policy ⇄ CHANGE_PLAN_OPS") asserts this table's op set **equals**
 `CHANGE_PLAN_OPS`, so Task 4.3 can generate every op×type case with no missing/stray row.
@@ -100,8 +101,6 @@ the frontmatter op is `SetFrontmatterField` (not `Add/UpdateFrontmatterField`), 
 | `ProposeMerge` | review | review | review | review | immutable | immutable | reserved |
 | `ProposeRename` | review | review | review | review | immutable | immutable | reserved |
 | `ProposeArchive` | review | review | review | review | immutable | immutable | reserved |
-| `PromoteTrust` | immutable | immutable | immutable | immutable | immutable | review | reserved |
-| `RevokeTrust` | immutable | immutable | immutable | immutable | immutable | review | reserved |
 | `CreateTask` | reserved | reserved | reserved | reserved | reserved | reserved | reserved |
 | `UpdateTaskState` | reserved | reserved | reserved | reserved | reserved | reserved | reserved |
 
@@ -127,8 +126,6 @@ The same table, machine-readable — the bijection test parses this block and as
     { "op": "ProposeMerge", "policy": { "concept": "review", "person": "review", "project": "review", "research": "review", "decision": "immutable", "source": "immutable", "task": "reserved" } },
     { "op": "ProposeRename", "policy": { "concept": "review", "person": "review", "project": "review", "research": "review", "decision": "immutable", "source": "immutable", "task": "reserved" } },
     { "op": "ProposeArchive", "policy": { "concept": "review", "person": "review", "project": "review", "research": "review", "decision": "immutable", "source": "immutable", "task": "reserved" } },
-    { "op": "PromoteTrust", "policy": { "concept": "immutable", "person": "immutable", "project": "immutable", "research": "immutable", "decision": "immutable", "source": "review", "task": "reserved" } },
-    { "op": "RevokeTrust", "policy": { "concept": "immutable", "person": "immutable", "project": "immutable", "research": "immutable", "decision": "immutable", "source": "review", "task": "reserved" } },
     { "op": "CreateTask", "policy": { "concept": "reserved", "person": "reserved", "project": "reserved", "research": "reserved", "decision": "reserved", "source": "reserved", "task": "reserved" } },
     { "op": "UpdateTaskState", "policy": { "concept": "reserved", "person": "reserved", "project": "reserved", "research": "reserved", "decision": "reserved", "source": "reserved", "task": "reserved" } }
   ]
@@ -144,9 +141,8 @@ Invariants encoded above (fixed here, enforced by the Task 4.3/4.4 table-driven 
 - **Destructive/structural proposals are never auto.** `ProposeMerge`/`ProposeRename`/`ProposeArchive`
   are `review` (Tier-3) where the type allows structural change at all, and `immutable` for
   `source`/`decision`.
-- **Trust ops target sources only.** `PromoteTrust`/`RevokeTrust` are `review` (privileged, always
-  Tier-3, broker-authorized) on `source` and `immutable` for every other note type — trust is a
-  property of a source, never of a synthesized note.
+- **No trust ChangePlan ops.** The v2 contract demolition retired `PromoteTrust`/`RevokeTrust`
+  (trust tiers no longer exist) — the mutation-policy table therefore carries no trust rows.
 - **Reserved surface cannot be driven.** `CreateTask`/`UpdateTaskState` (and any op on a `task` note)
   are rejected `reserved-operation` — schema-present, execution-denied (fail-closed).
 

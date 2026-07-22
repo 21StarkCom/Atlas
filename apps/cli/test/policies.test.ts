@@ -85,7 +85,7 @@ describe("mutationPolicyFor: table matches the contract for every op × type", (
   it("sources are immutable for every content/proposal op (source mutation ⇒ policy violation)", () => {
     const row = mutationPolicyFor("source");
     for (const { op } of spec.ops) {
-      const expected = op === "PromoteTrust" || op === "RevokeTrust" ? "review" : op.startsWith("CreateTask") || op === "UpdateTaskState" ? "reserved" : "immutable";
+      const expected = op.startsWith("CreateTask") || op === "UpdateTaskState" ? "reserved" : "immutable";
       expect(row[op as keyof typeof row]).toBe(expected as PolicyValue);
     }
   });

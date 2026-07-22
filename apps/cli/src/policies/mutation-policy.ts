@@ -61,8 +61,6 @@ export const MUTATION_POLICY = {
     { op: "ProposeMerge", policy: { concept: "review", person: "review", project: "review", research: "review", decision: "immutable", source: "immutable", task: "reserved" } },
     { op: "ProposeRename", policy: { concept: "review", person: "review", project: "review", research: "review", decision: "immutable", source: "immutable", task: "reserved" } },
     { op: "ProposeArchive", policy: { concept: "review", person: "review", project: "review", research: "review", decision: "immutable", source: "immutable", task: "reserved" } },
-    { op: "PromoteTrust", policy: { concept: "immutable", person: "immutable", project: "immutable", research: "immutable", decision: "immutable", source: "review", task: "reserved" } },
-    { op: "RevokeTrust", policy: { concept: "immutable", person: "immutable", project: "immutable", research: "immutable", decision: "immutable", source: "review", task: "reserved" } },
     { op: "CreateTask", policy: { concept: "reserved", person: "reserved", project: "reserved", research: "reserved", decision: "reserved", source: "reserved", task: "reserved" } },
     { op: "UpdateTaskState", policy: { concept: "reserved", person: "reserved", project: "reserved", research: "reserved", decision: "reserved", source: "reserved", task: "reserved" } },
   ],

@@ -6,7 +6,7 @@
  * exact same objects — the byte-identity assertion in `contracts.operations.test`
  * is meaningful only if the two sides serialize identical input.
  *
- * There is exactly one sample per member of `CHANGE_PLAN_OPS` (all 17). Keys are
+ * There is exactly one sample per member of `CHANGE_PLAN_OPS` (all 15). Keys are
  * intentionally written in a NON-sorted order so canonical serialization's
  * key-sorting is actually exercised across the seam.
  */
@@ -95,8 +95,6 @@ export const OP_SAMPLES = [
   plan({ op: "ProposeMerge", opVersion: 1, survivor: "note/2026/survivor", sourceNotes: ["note/2026/dup"] }),
   plan({ op: "ProposeRename", opVersion: 1, newTitle: "Renamed", newAliases: ["Old Name"] }),
   plan({ op: "ProposeArchive", opVersion: 1, reason: "superseded by a newer note" }),
-  plan({ op: "PromoteTrust", opVersion: 1, sourceHandle: CONTENT_ID, toLevel: "trusted", reason: "vetted origin" }),
-  plan({ op: "RevokeTrust", opVersion: 1, sourceHandle: CONTENT_ID, reason: "origin compromised" }),
   plan({ op: "CreateTask", opVersion: 1, title: "Reserved task", state: "open", due: "2026-08-01" }),
   plan({ op: "UpdateTaskState", opVersion: 1, taskId: "note/2026/task", toState: "done" }),
 ];
