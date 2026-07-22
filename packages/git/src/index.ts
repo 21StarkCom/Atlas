@@ -13,6 +13,7 @@ export {
   type WorktreeEntry,
   type ChangeStatus,
   type PathChange,
+  type RawStatusChange,
   type CommitChanges,
 } from "./repo.js";
 export { type Worktree } from "./worktree.js";
@@ -26,6 +27,9 @@ export {
   updateAgentRef,
   deleteAgentRef,
   attachHeadToAgentRef,
+  assertCanonicalRef,
+  advanceCanonicalRef,
+  CanonicalRefError,
 } from "./refs.js";
 export {
   RUN_MANIFEST_TRAILER,

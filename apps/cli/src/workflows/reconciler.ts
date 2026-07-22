@@ -761,6 +761,47 @@ async function resolveIntegrationIntents(
     if (!row.event_json) continue;
     const event = IntentsRepo.parseEvent(row);
     if (event.kind !== "run.integrated") continue;
+
+    // AUTHORITATIVE canonical containment by ANCESTRY (round-2 finding W4): a canonical
+    // tip that advanced beyond the installed commit still contains it, so ancestry —
+    // not tip-equality — is the correct test. Computed up front because under the v2
+    // in-process integrator (ADR-0003) containment, NOT audit anchoring, is the sole
+    // proof the integrate step landed (there is no audit append at all).
+    const base = readGitOp(store.db, row.run_id, "base");
+    const canonicalRef = base?.refName ?? null;
+    const installed = event.canonicalCommit;
+    const canonicalNow = canonicalRef ? await repo.readRef(canonicalRef) : null;
+    const contained =
+      canonicalRef !== null &&
+      canonicalNow !== null &&
+      installed !== "0".repeat(40) &&
+      (await repo.isAncestor(installed, canonicalNow));
+
+    // Land §2.8 step-3 by REPLAYING the intent's EXACT persisted `write_json` (round-3
+    // finding on reconciler.ts:738-747), NOT by reconstructing from mutable `agent_runs`
+    // metadata. Validates payload identity first: the recomputed hash of the stored
+    // event MUST equal the intent's `payload_hash`, proving the persisted write belongs
+    // to this exact event. Returns the barrier result on a mismatch (never fabricate),
+    // else null (landed → caller continues).
+    const landStep3 = (auditHead: string): { actionRequired: string[]; barrierSeq: number } | null => {
+      const recomputed = payloadHashOf(event);
+      if (recomputed !== row.payload_hash) {
+        actionRequired.push(row.run_id);
+        return { actionRequired, barrierSeq: row.seq };
+      }
+      recordIntegrationFromIntent(store, {
+        runId: row.run_id,
+        seq: row.seq,
+        payloadHash: row.payload_hash,
+        canonicalRef: canonicalRef!,
+        canonicalSha: installed,
+        auditHead,
+        write: IntentsRepo.parseWrite(row),
+        now: now(),
+      });
+      return null;
+    };
+
     let head: string;
     try {
       const anchored = await broker.signAndAppendAuditEvent(event); // idempotent replay if already anchored
@@ -773,13 +814,19 @@ async function resolveIntegrationIntents(
         actionRequired.push(row.run_id);
         return { actionRequired, barrierSeq: row.seq };
       }
-      // Un-anchored (signing refusal) ⇒ canonical never advanced. Normally the
-      // abandoned seq is dropped so the run re-drives with a fresh seq. But if a HIGHER
-      // seq was already allocated (a concurrent later intent), deleting this seq would
-      // leave a PERMANENT hole in the gapless chain (round-3 finding on
-      // reconciler.ts:716-718) — the later intent could never anchor at `last+1`.
-      // PRESERVE it as an ordered barrier instead (the run re-drives at the SAME seq),
-      // and HALT so no later intent is completed past it.
+      // Un-anchored / no-audit. Under v1 the broker appended BEFORE the canonical CAS,
+      // so un-anchored proved canonical never advanced; under v2 (ADR-0003) there is NO
+      // audit append at all, so canonical containment is the SOLE signal. If canonical
+      // genuinely contains the commit, the in-process FF landed before the §2.8 step-3
+      // write (crash after `update-ref`) → replay the persisted write_json with an EMPTY
+      // audit head. Otherwise nothing installed → drop for a fresh re-drive, UNLESS a
+      // HIGHER seq was already allocated (a later intent depends on this seq existing in
+      // the gapless chain) — then PRESERVE it as an ordered barrier and HALT.
+      if (contained) {
+        const barrier = landStep3("");
+        if (barrier) return barrier;
+        continue;
+      }
       if (row.seq < maxAllocatedSeq) {
         actionRequired.push(row.run_id);
         return { actionRequired, barrierSeq: row.seq };
@@ -788,53 +835,20 @@ async function resolveIntegrationIntents(
       continue;
     }
 
-    // Anchored — but that is NOT proof canonical advanced (append precedes the
-    // canonical CAS). Require AUTHORITATIVE containment by ANCESTRY (round-2 finding
-    // W4): a canonical tip that advanced beyond the installed commit still contains
-    // it, so ancestry — not tip-equality — is the correct test.
-    const base = readGitOp(store.db, row.run_id, "base");
-    const canonicalRef = base?.refName ?? null;
-    const installed = event.canonicalCommit;
-    const canonicalNow = canonicalRef ? await repo.readRef(canonicalRef) : null;
-    const contained =
-      canonicalRef !== null &&
-      canonicalNow !== null &&
-      installed !== "0".repeat(40) &&
-      (await repo.isAncestor(installed, canonicalNow));
-
+    // Anchored (v1 broker path) — but anchored is NOT proof canonical advanced (append
+    // precedes the CAS). Require the SAME authoritative containment before landing.
     if (contained) {
-      // Canonical genuinely contains the commit → land step-3 by REPLAYING the intent's
-      // EXACT persisted `write_json` (round-3 finding on reconciler.ts:738-747), NOT by
-      // reconstructing the write from current mutable `agent_runs` metadata (which may
-      // have diverged). Validate payload identity first: the recomputed hash of the
-      // stored event MUST equal the intent's `payload_hash` (the anchored event's hash),
-      // proving the persisted write belongs to this exact audit event.
-      const recomputed = payloadHashOf(event);
-      if (recomputed !== row.payload_hash) {
-        // Corrupt/mismatched intent — never fabricate. Preserve as a barrier + surface.
-        actionRequired.push(row.run_id);
-        return { actionRequired, barrierSeq: row.seq };
-      }
-      recordIntegrationFromIntent(store, {
-        runId: row.run_id,
-        seq: row.seq,
-        payloadHash: row.payload_hash,
-        canonicalRef: canonicalRef!,
-        canonicalSha: installed,
-        auditHead: head,
-        write: IntentsRepo.parseWrite(row),
-        now: now(),
-      });
+      const barrier = landStep3(head);
+      if (barrier) return barrier;
       continue;
     }
 
-    // Anchored but canonical does NOT contain the claimed commit (append-success /
-    // CAS-failure). PRESERVE the intent (round-2 finding W6) — its linkage to the
-    // immutable audit event must survive and no fresh seq may re-drive integration —
-    // and surface the run as action-required. As the FIRST unresolved sequence it is
-    // also the ordered BARRIER (round-3 finding on reconciler.ts:700-756): HALT so
-    // layer 0 never completes a LATER integrated intent past this unresolved earlier
-    // one, and layer 1 stops before it.
+    // Canonical does NOT contain the claimed commit (append-success / CAS-failure, or a
+    // no-audit crash before the FF). PRESERVE the intent (round-2 finding W6) — its
+    // linkage to the event must survive and no fresh seq may re-drive integration — and
+    // surface the run as action-required. As the FIRST unresolved sequence it is also
+    // the ordered BARRIER (round-3 finding on reconciler.ts:700-756): HALT so layer 0
+    // never completes a LATER integrated intent past this unresolved earlier one.
     actionRequired.push(row.run_id);
     return { actionRequired, barrierSeq: row.seq };
   }

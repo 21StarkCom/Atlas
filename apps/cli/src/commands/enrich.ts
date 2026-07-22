@@ -6,7 +6,6 @@
  * model-plan generator (generateObject<ChangePlan>), the store-backed validation vault, and — on
  * apply — the broker integrator. Output matches `enrich.schema.json`.
  */
-import { BrokerClient } from "@atlas/broker";
 import { newRunId } from "@atlas/contracts";
 import { openRepo } from "@atlas/git";
 import { GeneratedArtifactGuard } from "@atlas/scan";
@@ -15,7 +14,7 @@ import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { openWorkflowStore } from "../workflows/index.js";
 import { makeRetrieveSeam } from "../retrieval/wiring.js";
-import { makeModelPlanGenerator, PLAN_GENERATION_MAX_TOKENS, makeBrokerIntegrator } from "../workflows/index.js";
+import { makeModelPlanGenerator, PLAN_GENERATION_MAX_TOKENS, makeBrokerIntegrator, makeInProcessBrokerClient } from "../workflows/index.js";
 import { makeStoreValidationVault } from "../validation/store-vault.js";
 import { applySynthesis, previewSynthesis, type SynthesisApplyDeps, type SynthesisPlanDeps } from "../workflows/synthesis.js";
 import { readVault } from "../vault/reader.js";
@@ -84,34 +83,28 @@ async function enrich(ctx: RunContext): Promise<number> {
       return EXIT.OK;
     }
 
-    // --apply: connect the broker + wire the Tier-2 integrator; run the full apply.
-    let brokerClient: BrokerClient;
-    try {
-      brokerClient = await BrokerClient.connect(cfg.broker.socket_path);
-    } catch (e) {
-      throw new CliError({ code: "broker-unreachable", message: `the broker is unreachable at ${cfg.broker.socket_path}`, hint: "Start the broker daemon before --apply.", exitCode: EXIT.CONFIG, cause: e });
-    }
-    try {
-      const applyDeps: SynthesisApplyDeps = {
-        ...planDeps,
-        store, broker: brokerClient, backup: backupConfig(ctx), repo: openRepo(resolvePath(ctx, cfg.vault.path)),
-        integrate: makeBrokerIntegrator(brokerClient),
-        guard: new GeneratedArtifactGuard(quarantineStoreFromContext(ctx)),
-        foldProjections: async () => {},
-        worktreesPath: resolvePath(ctx, cfg.git.worktrees_path),
-        canonicalRef: cfg.git.canonical_ref,
-        now,
-      };
-      const res = await applySynthesis("enrich", { target: p.note, instruction: `enrich note ${p.note}` }, applyDeps);
-      const out = res.mode === "review-pending"
-        ? { command: "enrich", mode: "review_pending" as const, runId: res.runId, note: p.note, risk: res.plan.tier }
-        : { command: "enrich", mode: "applied" as const, runId: res.runId, note: p.note, risk: res.plan.tier, integratedCommit: res.canonicalSha ?? res.commitSha };
-      if (ctx.output.mode === "json") emitJson(out);
-      else ctx.render(`enrich ${p.note}: ${out.mode}`);
-      return res.mode === "review-pending" ? EXIT.ACTION_REQUIRED : EXIT.OK;
-    } finally {
-      brokerClient.close();
-    }
+    // --apply: wire the in-process broker client behind the UNCHANGED
+    // `makeBrokerIntegrator(client)` seam (no broker daemon; ADR-0003). The canonical
+    // FF-advance + run state-machine run in-process; audit/WORM dropped.
+    const repo = openRepo(resolvePath(ctx, cfg.vault.path));
+    const broker = makeInProcessBrokerClient(repo, cfg.git.canonical_ref);
+    const applyDeps: SynthesisApplyDeps = {
+      ...planDeps,
+      store, broker, backup: backupConfig(ctx), repo,
+      integrate: makeBrokerIntegrator(broker),
+      guard: new GeneratedArtifactGuard(quarantineStoreFromContext(ctx)),
+      foldProjections: async () => {},
+      worktreesPath: resolvePath(ctx, cfg.git.worktrees_path),
+      canonicalRef: cfg.git.canonical_ref,
+      now,
+    };
+    const res = await applySynthesis("enrich", { target: p.note, instruction: `enrich note ${p.note}` }, applyDeps);
+    const out = res.mode === "review-pending"
+      ? { command: "enrich", mode: "review_pending" as const, runId: res.runId, note: p.note, risk: res.plan.tier }
+      : { command: "enrich", mode: "applied" as const, runId: res.runId, note: p.note, risk: res.plan.tier, integratedCommit: res.canonicalSha ?? res.commitSha };
+    if (ctx.output.mode === "json") emitJson(out);
+    else ctx.render(`enrich ${p.note}: ${out.mode}`);
+    return res.mode === "review-pending" ? EXIT.ACTION_REQUIRED : EXIT.OK;
   } finally {
     store.close();
   }

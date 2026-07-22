@@ -12,14 +12,13 @@
  *   - the blob's active rendition is gone (`not-found`) ⇒ `failed`, never integrated (outcome=failed, exit 1).
  * Missing evidence ⇒ not-found (exit 1). Output ⇒ `evidence-resolve.schema.json`.
  */
-import { BrokerClient } from "@atlas/broker";
 import { newRunId, serializeRenditionId, parseSourceHandle } from "@atlas/contracts";
 import { openRepo } from "@atlas/git";
 import { GeneratedArtifactGuard } from "@atlas/scan";
 import { ProvenanceRepo } from "@atlas/sqlite-store";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
-import { openWorkflowStore, makeBrokerIntegrator } from "../workflows/index.js";
+import { openWorkflowStore, makeBrokerIntegrator, makeInProcessBrokerClient } from "../workflows/index.js";
 import { makeStoreValidationVault } from "../validation/store-vault.js";
 import { classifyReanchor, type ReanchorMatch } from "../workflows/reverify.js";
 import { applySynthesis, type SynthesisApplyDeps } from "../workflows/synthesis.js";
@@ -134,13 +133,12 @@ async function evidenceResolve(ctx: RunContext): Promise<number> {
 
     const snapshot = await readVault(cfg);
     const noteById = new Map(snapshot.notes.map((n) => [n.id, n]));
-    let brokerClient: BrokerClient;
-    try {
-      brokerClient = await BrokerClient.connect(cfg.broker.socket_path);
-    } catch (e) {
-      throw new CliError({ code: "broker-unreachable", message: `the broker is unreachable at ${cfg.broker.socket_path}`, hint: "Start the broker daemon.", exitCode: EXIT.CONFIG, cause: e });
-    }
-    try {
+    // In-process apply behind the UNCHANGED makeBrokerIntegrator seam (no broker
+    // daemon; ADR-0003) — mirrors enrich/reconcile/maintain. Evidence resolve is a
+    // Tier-2/Tier-3 ChangePlan apply and must be daemon-free with zero provisioning.
+    const repo = openRepo(resolvePath(ctx, cfg.vault.path));
+    const broker = makeInProcessBrokerClient(repo, cfg.git.canonical_ref);
+    {
       const deps: SynthesisApplyDeps = {
         retrieve: (q) => Promise.resolve(stubRetrieve(owningNoteId, runId + q.text.length)),
         generatePlan: () => Promise.resolve(plan),
@@ -152,8 +150,8 @@ async function evidenceResolve(ctx: RunContext): Promise<number> {
         // one is Tier-3 (review-pending) — the fail-closed evidence gate (Task 4.7).
         evidenceValid: () => verification === "valid",
         config: { packBudgetTokens: 6000, requireSourcesForSynthesis: false, risk: riskConfigFrom(cfg.policies) },
-        store, broker: brokerClient, backup: backupConfig(ctx), repo: openRepo(resolvePath(ctx, cfg.vault.path)),
-        integrate: makeBrokerIntegrator(brokerClient),
+        store, broker, backup: backupConfig(ctx), repo,
+        integrate: makeBrokerIntegrator(broker),
         guard: new GeneratedArtifactGuard(quarantineStoreFromContext(ctx)),
         foldProjections: async () => {},
         worktreesPath: resolvePath(ctx, cfg.git.worktrees_path),
@@ -181,8 +179,6 @@ async function evidenceResolve(ctx: RunContext): Promise<number> {
       if (ctx.output.mode === "json") emitJson(out);
       else ctx.render(`evidence resolve ${ev.evidence_id}: integrated (${verification})`);
       return EXIT.OK;
-    } finally {
-      brokerClient.close();
     }
   } finally {
     store.close();

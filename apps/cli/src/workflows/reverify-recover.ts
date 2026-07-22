@@ -42,7 +42,6 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BrokerClient } from "@atlas/broker";
 import { parseSourceHandle } from "@atlas/contracts";
 import { openRepo, type Repo } from "@atlas/git";
 import { GeneratedArtifactGuard, SecretDetectedError, type PrePersistenceGuard } from "@atlas/scan";
@@ -56,7 +55,7 @@ import { riskConfigFrom } from "../policies/risk.js";
 import { makeStoreValidationVault } from "../validation/store-vault.js";
 import { resolveAtRef } from "../sync/resolve-at-ref.js";
 import type { RetrievalResult } from "../retrieval/layers.js";
-import { makeBrokerIntegrator } from "./index.js";
+import { makeBrokerIntegrator, makeInProcessBrokerClient } from "./index.js";
 import { applySynthesis, type SynthesisApplyDeps } from "./synthesis.js";
 import type { EvidenceHeadRow, ReanchorApplyRequest, ReanchorApplyResult } from "./reverify-handler.js";
 import type { ReanchorInput } from "./reverify-match.js";
@@ -269,6 +268,7 @@ export async function applyReanchorViaBroker(deps: JobHandlerDeps, req: Reanchor
   const store = deps.store; // already open + migrated by the drain — never closed here
   const provenance = new ProvenanceRepo(store.db);
   const repo = openRepo(resolvePath(ctx, cfg.vault.path));
+  const broker = makeInProcessBrokerClient(repo, cfg.git.canonical_ref);
 
   // Notes are read AT THE CANONICAL REF, never the working tree (review round-1
   // finding): the working tree does not advance when canonical does (#260), so a
@@ -280,49 +280,41 @@ export async function applyReanchorViaBroker(deps: JobHandlerDeps, req: Reanchor
   // concurrent edit the CAS retry exists to accommodate.
   const readNoteAtCanonical = (id: string) => resolveAtRef(repo, cfg.git.canonical_ref, cfg.vault.note_globs)(id);
 
-  let brokerClient: BrokerClient;
-  try {
-    brokerClient = await BrokerClient.connect(cfg.broker.socket_path);
-  } catch (e) {
-    // The broker being down is a genuinely TRANSIENT condition — let the runner
-    // classify it as such (retry with backoff), unlike the deterministic failures above.
-    throw { kind: "unavailable", code: "broker-unreachable", message: `the broker is unreachable at ${cfg.broker.socket_path}`, cause: e };
-  }
-  try {
-    const sdeps: SynthesisApplyDeps = {
-      retrieve: (q) => Promise.resolve(stubRetrieve(req.owningNoteId, req.evidenceId + q.text.length)),
-      generatePlan: () => Promise.resolve(req.plan),
-      readNote: (id) => readNoteAtCanonical(id),
-      validationVault: makeStoreValidationVault(store.db),
-      supportingEvidenceStates: () => ["valid"],
-      inputsTrusted: () => true,
-      // Only a proven-`exact` re-anchor reaches this seam: the evidence gate sees a
-      // valid state and the plan lands Tier-2 (auto-integrate under broker CAS).
-      evidenceValid: () => true,
-      config: { packBudgetTokens: 6000, requireSourcesForSynthesis: false, risk: riskConfigFrom(cfg.policies) },
-      store,
-      broker: brokerClient,
-      backup: backupConfig(ctx),
-      repo,
-      integrate: makeBrokerIntegrator(brokerClient),
-      guard: new GeneratedArtifactGuard(quarantineStoreFromContext(ctx)),
-      foldProjections: async () => {},
-      worktreesPath: resolvePath(ctx, cfg.git.worktrees_path),
-      canonicalRef: cfg.git.canonical_ref,
-      now: () => new Date().toISOString(),
-      resolveRendition: (h) => {
-        try {
-          return provenance.resolveSourceHandle(parseSourceHandle(h)) !== null ? h : null;
-        } catch {
-          return null;
-        }
-      },
-      hasClaim: (k) => store.db.prepare(`SELECT 1 FROM claims WHERE claim_id = ?`).get(k) !== undefined,
-      hasNote: (id) => store.db.prepare(`SELECT 1 FROM notes WHERE note_id = ?`).get(id) !== undefined,
-    };
-    const res = await applySynthesis("maintain", { target: req.owningNoteId, instruction: `re-anchor ${req.evidenceId}` }, sdeps);
-    return { mode: res.mode === "review-pending" ? "review-pending" : "integrated", runId: res.runId };
-  } finally {
-    brokerClient.close();
-  }
+  // In-process re-anchor (ADR-0003): the canonical FF-advance + run state-machine
+  // run in-process — no broker daemon, no audit/WORM append. A `broker.cas_failed`
+  // from a concurrent canonical move is still surfaced (via the in-process CAS) so
+  // the multi-head sequential integration + retry semantics are unchanged.
+  const sdeps: SynthesisApplyDeps = {
+    retrieve: (q) => Promise.resolve(stubRetrieve(req.owningNoteId, req.evidenceId + q.text.length)),
+    generatePlan: () => Promise.resolve(req.plan),
+    readNote: (id) => readNoteAtCanonical(id),
+    validationVault: makeStoreValidationVault(store.db),
+    supportingEvidenceStates: () => ["valid"],
+    inputsTrusted: () => true,
+    // Only a proven-`exact` re-anchor reaches this seam: the evidence gate sees a
+    // valid state and the plan lands Tier-2 (auto-integrate under the in-process CAS).
+    evidenceValid: () => true,
+    config: { packBudgetTokens: 6000, requireSourcesForSynthesis: false, risk: riskConfigFrom(cfg.policies) },
+    store,
+    broker,
+    backup: backupConfig(ctx),
+    repo,
+    integrate: makeBrokerIntegrator(broker),
+    guard: new GeneratedArtifactGuard(quarantineStoreFromContext(ctx)),
+    foldProjections: async () => {},
+    worktreesPath: resolvePath(ctx, cfg.git.worktrees_path),
+    canonicalRef: cfg.git.canonical_ref,
+    now: () => new Date().toISOString(),
+    resolveRendition: (h) => {
+      try {
+        return provenance.resolveSourceHandle(parseSourceHandle(h)) !== null ? h : null;
+      } catch {
+        return null;
+      }
+    },
+    hasClaim: (k) => store.db.prepare(`SELECT 1 FROM claims WHERE claim_id = ?`).get(k) !== undefined,
+    hasNote: (id) => store.db.prepare(`SELECT 1 FROM notes WHERE note_id = ?`).get(id) !== undefined,
+  };
+  const res = await applySynthesis("maintain", { target: req.owningNoteId, instruction: `re-anchor ${req.evidenceId}` }, sdeps);
+  return { mode: res.mode === "review-pending" ? "review-pending" : "integrated", runId: res.runId };
 }

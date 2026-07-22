@@ -8,13 +8,12 @@
  * (DEFECT #1). The broker-side integration seam signs the `run.integrated` event —
  * the CLI never holds the audit-attestation key (DEFECT #2).
  */
-import { BrokerClient, type CaptureScope, DEFAULT_CANONICAL_REF } from "@atlas/broker";
+import { type CaptureScope, DEFAULT_CANONICAL_REF } from "@atlas/broker";
 import { PrePersistenceGuard } from "@atlas/scan";
 import { openRepo } from "@atlas/git";
-import { CliError, EXIT } from "../errors/envelope.js";
 import type { RunContext } from "../handlers.js";
 import { quarantineStoreFromContext } from "../quarantine/config.js";
-import { openWorkflowStore } from "../workflows/index.js";
+import { openWorkflowStore, makeInProcessBrokerClient, type CaptureClient } from "../workflows/index.js";
 import { openMigratedStore } from "../commands/store-open.js";
 import { backupConfig, ledgerDbPath, resolvePath } from "../commands/backup-config.js";
 import { makeBrokerSignedCaptureIntegrator, type CaptureDeps, type CaptureIntegration } from "./capture.js";
@@ -36,25 +35,27 @@ export function probeStore(ctx: RunContext): (() => ReturnType<typeof openMigrat
 }
 
 /**
- * Build the broker-side capture-integration seam over an ALREADY-CONNECTED
- * {@link BrokerClient}. The `run.integrated` event is a canonical-installing kind
- * that ONLY the broker's protected-ref path may attest, so the CLI submits it
- * UNSIGNED and the broker signs it internally via `signAndIntegrateSourceCapture`
- * (DEFECT #2 — the CLI never holds the attestation key). The broker fills
- * `prevAuditHead`, signs the event with its attestation key, scope-checks the
- * capture commit (`sources/**` + manifest only), and fast-forwards canonical under
- * Tier-1 CAS — all in one lock-held RPC. This is the SINGLE production construction
- * of the seam; both `connectBrokerIntegration` (daemon socket) and the Phase-2 E2E
- * harness drive it, so the E2E exercises the real wiring rather than a duplicate.
+ * Build the capture-integration seam over a capture `client` (ADR-0003, phase-2
+ * in-process cutover). `client` is the STRUCTURAL {@link CaptureClient} — the
+ * `AuditBroker` + `signAndIntegrateSourceCapture` + `close` subset a socket-connected
+ * `BrokerClient` ALSO satisfies — so the seam contract is unchanged and either client
+ * (in-process today, a socket `BrokerClient` if ever re-wired) can be handed in. Kept
+ * its production name + shape: it wraps the `client.signAndIntegrateSourceCapture`
+ * method with the SAME `makeBrokerSignedCaptureIntegrator` seam a socket-connected
+ * capture used — only the `client` is now in-process by default. The
+ * privilege-separated broker is retired: the canonical-ref advance runs in-process and
+ * the attestation-signed `refs/audit/runs` append + WORM anchor are DROPPED (no OS key
+ * custody). What is NOT dropped is the capture-commit path/status SCOPE policy
+ * (`"sources"` / `"note"` / `"sync"`): the in-process client re-enforces it over the
+ * whole `base..commit` range before any FF advance, so a capture seam can never advance
+ * an arbitrary commit. The `broker` field is the same client (its `signAndAppendAuditEvent`
+ * appends the run state machine's non-installing events — no git audit ref, no WORM).
  */
-export function brokerSignedIntegration(client: BrokerClient, scope: CaptureScope = "sources"): CaptureIntegration {
+export function brokerSignedIntegration(client: CaptureClient, scope: CaptureScope = "sources"): CaptureIntegration {
   const integrate = makeBrokerSignedCaptureIntegrator({
     // The UNSIGNED `run.integrated` event is threaded through with its NATURAL type
-    // (`Omit<AuditEvent, "prevAuditHead">`) straight to the capture RPC — no
-    // `SignedAuditEvent` masquerade (round-3 finding #6). The broker fills
-    // `prevAuditHead` + signs it internally under its protected-ref lock. The
-    // declared `scope` selects which broker-enforced path policy applies
-    // (`"sources"`: sources/** + manifest; `"note"`: additions-only *.md, #262).
+    // straight to the in-process integrate; the declared `scope` selects which path
+    // policy the client enforces over the whole `base..commit` range.
     integrateSourceCapture: (r) =>
       client.signAndIntegrateSourceCapture({
         captureCommit: r.captureCommit,
@@ -72,36 +73,37 @@ export function brokerSignedIntegration(client: BrokerClient, scope: CaptureScop
 }
 
 /**
- * Connect the broker daemon socket and build the broker-side capture-integration
- * seam ({@link brokerSignedIntegration}). Surfaces an unreachable broker as a
- * typed `broker-unreachable` CliError so an applied capture fails clearly rather
- * than silently.
+ * Build the capture-integration seam for an applied capture — now DAEMON-FREE
+ * (ADR-0003). Resolves the vault {@link Repo} + canonical ref from `ctx` (the SINGLE
+ * resolution, reused by {@link buildCaptureDeps}) and returns the in-process seam; no
+ * socket connect, so an applied capture needs no running broker. Kept `async` + same
+ * signature so `buildCaptureDeps`' `connectIntegration` factory (and its callers) are
+ * unchanged.
  */
 export async function connectBrokerIntegration(ctx: RunContext, scope: CaptureScope = "sources"): Promise<CaptureIntegration> {
-  let client: BrokerClient;
-  try {
-    client = await BrokerClient.connect(ctx.config.config.broker.socket_path);
-  } catch (e) {
-    throw new CliError({
-      code: "broker-unreachable",
-      message: `the broker is unreachable at ${ctx.config.config.broker.socket_path}: ${e instanceof Error ? e.message : String(e)}`,
-      hint: "Start the broker daemon before an applied capture (it signs the run.integrated event + performs the Tier-1 CAS).",
-      exitCode: EXIT.INTERNAL,
-      cause: e,
-    });
-  }
-  return brokerSignedIntegration(client, scope);
+  const repo = openRepo(resolvePath(ctx, ctx.config.config.vault.path));
+  const canonicalRef = ctx.config.config.git.canonical_ref ?? DEFAULT_CANONICAL_REF;
+  return brokerSignedIntegration(makeInProcessBrokerClient(repo, canonicalRef), scope);
 }
 
-/** Assemble the {@link CaptureDeps} for an applied capture. */
+/**
+ * Assemble the {@link CaptureDeps} for an applied capture. The vault {@link Repo} +
+ * canonical ref are resolved ONCE here and the SAME `repo` instance is reused for both
+ * the run's git ops (`CaptureDeps.repo`) and the integration seam
+ * (`connectIntegration`) — a ctx-resolved vault path and a raw relative one must never
+ * diverge (finding: commit creation + integration must target the same repository even
+ * when `ctx.cwd` ≠ `process.cwd`).
+ */
 export function buildCaptureDeps(ctx: RunContext, command: string, idempotencyKey?: string, scope: CaptureScope = "sources"): CaptureDeps {
+  const repo = openRepo(resolvePath(ctx, ctx.config.config.vault.path));
+  const canonicalRef = ctx.config.config.git.canonical_ref ?? DEFAULT_CANONICAL_REF;
   return {
     openStore: () => openWorkflowStore({ path: ledgerDbPath(ctx) }),
-    repo: openRepo(ctx.config.config.vault.path),
-    connectIntegration: () => connectBrokerIntegration(ctx, scope),
+    repo,
+    connectIntegration: () => Promise.resolve(brokerSignedIntegration(makeInProcessBrokerClient(repo, canonicalRef), scope)),
     backup: backupConfig(ctx),
     worktreesPath: resolvePath(ctx, ctx.config.config.git.worktrees_path),
-    canonicalRef: ctx.config.config.git.canonical_ref ?? DEFAULT_CANONICAL_REF,
+    canonicalRef,
     command,
     ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
   };

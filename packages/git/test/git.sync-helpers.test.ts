@@ -255,6 +255,67 @@ describe("NUL-safe path parsing", () => {
   });
 });
 
+describe("changedStatusesInRange — RAW-status, ALL-REACHABLE range inspection (mirrors the broker)", () => {
+  it("keeps RAW status letters (T is NOT folded to M)", async () => {
+    await commit("notes/a.md", "regular file\n", "base");
+    const base = git(["rev-parse", "HEAD"]);
+    // Replace the regular file with a symlink at the same path ⇒ git reports `T`.
+    await unlink(join(dir, "notes/a.md"));
+    await symlink("b.md", join(dir, "notes/a.md"));
+    git(["add", "-A"]);
+    git(["commit", "-q", "-m", "typechange"]);
+    const to = git(["rev-parse", "HEAD"]);
+    const changes = await openRepo(dir).changedStatusesInRange(base, to);
+    // The normalized `commitsInRange` would report `M`; the raw inspection keeps `T`.
+    expect(changes).toEqual([{ status: "T", path: "notes/a.md" }]);
+  });
+
+  it("sees a change made AND REVERTED on a MERGED SIDE BRANCH that a first-parent walk misses", async () => {
+    const base = await commit("notes/main.md", "main\n", "base");
+    // Side branch off base ADDS then DELETES a path — net-nothing, so the merge's net
+    // tree (and its first-parent diff) never shows it, but every commit of the branch
+    // DID touch it. This is the exact first-parent blind spot the raw all-reachable
+    // walk closes.
+    git(["checkout", "-q", "-b", "side"]);
+    await commit("sources/smuggled.md", "smuggled\n", "side add");
+    await unlink(join(dir, "sources/smuggled.md"));
+    git(["add", "-A"]);
+    git(["commit", "-q", "-m", "side revert"]);
+    const sideOid = git(["rev-parse", "HEAD"]);
+    // Back on main, a mainline commit, then a no-ff merge of the side branch.
+    git(["checkout", "-q", "main"]);
+    await commit("notes/more.md", "more\n", "mainline more");
+    git(["merge", "--no-ff", "-q", "-m", "merge side", sideOid]);
+    const merge = git(["rev-parse", "HEAD"]);
+
+    // First-parent walk: the reverted side path never appears.
+    const firstParent = (await openRepo(dir).commitsInRange(base, merge, [])).flatMap((c) => c.changes.map((ch) => ch.path));
+    expect(firstParent).not.toContain("sources/smuggled.md");
+    // All-reachable raw inspection: the side-branch add/delete surfaces.
+    const allReachable = (await openRepo(dir).changedStatusesInRange(base, merge)).map((e) => e.path);
+    expect(allReachable).toContain("sources/smuggled.md");
+  });
+
+  it("reports BOTH sides of a rename under the raw R letter (not a normalized fromPath)", async () => {
+    const base = await commit("notes/old.md", "content that is long enough to detect a rename cleanly\n", "base");
+    await unlink(join(dir, "notes/old.md"));
+    await writeFile(join(dir, "notes/new.md"), "content that is long enough to detect a rename cleanly\n");
+    git(["add", "-A"]);
+    git(["commit", "-q", "-m", "rename"]);
+    const to = git(["rev-parse", "HEAD"]);
+    const changes = await openRepo(dir).changedStatusesInRange(base, to);
+    expect(changes).toContainEqual({ status: "R", path: "notes/old.md" });
+    expect(changes).toContainEqual({ status: "R", path: "notes/new.md" });
+  });
+
+  it("from=null inspects the whole reachable history (unborn-canonical parity)", async () => {
+    await commit("notes/a.md", "a\n", "first");
+    await commit("notes/b.md", "b\n", "second");
+    const paths = (await openRepo(dir).changedStatusesInRange(null, "main")).map((e) => e.path).sort();
+    expect(paths).toEqual(["notes/a.md", "notes/b.md"]);
+  });
+});
+
 describe("public surface", () => {
   it("does not leak runGitBuffer (nor runGit) from the barrel", () => {
     // Companion to git.no-protected-write.test's runGit lock: the buffer-mode

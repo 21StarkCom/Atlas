@@ -17,13 +17,13 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { BrokerClient, BrokerService, generateEd25519, signBytes, startBrokerServer } from "@atlas/broker";
+import { BrokerService, generateEd25519, signBytes, startBrokerServer } from "@atlas/broker";
 import { openRepo, type Repo } from "@atlas/git";
 import { bindEnqueueContext } from "@atlas/jobs";
 import { registerJobsMigration } from "@atlas/jobs";
 import { scanBytes, SecretDetectedError } from "@atlas/scan";
 import { registerSyncCursorsMigration, type LedgerBackupConfig, type Store } from "@atlas/sqlite-store";
-import { openWorkflowStore } from "../../src/workflows/index.js";
+import { openWorkflowStore, makeInProcessBrokerClient } from "../../src/workflows/index.js";
 import { brokerSignedIntegration } from "../../src/ingest/wiring.js";
 import { seedSyncCursor } from "../../src/sync/seed.js";
 import type { SyncCycleDeps } from "../../src/sync/cycle.js";
@@ -251,7 +251,7 @@ export async function makeSyncHarness(opts: SyncHarnessOptions = {}): Promise<Sy
       return {
         store,
         repo,
-        connectIntegration: async () => brokerSignedIntegration(await BrokerClient.connect(socketPath), "sync"),
+        connectIntegration: async () => brokerSignedIntegration(makeInProcessBrokerClient(repo, SYNC_CANONICAL_REF), "sync"),
         backup,
         worktreesPath,
         canonicalRef: SYNC_CANONICAL_REF,

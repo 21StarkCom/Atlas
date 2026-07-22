@@ -6,7 +6,6 @@
  * a derived instruction → retrieval-first plan → validate → Tier-2 auto-commit / Tier-3
  * review-pending (destructive maintenance is always Tier-3 ⇒ exit 6). Output ⇒ `maintain.schema.json`.
  */
-import { BrokerClient } from "@atlas/broker";
 import { newRunId } from "@atlas/contracts";
 import { openRepo } from "@atlas/git";
 import { GeneratedArtifactGuard } from "@atlas/scan";
@@ -15,7 +14,7 @@ import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { openWorkflowStore } from "../workflows/index.js";
 import { makeRetrieveSeam } from "../retrieval/wiring.js";
-import { makeModelPlanGenerator, PLAN_GENERATION_MAX_TOKENS, makeBrokerIntegrator } from "../workflows/index.js";
+import { makeModelPlanGenerator, PLAN_GENERATION_MAX_TOKENS, makeBrokerIntegrator, makeInProcessBrokerClient } from "../workflows/index.js";
 import { makeStoreValidationVault } from "../validation/store-vault.js";
 import { detectMaintenanceIssues, type MaintenanceIssue } from "../workflows/maintain.js";
 import { applySynthesis, type SynthesisApplyDeps } from "../workflows/synthesis.js";
@@ -83,15 +82,11 @@ async function maintain(ctx: RunContext): Promise<number> {
     }
 
     // APPLY: drive each issue's remediation through the risk-tiered synthesis pipeline. Assemble
-    // the SAME seams `enrich` uses — the in-process model boundary + the broker.
-    let brokerClient: BrokerClient;
-    try {
-      brokerClient = await BrokerClient.connect(cfg.broker.socket_path);
-    } catch (e) {
-      throw new CliError({ code: "broker-unreachable", message: `the broker is unreachable at ${cfg.broker.socket_path}`, hint: "Start the broker daemon before --apply.", exitCode: EXIT.CONFIG, cause: e });
-    }
-
-    try {
+    // the SAME seams `enrich` uses — the in-process model boundary + the in-process integrator
+    // (no broker daemon; ADR-0003 — canonical FF-advance + run state-machine run in-process).
+    const repo = openRepo(resolvePath(ctx, cfg.vault.path));
+    const broker = makeInProcessBrokerClient(repo, cfg.git.canonical_ref);
+    {
       // The in-process model boundary (no egress daemon, no capability mint).
       const receipts: ModelCallReceipt[] = [];
       const models = new ModelsClient(createInProcessInvoker({ env: ctx.env }), (r) => { receipts.push(r); });
@@ -117,8 +112,8 @@ async function maintain(ctx: RunContext): Promise<number> {
           inputsTrusted: () => true,
           evidenceValid: () => true,
           config: { packBudgetTokens: PACK_BUDGET, requireSourcesForSynthesis: cfg.policies.require_sources_for_synthesis, risk: riskConfigFrom(cfg.policies) },
-          store, broker: brokerClient, backup: backupConfig(ctx), repo: openRepo(resolvePath(ctx, cfg.vault.path)),
-          integrate: makeBrokerIntegrator(brokerClient),
+          store, broker, backup: backupConfig(ctx), repo,
+          integrate: makeBrokerIntegrator(broker),
           guard: new GeneratedArtifactGuard(quarantineStoreFromContext(ctx)),
           foldProjections: async () => {},
           worktreesPath: resolvePath(ctx, cfg.git.worktrees_path),
@@ -134,8 +129,6 @@ async function maintain(ctx: RunContext): Promise<number> {
       if (ctx.output.mode === "json") emitJson(out);
       else ctx.render(`maintain: ${out.mode}, ${findings.length} finding(s)`);
       return anyReviewPending ? EXIT.ACTION_REQUIRED : EXIT.OK;
-    } finally {
-      brokerClient.close();
     }
   } finally {
     store.close();

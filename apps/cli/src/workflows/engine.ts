@@ -667,11 +667,51 @@ export class RunHandle {
       return { canonicalRef, canonicalSha, seq: allocated.seq, payloadHash: allocated.payloadHash, auditHead: anchored.head };
     }
 
-    // Un-anchored: the broker appends BEFORE its canonical CAS, so an un-anchored
-    // event guarantees the canonical ref did not advance — nothing installed. Drop
-    // the abandoned intent so the run re-drives integration from agent-committed
-    // with a fresh seq (the seq was never anchored, so the chain stays gapless).
-    dropPendingIntent(db, this.runId, allocated.seq);
+    // Un-anchored. Under the v1 broker an un-anchored event proved canonical did NOT
+    // advance (the append PRECEDED the CAS), so "nothing installed" was safe to assume.
+    // Under the v2 in-process integrator (ADR-0003) there is NO audit append at all —
+    // `signAndAppendAuditEvent` refuses every canonical-installing kind — so an
+    // un-anchored verdict no longer proves the canonical ref stayed put: the in-process
+    // FF may have landed (crash after `update-ref`, before the §2.8 step-3 SQLite write).
+    // Check AUTHORITATIVE canonical containment FIRST, exactly as the anchored branch
+    // does, and only DROP when canonical genuinely does not contain the commit.
+    if (this.deps.repo) {
+      const head = await this.deps.repo.readRef(canonicalRef);
+      if (head !== null && (await this.deps.repo.isAncestor(commitSha, head))) {
+        // The FF advance landed → complete the §2.8 step-3 CAS forward, replaying the
+        // integration write with an EMPTY audit head (no audit ref this phase). Never
+        // fabricate: the sha recorded is the agent commit proven contained above.
+        const write = integrationLedgerWrite({
+          runId: this.runId,
+          operation: this.operation,
+          targetNoteId: this.input.targetNoteId ?? null,
+          canonicalRef,
+          commitSha,
+          now,
+        });
+        finishIntegration(this.deps.store, {
+          runId: this.runId,
+          operation: this.operation,
+          targetNoteId: this.input.targetNoteId ?? null,
+          seq: allocated.seq,
+          payloadHash: allocated.payloadHash,
+          canonicalRef,
+          canonicalSha: commitSha,
+          auditHead: "",
+          write,
+          now,
+        });
+        return { canonicalRef, canonicalSha: commitSha, seq: allocated.seq, payloadHash: allocated.payloadHash, auditHead: "" };
+      }
+      // Repo present + canonical does NOT contain the commit ⇒ nothing installed. Drop
+      // the abandoned intent so the run re-drives integration from agent-committed with
+      // a fresh seq (the seq was never anchored, so the chain stays gapless).
+      dropPendingIntent(db, this.runId, allocated.seq);
+      return null;
+    }
+    // No repo ⇒ containment is unprovable. PRESERVE the pending intent (return null →
+    // integrate() re-throws) so the startup reconciler — which always has a repo —
+    // resolves it authoritatively; never drop on an unprovable state.
     return null;
   }
 

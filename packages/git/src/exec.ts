@@ -30,6 +30,12 @@ export class GitError extends Error {
 export interface RunGitOptions {
   /** Data to pipe to the subprocess stdin (used for `commit -F -`). */
   readonly input?: string;
+  /**
+   * Environment variables merged over `process.env` for this one invocation.
+   * Used to pin `GIT_AUTHOR_*`/`GIT_COMMITTER_*` so a poisoned ambient
+   * environment cannot override the deterministic commit identity.
+   */
+  readonly env?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -46,6 +52,7 @@ export async function runGit(
       cwd,
       encoding: "utf8",
       maxBuffer: 64 * 1024 * 1024,
+      ...(options.env ? { env: { ...process.env, ...options.env } } : {}),
     });
     if (options.input !== undefined) {
       child.child.stdin?.end(options.input);

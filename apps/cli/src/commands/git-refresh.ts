@@ -7,7 +7,6 @@
  * operator must still approve), so it needs no OS-presence authorization; it emits a `run.refreshed`
  * audit event through the normal audit path (engine core `refreshRun`). Output ⇒ `git-refresh.schema.json`.
  */
-import { BrokerClient } from "@atlas/broker";
 import { openRepo } from "@atlas/git";
 import { GeneratedArtifactGuard } from "@atlas/scan";
 import { ModelsClient, createInProcessInvoker, type ModelCallReceipt } from "@atlas/models";
@@ -16,7 +15,7 @@ import { registerCommand, type RunContext } from "../handlers.js";
 import { openWorkflowStore } from "../workflows/index.js";
 import { readAgentRunStatus } from "../workflows/checkpoints.js";
 import { makeRetrieveSeam } from "../retrieval/wiring.js";
-import { makeModelPlanGenerator, PLAN_GENERATION_MAX_TOKENS, refreshRun, type SynthesisRefreshDeps } from "../workflows/index.js";
+import { makeModelPlanGenerator, PLAN_GENERATION_MAX_TOKENS, refreshRun, makeInProcessBrokerClient, type SynthesisRefreshDeps } from "../workflows/index.js";
 import { makeStoreValidationVault } from "../validation/store-vault.js";
 import { readRunInput } from "../workflows/synthesis.js";
 import { readVault } from "../vault/reader.js";
@@ -66,16 +65,14 @@ async function gitRefresh(ctx: RunContext): Promise<number> {
     const kind = runRow.operation as "enrich" | "reconcile" | "maintain";
     const input = { target: runRow.target_note_id, instruction: persisted.instruction, ...(persisted.retrievalK !== undefined ? { retrievalK: persisted.retrievalK } : {}), ...(persisted.typeFilter !== undefined ? { typeFilter: persisted.typeFilter } : {}) };
 
-    // Connect the audit broker. The model boundary is in-process (retrieval embed +
-    // plan generateObject) — no egress daemon, no capability mint.
-    let brokerClient: BrokerClient;
-    try {
-      brokerClient = await BrokerClient.connect(cfg.broker.socket_path);
-    } catch (e) {
-      throw new CliError({ code: "broker-unreachable", message: `the broker is unreachable at ${cfg.broker.socket_path}`, hint: "Start the broker daemon.", exitCode: EXIT.CONFIG, cause: e });
-    }
+    // The audit + model boundaries are both in-process (ADR-0003): no broker daemon,
+    // no egress daemon, no capability mint. `refresh` performs no canonical move (the
+    // run stays review-pending), so the in-process client only appends the
+    // non-installing `run.refreshed` event (audit/WORM dropped).
+    const repo = openRepo(resolvePath(ctx, cfg.vault.path));
+    const broker = makeInProcessBrokerClient(repo, cfg.git.canonical_ref);
 
-    try {
+    {
       const receipts: ModelCallReceipt[] = [];
       const models = new ModelsClient(createInProcessInvoker({ env: ctx.env }), (r) => { receipts.push(r); });
       const indexingCfg = { chunker_version: cfg.indexing.chunker_version, embedding_model: cfg.indexing.embedding_model, dimensions: cfg.indexing.dimensions };
@@ -95,7 +92,7 @@ async function gitRefresh(ctx: RunContext): Promise<number> {
         inputsTrusted: () => true,
         evidenceValid: () => true,
         config: { packBudgetTokens: PACK_BUDGET, requireSourcesForSynthesis: cfg.policies.require_sources_for_synthesis, risk: riskConfigFrom(cfg.policies) },
-        store, broker: brokerClient, backup: backupConfig(ctx), repo: openRepo(resolvePath(ctx, cfg.vault.path)),
+        store, broker, backup: backupConfig(ctx), repo,
         guard: new GeneratedArtifactGuard(quarantineStoreFromContext(ctx)),
         worktreesPath: resolvePath(ctx, cfg.git.worktrees_path),
         canonicalRef: cfg.git.canonical_ref,
@@ -106,8 +103,6 @@ async function gitRefresh(ctx: RunContext): Promise<number> {
       if (ctx.output.mode === "json") emitJson(out);
       else ctx.render(`refreshed ${res.runId}: ${res.superseded.slice(0, 8)} → ${res.newCommit.slice(0, 8)} (${res.state})`);
       return EXIT.OK;
-    } finally {
-      brokerClient.close();
     }
   } finally {
     store.close();

@@ -33,10 +33,10 @@
  * git fixture vault), so it is part of the required `pnpm -r test` CI gate on both OS.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { platform } from "node:os";
 import { probeSandbox } from "@atlas/sources";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { CHANGE_PLAN_OPS, RISK_TIERS, type RiskTier } from "@atlas/contracts";
 import { OperationForbiddenError, assertOperationAllowed, classifyOperation } from "../../src/policies/operation-gate.js";
 // The PRODUCTION model-output orchestration boundary — the exit test drives THIS entry
@@ -462,6 +462,10 @@ describeIfSandbox("phase2.non-integration: Phase 2 cannot mutate the vault via m
         name: "WORM audit anchor file",
         mutate: () => {
           // Append a tampering line to the append-only anchor — the snapshot covers it.
+          // v2 (ADR-0003): captures advance canonical in-process, so no broker append
+          // has created the anchor dir/file yet — materialize the parent so the write
+          // (and thus the snapshot delta the assertion detects) still lands.
+          mkdirSync(dirname(h.anchorPath), { recursive: true });
           writeFileSync(h.anchorPath, "TAMPER\n", { encoding: "utf8", flag: "a" });
         },
       },

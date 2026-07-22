@@ -8,14 +8,17 @@ import { runGit } from "./exec.js";
 import { buildCommitMessage, parseManifestTrailer } from "./commit.js";
 
 /**
- * Runtime identity stamped on agent commits. Agent commits are made by the
- * automated runtime, not a human, so they carry a dedicated agent identity
- * (distinct from the repo-authoring convention used for source commits). The
- * identity is set per-invocation via `-c` so the commit never depends on — or
- * mutates — ambient git config.
+ * Deterministic identity stamped on agent commits. Under the v2 in-process cutover
+ * (ADR-0003) the agent commit is FF-installed DIRECTLY onto the canonical ref (the
+ * retired broker no longer re-authors an audit commit over it), so it must carry the
+ * required deterministic authorship `Aryeh Stark <aryeh@21stark.com>` — the same
+ * identity the (now-retired) broker stamped on canonical writes. Both author AND
+ * committer are pinned so the installed commit's identity is fully deterministic. The
+ * identity is set per-invocation via `-c` so the commit never depends on — or mutates
+ * — ambient git config.
  */
-const AGENT_AUTHOR_NAME = "Atlas Agent";
-const AGENT_AUTHOR_EMAIL = "agent@atlas.local";
+const AGENT_AUTHOR_NAME = "Aryeh Stark";
+const AGENT_AUTHOR_EMAIL = "aryeh@21stark.com";
 
 export interface Worktree {
   /** Absolute path to the worktree directory. */
@@ -54,7 +57,19 @@ class WorktreeImpl implements Worktree {
         "-F",
         "-",
       ],
-      { input: message },
+      // Pin all four identity vars in the environment too: `-c user.name/email`
+      // is overridden by ambient GIT_AUTHOR_*/GIT_COMMITTER_*, so a poisoned
+      // environment could otherwise change the committed authorship. Explicit
+      // env wins and keeps the directly-installed canonical commit deterministic.
+      {
+        input: message,
+        env: {
+          GIT_AUTHOR_NAME: AGENT_AUTHOR_NAME,
+          GIT_AUTHOR_EMAIL: AGENT_AUTHOR_EMAIL,
+          GIT_COMMITTER_NAME: AGENT_AUTHOR_NAME,
+          GIT_COMMITTER_EMAIL: AGENT_AUTHOR_EMAIL,
+        },
+      },
     );
     return runGit(this.dir, ["rev-parse", "HEAD"]);
   }
