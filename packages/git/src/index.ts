@@ -17,6 +17,7 @@ export {
   type CommitChanges,
 } from "./repo.js";
 export { type Worktree } from "./worktree.js";
+export { commitPaths } from "./commit-paths.js";
 export {
   AGENT_REF_PREFIX,
   AGENT_REF_RE,
