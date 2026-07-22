@@ -58,6 +58,7 @@ export type {
 // note-scoped `notes`-projection fold (O(delta), caller-supplied resolver).
 export { deriveAndPersistNote } from "./note-derivation.js";
 export { foldNotesForPaths } from "./fold-notes-for-paths.js";
+export { foldNotesV2 } from "./fold-notes-v2.js";
 
 export {
   foldProvenanceManifests,

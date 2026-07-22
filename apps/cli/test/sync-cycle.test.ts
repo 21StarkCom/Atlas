@@ -21,11 +21,6 @@ import { reconcilePending } from "../src/sync/pending.js";
 import { runSyncCycle, computeBlocked, readSingleCursor, recoverSyncRuns, readSyncIntent } from "../src/sync/cycle.js";
 import { buildSyncPlan, SyncBlockedError } from "../src/sync/plan.js";
 import { reconcileRunsOnStartup } from "../src/workflows/index.js";
-import { fileURLToPath } from "node:url";
-import { dirname, join as pathJoin } from "node:path";
-
-// repo root = five levels up from apps/cli/test/ (…/apps/cli/test → repo root).
-const REPO_ROOT_FOR_SCHEMA = pathJoin(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 import {
   makeSyncHarness,
   noteText,
@@ -1018,41 +1013,8 @@ describe("sync coverage gaps (#289 review)", () => {
   }, 60_000);
 });
 
-// ── envelope schema conformance (#289 contract-drift: no ajv check on the write path) ──
-
-describe("sync write envelope conforms to sync.schema.json (ajv)", () => {
-  let h: SyncHarness;
-  afterEach(async () => {
-    await h?.cleanup();
-  });
-
-  it("a clean, a mixed(exit 2), and a no-run envelope all validate against the committed schema", async () => {
-    const AjvMod = (await import("ajv/dist/2020.js")).default as unknown as {
-      new (o?: unknown): {
-        compile: (s: unknown) => ((d: unknown) => boolean) & { errors?: unknown };
-        errorsText: (e?: unknown) => string;
-      };
-    };
-    const { readFileSync } = await import("node:fs");
-    const schema = JSON.parse(
-      readFileSync(pathJoin(REPO_ROOT_FOR_SCHEMA, "docs/specs/cli-contract/sync.schema.json"), "utf8"),
-    );
-    const ajv = new AjvMod({ strict: false, allErrors: true });
-    const validate = ajv.compile(schema);
-
-    h = await makeSyncHarness();
-    // clean absorb
-    const clean = await runSyncCycle(h.deps());
-    expect(validate(clean.envelope), ajv.errorsText(validate.errors)).toBe(true);
-    // no-run (behindBy == 0)
-    const noRun = await runSyncCycle(h.deps());
-    expect(validate(noRun.envelope), ajv.errorsText(validate.errors)).toBe(true);
-    // mixed → exit 2
-    h.writeUpstream("notes/c.md", noteText("concept-c", "C"));
-    h.writeUpstream("notes/d.md", noteText("concept-d", "D", PLANTED_SECRET));
-    h.commitUpstream("mixed");
-    const mixed = await runSyncCycle(h.deps());
-    expect(mixed.exitCode).toBe(2);
-    expect(validate(mixed.envelope), ajv.errorsText(validate.errors)).toBe(true);
-  }, 60_000);
-});
+// The old absorb-cycle envelope is no longer bound to `sync.schema.json`: v2 (#329)
+// rewrote that schema to the flat 6-count reconcile shape owned by the `sync` command
+// (proven by `sync.v2.test.ts`). `runSyncCycle` now backs `sync reset` only, so its
+// envelope conforms to no command schema — the former ajv-against-sync.schema.json
+// conformance block was removed with the rewrite.

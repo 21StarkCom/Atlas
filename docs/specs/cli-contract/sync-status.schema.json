@@ -16,7 +16,8 @@
     "cycleSeq",
     "pendingQuarantine",
     "divergence",
-    "blocked"
+    "blocked",
+    "pending"
   ],
   "properties": {
     "command": { "const": "sync status" },
@@ -81,6 +82,20 @@
         "commitOid": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
         "reason": { "type": "string", "minLength": 1 }
       }
+    },
+    "pending": {
+      "type": "object",
+      "description": "The v2 reconcile-derived pending set (#329) — the working tree classified against the SQLite projection via the SAME reconcile routine `sync` acts on, so status.pending counts exactly equal the counts the very next `sync` reports. Read-only.",
+      "additionalProperties": false,
+      "required": ["scannedCount", "changedCount", "newCount", "droppedCount", "movedCount", "noop"],
+      "properties": {
+        "scannedCount": { "type": "integer", "minimum": 0, "description": "Distinct vault note files scanned + hashed (the reconcile input size)." },
+        "changedCount": { "type": "integer", "minimum": 0, "description": "Notes whose content hash changed (same stable id). A rename-plus-edit counts here, never in movedCount." },
+        "newCount": { "type": "integer", "minimum": 0, "description": "Vault notes whose stable id is absent from the projection." },
+        "droppedCount": { "type": "integer", "minimum": 0, "description": "Projection notes whose stable id is absent from the vault." },
+        "movedCount": { "type": "integer", "minimum": 0, "description": "Notes with an identical content hash but a relocated path (same stable id)." },
+        "noop": { "type": "boolean", "description": "true iff changedCount + newCount + droppedCount + movedCount == 0." }
+      }
     }
   },
   "examples": [
@@ -95,7 +110,8 @@
       "cycleSeq": 0,
       "pendingQuarantine": [],
       "divergence": { "state": "ok", "cursorOid": null, "upstreamHead": "cccccccccccccccccccccccccccccccccccccccc" },
-      "blocked": null
+      "blocked": null,
+      "pending": { "scannedCount": 210, "changedCount": 0, "newCount": 210, "droppedCount": 0, "movedCount": 0, "noop": false }
     },
     {
       "command": "sync status",
@@ -114,7 +130,8 @@
         "cursorOid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "upstreamHead": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
       },
-      "blocked": null
+      "blocked": null,
+      "pending": { "scannedCount": 212, "changedCount": 1, "newCount": 2, "droppedCount": 1, "movedCount": 1, "noop": false }
     }
   ],
   "x-atlas-contract": {

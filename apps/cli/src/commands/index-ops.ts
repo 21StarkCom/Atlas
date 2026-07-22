@@ -23,6 +23,7 @@
  * convergence FIRST and then anchor the single `run.projection` marker; a crash between
  * the two re-converges idempotently on rerun (`reconcileIndex` is crash-safe).
  */
+import { writeFileSync } from "node:fs";
 import * as lancedb from "@lancedb/lancedb";
 import type { ParsedNote, VaultSnapshot } from "@atlas/contracts";
 import {
@@ -150,7 +151,22 @@ export async function buildEmbedder(
     },
   );
   // The embed transmission binds to the run id (no capability mint).
-  return { embed: embedderFromClient(models, { runId }, cfg), close: () => {} };
+  const embed = embedderFromClient(models, { runId }, cfg);
+  // Test-only observable (gated; inert in production): when ATLAS_EMBED_COUNT_FILE
+  // is set, persist the cumulative count of embed() calls this command made, so a
+  // test can assert "zero embeddings on a noop/pure-move, exactly one on a
+  // rename-plus-edit" without reaching into the provider.
+  const countFile = ctx.env.ATLAS_EMBED_COUNT_FILE;
+  if (ctx.env.ATLAS_TEST_MODE === "1" && countFile) {
+    let calls = 0;
+    const counting: Embedder = async (texts) => {
+      calls += 1;
+      writeFileSync(countFile, String(calls), "utf8");
+      return embed(texts);
+    };
+    return { embed: counting, close: () => {} };
+  }
+  return { embed, close: () => {} };
 }
 
 /** Build the reconcile {@link IndexDeps} shared by repair + rebuild. */
