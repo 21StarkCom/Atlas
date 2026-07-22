@@ -192,6 +192,12 @@ export async function addNote(req: {
   dest: string;
   guard: PrePersistenceGuard;
   deps: CaptureDeps;
+  /**
+   * Invoked at the true post-grounding boundary — AFTER the pure scan/frontmatter
+   * grounding, BEFORE the first durable mutation (store open + migrate). See
+   * {@link import("./capture.js").captureSource}. A no-op when absent.
+   */
+  preApply?: () => void;
 }): Promise<NoteAddResult> {
   const { path, dest, guard, deps } = req;
   const now = deps.now ?? rfc3339Ms;
@@ -237,6 +243,11 @@ export async function addNote(req: {
       `type "source" / the source-* id namespace belong to captures; authored notes must use their own type/id`,
     );
   }
+
+  // Post-grounding boundary: scan + frontmatter validation done, nothing durable
+  // written. Re-check the external git index.lock (+ test barrier) BEFORE the first
+  // mutation (store open + migrate below).
+  req.preApply?.();
 
   // ── Step 1: assemble the mutating deps (bytes proven clean + note proven valid).
   const store = deps.openStore();

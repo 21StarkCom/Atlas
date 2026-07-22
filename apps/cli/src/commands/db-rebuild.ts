@@ -47,20 +47,24 @@ interface RebuildOutput {
 async function dbRebuild(ctx: RunContext): Promise<number> {
   const { fromGit } = parseArgs(ctx.argv);
 
-  let snapshot: VaultSnapshot;
-  try {
-    snapshot = await readVault(ctx.config.config);
-  } catch (e) {
-    throw new CliError({
-      code: "vault-error",
-      message: `cannot read vault: ${e instanceof Error ? e.message : String(e)}`,
-      hint: "Check that vault.path in brain.config.yaml exists and is readable.",
-      exitCode: EXIT.CONFIG,
-      cause: e,
-    });
-  }
-
   return ctx.withLock("vault-maintenance", async () => {
+    // Read the vault snapshot INSIDE the lock (round-2 finding): reading it before
+    // acquiring `vault-maintenance` let a mutation commit in between, so the rebuild
+    // could replace projections from a stale snapshot. Under the lock no writer can
+    // move the vault while we snapshot → rebuild.
+    let snapshot: VaultSnapshot;
+    try {
+      snapshot = await readVault(ctx.config.config);
+    } catch (e) {
+      throw new CliError({
+        code: "vault-error",
+        message: `cannot read vault: ${e instanceof Error ? e.message : String(e)}`,
+        hint: "Check that vault.path in brain.config.yaml exists and is readable.",
+        exitCode: EXIT.CONFIG,
+        cause: e,
+      });
+    }
+
     // Require an EXISTING migrated ledger — `db rebuild` must NEVER create the DB
     // or apply DDL / touch db_schema_migrations (round-2 finding F5); that is
     // `db migrate`'s job. A projection rebuild only replaces projection rows.

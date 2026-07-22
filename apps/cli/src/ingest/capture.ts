@@ -360,6 +360,15 @@ export async function captureSource(req: {
   path: string;
   guard: PrePersistenceGuard;
   deps: CaptureDeps;
+  /**
+   * Invoked at the true post-grounding boundary — AFTER the pure normalize/scan
+   * grounding, BEFORE the first durable mutation (store open + migrate). The
+   * caller ({@link import("../locks/mutation-guard.js").withVaultMutation}) uses it
+   * to re-run the external-git-`index.lock` preflight here, so a lock an external
+   * git process creates DURING our (sandboxed) normalize is still caught before we
+   * mutate. A no-op when absent (a direct caller with no lock scope).
+   */
+  preApply?: () => void;
 }): Promise<CaptureResult> {
   const { path, guard, deps } = req;
   const now = deps.now ?? rfc3339Ms;
@@ -373,6 +382,12 @@ export async function captureSource(req: {
   const rendition = norm.rendition;
   const contentId = rendition.contentId;
   const origin = path;
+
+  // Post-grounding boundary: normalize/scan is done, nothing durable has been
+  // written. Re-check the external git index.lock (and, in tests, park the barrier)
+  // HERE so a lock loser / an index.lock racing our grounding is caught before the
+  // first mutation (store open + migrate below).
+  req.preApply?.();
 
   // ── Step 1: assemble the mutating deps (now that the bytes are proven clean).
   const store = deps.openStore();

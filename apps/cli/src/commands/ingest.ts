@@ -10,6 +10,8 @@ import { registerCommand, type RunContext } from "../handlers.js";
 import { serializeContentId, serializeRenditionId } from "@atlas/contracts";
 import { captureSource, previewCapture, CaptureRejectedError } from "../ingest/capture.js";
 import { buildCaptureDeps, buildGuard, probeStore } from "../ingest/wiring.js";
+import { resolvePath } from "./backup-config.js";
+import { withVaultMutation } from "../locks/mutation-guard.js";
 
 interface ParsedArgs {
   readonly path: string;
@@ -77,9 +79,16 @@ async function ingest(ctx: RunContext): Promise<number> {
 
   // APPLY: same captureSource path as `source add`.
   const deps = buildCaptureDeps(ctx, "ingest", args.idempotencyKey);
+  const vaultPath = resolvePath(ctx, ctx.config.config.vault.path);
   let result;
   try {
-    result = await captureSource({ path: args.path, guard, deps });
+    // Hold the vault lock across the whole capture. `preApply` is threaded INTO
+    // captureSource so the pre-apply index.lock re-check fires at the true
+    // post-grounding boundary (after the sandboxed normalize, before the first
+    // durable mutation), not before grounding.
+    result = await withVaultMutation(ctx, vaultPath, (preApply) =>
+      captureSource({ path: args.path, guard, deps, preApply }),
+    );
   } catch (e) {
     if (e instanceof CaptureRejectedError) {
       throw new CliError({ code: "validation-error", message: e.message, exitCode: EXIT.VALIDATION, cause: e });

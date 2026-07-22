@@ -26,6 +26,7 @@ import { readVault } from "../vault/reader.js";
 import { riskConfigFrom } from "../policies/risk.js";
 import { quarantineStoreFromContext } from "../quarantine/config.js";
 import { backupConfig, ledgerDbPath, resolvePath } from "./backup-config.js";
+import { withVaultMutation } from "../locks/mutation-guard.js";
 import type { ChangePlan } from "@atlas/contracts";
 import type { RetrievalResult } from "../retrieval/layers.js";
 
@@ -69,10 +70,18 @@ function stubRetrieve(noteId: string, runId: string): RetrievalResult {
 async function evidenceResolve(ctx: RunContext): Promise<number> {
   const p = parseArgs(ctx.argv);
   const cfg = ctx.config.config;
-  const store = openWorkflowStore({ path: ledgerDbPath(ctx) });
   const runId = newRunId();
 
-  try {
+  // `evidence resolve` is a MUTATING command (no preview mode). Acquire the vault
+  // lock BEFORE opening the migrating store or resolving any grounding (evidence
+  // head, provenance, vault snapshot), so a lock loser / git-index-locked invocation
+  // never mutates SQLite nor reads stale grounding before exiting 2. Everything —
+  // store open, resolution, apply, commit, refresh — runs under the held lock. A
+  // `failed` re-anchor still runs here but simply never touches canonical.
+  const vaultPath = resolvePath(ctx, cfg.vault.path);
+  return withVaultMutation(ctx, vaultPath, async (preApply) => {
+    const store = openWorkflowStore({ path: ledgerDbPath(ctx) });
+    try {
     // Resolve the arg as a current evidence head (by evidence_id).
     const ev = store.db
       .prepare(`SELECT evidence_id, claim_id, lineage_id, raw_content_hash, canonical_media_type, extractor_version, normalizer_version, locator, quote_hash FROM claim_evidence WHERE evidence_id = ? AND current = 1`)
@@ -136,7 +145,7 @@ async function evidenceResolve(ctx: RunContext): Promise<number> {
     // In-process apply behind the UNCHANGED makeBrokerIntegrator seam (no broker
     // daemon; ADR-0003) — mirrors enrich/reconcile/maintain. Evidence resolve is a
     // Tier-2/Tier-3 ChangePlan apply and must be daemon-free with zero provisioning.
-    const repo = openRepo(resolvePath(ctx, cfg.vault.path));
+    const repo = openRepo(vaultPath);
     const broker = makeInProcessBrokerClient(repo, cfg.git.canonical_ref);
     {
       const deps: SynthesisApplyDeps = {
@@ -166,6 +175,10 @@ async function evidenceResolve(ctx: RunContext): Promise<number> {
         },
         hasClaim: (k) => store.db.prepare(`SELECT 1 FROM claims WHERE claim_id = ?`).get(k) !== undefined,
         hasNote: (id) => store.db.prepare(`SELECT 1 FROM notes WHERE note_id = ?`).get(id) !== undefined,
+        // Threaded INTO applySynthesis so the index.lock re-check fires at the true
+        // post-grounding boundary (before the first durable mutation), not before
+        // grounding.
+        preApply,
       };
       const res = await applySynthesis("maintain", { target: owningNoteId, instruction: `re-anchor ${ev.evidence_id}` }, deps);
       const base = { command: "evidence resolve", runId: res.runId, evidenceId: ev.evidence_id, lineageId: ev.lineage_id, supersedesEvidenceId: ev.evidence_id, replacementRenditionId: replacementHandle, quoteHash: ev.quote_hash };
@@ -180,9 +193,10 @@ async function evidenceResolve(ctx: RunContext): Promise<number> {
       else ctx.render(`evidence resolve ${ev.evidence_id}: integrated (${verification})`);
       return EXIT.OK;
     }
-  } finally {
-    store.close();
-  }
+    } finally {
+      store.close();
+    }
+  });
 }
 
 registerCommand("evidence resolve", evidenceResolve);

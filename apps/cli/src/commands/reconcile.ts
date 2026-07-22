@@ -23,6 +23,8 @@ import { readVault } from "../vault/reader.js";
 import { riskConfigFrom } from "../policies/risk.js";
 import { quarantineStoreFromContext } from "../quarantine/config.js";
 import { backupConfig, ledgerDbPath, resolvePath } from "./backup-config.js";
+import { openMigratedStore, PREVIEW_PROJECTION_TABLES } from "./store-open.js";
+import { withVaultMutation } from "../locks/mutation-guard.js";
 
 const PACK_BUDGET = 6000;
 
@@ -68,25 +70,39 @@ async function reconcile(ctx: RunContext): Promise<number> {
   const p = parseArgs(ctx.argv);
   const cfg = ctx.config.config;
   const runId = newRunId();
-  const store = openWorkflowStore({ path: ledgerDbPath(ctx) });
 
-  try {
-    const found = detectReconciliationProposals(store.db);
-
-    // PREVIEW (default): deterministic reconciliation report. No model call, no sink.
-    if (!p.apply) {
+  // PREVIEW (default): deterministic reconciliation report. No model call, no sink.
+  // LOCK-FREE and READ-ONLY (the non-migrating reader never creates the DB nor
+  // applies DDL).
+  if (!p.apply) {
+    // Assert the projection tables the detector reads (notes/claims/note_links) are
+    // present so a partially-migrated ledger fails with a typed db-unavailable
+    // (exit 2), not an internal no-such-table error.
+    const store = openMigratedStore(ctx, PREVIEW_PROJECTION_TABLES);
+    try {
+      const found = detectReconciliationProposals(store.db);
       const proposals = found.map((f) => toEntry(f, f.minTier));
       const out = { command: "reconcile", mode: "preview", runId, risk: effectiveRisk(found.map((f) => f.minTier)), proposals };
       if (ctx.output.mode === "json") emitJson(out);
       else ctx.render(`reconcile (preview): ${proposals.length} proposal(s), ${out.risk}`);
       return EXIT.OK;
+    } finally {
+      store.close();
     }
+  }
 
-    // APPLY: drive each proposal through the risk-tiered synthesis pipeline (same seams as enrich).
-    // The canonical FF-advance + run state-machine run in-process (no broker daemon; ADR-0003).
-    const repo = openRepo(resolvePath(ctx, cfg.vault.path));
-    const broker = makeInProcessBrokerClient(repo, cfg.git.canonical_ref);
-    {
+  // APPLY: acquire the vault lock BEFORE opening the migrating store or grounding
+  // (proposal detection, vault snapshot), so a lock loser / git-index-locked
+  // invocation never mutates SQLite nor reads stale grounding before exiting 2.
+  // Everything runs under the held lock. The canonical FF-advance + run state-machine
+  // run in-process (no broker daemon; ADR-0003).
+  const vaultPath = resolvePath(ctx, cfg.vault.path);
+  return withVaultMutation(ctx, vaultPath, async (preApply) => {
+    const store = openWorkflowStore({ path: ledgerDbPath(ctx) });
+    try {
+      const found = detectReconciliationProposals(store.db);
+      const repo = openRepo(vaultPath);
+      const broker = makeInProcessBrokerClient(repo, cfg.git.canonical_ref);
       // The in-process model boundary (no egress daemon, no capability mint).
       const receipts: ModelCallReceipt[] = [];
       const models = new ModelsClient(createInProcessInvoker({ env: ctx.env }), (r) => { receipts.push(r); });
@@ -119,6 +135,11 @@ async function reconcile(ctx: RunContext): Promise<number> {
           worktreesPath: resolvePath(ctx, cfg.git.worktrees_path),
           canonicalRef: cfg.git.canonical_ref,
           now: () => new Date().toISOString(),
+          // Threaded INTO applySynthesis so the index.lock re-check fires at the
+          // true post-grounding boundary (after retrieval + model planning, before
+          // the first durable mutation), on every CAS-rebase retry — not before
+          // grounding.
+          preApply,
         };
         const res = await applySynthesis("reconcile", { target: f.targets[0]!, instruction: instructionFor(f) }, deps);
         if (res.mode === "review-pending") anyReviewPending = true;
@@ -129,10 +150,10 @@ async function reconcile(ctx: RunContext): Promise<number> {
       if (ctx.output.mode === "json") emitJson(out);
       else ctx.render(`reconcile: ${out.mode}, ${proposals.length} proposal(s)`);
       return anyReviewPending ? EXIT.ACTION_REQUIRED : EXIT.OK;
+    } finally {
+      store.close();
     }
-  } finally {
-    store.close();
-  }
+  });
 }
 
 registerCommand("reconcile", reconcile);

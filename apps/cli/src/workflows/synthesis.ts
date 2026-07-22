@@ -240,6 +240,16 @@ export interface SynthesisApplyDeps extends SynthesisPlanDeps {
   readonly canonicalRef: string;
   /** Max attempts across CAS-miss rebases (default 3). */
   readonly maxAttempts?: number;
+  /**
+   * Invoked at the true post-grounding boundary of EACH attempt — AFTER the
+   * retrieval-first plan + validation grounding, BEFORE the first durable mutation
+   * (the `planned` sqlite write / agent worktree + commit). The caller
+   * ({@link import("../locks/mutation-guard.js").withVaultMutation}) uses it to
+   * re-run the external-git-`index.lock` preflight, so a lock an external git
+   * process creates DURING retrieval/model planning is caught before we mutate — on
+   * every CAS-rebase retry too. A no-op when absent.
+   */
+  preApply?: () => void;
   readonly now?: () => string;
 }
 
@@ -336,6 +346,12 @@ export async function applySynthesis(
         exitCode: EXIT.VALIDATION,
       });
     }
+
+    // Post-grounding boundary: the retrieval-first plan is validated and the op is
+    // applicable — nothing durable has been written for this attempt yet. Re-check
+    // the external git index.lock (+ test barrier) HERE, before the first mutation
+    // (`planned` sqlite write below). Fires on every CAS-rebase retry.
+    deps.preApply?.();
 
     const runId = newRunId();
     const tierNum: 2 | 3 = plan.tier === "tier-2" ? 2 : 3;

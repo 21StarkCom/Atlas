@@ -131,9 +131,11 @@ function requestHash(command: string, selector: Selector): string {
  *    the prior `{ items, aggregate }` + exit code WITHOUT re-running the work;
  *  - key reuse with a DIFFERENT request is REJECTED (`idempotency-key-conflict`, exit 1);
  *  - a concurrent duplicate still `in-progress` BLOCKS on the key
- *    (`idempotency-in-progress`, exit 6, retryable) rather than executing twice —
- *    for `jobs run` this happens BEFORE the `jobs-runner` lock, so a duplicate never
- *    even attempts the drain.
+ *    (`idempotency-in-progress`, exit 6, retryable) rather than executing twice.
+ *    For `jobs run` the caller now holds `jobs-runner` around this whole call
+ *    (round-2 finding), so store open + the idempotency claim + the drain are all
+ *    serialized under the one lock — a concurrent runner is rejected `locked:jobs-runner`
+ *    (exit 2) at the lock BEFORE it can open a store or write an in-progress claim.
  *
  * A failure of `work` releases the in-progress slot so a later retry can re-claim it.
  */
@@ -304,34 +306,45 @@ function jobsList(ctx: RunContext): number {
 function jobsRun(ctx: RunContext): Promise<number> {
   const selector = parseSelector("jobs run", ctx.argv);
   const j = ctx.config.config.jobs;
-  return runKeyed(ctx, "jobs run", selector, async (store) => {
-    // Cross-process cancel (finding 3): the drain observes DURABLE cancel intents a
-    // separate `jobs cancel` records atomically in `job_cancellations`, aborting a
-    // running job at its next checkpoint — observed from durable SQLite state, not a
-    // filesystem marker (so a crash after the cancel commit cannot lose it).
-    const cancellation = new SqliteCancellationSource(store.db);
-    const deps: JobsDeps = {
-      store,
-      // Production executors are built per-drain (they close over ctx + the open
-      // store); the import-time map carries only the env-gated test handler. The
-      // test handler is spread FIRST so a production workflow can never be
-      // shadowed by `ATLAS_TEST_JOB_WORKFLOW` naming collision.
-      handlers: { ...JOB_HANDLERS, ...buildJobHandlers({ ctx, store }) },
-      withLock: ctx.withLock,
-      now: nowIso,
-      backoff: { baseMs: j.backoff_base_ms, factor: j.backoff_factor, maxMs: j.backoff_max_ms },
-      defaultMaxAttempts: j.max_attempts,
-      cancellation,
-    };
-    // A `locked:jobs-runner` from `withLock` propagates (runCli → exit 2 envelope).
-    // Bare invocation (no <jobId>, no --all) defaults to --all (contract §8).
-    const runSelector = selector.jobId !== undefined ? { jobId: selector.jobId } : { all: true };
-    const report: JobRunReport = await runAll(deps, runSelector);
-    return {
-      output: { command: "jobs run", items: report.items, aggregate: report.aggregate },
-      exitCode: report.aggregate.exitCode,
-    };
-  });
+  // Acquire `jobs-runner` OUTERMOST — around store open, the idempotency claim, AND
+  // the drain (round-2 finding). Previously `runKeyed` opened the store and wrote the
+  // in-progress idempotency claim BEFORE `runAll` took the lock, so a lock loser (or a
+  // crash) could strand a claim / write a derived store while another runner held the
+  // lock. Now every derived-store write for `jobs run` is serialized under the one
+  // lock. A `locked:jobs-runner` here fails fast (exit 2, no queueing) BEFORE any store
+  // open or idempotency write. Bare invocation (no <jobId>, no --all) defaults to --all.
+  return ctx.withLock("jobs-runner", () =>
+    runKeyed(ctx, "jobs run", selector, async (store) => {
+      // Cross-process cancel (finding 3): the drain observes DURABLE cancel intents a
+      // separate `jobs cancel` records atomically in `job_cancellations`, aborting a
+      // running job at its next checkpoint — observed from durable SQLite state, not a
+      // filesystem marker (so a crash after the cancel commit cannot lose it).
+      const cancellation = new SqliteCancellationSource(store.db);
+      const deps: JobsDeps = {
+        store,
+        // Production executors are built per-drain (they close over ctx + the open
+        // store); the import-time map carries only the env-gated test handler. The
+        // test handler is spread FIRST so a production workflow can never be
+        // shadowed by `ATLAS_TEST_JOB_WORKFLOW` naming collision.
+        handlers: { ...JOB_HANDLERS, ...buildJobHandlers({ ctx, store }) },
+        // The `jobs-runner` lock is ALREADY held by the outer `ctx.withLock` above;
+        // `runAll` MUST NOT re-take it (re-acquiring the same scope in one process is
+        // an order violation → exit 4). Pass a passthrough so the existing `runAll`
+        // body runs under the already-held lock.
+        withLock: (_scope, fn) => Promise.resolve(fn()),
+        now: nowIso,
+        backoff: { baseMs: j.backoff_base_ms, factor: j.backoff_factor, maxMs: j.backoff_max_ms },
+        defaultMaxAttempts: j.max_attempts,
+        cancellation,
+      };
+      const runSelector = selector.jobId !== undefined ? { jobId: selector.jobId } : { all: true };
+      const report: JobRunReport = await runAll(deps, runSelector);
+      return {
+        output: { command: "jobs run", items: report.items, aggregate: report.aggregate },
+        exitCode: report.aggregate.exitCode,
+      };
+    }),
+  );
 }
 
 // ---------------------------------------------------------------------------

@@ -10,6 +10,8 @@ import { registerCommand, type RunContext } from "../handlers.js";
 import { serializeContentId, serializeRenditionId } from "@atlas/contracts";
 import { captureSource, CaptureRejectedError } from "../ingest/capture.js";
 import { buildCaptureDeps, buildGuard } from "../ingest/wiring.js";
+import { resolvePath } from "./backup-config.js";
+import { withVaultMutation } from "../locks/mutation-guard.js";
 
 interface ParsedArgs {
   readonly path: string;
@@ -44,10 +46,17 @@ async function sourceAdd(ctx: RunContext): Promise<number> {
   // BEFORE assembling any mutating dep (DEFECT #1).
   const guard = buildGuard(ctx);
   const deps = buildCaptureDeps(ctx, "source add", args.idempotencyKey);
+  const vaultPath = resolvePath(ctx, ctx.config.config.vault.path);
 
   let result;
   try {
-    result = await captureSource({ path: args.path, guard, deps });
+    // Hold the vault lock across the whole capture (grounding → apply → commit →
+    // refresh). `preApply` is threaded INTO captureSource so the pre-apply
+    // index.lock re-check fires at the true post-grounding boundary (after the
+    // sandboxed normalize, before the first durable mutation), not before grounding.
+    result = await withVaultMutation(ctx, vaultPath, (preApply) =>
+      captureSource({ path: args.path, guard, deps, preApply }),
+    );
   } catch (e) {
     if (e instanceof CaptureRejectedError) {
       throw new CliError({

@@ -204,13 +204,23 @@ export function createLockManager(options: LockManagerOptions): LockManager {
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
         const holderPid = Number(readGuardPid(guard));
-        const holderStale = !holderPid || !isAlive(holderPid);
+        // Reclaim ONLY after positively proving a valid owner PID is dead. An
+        // EMPTY/UNREADABLE guard is NEVER reclaimed during acquisition: a live
+        // creator may be between the exclusive `wx` create and its PID write (the
+        // content is written a beat after the file exists), so an empty guard is
+        // "owner not yet published", not "stale". Treating it as stale would let a
+        // second acquirer delete a live creator's guard and run its scan+create
+        // concurrently — defeating the atomic cross-scope conflict check. So we wait
+        // for the owner to either publish its PID (then the live-holder branch takes
+        // over) or, if it truly never does, we fail fast on the bounded budget.
+        const holderStale = holderPid > 0 && !isAlive(holderPid);
         if (holderStale) {
-          // Positively stale (dead/unreadable/absent owner): safe to reclaim.
+          // Positively stale (a readable, dead owner PID): safe to reclaim.
           rmSync(guard, { force: true });
           continue;
         }
-        // Live holder: never reclaim. Wait a beat, then retry the exclusive create.
+        // Live holder OR not-yet-published owner: never reclaim. Wait a beat, then
+        // retry the exclusive create.
         if (waited >= MAX_WAIT_MS) {
           throw new CliError({
             code: "locked:acquire-guard",
