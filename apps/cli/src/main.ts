@@ -15,7 +15,6 @@ import { dirname, join, resolve } from "node:path";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { newRunId } from "@atlas/contracts";
-import { SecretDetectedError } from "@atlas/scan";
 import { loadConfig, type LoadedConfig } from "./config/load.js";
 import { ConfigError } from "./config/schema.js";
 import {
@@ -232,17 +231,7 @@ export async function runCli(
     log.info("command.end", { exitCode: code });
     return code;
   } catch (e) {
-    // A scan guard's refusal maps to the plan §2.5 secret-scan exit code (3). The
-    // offending bytes are already quarantined by the time the guard throws.
-    const err = isCliError(e)
-      ? e
-      : e instanceof SecretDetectedError
-        ? CliError.secretScan(
-            e.message,
-            "The offending bytes were quarantined (AEAD, ciphertext-only); resolve via `quarantine inspect`/`resolve`.",
-            e,
-          )
-        : CliError.internal(`unhandled error in \`${parsed.command}\``, e);
+    const err = isCliError(e) ? e : CliError.internal(`unhandled error in \`${parsed.command}\``, e);
     return fail(err, output, stdout, stderr, log);
   }
 }

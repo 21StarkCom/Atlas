@@ -111,7 +111,7 @@ async function syncResetHandler(ctx: RunContext): Promise<number> {
       code: "action-required",
       message: "sync reset requires a broker authorization",
       hint: "Re-run with --export-challenge, sign the challenge with an enrolled approver key, then pass --authorization <path>. --yes never authorizes.",
-      exitCode: EXIT.ACTION_REQUIRED,
+      exitCode: EXIT.CONFIG,
     });
   }
   const authorization = JSON.parse(readFileSync(args.authorization, "utf8")) as AuthorizationResponse;

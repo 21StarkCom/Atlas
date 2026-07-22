@@ -30,19 +30,28 @@ describe("model-output export surface: no shipped bypass (round-2 wing finding 1
     expect(surface.submitWithGate).toBeUndefined();
   });
 
-  it("the production entry point ignores any extra caller key — a Phase-2 synthesis op is STILL rejected", async () => {
-    // Even a caller who CASTS a submission carrying a no-op `gate` + `phase: 4` cannot
-    // weaken enforcement: `submitModelDerivedOperation` consults the SSOT gate at phase 2
-    // FIXED inside the boundary, so a synthesis op is refused and `execute` never runs.
+  it("the production entry point ignores any extra caller key — a RESERVED op is STILL rejected, its executor never runs", async () => {
+    // The Phase-2 blanket synthesis refusal is retired (ADR-0003): a synthesis op now
+    // executes. What survives is the minimal membership gate — a RESERVED op (CreateTask)
+    // is refused fail-closed. Even a caller who CASTS a submission carrying a no-op `gate`
+    // + `phase: 4` cannot weaken it: `submitModelDerivedOperation` consults the SSOT gate
+    // FIXED inside the boundary, so the reserved op is refused and `execute` never runs.
     const bypassAttempt = {
       execute: () => {
-        throw new Error("executor must NOT run — the gate must reject a Phase-2 synthesis op first");
+        throw new Error("executor must NOT run — the gate must reject a reserved op first");
       },
       gate: () => {
         /* a no-op gate a caller WISHES were honored */
       },
       phase: 4,
     } as unknown as ModelOutputSubmission;
-    await expect(submitModelDerivedOperation(validChangePlan("CreateNote"), bypassAttempt)).rejects.toBeInstanceOf(OperationForbiddenError);
+    await expect(submitModelDerivedOperation(validChangePlan("CreateTask"), bypassAttempt)).rejects.toBeInstanceOf(OperationForbiddenError);
+  });
+
+  it("a permitted synthesis op now EXECUTES through the production entry point (no tier gate)", async () => {
+    // The v2 gate permits every recognized synthesis op — the injected executor runs.
+    let ran = false;
+    await submitModelDerivedOperation(validChangePlan("CreateNote"), { execute: () => { ran = true; } });
+    expect(ran).toBe(true);
   });
 });

@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { openStore, registerSyncCursorsMigration, type Store } from "@atlas/sqlite-store";
-import { SecretDetectedError } from "@atlas/scan";
+import { SecretDetectedError, scanBytes } from "@atlas/scan";
 import { CliError } from "../src/errors/envelope.js";
 import { seedSyncCursor } from "../src/sync/seed.js";
 import {
@@ -21,7 +21,6 @@ import { reconcilePending } from "../src/sync/pending.js";
 import { runSyncCycle, computeBlocked, readSingleCursor, recoverSyncRuns, readSyncIntent } from "../src/sync/cycle.js";
 import { buildSyncPlan, SyncBlockedError } from "../src/sync/plan.js";
 import { reconcileRunsOnStartup } from "../src/workflows/index.js";
-import { dryScanners } from "../src/commands/sync.js";
 import { fileURLToPath } from "node:url";
 import { dirname, join as pathJoin } from "node:path";
 
@@ -348,7 +347,7 @@ describe("runSyncCycle — the absorb engine (Tasks 4.4–4.7, 4.10)", () => {
     expect(row).toEqual({ file_path: "notes/seed-2026.md", status: "active" });
   }, 60_000);
 
-  it("mixed cycle: the secret quarantines and does NOT wedge — clean absorbs, cursor→head, exit 6, firstSeenOid recorded", async () => {
+  it("mixed cycle: the secret quarantines and does NOT wedge — clean absorbs, cursor→head, exit 2, firstSeenOid recorded", async () => {
     h = await makeSyncHarness();
     await runSyncCycle(h.deps());
     h.writeUpstream("notes/clean.md", noteText("concept-clean", "Clean"));
@@ -357,7 +356,7 @@ describe("runSyncCycle — the absorb engine (Tasks 4.4–4.7, 4.10)", () => {
 
     const res = await runSyncCycle(h.deps());
 
-    expect(res.exitCode).toBe(6);
+    expect(res.exitCode).toBe(2);
     expect(res.envelope.absorbed.map((a) => a.path)).toEqual(["notes/clean.md"]);
     expect(res.envelope.quarantined).toEqual([{ path: "notes/dirty.md", quarantineId: expect.stringMatching(/^q-/) }]);
     expect(res.envelope.cursorTo).toBe(head); // cursor STILL advances (anti-wedge)
@@ -373,7 +372,7 @@ describe("runSyncCycle — the absorb engine (Tasks 4.4–4.7, 4.10)", () => {
     expect(res2.envelope.cursorFrom).toBe(res2.envelope.cursorTo);
   }, 60_000);
 
-  it("all-quarantined cycle: one finalized empty-plan run, no integrate, cursor advanced, exit 6", async () => {
+  it("all-quarantined cycle: one finalized empty-plan run, no integrate, cursor advanced, exit 2", async () => {
     h = await makeSyncHarness();
     await runSyncCycle(h.deps());
     const canonicalBefore = h.readRef(SYNC_CANONICAL_REF)!;
@@ -383,7 +382,7 @@ describe("runSyncCycle — the absorb engine (Tasks 4.4–4.7, 4.10)", () => {
 
     const res = await runSyncCycle(h.deps());
 
-    expect(res.exitCode).toBe(6);
+    expect(res.exitCode).toBe(2);
     expect(res.envelope.appliedOps).toBe(0);
     expect(res.envelope.reconcileJobId).toBeNull();
     expect(res.envelope.quarantined).toHaveLength(2);
@@ -413,7 +412,7 @@ describe("runSyncCycle — the absorb engine (Tasks 4.4–4.7, 4.10)", () => {
     h.writeUpstream("notes/s.md", noteText("concept-s", "S", `other ${PLANTED_SECRET}`));
     h.commitUpstream("dirty v2");
     const res2 = await runSyncCycle(h.deps());
-    expect(res2.exitCode).toBe(6);
+    expect(res2.exitCode).toBe(2);
     const entry2 = (JSON.parse(h.cursorRow().pending_quarantine) as typeof entry1[])[0]!;
     expect(entry2.firstSeenOid).toBe(firstDirty); // preserved
     expect(entry2.quarantineId).not.toBe(entry1.quarantineId); // refreshed handle
@@ -496,9 +495,21 @@ describe("runSyncCycle — the absorb engine (Tasks 4.4–4.7, 4.10)", () => {
     const jobsBefore = h.jobRows().length;
     const quarantinesBefore = h.quarantines.length;
 
-    // Production dry-run wiring: the SAME scan engine, verdicts only — no
-    // quarantine record persists (the command layer owns scanner selection).
-    const res = await runSyncCycle(h.deps({ ...dryScanners() }), { dryRun: true });
+    // Post-#326 the production dryScanners are always-clean no-ops (the scan is
+    // retired), and the harness scanner records every dirty verdict in-memory.
+    // This test needs the RETIRED dry semantics — dirty verdict, "" sentinel,
+    // ZERO persistence — so it wires a local verdict-only scanner. The engine's
+    // dry-run planning path is what's under test, until #329 deletes it.
+    const res = await runSyncCycle(
+      h.deps({
+        scanNoteBytes: async (bytes, origin) => {
+          await Promise.resolve();
+          const verdict = scanBytes({ bytes, context: { origin, boundary: "pre-persistence", kind: "raw" } });
+          return verdict.clean ? { clean: true } : { clean: false, quarantineId: "" };
+        },
+      }),
+      { dryRun: true },
+    );
 
     expect(res.exitCode).toBe(0);
     expect(res.envelope.appliedOps).toBe(0);
@@ -753,7 +764,7 @@ describe("sync crash semantics (Task 4.8 — replay from the durable intent)", (
 
     // Re-run: identical delta re-derived, ONE pending entry, content-addressed handle.
     const res = await runSyncCycle(h.deps());
-    expect(res.exitCode).toBe(6);
+    expect(res.exitCode).toBe(2);
     expect(h.cursorRow().last_absorbed_oid).toBe(head);
     const pending = JSON.parse(h.cursorRow().pending_quarantine) as { path: string }[];
     expect(pending).toHaveLength(1);
@@ -1015,7 +1026,7 @@ describe("sync write envelope conforms to sync.schema.json (ajv)", () => {
     await h?.cleanup();
   });
 
-  it("a clean, a mixed(exit 6), and a no-run envelope all validate against the committed schema", async () => {
+  it("a clean, a mixed(exit 2), and a no-run envelope all validate against the committed schema", async () => {
     const AjvMod = (await import("ajv/dist/2020.js")).default as unknown as {
       new (o?: unknown): {
         compile: (s: unknown) => ((d: unknown) => boolean) & { errors?: unknown };
@@ -1036,12 +1047,12 @@ describe("sync write envelope conforms to sync.schema.json (ajv)", () => {
     // no-run (behindBy == 0)
     const noRun = await runSyncCycle(h.deps());
     expect(validate(noRun.envelope), ajv.errorsText(validate.errors)).toBe(true);
-    // mixed → exit 6
+    // mixed → exit 2
     h.writeUpstream("notes/c.md", noteText("concept-c", "C"));
     h.writeUpstream("notes/d.md", noteText("concept-d", "D", PLANTED_SECRET));
     h.commitUpstream("mixed");
     const mixed = await runSyncCycle(h.deps());
-    expect(mixed.exitCode).toBe(6);
+    expect(mixed.exitCode).toBe(2);
     expect(validate(mixed.envelope), ajv.errorsText(validate.errors)).toBe(true);
   }, 60_000);
 });

@@ -73,32 +73,6 @@ describe("validation: per-op schema re-validation", () => {
   });
 });
 
-describe("validation: mutation-policy cell", () => {
-  it("rejects an op on an immutable target type (source)", () => {
-    const r = validatePlan(plan(updateSection()), ctx({ targetType: "source" }));
-    expect(codes(r)).toContain("policy-immutable");
-    expect(r.ok).toBe(false);
-  });
-
-  it("rejects in-place replacement on an append-only type (decision)", () => {
-    const r = validatePlan(plan(updateSection()), ctx({ targetType: "decision" }));
-    expect(codes(r)).toContain("append-only-violation");
-  });
-
-  it("permits an append-shaped op on an append-only type", () => {
-    const append = { op: "AppendSection", opVersion: 1, selector: { path: "Log" }, content: "more" } as ChangePlanOperation;
-    expect(codes(validatePlan(plan(append), ctx({ targetType: "decision" })))).not.toContain("append-only-violation");
-  });
-
-  it("clears Tier-2 (gate) for a review-only op without blocking it", () => {
-    const merge = { op: "ProposeMerge", opVersion: 1, survivor: "note-x", sourceNotes: ["note-y"] } as ChangePlanOperation;
-    const r = validatePlan(plan(merge), ctx());
-    expect(codes(r)).toContain("policy-review");
-    expect(r.ok).toBe(true);
-    expect(r.gates.tier2Eligible).toBe(false);
-  });
-});
-
 describe("validation: path policy", () => {
   const createNote = (noteType: string): ChangePlanOperation =>
     ({ op: "CreateNote", opVersion: 1, noteType, title: "T", expectedAbsent: true, body: "# T\n\nhi\n" }) as ChangePlanOperation;

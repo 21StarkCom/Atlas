@@ -1,7 +1,7 @@
 /**
  * `purge.cli.e2e` (Task 4.10) — `brain purge` is DEFAULT-SAFE: a bare invocation is a non-mutating
  * preview (mode `preview`, inventory + digest); `--apply` requires a broker authorization
- * (`--export-challenge` emits the challenge, exit 6; bare `--apply` is action-required, exit 6);
+ * (`--export-challenge` emits the challenge, exit 2; bare `--apply` is action-required, exit 2);
  * the selector must be EXACTLY ONE of --note/--source/--data-category (else usage, exit 5). The
  * authorized erasure itself is covered by `purge-erase.test`.
  */
@@ -55,15 +55,15 @@ describe("brain purge (default-safe)", () => {
     expect(out.inventoryId).toBeTruthy();
   });
 
-  it("--apply --export-challenge emits a challenge (op purge) + exits 6", async () => {
+  it("--apply --export-challenge emits a challenge (op purge) + exits 2", async () => {
     const r = await cli(["purge", "--note", "concept-x", "--apply", "--export-challenge", "--json"]);
-    expect(r.code, r.out).toBe(6);
+    expect(r.code, r.out).toBe(2);
     expect(JSON.parse(r.out).op).toBe("purge");
   });
 
-  it("--apply without an authorization is action-required (exit 6)", async () => {
+  it("--apply without an authorization is action-required (exit 2)", async () => {
     const r = await cli(["purge", "--note", "concept-x", "--apply", "--json"]);
-    expect(r.code).toBe(6);
+    expect(r.code).toBe(2);
   });
 
   it("no selector, or more than one, is a usage error (exit 5)", async () => {

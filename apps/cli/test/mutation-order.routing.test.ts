@@ -7,8 +7,9 @@
  *  2. the common mutation-order wrapper exists and exposes `runMutation`;
  *  3. `note add` routes its mutation through that wrapper (`runMutation`);
  *  4. every surviving synthesis mutation entry point (enrich / maintain / reconcile
- *     / evidence resolve) installs canonical through the daemon-free direct
- *     integrator (`makeCanonicalIntegrator`), never a Phase-2 factory.
+ *     / evidence resolve) routes its apply through `applySynthesis`, which installs
+ *     canonical via the common `runMutation` + direct `commitPaths` order — never a
+ *     Phase-2 broker-CAS factory.
  *
  * The forbidden-factory scan mirrors `tools/verify-325.sh` gate 3 (comment-only
  * lines excluded), so this test and the acceptance harness cannot diverge.
@@ -66,12 +67,19 @@ describe("mutation-order routing conformance (#325)", () => {
     expect(noteAdd).toContain('from "../workflows/mutation-order.js"');
   });
 
-  it("every synthesis entry point installs canonical through the direct integrator, not a factory", () => {
+  it("every synthesis entry point routes its apply through applySynthesis, never a Phase-2 factory", () => {
     for (const rel of ["commands/enrich.ts", "commands/maintain.ts", "commands/reconcile.ts", "commands/evidence-resolve.ts"]) {
       const src = read(rel);
-      expect(src, rel).toContain("makeCanonicalIntegrator");
+      expect(src, rel).toContain("applySynthesis");
       for (const name of FORBIDDEN) expect(codeLines(join(SRC, rel)).join("\n"), `${rel} uses ${name}`).not.toContain(name);
     }
+  });
+
+  it("applySynthesis installs canonical via the common runMutation + direct commitPaths order", () => {
+    const synth = read("workflows/synthesis.ts");
+    expect(synth).toContain("runMutation");
+    expect(synth).toContain('from "./mutation-order.js"');
+    for (const name of FORBIDDEN) expect(codeLines(join(SRC, "workflows/synthesis.ts")).join("\n"), `synthesis.ts uses ${name}`).not.toContain(name);
   });
 
   it("no source references the folded-out canonical-ref indirection", () => {

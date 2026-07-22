@@ -503,7 +503,6 @@ describe("Phase-2 cli-contract schema presence (Task 2.0)", () => {
         "source add",
         "source list",
         "source show",
-        "source trust show",
       ].sort(),
     );
   });
@@ -933,8 +932,6 @@ describe("Phase-4 cli-contract schema presence (Task 4.0)", () => {
         "maintain",
         "purge",
         "reconcile",
-        "source trust promote",
-        "source trust revoke",
         "validate",
       ].sort(),
     );
@@ -1173,7 +1170,7 @@ describe("Phase-4 privileged schemas ⇄ broker authzContract (per-command exits
     // review-pending proposal's agent branch (no canonical/trust/erase mutation), so it
     // carries no OS-presence challenge/authorization flow.
     expect(privileged.map((c) => c.name).sort()).toEqual(
-      ["git approve", "git rollback", "purge", "source trust promote", "source trust revoke"].sort(),
+      ["git approve", "git rollback", "purge"].sort(),
     );
   });
 
@@ -1286,8 +1283,6 @@ describe("Phase-4 key-accepting commands expose --idempotency-key + request-hash
         "maintain",
         "purge",
         "reconcile",
-        "source trust promote",
-        "source trust revoke",
       ].sort(),
     );
   });

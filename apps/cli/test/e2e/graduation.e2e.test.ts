@@ -127,11 +127,11 @@ describe("graduation E2E — scan → audit → migrate apply/rollback (test-sig
     expect(plan.mode).toBe("preview");
     expect(plan.idMap["Concepts/Atlas.md"]).toBe("concept-atlas");
 
-    // 4) APPLY — privileged: without an authorization it is action-required (exit 6).
-    expect((await cli(["graduation", "migrate", "--apply", "--json"])).code).toBe(6);
+    // 4) APPLY — privileged: without an authorization it is action-required (exit 2).
+    expect((await cli(["graduation", "migrate", "--apply", "--json"])).code).toBe(2);
     // mint → sign → authorize.
     const ch = await cli(["graduation", "migrate", "--apply", "--export-challenge", "--json"]);
-    expect(ch.code).toBe(6);
+    expect(ch.code).toBe(2);
     const authPath = join(root, "apply.auth.json");
     signAuth(ch.out, authPath);
     const applied = await cli(["graduation", "migrate", "--apply", "--authorization", authPath, "--json"]);
@@ -142,7 +142,7 @@ describe("graduation E2E — scan → audit → migrate apply/rollback (test-sig
 
     // 5) ROLLBACK — privileged, test-signed: byte-exact reversal of the copy.
     const rch = await cli(["graduation", "migrate", "--rollback", "--export-challenge", "--json"]);
-    expect(rch.code).toBe(6);
+    expect(rch.code).toBe(2);
     const rbAuth = join(root, "rollback.auth.json");
     signAuth(rch.out, rbAuth);
     const rolled = await cli(["graduation", "migrate", "--rollback", "--authorization", rbAuth, "--json"]);

@@ -6,7 +6,7 @@
  * the whole surface through `runCli(argv, env)` against a REAL broker Unix socket:
  *
  *   - **socket authorization** — `db restore --export-challenge` mints over the
- *     socket (exit 6 action-required), the challenge is signed by an enrolled
+ *     socket (exit 2 action-required), the challenge is signed by an enrolled
  *     approver, and `db restore --authorization` verifies over the socket (exit 0);
  *   - **key custody** — the AEAD key is read only through the gated platform-custody
  *     seam (`ATLAS_TEST_MODE=1` + `ATLAS_CUSTODY_TEST_DIR`); a missing custody key is
@@ -303,9 +303,9 @@ describe("db lifecycle via runCli (round-3 finding 10)", () => {
   it("full socket-authorized restore round-trip through runCli (mint → sign → restore)", async () => {
     const b = JSON.parse((await cli(c, ["db", "backup", "--json"])).out);
 
-    // 1) --export-challenge mints over the socket → exit 6 + an AuthorizationChallenge.
+    // 1) --export-challenge mints over the socket → exit 2 + an AuthorizationChallenge.
     const ch = await cli(c, ["db", "restore", b.backupRef, "--export-challenge", "--json"]);
-    expect(ch.code).toBe(6);
+    expect(ch.code).toBe(2);
     const challenge = JSON.parse(ch.out);
     expect(challenge.intendedEffect.kind).toBe("restore");
 
@@ -337,10 +337,10 @@ describe("db lifecycle via runCli (round-3 finding 10)", () => {
     store.close();
   });
 
-  it("db restore without an authorization is action-required (exit 6)", async () => {
+  it("db restore without an authorization is action-required (exit 2)", async () => {
     const b = JSON.parse((await cli(c, ["db", "backup", "--json"])).out);
     const r = await cli(c, ["db", "restore", b.backupRef, "--json"]);
-    expect(r.code).toBe(6);
+    expect(r.code).toBe(2);
     expect(JSON.parse(r.out).code).toBe("authorization-required");
   });
 
@@ -394,7 +394,7 @@ describe("db lifecycle via runCli (round-3 finding 10)", () => {
 
     // Authorized --force-unblock over the socket clears the block.
     const ch = await cli(c, ["db", "backup", "--force-unblock", "--export-challenge", "--json"]);
-    expect(ch.code).toBe(6);
+    expect(ch.code).toBe(2);
     const authPath = join(c.cwd, "fu.json");
     signAuthorization(c, ch.out, authPath);
     const r = await cli(c, ["db", "backup", "--force-unblock", "--authorization", authPath, "--json"]);
@@ -429,7 +429,7 @@ describe("db lifecycle via runCli (round-3 finding 10)", () => {
     // STAMPED in the bundle (v1), not the current configured key (v2), or the
     // retained backup would be unrestorable after rotation.
     const ch = await cli(c, ["db", "restore", b.backupRef, "--export-challenge", "--json"]);
-    expect(ch.code).toBe(6);
+    expect(ch.code).toBe(2);
     const authPath = join(c.cwd, "rot.json");
     signAuthorization(c, ch.out, authPath);
     const r = await cli(c, ["db", "restore", b.backupRef, "--authorization", authPath, "--json"]);

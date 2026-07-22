@@ -73,9 +73,9 @@ async function purge(ctx: RunContext): Promise<number> {
     // Ordinary erasure performs NO canonical-ref rewrite, so oldHead === replacementHead (ZERO).
     const op = { op: "purge", canonicalBaseCommit: "0".repeat(40), intendedEffect: { kind: "erase" as const, oldHead: "0".repeat(40), replacementHead: "0".repeat(40), scope: p.selector.kind } };
     if (p.authorization === undefined) {
-      if (!p.exportChallenge) throw new CliError({ code: "action-required", message: `purge --apply requires a broker authorization`, hint: "Re-run with --export-challenge, sign the challenge, then pass --authorization <path>.", exitCode: EXIT.ACTION_REQUIRED });
+      if (!p.exportChallenge) throw new CliError({ code: "action-required", message: `purge --apply requires a broker authorization`, hint: "Re-run with --export-challenge, sign the challenge, then pass --authorization <path>.", exitCode: EXIT.CONFIG });
       const client = await connect(ctx);
-      try { emitJson((await client.mintChallenge(op as never)) as unknown); return EXIT.ACTION_REQUIRED; }
+      try { emitJson((await client.mintChallenge(op as never)) as unknown); return EXIT.CONFIG; }
       finally { client.close(); }
     }
     const authorization = JSON.parse(readFileSync(p.authorization, "utf8")) as never;

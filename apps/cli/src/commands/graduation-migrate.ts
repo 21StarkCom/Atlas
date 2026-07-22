@@ -95,11 +95,11 @@ async function graduationMigrate(ctx: RunContext): Promise<number> {
     intendedEffect: { kind: "graduate" as const, fromGeneration: 0, toGeneration: 1, migrationPlanDigest: planDigest(plan) },
   };
   if (p.authorization === undefined) {
-    if (!p.exportChallenge) throw new CliError({ code: "authorization-required", message: `\`graduation migrate ${p.apply ? "--apply" : "--rollback"}\` requires a broker authorization`, hint: "Re-run with --export-challenge, sign the challenge, then pass --authorization <path>.", exitCode: EXIT.ACTION_REQUIRED });
+    if (!p.exportChallenge) throw new CliError({ code: "authorization-required", message: `\`graduation migrate ${p.apply ? "--apply" : "--rollback"}\` requires a broker authorization`, hint: "Re-run with --export-challenge, sign the challenge, then pass --authorization <path>.", exitCode: EXIT.CONFIG });
     const client = await connect(ctx);
     try {
       emitJson((await client.mintChallenge(op as never)) as unknown);
-      return EXIT.ACTION_REQUIRED;
+      return EXIT.CONFIG;
     } finally {
       client.close();
     }

@@ -99,7 +99,7 @@ async function graduationScan(ctx: RunContext): Promise<number> {
     if (ctx.output.mode === "json") emitJson(out);
     else ctx.render(`graduation scan — ${wt.scannedFiles} file(s) + ${hist.historyCommits} commit(s): ${gate}${findings.length ? ` (${findings.length} finding(s))` : ""}`);
     // Fail-closed: a non-empty finding set exits 3 (secret-scan) so graduation cannot proceed.
-    return gate === "clean" ? EXIT.OK : EXIT.SECRET_SCAN;
+    return gate === "clean" ? EXIT.OK : EXIT.VALIDATION;
   });
 }
 

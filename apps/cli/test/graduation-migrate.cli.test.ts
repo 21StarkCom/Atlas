@@ -140,17 +140,17 @@ describe("brain graduation migrate (preview + gates)", () => {
     expect(execFileSync("git", ["-C", copy, "rev-parse", "HEAD^{tree}"], { encoding: "utf8" }).trim()).toBe(treeBefore);
   });
 
-  it("--apply without an authorization ⇒ authorization-required (exit 6)", async () => {
+  it("--apply without an authorization ⇒ authorization-required (exit 2)", async () => {
     seedCleanGate();
     const r = await cli(["graduation", "migrate", "--apply", "--json"]);
-    expect(r.code).toBe(6);
+    expect(r.code).toBe(2);
     expect(JSON.parse(r.out).code).toBe("authorization-required");
   });
 
-  it("--rollback without an authorization ⇒ authorization-required (exit 6)", async () => {
+  it("--rollback without an authorization ⇒ authorization-required (exit 2)", async () => {
     seedCleanGate();
     const r = await cli(["graduation", "migrate", "--rollback", "--json"]);
-    expect(r.code).toBe(6);
+    expect(r.code).toBe(2);
     expect(JSON.parse(r.out).code).toBe("authorization-required");
   });
 

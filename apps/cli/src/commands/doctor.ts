@@ -835,7 +835,7 @@ async function doctor(ctx: RunContext): Promise<number> {
   }
 
   // Exit 0 when all checks pass (or only skip/warn/degrade); 6 when any needs an action.
-  return anyActionRequired ? EXIT.ACTION_REQUIRED : EXIT.OK;
+  return anyActionRequired ? EXIT.CONFIG : EXIT.OK;
 }
 
 registerCommand("doctor", doctor);

@@ -73,9 +73,9 @@ async function gitRollback(ctx: RunContext): Promise<number> {
     const integratedCommit = readGitOp(store.db, p.runId, "integrated")?.commitSha ?? ZERO;
     const op = { op: "git rollback", runId: p.runId, targetCommit: integratedCommit, canonicalBaseCommit: (await repo.readRef(CANONICAL_REF)) ?? ZERO, intendedEffect: { kind: "revert" as const, revertCommit: ZERO } };
     if (p.authorization === undefined) {
-      if (!p.exportChallenge) throw new CliError({ code: "action-required", message: `rolling back ${p.runId} requires a broker authorization`, hint: "Re-run with --export-challenge, sign the challenge, then pass --authorization <path>.", exitCode: EXIT.ACTION_REQUIRED });
+      if (!p.exportChallenge) throw new CliError({ code: "action-required", message: `rolling back ${p.runId} requires a broker authorization`, hint: "Re-run with --export-challenge, sign the challenge, then pass --authorization <path>.", exitCode: EXIT.CONFIG });
       const client = await connect(ctx);
-      try { emitJson((await client.mintChallenge(op as never)) as unknown); return EXIT.ACTION_REQUIRED; }
+      try { emitJson((await client.mintChallenge(op as never)) as unknown); return EXIT.CONFIG; }
       finally { client.close(); }
     }
 

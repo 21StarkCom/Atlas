@@ -4,11 +4,10 @@
  *
  * The file itself lands at a caller-chosen vault path, is committed DIRECTLY onto
  * `refs/heads/main` via {@link runMutation} (no agent branch, no worktree, no
- * broker CAS), and is projected/indexed like any graduated note. Security posture
- * unchanged: scan-before-persist runs FIRST (a secret ⇒ exit 3, quarantined,
- * nothing persisted), the note must parse as valid vault frontmatter, and
- * id/alias/path collisions against the CURRENT projection are refused up front —
- * all during the mutation order's GROUNDING phase, before any file is written.
+ * broker CAS), and is projected/indexed like any graduated note. The secret-scan
+ * gate is RETIRED (v2, ADR-0003) — a note body is persisted as authored; grounding
+ * still requires the note to parse as valid vault frontmatter and refuses
+ * id/alias/path collisions against the CURRENT projection, before any file is written.
  */
 import { basename, join, posix } from "node:path";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -16,8 +15,6 @@ import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { newRunId, normalizeIdentityKey } from "@atlas/contracts";
 import { ProjectionRepo, deriveSlug, IDENTITY_NORMALIZER_VERSION, type Store } from "@atlas/sqlite-store";
-import { normalize } from "@atlas/sources";
-import { PrePersistenceGuard } from "@atlas/scan";
 import { openRepo } from "@atlas/git";
 import type { RunContext } from "../handlers.js";
 import { resolvePath } from "../commands/backup-config.js";
@@ -152,8 +149,6 @@ function projectAddedNote(store: Store, fm: FrontmatterShape, destPath: string, 
 
 /** The seams `addNote` needs beyond the {@link RunContext}. */
 export interface NoteAddDeps {
-  /** The scan-before-persist guard (quarantine sink OUTSIDE the vault). */
-  readonly guard: PrePersistenceGuard;
   /** The migrated projection store the note is projected into + collision-checked against. */
   readonly store: Store;
   /** Optional LanceDB index refresh for the new note (runs BEFORE the projection advance). */
@@ -182,21 +177,13 @@ export async function addNote(ctx: RunContext, req: { path: string; dest: string
     vaultPath,
     store: deps.store,
     async ground(preApply): Promise<Grounded> {
-      // ── Scan-before-persist through the SAME sandboxed normalize pipeline as a
-      // capture. A secret ⇒ SecretDetectedError (exit 3, quarantined) BEFORE any write.
-      const norm = await normalize({ path, guard: deps.guard });
-      if (!norm.ok) {
-        throw new NoteAddRejectedError(norm.rejection.code, norm.rejection.detail ?? norm.rejection.format ?? "rejected");
-      }
-      if (norm.rendition.contentId.canonicalMediaType !== "text/markdown") {
-        throw new NoteAddRejectedError("bad-input", `note add ingests markdown notes; detected ${norm.rendition.contentId.canonicalMediaType}`);
-      }
-
+      // The secret-scan gate is retired (v2, ADR-0003): the note body is persisted as
+      // authored. Grounding validates the destination + frontmatter and refuses
+      // collisions — no scan, no quarantine. `deriveDestPath` already enforces the
+      // `.md` extension (the authored-markdown contract).
       const destPath = deriveDestPath(dest, path);
-      // Read ONCE the bytes that will actually be persisted, then scan THOSE exact
-      // bytes — closes the TOCTOU window between normalize()'s read and ours.
+      // Read ONCE the bytes that will actually be persisted.
       const raw = readFileSync(path);
-      await deps.guard.assertClean({ bytes: raw, origin: path, kind: "raw" });
       const text = raw.toString("utf8");
       const contentHash = createHash("sha256").update(raw).digest("hex");
 

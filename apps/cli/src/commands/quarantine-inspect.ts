@@ -38,11 +38,11 @@ async function quarantineInspect(ctx: RunContext): Promise<number> {
 
   // Challenge-bound EVEN for metadata (§7): without an authorization, exit 6 (or emit the challenge).
   if (p.authorization === undefined) {
-    if (!p.exportChallenge) throw new CliError({ code: "authorization-required", message: `inspecting ${p.opaqueId} requires a broker authorization`, hint: "Re-run with --export-challenge, sign the challenge, then pass --authorization <path>.", exitCode: EXIT.ACTION_REQUIRED });
+    if (!p.exportChallenge) throw new CliError({ code: "authorization-required", message: `inspecting ${p.opaqueId} requires a broker authorization`, hint: "Re-run with --export-challenge, sign the challenge, then pass --authorization <path>.", exitCode: EXIT.CONFIG });
     const client = await connect(ctx);
     try {
       emitJson((await client.mintChallenge(op as never)) as unknown);
-      return EXIT.ACTION_REQUIRED;
+      return EXIT.CONFIG;
     } finally {
       client.close();
     }

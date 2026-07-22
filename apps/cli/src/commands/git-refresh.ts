@@ -8,7 +8,6 @@
  * audit event through the normal audit path (engine core `refreshRun`). Output ⇒ `git-refresh.schema.json`.
  */
 import { openRepo } from "@atlas/git";
-import { GeneratedArtifactGuard } from "@atlas/scan";
 import { ModelsClient, createInProcessInvoker, type ModelCallReceipt } from "@atlas/models";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
@@ -20,8 +19,6 @@ import { inProcessAuditBroker, CANONICAL_BRANCH } from "../workflows/direct-inte
 import { makeStoreValidationVault } from "../validation/store-vault.js";
 import { readRunInput } from "../workflows/synthesis.js";
 import { readVault } from "../vault/reader.js";
-import { riskConfigFrom } from "../policies/risk.js";
-import { quarantineStoreFromContext } from "../quarantine/config.js";
 import { backupConfig, ledgerDbPath, resolvePath } from "./backup-config.js";
 
 const PACK_BUDGET = 6000;
@@ -90,11 +87,8 @@ async function gitRefresh(ctx: RunContext): Promise<number> {
         readNote: (id: string) => noteById.get(id) ?? null,
         validationVault: makeStoreValidationVault(store.db),
         supportingEvidenceStates: () => [],
-        inputsTrusted: () => true,
-        evidenceValid: () => true,
-        config: { packBudgetTokens: PACK_BUDGET, requireSourcesForSynthesis: cfg.policies.require_sources_for_synthesis, risk: riskConfigFrom(cfg.policies) },
+        config: { packBudgetTokens: PACK_BUDGET, requireSourcesForSynthesis: cfg.policies.require_sources_for_synthesis },
         store, broker, backup: backupConfig(ctx), repo,
-        guard: new GeneratedArtifactGuard(quarantineStoreFromContext(ctx)),
         worktreesPath: resolvePath(ctx, cfg.git.worktrees_path),
         canonicalRef: CANONICAL_BRANCH,
       };

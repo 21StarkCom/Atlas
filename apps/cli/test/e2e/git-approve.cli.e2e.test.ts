@@ -1,52 +1,25 @@
 /**
- * `git-approve.cli.e2e` (Task 4.9) — the `brain git approve` command's authorization gate over the
- * REAL broker daemon: a review-pending run with `--export-challenge` emits an AuthorizationChallenge
- * and exits 6; without an authorization it exits 6 (action-required); `--yes`-style bare invocation
- * never integrates. The authorized → integrated path itself is proven by `broker-integrator.e2e`
- * (the real signAndAdvanceProtectedRef install). This exercises the command's gate wiring.
+ * `git-approve.cli.e2e` — the `brain git approve` command's authorization gate over the REAL
+ * broker daemon. Post-demolition (ADR-0003) the retired action-required exit 6 is now
+ * config/authorization exit 2 (`EXIT.CONFIG`): a review-pending run with `--export-challenge`
+ * emits an AuthorizationChallenge and exits 2; without an authorization it exits 2; a
+ * non-review-pending run is rejected (exit 1). The authorized → integrated path itself is
+ * proven elsewhere; this exercises the command's gate wiring + exit mapping.
+ *
+ * NOTE: no production path produces a `review-pending` run any more (the Tier-3 synthesis
+ * review loop is retired) — the gate precondition is synthesized directly in the ledger so
+ * the SURVIVING `git approve` command's authorization + exit-code behavior stays covered.
  */
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { ChangePlan, ChangePlanOperation, ParsedNote } from "@atlas/contracts";
-import { GeneratedArtifactGuard, type QuarantineSink, type SecretFinding } from "@atlas/scan";
-import { BrokerClient } from "@atlas/broker";
+import { newRunId } from "@atlas/contracts";
 import { runCli } from "../../src/main.js";
-import type { RetrievalResult } from "../../src/retrieval/layers.js";
-import { splitFrontmatter } from "../../src/markdown/parse.js";
-import { buildSectionTree, resolveSections } from "../../src/markdown/sections.js";
-import { sectionContentHash } from "../../src/markdown/patch.js";
-import { riskConfigFrom } from "../../src/policies/risk.js";
-import type { ValidationVault } from "../../src/validation/index.js";
-import type { IntegrationContext, RunIntegrator } from "../../src/workflows/index.js";
-import { applySynthesis, type SynthesisApplyDeps } from "../../src/workflows/synthesis.js";
-import { readFileSync } from "node:fs";
+import { gitOpId, gitOpUpsert } from "../../src/workflows/checkpoints.js";
 import { makePhase2Harness, CANONICAL_REF, type Phase2Harness } from "./phase2-support.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..", "..", "..", "..");
-
-const RISK = riskConfigFrom({ tier2_min_confidence: 0.8, tier2_max_changed_lines: 50, tier2_max_sections: 3 });
-const ALPHA_ID = "concept-alpha";
-
-class Q implements QuarantineSink { quarantine(_i: { bytes: Uint8Array; origin: string; findings: readonly SecretFinding[] }): Promise<void> { return Promise.resolve(); } }
-function alphaNote(h: Phase2Harness): ParsedNote {
-  const raw = readFileSync(join(h.vaultDir, "note-alpha.md"), "utf8").replace(/\r\n/g, "\n");
-  const { body } = splitFrontmatter(raw);
-  return { id: ALPHA_ID, path: "note-alpha.md", type: "concept", schemaVersion: 1, title: "Alpha", status: "active", created: "2026-07-14", updated: "2026-07-14", aliases: [], sources: [], declaredSensitivity: "internal", links: [], sections: buildSectionTree(body), contentHash: "sha256:0", raw };
-}
-function plan(h: Phase2Harness): ChangePlan {
-  const { body } = splitFrontmatter(alphaNote(h).raw);
-  const alpha = resolveSections(body).find((s) => s.path === "Alpha")!;
-  const op: ChangePlanOperation = { op: "UpdateSection", opVersion: 1, selector: { path: "Alpha", expectedContentHash: sectionContentHash(body.slice(alpha.bodyStart, alpha.bodyEnd)) }, newContent: "Enriched.\n" };
-  return { target: ALPHA_ID, rationale: "enrich", sourceIds: ["s"], retrievedEvidence: [], confidence: 0.95, proposedRisk: "tier-1", reversibility: "reversible", schemaVersion: 1, operation: op } as ChangePlan;
-}
-function retrieval(): RetrievalResult {
-  return { items: [{ noteId: ALPHA_ID, sectionPath: "Alpha", score: 1, contributions: [{ layer: "vector", rank: 0, weightedContribution: 1 }], sensitivity: "internal", trust: "verified", sections: [{ sectionPath: "Alpha", text: "t" }] }] as RetrievalResult["items"], layersUsed: ["vector"], retrievalRunId: "r", mode: "vector", degraded: false };
-}
-function vault(): ValidationVault {
-  return { hasNoteId: () => true, identityOwners: () => [], hasSourceRef: () => true, hasClaimKey: () => true, hasEvidenceLineage: () => true, hasEvidenceId: () => true, attachWouldDuplicate: () => false };
-}
-function noopIntegrator(): RunIntegrator { return async (_ctx: IntegrationContext) => { throw new Error("Tier-3 never integrates"); }; }
+const NOW = "2026-07-14T00:00:00.000Z";
 
 let h: Phase2Harness;
 let cwd: string, env: NodeJS.ProcessEnv;
@@ -57,6 +30,31 @@ async function cli(argv: string[]): Promise<{ code: number; out: string }> {
   (process.stderr as unknown as { write: (s: string) => boolean }).write = () => true;
   try { return { code: await runCli(argv, env, { cwd, root: REPO_ROOT }), out }; }
   finally { process.stdout.write = ro; process.stderr.write = re; }
+}
+
+/**
+ * Synthesize a durable `review-pending` run directly in the ledger (agent_runs +
+ * git_operations agent-committed/base + change_plans), backed by a real agent commit —
+ * enough for `git approve`'s read-only precondition + challenge minting.
+ */
+function seedReviewPending(): string {
+  const runId = newRunId();
+  const base = h.git(["rev-parse", CANONICAL_REF]);
+  // A real agent commit (the "reviewed" commit) on a detached agent branch.
+  const agentRef = `refs/agent/${runId}`;
+  const commitSha = h.gitIn(h.vaultDir, ["commit-tree", `${base}^{tree}`, "-p", base, "-m", `agent ${runId}`], Buffer.from(""));
+  h.git(["update-ref", agentRef, commitSha]);
+  const store = h.openStore();
+  try {
+    store.ledger.upsertAgentRun({ run_id: runId, operation: "enrich", status: "review-pending", tier: 3, started_at: NOW, updated_at: NOW });
+    store.db.prepare(`INSERT INTO change_plans (plan_id, run_id, tier, confidence, summary, plan_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(`${runId}-plan`, runId, 3, 0.5, "enrich alpha", "sha256:plan", NOW);
+    for (const stmt of [
+      gitOpUpsert({ gitOpId: gitOpId(runId, "agent-committed"), runId, opType: "agent-committed", refName: agentRef, commitSha, now: NOW }),
+      gitOpUpsert({ gitOpId: gitOpId(runId, "base"), runId, opType: "base", refName: CANONICAL_REF, commitSha: base, now: NOW }),
+    ]) store.db.prepare(stmt.sql).run(stmt.params);
+  } finally { store.close(); }
+  return runId;
 }
 
 beforeEach(async () => {
@@ -72,39 +70,22 @@ beforeEach(async () => {
 });
 afterEach(async () => { await h.cleanup(); });
 
-async function makeReviewPending(): Promise<string> {
-  const client = await BrokerClient.connect(h.socketPath);
-  const store = h.openStore();
-  try {
-    const deps: SynthesisApplyDeps = {
-      retrieve: async () => retrieval(), generatePlan: async () => plan(h), readNote: () => alphaNote(h), validationVault: vault(),
-      supportingEvidenceStates: () => [], evidenceValid: () => true, inputsTrusted: () => false, // Tier-3
-      config: { packBudgetTokens: 4000, requireSourcesForSynthesis: true, risk: RISK },
-      store, broker: client, backup: h.backup, repo: h.repo(), integrate: noopIntegrator(),
-      guard: new GeneratedArtifactGuard(new Q()), foldProjections: async () => {}, worktreesPath: h.worktreesPath, canonicalRef: CANONICAL_REF, now: () => "2026-07-14T00:00:00.000Z",
-    };
-    const res = await applySynthesis("enrich", { target: ALPHA_ID, instruction: "x" }, deps);
-    expect(res.mode).toBe("review-pending");
-    return res.runId;
-  } finally { store.close(); client.close(); }
-}
-
 describe("brain git approve (authorization gate)", () => {
-  it("--export-challenge on a review-pending run emits a challenge + exits 6", async () => {
-    const runId = await makeReviewPending();
+  it("--export-challenge on a review-pending run emits a challenge + exits 2 (config/authorization)", async () => {
+    const runId = seedReviewPending();
     const r = await cli(["git", "approve", runId, "--export-challenge", "--json"]);
-    expect(r.code, r.out).toBe(6);
+    expect(r.code, r.out).toBe(2);
     const challenge = JSON.parse(r.out);
     expect(challenge.op).toBe("git approve");
     expect(challenge.nonce).toBeTruthy();
     expect(challenge.signingPayload).toBeTruthy();
   });
 
-  it("without an authorization it is action-required (exit 6), never integrating", async () => {
-    const runId = await makeReviewPending();
+  it("without an authorization it is action-required (exit 2), never integrating", async () => {
+    const runId = seedReviewPending();
     const before = h.git(["rev-parse", CANONICAL_REF]);
     const r = await cli(["git", "approve", runId, "--json"]);
-    expect(r.code, r.out).toBe(6);
+    expect(r.code, r.out).toBe(2);
     expect(h.git(["rev-parse", CANONICAL_REF])).toBe(before); // never integrated
   });
 

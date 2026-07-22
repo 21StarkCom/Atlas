@@ -15,11 +15,9 @@
  *   2. duplicate id vs an existing `notes` row — refused, canonical does NOT advance;
  *   3. duplicate path vs an existing `notes` row — refused;
  *   4. invalid frontmatter (missing `id`) — refused before any write;
- *   5. a secret in the note body — quarantined + `SecretDetectedError` exit 3,
- *      nothing on canonical;
- *   6. REGRESSION (TOCTOU): bytes swapped on disk AFTER normalize()'s clean scan
- *      are re-scanned as the exact persisted buffer — quarantined + exit 3;
- *   7. `deriveDestPath` unit cases.
+ *   5. a secret in the note body — PERSISTED as authored onto canonical + projected
+ *      (the secret-scan gate is retired, v2/ADR-0003);
+ *   6. `deriveDestPath` unit cases.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
@@ -29,7 +27,6 @@ import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { probeSandbox } from "@atlas/sources";
 import { openStore, ProjectionRepo, type Store } from "@atlas/sqlite-store";
-import { PrePersistenceGuard, SecretDetectedError, type QuarantineSink, type SecretFinding } from "@atlas/scan";
 import { addNote, deriveDestPath, NoteAddRejectedError, type NoteAddResult } from "../src/ingest/note-add.js";
 import type { RunContext } from "../src/handlers.js";
 
@@ -42,48 +39,6 @@ const gitEnv = (): NodeJS.ProcessEnv => ({
   GIT_COMMITTER_NAME: "Aryeh Stark",
   GIT_COMMITTER_EMAIL: "aryeh@21stark.com",
 });
-
-/** Records what was quarantined, so we can assert quarantine-before-throw. */
-class RecordingSink implements QuarantineSink {
-  readonly entries: { bytes: Uint8Array; origin: string; findings: readonly SecretFinding[] }[] = [];
-  quarantine(input: { bytes: Uint8Array; origin: string; findings: readonly SecretFinding[] }): Promise<void> {
-    this.entries.push({ bytes: Uint8Array.from(input.bytes), origin: input.origin, findings: input.findings });
-    return Promise.resolve();
-  }
-}
-
-/** A fresh guard whose sink never trips on clean authored notes. */
-function cleanGuard(): PrePersistenceGuard {
-  return new PrePersistenceGuard(new RecordingSink());
-}
-
-/**
- * A guard simulating a TOCTOU attacker: after the FIRST scan (normalize()'s
- * raw-bytes pass over its own read) clears, it rewrites the on-disk file — so
- * the bytes addNote later reads for persistence differ from the bytes normalize
- * proved clean. Only the persisted-buffer re-scan stands between the swapped-in
- * secret and canonical.
- */
-class RewriteAfterFirstScanGuard extends PrePersistenceGuard {
-  private fired = false;
-  constructor(
-    sink: QuarantineSink,
-    private readonly rewrite: () => void,
-  ) {
-    super(sink);
-  }
-  override async assertClean(a: {
-    readonly bytes: Uint8Array;
-    readonly origin: string;
-    readonly kind?: "raw" | "normalized";
-  }): Promise<void> {
-    await super.assertClean(a);
-    if (!this.fired) {
-      this.fired = true;
-      this.rewrite();
-    }
-  }
-}
 
 /** A schema-valid authored vault note (the vault reader's frontmatter contract). */
 function noteText(id: string, title: string, body = "A perfectly ordinary note body."): string {
@@ -199,7 +154,7 @@ describeIfSandbox("note add — v2 direct-commit onto refs/heads/main", () => {
     const result: NoteAddResult = await addNote(fix.ctx, {
       path: input,
       dest: "history/2026",
-      deps: { guard: cleanGuard(), store: fix.store },
+      deps: { store: fix.store },
     });
 
     expect(result.noteId).toBe("history-trip-2026");
@@ -229,7 +184,7 @@ describeIfSandbox("note add — v2 direct-commit onto refs/heads/main", () => {
     writeFileSync(input, noteText("history-dup-2026", "Duplicate"), "utf8");
     const before = fix.git(["rev-parse", CANONICAL_REF]);
 
-    const code = await rejectedCode(addNote(fix.ctx, { path: input, dest: "history", deps: { guard: cleanGuard(), store: fix.store } }));
+    const code = await rejectedCode(addNote(fix.ctx, { path: input, dest: "history", deps: { store: fix.store } }));
     expect(code).toBe("duplicate-id");
     expect(fix.git(["rev-parse", CANONICAL_REF])).toBe(before);
   }, 60_000);
@@ -240,7 +195,7 @@ describeIfSandbox("note add — v2 direct-commit onto refs/heads/main", () => {
     writeFileSync(input, noteText("history-fresh-2026", "Fresh"), "utf8");
     const before = fix.git(["rev-parse", CANONICAL_REF]);
 
-    const code = await rejectedCode(addNote(fix.ctx, { path: input, dest: "history", deps: { guard: cleanGuard(), store: fix.store } }));
+    const code = await rejectedCode(addNote(fix.ctx, { path: input, dest: "history", deps: { store: fix.store } }));
     expect(code).toBe("duplicate-path");
     expect(fix.git(["rev-parse", CANONICAL_REF])).toBe(before);
   }, 60_000);
@@ -254,68 +209,40 @@ describeIfSandbox("note add — v2 direct-commit onto refs/heads/main", () => {
     );
     const before = fix.git(["rev-parse", CANONICAL_REF]);
 
-    const code = await rejectedCode(addNote(fix.ctx, { path: input, dest: "history", deps: { guard: cleanGuard(), store: fix.store } }));
+    const code = await rejectedCode(addNote(fix.ctx, { path: input, dest: "history", deps: { store: fix.store } }));
     expect(code).toBe("invalid-frontmatter");
     expect(fix.git(["rev-parse", CANONICAL_REF])).toBe(before);
   }, 60_000);
 
-  it("a secret in the note body: quarantined, SecretDetectedError exit 3, nothing on canonical", async () => {
+  it("a secret in the note body: PERSISTED as authored onto canonical + projected (scan gate retired, ADR-0003)", async () => {
     // A live-format AWS key assembled at runtime (never a committed literal — the repo is public).
+    // The secret-scan gate is gone: the note is committed byte-exact, secret and all.
     const secret = "AKIA" + "A".repeat(16);
     const input = join(fix.dir, "leaky-note.md");
     writeFileSync(input, noteText("history-leaky-2026", "Leaky", `embedded credential: ${secret}`), "utf8");
-    const sink = new RecordingSink();
-    const guard = new PrePersistenceGuard(sink);
+    const raw = readFileSync(input);
     const before = fix.git(["rev-parse", CANONICAL_REF]);
 
-    let thrown: unknown;
-    let result: unknown;
-    try {
-      result = await addNote(fix.ctx, { path: input, dest: "history", deps: { guard, store: fix.store } });
-    } catch (e) {
-      thrown = e;
-    }
+    const result = await addNote(fix.ctx, { path: input, dest: "history", deps: { store: fix.store } });
 
-    expect(result).toBeUndefined();
-    expect(thrown).toBeInstanceOf(SecretDetectedError);
-    expect((thrown as SecretDetectedError).exitCode).toBe(3);
+    expect(result.noteId).toBe("history-leaky-2026");
+    expect(result.path).toBe("history/leaky-note.md");
 
-    expect(sink.entries.length).toBeGreaterThanOrEqual(1);
-    expect(sink.entries[0]!.origin).toBe(input);
-    expect(sink.entries[0]!.findings.length).toBeGreaterThanOrEqual(1);
+    // Canonical advanced to the reported sha …
+    const head = fix.git(["rev-parse", CANONICAL_REF]);
+    expect(head).not.toBe(before);
+    expect(result.canonicalSha).toBe(head);
 
-    expect(fix.git(["rev-parse", CANONICAL_REF])).toBe(before);
-  }, 60_000);
+    // … the file is on canonical byte-exact (secret included) …
+    const shown = execFileSync("git", ["show", `${CANONICAL_REF}:history/leaky-note.md`], { cwd: fix.dir });
+    expect(Buffer.from(shown).equals(raw)).toBe(true);
+    expect(Buffer.from(shown).toString("utf8")).toContain(secret);
 
-  it("REGRESSION (TOCTOU): a secret swapped in AFTER normalize()'s clean scan is caught on the persisted buffer", async () => {
-    const secret = "AKIA" + "A".repeat(16);
-    const input = join(fix.dir, "toctou-note.md");
-    writeFileSync(input, noteText("history-toctou-2026", "Toctou"), "utf8");
-    const sink = new RecordingSink();
-    const guard = new RewriteAfterFirstScanGuard(sink, () => {
-      writeFileSync(input, noteText("history-toctou-2026", "Toctou", `swapped-in credential: ${secret}`), "utf8");
-    });
-    const before = fix.git(["rev-parse", CANONICAL_REF]);
-
-    let thrown: unknown;
-    let result: unknown;
-    try {
-      result = await addNote(fix.ctx, { path: input, dest: "history", deps: { guard, store: fix.store } });
-    } catch (e) {
-      thrown = e;
-    }
-
-    expect(result).toBeUndefined();
-    expect(thrown).toBeInstanceOf(SecretDetectedError);
-    expect((thrown as SecretDetectedError).exitCode).toBe(3);
-
-    expect(sink.entries.length).toBeGreaterThanOrEqual(1);
-    const q = sink.entries[sink.entries.length - 1]!;
-    expect(q.origin).toBe(input);
-    expect(q.findings.length).toBeGreaterThanOrEqual(1);
-    expect(Buffer.from(q.bytes).toString("utf8")).toContain(secret);
-
-    expect(fix.git(["rev-parse", CANONICAL_REF])).toBe(before);
+    // … and the projection row is present.
+    const row = fix.store.db.prepare("SELECT note_id FROM notes WHERE note_id = ?").get("history-leaky-2026") as
+      | { note_id: string }
+      | undefined;
+    expect(row).toEqual({ note_id: "history-leaky-2026" });
   }, 60_000);
 });
 

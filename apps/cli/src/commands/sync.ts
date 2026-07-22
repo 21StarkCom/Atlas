@@ -15,14 +15,6 @@
  * deterministic exit-3 block. It mutates nothing and resolves no lock.
  */
 import { openRepo, type Repo } from "@atlas/git";
-import {
-  scanBytes,
-  PrePersistenceGuard,
-  GeneratedArtifactGuard,
-  SecretDetectedError,
-  type QuarantineSink,
-  type SecretFinding,
-} from "@atlas/scan";
 import { bindEnqueueContext, productionEnqueueContext } from "@atlas/jobs";
 import { assertBackupHealthy, BackupUnhealthyError, type Store } from "@atlas/sqlite-store";
 import { registerCommand, type RunContext } from "../handlers.js";
@@ -30,7 +22,6 @@ import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { buildCaptureDeps } from "../ingest/wiring.js";
 import { DEFAULT_CANONICAL_REF } from "../ingest/capture.js";
 import { CANONICAL_BRANCH } from "../workflows/direct-integrator.js";
-import { quarantineStoreFromContext } from "../quarantine/config.js";
 import { resolvePath } from "./backup-config.js";
 import { openMigratedStore } from "./store-open.js";
 import {
@@ -70,52 +61,28 @@ function parseSyncArgs(argv: readonly string[]): SyncArgs {
   return { dryRun, maxPaths };
 }
 
-/** Real-cycle scanners: quarantine-before-throw with the captured item id. Shared with `sync reset`. */
-export function realScanners(ctx: RunContext): Pick<SyncCycleDeps, "scanNoteBytes" | "scanGeneratedArtifact"> {
-  const qstore = quarantineStoreFromContext(ctx);
-  let lastQuarantineId = "";
-  // The store's own async sink discards the item id; sync needs it for the
-  // pending_quarantine entry — capture it via the underlying quarantineItem.
-  const capturingSink: QuarantineSink = {
-    quarantine: async (a: { bytes: Uint8Array; origin: string; findings: readonly SecretFinding[] }): Promise<void> => {
-      await Promise.resolve();
-      lastQuarantineId = qstore.quarantineItem(a);
-    },
-  };
-  const guard = new PrePersistenceGuard(capturingSink);
-  const artifactGuard = new GeneratedArtifactGuard(qstore);
+/**
+ * v2 (#326, ADR-0003): the secret scan is retired EVERYWHERE — production
+ * scanners are always-clean no-ops, so a sync cycle can never quarantine and
+ * exit 3 is unreachable. The engine's verdict-handling seam survives untouched
+ * until #329 rewrites sync v2 (cycle tests inject their own scanners to
+ * exercise it). Shared with `sync reset`.
+ */
+export function realScanners(_ctx: RunContext): Pick<SyncCycleDeps, "scanNoteBytes" | "scanGeneratedArtifact"> {
   return {
-    scanNoteBytes: async (bytes, origin): Promise<ScanOutcome> => {
-      try {
-        await guard.assertClean({ bytes, origin, kind: "raw" });
-        return { clean: true };
-      } catch (e) {
-        if (e instanceof SecretDetectedError) return { clean: false, quarantineId: lastQuarantineId };
-        throw e;
-      }
+    scanNoteBytes: async (): Promise<ScanOutcome> => {
+      await Promise.resolve();
+      return { clean: true };
     },
-    scanGeneratedArtifact: (text, runId) => artifactGuard.assertClean({ text, sink: "audit", runId }),
+    scanGeneratedArtifact: async () => {
+      await Promise.resolve();
+    },
   };
 }
 
-/** Dry-run scanners: same engine, verdicts only — NOTHING persists. Exported for the cycle tests. */
+/** Dry-run scanners: identical always-clean no-ops in v2. Exported for the cycle tests. */
 export function dryScanners(): Pick<SyncCycleDeps, "scanNoteBytes" | "scanGeneratedArtifact"> {
-  return {
-    scanNoteBytes: async (bytes, origin): Promise<ScanOutcome> => {
-      await Promise.resolve();
-      const verdict = scanBytes({ bytes, context: { origin, boundary: "pre-persistence", kind: "raw" } });
-      return verdict.clean ? { clean: true } : { clean: false, quarantineId: "" };
-    },
-    scanGeneratedArtifact: async (text, runId) => {
-      await Promise.resolve();
-      const origin = `run:${runId}→audit`;
-      const verdict = scanBytes({
-        bytes: new TextEncoder().encode(text),
-        context: { origin, boundary: "generated-artifact", sink: "audit" },
-      });
-      if (!verdict.clean) throw new SecretDetectedError(origin, verdict.findings, "generated-artifact");
-    },
-  };
+  return realScanners(undefined as unknown as RunContext);
 }
 
 async function syncHandler(ctx: RunContext): Promise<number> {

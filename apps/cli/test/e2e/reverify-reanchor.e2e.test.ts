@@ -19,7 +19,7 @@
  * canonical ref exactly as production leaves it.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -119,12 +119,16 @@ function seedClaim(noteId: string, filePath: string, claimId: string, evidenceId
   const store = h.openStore();
   try {
     const now = "2026-07-20T00:00:00.000Z";
+    // v2's mutation order runs a dirty-vault projection-drift gate: the projected
+    // `content_hash` MUST match the on-disk file, else the re-anchor apply refuses
+    // (exit 1) and never advances canonical. Seed the REAL on-disk hash.
+    const onDisk = `sha256:${sha256(readFileSync(join(h.vaultDir, filePath), "utf8"))}`;
     store.db
       .prepare(
         `INSERT OR IGNORE INTO notes (note_id, slug, title, type, schema_version, status, file_path, content_hash, created, updated)
-         VALUES (?, ?, ?, 'concept', 1, 'active', ?, 'sha256:0', ?, ?)`,
+         VALUES (?, ?, ?, 'concept', 1, 'active', ?, ?, ?, ?)`,
       )
-      .run(noteId, noteId, noteId, filePath, now, now);
+      .run(noteId, noteId, noteId, filePath, onDisk, now, now);
     store.db
       .prepare(`INSERT INTO claims (claim_id, owning_note_id, text, created_at) VALUES (?, ?, 'The fox statement.', ?)`)
       .run(claimId, noteId, now);
@@ -242,6 +246,12 @@ describeIfSandbox("reverify re-anchor E2E (#217) — production seams, real sand
       writeFileSync(srcPath, CONTENT, "utf8");
       const cap = await captureViaBroker(h, srcPath);
       expect(cap.renditionId.extractorVersion).toBe(probe.extractor);
+      // `captureViaBroker` FF-advances `refs/heads/main` WITHOUT checking out the
+      // working tree. The v2 re-anchor path (`applyReanchorViaBroker`) commits DIRECTLY
+      // onto `refs/heads/main` via the mutation order, which stages against the working
+      // tree/index — so canonical and the working tree MUST be in sync (v2 invariant:
+      // `refs/heads/main` IS the working tree HEAD). Re-sync after the broker capture.
+      h.git(["reset", "--hard", CANONICAL_REF]);
 
       // 2. Projections the fold would derive (owning notes + claims + evidence heads).
       seedClaim("concept-claims", "note-claims.md", "c-1", "ev-e2e-1", rawHash, locator, quoteHash);

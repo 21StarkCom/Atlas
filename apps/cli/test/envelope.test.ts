@@ -40,14 +40,12 @@ function capture(): NodeJS.WritableStream & { text: string } {
 
 describe("error envelope", () => {
   it("maps the plan §2.5 exit categories", () => {
-    expect(EXIT).toMatchObject({
+    expect(EXIT).toEqual({
       OK: 0,
       VALIDATION: 1,
       CONFIG: 2,
-      SECRET_SCAN: 3,
       INTERNAL: 4,
       USAGE: 5,
-      ACTION_REQUIRED: 6,
     });
   });
 

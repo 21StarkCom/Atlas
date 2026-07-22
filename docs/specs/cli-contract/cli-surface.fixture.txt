@@ -29,7 +29,6 @@ contains backticked words. The text after the em dash is descriptive only.
 `source add` — deterministic Tier-1 source capture; applies immediately.
 `source list` — paginated list of captured sources.
 `source show` — show one source capture + renditions.
-`source trust show` — show a source's trust state.
 
 # Jobs queue (Phase 2)
 `jobs list` — paginated list of queue jobs.
@@ -74,8 +73,6 @@ contains backticked words. The text after the em dash is descriptive only.
 `evidence retry` — retry evidence re-verification (convergent).
 
 # Trust (Phase 4)
-`source trust promote` — privileged: promote a source's trust level.
-`source trust revoke` — privileged: revoke a source's trust.
 
 # Erasure (Phase 4)
 `purge` — privileged, broker-authorized selector-based erasure across all storage classes.

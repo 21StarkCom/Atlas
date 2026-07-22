@@ -141,9 +141,7 @@ describe("enrich.e2e — retrieval-first plan over a real index + egress (Task 4
       readNote: (id) => (id === "alpha" ? note : null),
       validationVault: makeStoreValidationVault(store.db),
       supportingEvidenceStates: () => [],
-      inputsTrusted: () => true,
-      evidenceValid: () => true,
-      config: { packBudgetTokens: 6000, requireSourcesForSynthesis: false, risk: { minConfidence: 0.8, maxChangedLines: 50, maxSections: 3 } },
+      config: { packBudgetTokens: 6000, requireSourcesForSynthesis: false },
     };
 
     const preview = await previewSynthesis("enrich", { target: "alpha", instruction: "enrich note alpha" }, deps);
@@ -157,7 +155,8 @@ describe("enrich.e2e — retrieval-first plan over a real index + egress (Task 4
     // Validation ran and the clean, patchable op materialized a patch.
     expect(preview.plan.report.ok).toBe(true);
     expect(preview.plan.patch).not.toBeNull();
-    expect(["tier-1", "tier-2", "tier-3"]).toContain(preview.plan.tier);
+    // No tier field — the trust/risk-tier machinery is retired (ADR-0003).
+    expect((preview.plan as Record<string, unknown>).tier).toBeUndefined();
     // Two provider transmissions reached the real egress: the query embed + the generateObject.
     expect(receipts.filter((r) => r.operation === "embed")).toHaveLength(1);
     expect(receipts.filter((r) => r.operation === "generateObject")).toHaveLength(1);

@@ -8,7 +8,7 @@
 import { describe, expect, it } from "vitest";
 import { openStore } from "@atlas/sqlite-store";
 import { bindEnqueueContext, productionEnqueueContext, registerJobsMigration, jobIdsInStates, readSnapshot } from "@atlas/jobs";
-import { trustStateFor, isTrusted, DEFAULT_TRUST, taintOf, revocationEffect, spawnRemediationRun, type TrustState } from "../src/trust/index.js";
+import { trustStateFor, isTrusted, DEFAULT_TRUST, revocationEffect, spawnRemediationRun, type TrustState } from "../src/trust/index.js";
 
 const trusted: TrustState = { level: "trusted", suspended: false };
 const authoritative: TrustState = { level: "authoritative", suspended: false };
@@ -26,19 +26,6 @@ describe("trust state (fail-closed)", () => {
     expect(isTrusted(provisional)).toBe(false);
     expect(isTrusted(untrusted)).toBe(false);
     expect(isTrusted({ level: "trusted", suspended: true })).toBe(false); // a suspension drops trust
-  });
-});
-
-describe("transitive taint (floors, no laundering)", () => {
-  it("all-trusted inputs → trusted", () => {
-    expect(taintOf([trusted, authoritative])).toBe("trusted");
-  });
-  it("ANY untrusted input → untrusted (mixed is untrusted)", () => {
-    expect(taintOf([trusted, untrusted])).toBe("untrusted");
-    expect(taintOf([trusted, provisional])).toBe("untrusted"); // provisional floors it too
-  });
-  it("empty input set → untrusted (no trusted basis)", () => {
-    expect(taintOf([])).toBe("untrusted");
   });
 });
 

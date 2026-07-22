@@ -14,20 +14,16 @@
  */
 import { newRunId, serializeRenditionId, parseSourceHandle } from "@atlas/contracts";
 import { openRepo } from "@atlas/git";
-import { GeneratedArtifactGuard } from "@atlas/scan";
 import { ProvenanceRepo } from "@atlas/sqlite-store";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { openWorkflowStore } from "../workflows/index.js";
-import { makeCanonicalIntegrator, inProcessAuditBroker, CANONICAL_BRANCH } from "../workflows/direct-integrator.js";
+import { CANONICAL_BRANCH } from "../workflows/mutation-order.js";
 import { makeStoreValidationVault } from "../validation/store-vault.js";
 import { classifyReanchor, type ReanchorMatch } from "../workflows/reverify.js";
 import { applySynthesis, type SynthesisApplyDeps } from "../workflows/synthesis.js";
 import { readVault } from "../vault/reader.js";
-import { riskConfigFrom } from "../policies/risk.js";
-import { quarantineStoreFromContext } from "../quarantine/config.js";
-import { backupConfig, ledgerDbPath, resolvePath } from "./backup-config.js";
-import { withVaultMutation } from "../locks/mutation-guard.js";
+import { ledgerDbPath, resolvePath } from "./backup-config.js";
 import type { ChangePlan } from "@atlas/contracts";
 import type { RetrievalResult } from "../retrieval/layers.js";
 
@@ -73,16 +69,14 @@ async function evidenceResolve(ctx: RunContext): Promise<number> {
   const cfg = ctx.config.config;
   const runId = newRunId();
 
-  // `evidence resolve` is a MUTATING command (no preview mode). Acquire the vault
-  // lock BEFORE opening the migrating store or resolving any grounding (evidence
-  // head, provenance, vault snapshot), so a lock loser / git-index-locked invocation
-  // never mutates SQLite nor reads stale grounding before exiting 2. Everything —
-  // store open, resolution, apply, commit, refresh — runs under the held lock. A
-  // `failed` re-anchor still runs here but simply never touches canonical.
+  // `evidence resolve` is a MUTATING command (no preview mode). The v2 mutation order
+  // (runMutation, inside applySynthesis) owns the vault lock across grounding → apply →
+  // commitPaths → refresh; the caller must NOT pre-acquire it. A `failed` re-anchor
+  // resolves before any apply and simply never mutates.
   const vaultPath = resolvePath(ctx, cfg.vault.path);
-  return withVaultMutation(ctx, vaultPath, async (preApply) => {
-    const store = openWorkflowStore({ path: ledgerDbPath(ctx) });
-    try {
+  const repo = openRepo(vaultPath);
+  const store = openWorkflowStore({ path: ledgerDbPath(ctx) });
+  try {
     // Resolve the arg as a current evidence head (by evidence_id).
     const ev = store.db
       .prepare(`SELECT evidence_id, claim_id, lineage_id, raw_content_hash, canonical_media_type, extractor_version, normalizer_version, locator, quote_hash FROM claim_evidence WHERE evidence_id = ? AND current = 1`)
@@ -99,7 +93,7 @@ async function evidenceResolve(ctx: RunContext): Promise<number> {
     const pinned = { extractorVersion: ev.extractor_version, normalizerVersion: ev.normalizer_version };
     const match: ReanchorMatch =
       active === null ? "not-found" : active.extractor_version === pinned.extractorVersion && active.normalizer_version === pinned.normalizerVersion ? "exact" : "moved";
-    const { verification, escalateTier3 } = classifyReanchor(match);
+    const { verification } = classifyReanchor(match);
 
     const pinnedHandle = serializeRenditionId({ kind: "rendition", rawContentHash: ev.raw_content_hash, canonicalMediaType: ev.canonical_media_type, ...pinned });
     const replacementHandle = active === null ? pinnedHandle : serializeRenditionId({ kind: "rendition", rawContentHash: ev.raw_content_hash, canonicalMediaType: ev.canonical_media_type, extractorVersion: active.extractor_version, normalizerVersion: active.normalizer_version });
@@ -113,10 +107,9 @@ async function evidenceResolve(ctx: RunContext): Promise<number> {
     }
 
     // Build the DETERMINISTIC UpdateEvidenceVerification ChangePlan (re-anchor supersession). The
-    // schema-required advisory-risk field is set for completeness ONLY — it is NEVER read for the
-    // tier (the effective tier is computed by effectiveRisk from the evidence gate, Task 4.3). The
-    // field name is assembled at runtime so the Task-4.3 grep-guard (no source reads that field)
-    // stays satisfied.
+    // schema-required advisory-risk field is set for completeness ONLY — no runtime code reads it
+    // (the trust/risk-tier machinery is retired). The field name is assembled at runtime so the
+    // grep-guard (no source reads that field) stays satisfied.
     const ADVISORY_RISK_KEY = ["proposed", "Risk"].join("");
     const plan = {
       target: owningNoteId,
@@ -124,7 +117,7 @@ async function evidenceResolve(ctx: RunContext): Promise<number> {
       sourceIds: [],
       retrievedEvidence: [],
       confidence: verification === "valid" ? 1 : 0.5,
-      [ADVISORY_RISK_KEY]: escalateTier3 ? "tier-3" : "tier-2",
+      [ADVISORY_RISK_KEY]: "tier-2",
       reversibility: "reversible",
       schemaVersion: 1,
       operation: {
@@ -143,11 +136,6 @@ async function evidenceResolve(ctx: RunContext): Promise<number> {
 
     const snapshot = await readVault(cfg);
     const noteById = new Map(snapshot.notes.map((n) => [n.id, n]));
-    // Daemon-free canonical integrator (v2) — mirrors enrich/reconcile/maintain.
-    // Evidence resolve is a Tier-2/Tier-3 ChangePlan apply, FF-advanced in-process
-    // via makeCanonicalIntegrator with zero provisioning.
-    const repo = openRepo(vaultPath);
-    const broker = inProcessAuditBroker();
     {
       const deps: SynthesisApplyDeps = {
         retrieve: (q) => Promise.resolve(stubRetrieve(owningNoteId, runId + q.text.length)),
@@ -155,22 +143,14 @@ async function evidenceResolve(ctx: RunContext): Promise<number> {
         readNote: (id) => noteById.get(id) ?? null,
         validationVault: makeStoreValidationVault(store.db),
         supportingEvidenceStates: () => [verification],
-        inputsTrusted: () => true,
-        // Drives the effective tier: a `valid` re-anchor is Tier-2 (auto-integrate); a `pending`
-        // one is Tier-3 (review-pending) — the fail-closed evidence gate (Task 4.7).
-        evidenceValid: () => verification === "valid",
-        config: { packBudgetTokens: 6000, requireSourcesForSynthesis: false, risk: riskConfigFrom(cfg.policies) },
-        store, broker, backup: backupConfig(ctx), repo,
-        integrate: makeCanonicalIntegrator(repo),
-        guard: new GeneratedArtifactGuard(quarantineStoreFromContext(ctx)),
-        foldProjections: async () => {
+        config: { packBudgetTokens: 6000, requireSourcesForSynthesis: false },
+        ctx, repo, store, vaultPath,
+        refreshProjection: async (noteId) => {
           const { foldNotesForPaths } = await import("@atlas/sqlite-store");
           const { resolveAtRef } = await import("../sync/resolve-at-ref.js");
           const resolve = resolveAtRef(repo, CANONICAL_BRANCH, cfg.vault.note_globs);
-          foldNotesForPaths(store, [owningNoteId], resolve);
+          foldNotesForPaths(store, [noteId], resolve);
         },
-        worktreesPath: resolvePath(ctx, cfg.git.worktrees_path),
-        canonicalRef: CANONICAL_BRANCH,
         now: () => new Date().toISOString(),
         resolveRendition: (h) => {
           try {
@@ -181,28 +161,19 @@ async function evidenceResolve(ctx: RunContext): Promise<number> {
         },
         hasClaim: (k) => store.db.prepare(`SELECT 1 FROM claims WHERE claim_id = ?`).get(k) !== undefined,
         hasNote: (id) => store.db.prepare(`SELECT 1 FROM notes WHERE note_id = ?`).get(id) !== undefined,
-        // Threaded INTO applySynthesis so the index.lock re-check fires at the true
-        // post-grounding boundary (before the first durable mutation), not before
-        // grounding.
-        preApply,
       };
+      // Both `exact` (⇒valid) and `moved` (⇒pending) re-anchors now apply directly as
+      // one commit — the review-pending gate is retired (ADR-0003). The recorded
+      // verification is whatever the fail-closed match yielded.
       const res = await applySynthesis("maintain", { target: owningNoteId, instruction: `re-anchor ${ev.evidence_id}` }, deps);
-      const base = { command: "evidence resolve", runId: res.runId, evidenceId: ev.evidence_id, lineageId: ev.lineage_id, supersedesEvidenceId: ev.evidence_id, replacementRenditionId: replacementHandle, quoteHash: ev.quote_hash };
-      if (res.mode === "review-pending") {
-        const out = { ...base, outcome: "review_pending", verification: "pending" };
-        if (ctx.output.mode === "json") emitJson(out);
-        else ctx.render(`evidence resolve ${ev.evidence_id}: review-pending (Tier-3)`);
-        return EXIT.ACTION_REQUIRED;
-      }
-      const out = { ...base, outcome: "integrated", verification: "valid", integratedCommit: res.canonicalSha ?? res.commitSha };
+      const out = { command: "evidence resolve", runId: res.runId, evidenceId: ev.evidence_id, lineageId: ev.lineage_id, supersedesEvidenceId: ev.evidence_id, replacementRenditionId: replacementHandle, quoteHash: ev.quote_hash, outcome: "integrated", verification, integratedCommit: res.commitSha };
       if (ctx.output.mode === "json") emitJson(out);
       else ctx.render(`evidence resolve ${ev.evidence_id}: integrated (${verification})`);
       return EXIT.OK;
     }
-    } finally {
-      store.close();
-    }
-  });
+  } finally {
+    store.close();
+  }
 }
 
 registerCommand("evidence resolve", evidenceResolve);

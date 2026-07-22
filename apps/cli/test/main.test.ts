@@ -8,7 +8,6 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCli, type CommandHandler, type RunContext } from "../src/main.js";
-import { SecretDetectedError } from "@atlas/scan";
 import { CliError, EXIT } from "../src/errors/envelope.js";
 import { parseArgv, loadRegistry } from "../src/router.js";
 
@@ -48,9 +47,7 @@ function run(
 
 describe("parseArgv", () => {
   it("matches multi-word commands longest-first", () => {
-    expect(parseArgv(["source", "trust", "promote", "x"], registry).command).toBe(
-      "source trust promote",
-    );
+    expect(parseArgv(["git", "approve", "x"], registry).command).toBe("git approve");
     expect(parseArgv(["db", "status"], registry).command).toBe("db status");
     expect(parseArgv(["status"], registry).command).toBe("status");
   });
@@ -143,32 +140,14 @@ describe("runCli", () => {
           code: "backup-unhealthy",
           message: "blocked",
           hint: "run backup",
-          exitCode: EXIT.ACTION_REQUIRED,
+          exitCode: EXIT.CONFIG,
           retryable: true,
         });
       },
     });
-    expect(code).toBe(EXIT.ACTION_REQUIRED);
+    expect(code).toBe(EXIT.CONFIG);
     const env = JSON.parse(out);
     expect(env).toMatchObject({ code: "backup-unhealthy", retryable: true });
-  });
-
-  it("maps a scan guard's SecretDetectedError to the secret-scan exit code (3)", async () => {
-    const { code, out } = await run(["status", "--json"], {}, {
-      status: () => {
-        throw new SecretDetectedError(
-          "note.md",
-          [{ ruleId: "aws-access-key-id", title: "AWS access key id", severity: "high", startOffset: 0, endOffset: 20, redactedPreview: "‹redacted:20 chars›" }],
-          "pre-persistence",
-        );
-      },
-    });
-    expect(code).toBe(EXIT.SECRET_SCAN);
-    const env = JSON.parse(out);
-    expect(env.code).toBe("secret-scan");
-    expect(env.message).toContain("note.md");
-    // The redacted preview must not leak the raw secret through the envelope.
-    expect(out).not.toContain("AKIA");
   });
 
   it("honours --json for an argument-PARSE failure (JSON envelope, not human text)", async () => {

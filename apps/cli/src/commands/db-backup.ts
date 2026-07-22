@@ -134,7 +134,7 @@ async function dbForceUnblock(
     } finally {
       broker.close();
     }
-    return EXIT.ACTION_REQUIRED;
+    return EXIT.CONFIG;
   }
 
   // No authorization supplied → action-required (6). `--force-unblock` is never
@@ -144,7 +144,7 @@ async function dbForceUnblock(
       code: "authorization-required",
       message: "db backup --force-unblock requires a signed authorization (--authorization <path>)",
       hint: "Run with --force-unblock --export-challenge, sign the challenge with an enrolled approver key, then pass --authorization.",
-      exitCode: EXIT.ACTION_REQUIRED,
+      exitCode: EXIT.CONFIG,
     });
   }
 

@@ -42,11 +42,11 @@ async function quarantineResolve(ctx: RunContext): Promise<number> {
   const op = { op: "quarantine resolve", canonicalBaseCommit: ZERO, intendedEffect: { kind: "quarantineResolve" as const, quarantineItemOpaqueId: p.opaqueId, resolution: p.resolution } };
 
   if (p.authorization === undefined) {
-    if (!p.exportChallenge) throw new CliError({ code: "authorization-required", message: `resolving ${p.opaqueId} requires a broker authorization`, hint: "Re-run with --export-challenge, sign the challenge, then pass --authorization <path>.", exitCode: EXIT.ACTION_REQUIRED });
+    if (!p.exportChallenge) throw new CliError({ code: "authorization-required", message: `resolving ${p.opaqueId} requires a broker authorization`, hint: "Re-run with --export-challenge, sign the challenge, then pass --authorization <path>.", exitCode: EXIT.CONFIG });
     const client = await connect(ctx);
     try {
       emitJson((await client.mintChallenge(op as never)) as unknown);
-      return EXIT.ACTION_REQUIRED;
+      return EXIT.CONFIG;
     } finally {
       client.close();
     }

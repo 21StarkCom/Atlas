@@ -1,7 +1,7 @@
 /**
  * `git-rollback.cli.e2e` (Task 4.9) — the `brain git rollback` authorization gate over the real
  * broker daemon: a finalized run with `--export-challenge` emits a challenge (op `git rollback`)
- * + exits 6; bare is action-required (exit 6); a non-rollbackable / unknown run is rejected
+ * + exits 2; bare is action-required (exit 2); a non-rollbackable / unknown run is rejected
  * (exit 1). The authorized revert+install itself is covered by `rollback-lifecycle.e2e`.
  */
 import { writeFileSync } from "node:fs";
@@ -44,15 +44,15 @@ beforeEach(async () => {
 afterEach(async () => { await h.cleanup(); });
 
 describe("brain git rollback (authorization gate)", () => {
-  it("--export-challenge on a finalized run emits a challenge (op git rollback) + exits 6", async () => {
+  it("--export-challenge on a finalized run emits a challenge (op git rollback) + exits 2", async () => {
     const r = await cli(["git", "rollback", RUN, "--export-challenge", "--json"]);
-    expect(r.code, r.out).toBe(6);
+    expect(r.code, r.out).toBe(2);
     expect(JSON.parse(r.out).op).toBe("git rollback");
   });
 
-  it("without an authorization it is action-required (exit 6)", async () => {
+  it("without an authorization it is action-required (exit 2)", async () => {
     const r = await cli(["git", "rollback", RUN, "--json"]);
-    expect(r.code).toBe(6);
+    expect(r.code).toBe(2);
   });
 
   it("a non-rollbackable / unknown run is rejected (exit 1)", async () => {

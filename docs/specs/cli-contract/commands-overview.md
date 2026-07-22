@@ -4,7 +4,7 @@
 
 # Atlas — CLI command surface (generated overview)
 
-Registry version: **1** · Commands: **55**
+Registry version: **1** · Commands: **52**
 
 | Phase | Command | Idempotency | Privilege | Implemented | Schema |
 |---|---|---|---|---|---|
@@ -31,7 +31,6 @@ Registry version: **1** · Commands: **55**
 | 2 | `source add` | key-accepting | shared | yes | `docs/specs/cli-contract/source-add.schema.json` |
 | 2 | `source list` | none | shared | yes | `docs/specs/cli-contract/source-list.schema.json` |
 | 2 | `source show` | none | shared | yes | `docs/specs/cli-contract/source-show.schema.json` |
-| 2 | `source trust show` | none | shared | yes | `docs/specs/cli-contract/source-trust-show.schema.json` |
 | 3 | `index rebuild` | intrinsic | shared | yes | `docs/specs/cli-contract/index-rebuild.schema.json` |
 | 3 | `index repair` | intrinsic | shared | yes | `docs/specs/cli-contract/index-repair.schema.json` |
 | 3 | `index status` | none | shared | yes | `docs/specs/cli-contract/index-status.schema.json` |
@@ -50,8 +49,6 @@ Registry version: **1** · Commands: **55**
 | 4 | `maintain` | key-accepting | shared | yes | `docs/specs/cli-contract/maintain.schema.json` |
 | 4 | `purge` | key-accepting | privileged | yes | `docs/specs/cli-contract/purge.schema.json` |
 | 4 | `reconcile` | key-accepting | shared | yes | `docs/specs/cli-contract/reconcile.schema.json` |
-| 4 | `source trust promote` | key-accepting | privileged | yes | `docs/specs/cli-contract/source-trust-promote.schema.json` |
-| 4 | `source trust revoke` | key-accepting | privileged | yes | `docs/specs/cli-contract/source-trust-revoke.schema.json` |
 | 4 | `validate` | none | shared | yes | `docs/specs/cli-contract/validate.schema.json` |
 | 5 | `graduation audit` | none | shared | yes | `docs/specs/cli-contract/graduation-audit.schema.json` |
 | 5 | `graduation migrate` | key-accepting | privileged | yes | `docs/specs/cli-contract/graduation-migrate.schema.json` |

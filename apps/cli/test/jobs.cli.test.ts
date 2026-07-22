@@ -231,7 +231,7 @@ describe("jobs.cli", () => {
     expect(JSON.parse(second.out)).toEqual(o1);
   });
 
-  it("a concurrent duplicate (same key still in-progress) blocks with exit 6", async () => {
+  it("a concurrent duplicate (same key still in-progress) blocks with exit 2", async () => {
     // Simulate a still-running duplicate: an in-progress idempotency slot for the same
     // (command, key, requestHash) owned by another run. A retry blocks on the key
     // rather than executing the work a second time.
@@ -249,7 +249,7 @@ describe("jobs.cli", () => {
       store.close();
     }
     const r = await cli(["jobs", "cancel", "job-z", "--idempotency-key", "kx", "--json"]);
-    expect(r.code).toBe(6);
+    expect(r.code).toBe(2);
     expect(JSON.parse(r.out).code).toBe("idempotency-in-progress");
   });
 

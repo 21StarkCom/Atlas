@@ -111,7 +111,7 @@ describe("sync reset — tree-diff re-converge (Task 5.3)", () => {
     expect(after.envelope.cursorFrom).toBe(after.envelope.cursorTo);
   }, 60_000);
 
-  it("partial reconcile: a dirty upstream note is quarantined (exit 6), cursor still re-baselines, clean paths converge", async () => {
+  it("partial reconcile: a dirty upstream note is quarantined (exit 2), cursor still re-baselines, clean paths converge", async () => {
     h = await makeSyncHarness();
     await runSyncCycle(h.deps());
     h.writeUpstream("notes/a.md", noteText("concept-a", "A"));
@@ -127,7 +127,7 @@ describe("sync reset — tree-diff re-converge (Task 5.3)", () => {
 
     const res = await authorizedReset(h);
 
-    expect(res.exitCode).toBe(6);
+    expect(res.exitCode).toBe(2);
     expect(res.envelope.quarantined.map((q) => q.path)).toEqual(["notes/c.md"]);
     // tree == upstream over NON-quarantined paths.
     expect(h.git(["show", `${SYNC_CANONICAL_REF}:notes/b.md`])).toContain("B");

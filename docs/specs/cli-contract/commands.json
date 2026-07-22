@@ -371,30 +371,6 @@
       "implemented": true
     },
     {
-      "name": "source trust promote",
-      "schemaRef": "docs/specs/cli-contract/source-trust-promote.schema.json",
-      "phase": 4,
-      "idempotency": "key-accepting",
-      "privilege": "privileged",
-      "implemented": true
-    },
-    {
-      "name": "source trust revoke",
-      "schemaRef": "docs/specs/cli-contract/source-trust-revoke.schema.json",
-      "phase": 4,
-      "idempotency": "key-accepting",
-      "privilege": "privileged",
-      "implemented": true
-    },
-    {
-      "name": "source trust show",
-      "schemaRef": "docs/specs/cli-contract/source-trust-show.schema.json",
-      "phase": 2,
-      "idempotency": "none",
-      "privilege": "shared",
-      "implemented": true
-    },
-    {
       "name": "status",
       "schemaRef": "docs/specs/cli-contract/status.schema.json",
       "phase": 1,

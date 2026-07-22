@@ -80,7 +80,7 @@ describe("quarantine inspect|resolve arg parsing (#59)", () => {
   });
 });
 
-describe("quarantine inspect|resolve authorization gate (exit 6)", () => {
+describe("quarantine inspect|resolve authorization gate (exit 2)", () => {
   let cwd: string;
   let env: NodeJS.ProcessEnv;
   beforeEach(() => {
@@ -113,14 +113,14 @@ describe("quarantine inspect|resolve authorization gate (exit 6)", () => {
     }
   }
 
-  it("inspect without an authorization ⇒ authorization-required (exit 6)", async () => {
+  it("inspect without an authorization ⇒ authorization-required (exit 2)", async () => {
     const r = await cli(["quarantine", "inspect", "q-abc", "--json"]);
-    expect(r.code).toBe(6);
+    expect(r.code).toBe(2);
     expect(JSON.parse(r.out).code).toBe("authorization-required");
   });
-  it("resolve without an authorization ⇒ authorization-required (exit 6)", async () => {
+  it("resolve without an authorization ⇒ authorization-required (exit 2)", async () => {
     const r = await cli(["quarantine", "resolve", "q-abc", "--resolution", "discard", "--json"]);
-    expect(r.code).toBe(6);
+    expect(r.code).toBe(2);
     expect(JSON.parse(r.out).code).toBe("authorization-required");
   });
 });

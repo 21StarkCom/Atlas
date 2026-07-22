@@ -26,7 +26,7 @@ import { mkdtemp } from "node:fs/promises";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { canonicalSerialize, newRunId, type RunManifest } from "@atlas/contracts";
+import { newRunId, type RunManifest } from "@atlas/contracts";
 import {
   finalizeLedgerWrite,
   type AuditBroker,
@@ -37,7 +37,6 @@ import {
   type Store,
 } from "@atlas/sqlite-store";
 import type { Repo } from "@atlas/git";
-import { GeneratedArtifactGuard } from "@atlas/scan";
 import { applyPatch } from "../markdown/apply.js";
 import { CliError, EXIT } from "../errors/envelope.js";
 import { gitOpId, gitOpUpsert, readAgentRunStatus, readGitOp, sha256Canonical } from "./checkpoints.js";
@@ -55,8 +54,6 @@ export interface SynthesisRefreshDeps extends SynthesisPlanDeps {
   readonly broker: AuditBroker;
   readonly backup: LedgerBackupConfig;
   readonly repo: Repo;
-  /** Scans every persisted refresh artifact (ChangePlan, applied text, commit, manifest). */
-  readonly guard: GeneratedArtifactGuard;
   readonly worktreesPath: string;
   /** The canonical protected ref (config `git.canonical_ref`, threaded by the caller). */
   readonly canonicalRef: string;
@@ -202,9 +199,6 @@ export async function refreshRun(
   const patch = plan.patch;
   const planHash = sha256Canonical(plan.changePlan);
 
-  // GUARD the regenerated ChangePlan before it informs any persisted artifact.
-  await deps.guard.assertClean({ text: JSON.stringify(plan.changePlan), sink: "sqlite", runId });
-
   // 4. Rebase the run's agent branch onto current canonical + re-apply the patch.
   const agentRef = await deps.repo.createAgentBranch(runId, canonicalRef);
   const wtParent = deps.worktreesPath && existsSync(deps.worktreesPath) ? deps.worktreesPath : tmpdir();
@@ -222,7 +216,6 @@ export async function refreshRun(
         retryable: true,
       });
     }
-    await deps.guard.assertClean({ text: applied.next, sink: "worktree", runId });
     writeFileSync(notePath, applied.next, "utf8");
 
     // 5. New agent commit (superseding), carrying the run manifest.
@@ -236,8 +229,6 @@ export async function refreshRun(
       targets: [note.id],
       changePlanDigest: planHash,
     };
-    await deps.guard.assertClean({ text: commitMsg, sink: "git-object", runId });
-    await deps.guard.assertClean({ text: canonicalSerialize(commitManifest).toString(), sink: "git-object", runId });
     const newCommit = await worktree.commit(commitMsg, commitManifest);
 
     // 6. Record the supersession + advance the recorded review-pending commit atomically

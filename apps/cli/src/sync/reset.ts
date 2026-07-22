@@ -344,7 +344,7 @@ export async function applySyncReset(deps: SyncResetDeps, authorization: Authori
     };
 
     const handle = await startRun(wdeps, { operation: "sync-reset", runId, targetNoteId: null, canonicalCommit: plan.canonicalBase });
-    const exitCode = plan.quarantined.length > 0 ? EXIT.ACTION_REQUIRED : EXIT.OK;
+    const exitCode = plan.quarantined.length > 0 ? EXIT.CONFIG : EXIT.OK;
     const planHash = sha256Canonical({ resetPlanDigest: plan.planDigest });
     await handle.checkpoint("planned", {
       planId: `${runId}-plan`,

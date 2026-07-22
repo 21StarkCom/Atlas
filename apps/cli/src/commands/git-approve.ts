@@ -64,13 +64,13 @@ async function gitApprove(ctx: RunContext): Promise<number> {
     // No authorization yet → mint the challenge (broker) or report action-required (no broker).
     if (p.authorization === undefined) {
       if (!p.exportChallenge) {
-        throw new CliError({ code: "action-required", message: `run ${p.runId} requires a broker authorization to approve`, hint: "Re-run with --export-challenge, sign the challenge with an enrolled approver key, then pass --authorization <path>.", exitCode: EXIT.ACTION_REQUIRED });
+        throw new CliError({ code: "action-required", message: `run ${p.runId} requires a broker authorization to approve`, hint: "Re-run with --export-challenge, sign the challenge with an enrolled approver key, then pass --authorization <path>.", exitCode: EXIT.CONFIG });
       }
       const client = await connectBroker();
       try {
         const challenge = await client.mintChallenge(op);
         emitJson(challenge as unknown);
-        return EXIT.ACTION_REQUIRED;
+        return EXIT.CONFIG;
       } finally {
         client.close();
       }
@@ -88,7 +88,7 @@ async function gitApprove(ctx: RunContext): Promise<number> {
       };
       const out = await approveRun(p.runId, deps);
       if (out.mode === "refresh-required") {
-        throw new CliError({ code: "refresh-required", message: `run ${p.runId}: canonical advanced since the commit was signed`, hint: "Run `brain git refresh` and re-approve.", exitCode: EXIT.ACTION_REQUIRED });
+        throw new CliError({ code: "refresh-required", message: `run ${p.runId}: canonical advanced since the commit was signed`, hint: "Run `brain git refresh` and re-approve.", exitCode: EXIT.CONFIG });
       }
       const canonicalHead = (await repo.readRef(canonicalRef)) ?? out.canonicalSha ?? committed.commitSha;
       const result = { command: "git approve", runId: p.runId, integratedCommit: out.canonicalSha ?? committed.commitSha, canonicalHead, reindexed: true };

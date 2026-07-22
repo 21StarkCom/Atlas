@@ -69,8 +69,8 @@ export async function submitModelDerivedOperation(
   plan: ChangePlan,
   submission: ModelOutputSubmission,
 ): Promise<void> {
-  // Fail-closed SSOT restriction — throws for synthesis/trust/reserved in Phase 2.
-  assertOperationAllowed(plan.operation, 2);
+  // Fail-closed SSOT restriction — throws for reserved/unknown ops.
+  assertOperationAllowed(plan.operation);
   // ── PAST THE GATE — reachable ONLY when the SSOT gate permitted the operation. ──
   await submission.execute(plan);
 }

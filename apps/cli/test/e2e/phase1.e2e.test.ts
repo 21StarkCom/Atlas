@@ -15,7 +15,7 @@
  *
  * These suites run WITHOUT `ATLAS_PROVISIONED` (a local in-process broker + the
  * gated custody seam), which is why the `doctor` case exercises BOTH the
- * unprovisioned (names the failing check, exit 6) and provisioned (exit 0) paths.
+ * unprovisioned (names the failing check, exit 2) and provisioned (exit 0) paths.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
@@ -442,9 +442,9 @@ describe("phase-1 exit surface (inspect / doctor / status + audit wiring)", () =
     expect(auditCount(c, "db.backup")).toBe(1);
   });
 
-  it("doctor NAMES the failing check and exits 6 on an unprovisioned host", async () => {
+  it("doctor NAMES the failing check and exits 2 on an unprovisioned host", async () => {
     const r = await cli(c, ["doctor", "--json"]);
-    expect(r.code).toBe(6);
+    expect(r.code).toBe(2);
     const out = JSON.parse(r.out);
     assertSchema("doctor", out);
     expect(out.status).toBe("action-required");

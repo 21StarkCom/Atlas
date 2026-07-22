@@ -8,23 +8,19 @@
  */
 import { newRunId } from "@atlas/contracts";
 import { openRepo } from "@atlas/git";
-import { GeneratedArtifactGuard } from "@atlas/scan";
 import { ModelsClient, createInProcessInvoker, type ModelCallReceipt } from "@atlas/models";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { openWorkflowStore } from "../workflows/index.js";
 import { makeRetrieveSeam } from "../retrieval/wiring.js";
 import { makeModelPlanGenerator, PLAN_GENERATION_MAX_TOKENS } from "../workflows/index.js";
-import { makeCanonicalIntegrator, inProcessAuditBroker, CANONICAL_BRANCH } from "../workflows/direct-integrator.js";
+import { CANONICAL_BRANCH } from "../workflows/mutation-order.js";
 import { makeStoreValidationVault } from "../validation/store-vault.js";
 import { detectMaintenanceIssues, type MaintenanceIssue } from "../workflows/maintain.js";
 import { applySynthesis, type SynthesisApplyDeps } from "../workflows/synthesis.js";
 import { readVault } from "../vault/reader.js";
-import { riskConfigFrom } from "../policies/risk.js";
-import { quarantineStoreFromContext } from "../quarantine/config.js";
-import { backupConfig, ledgerDbPath, resolvePath } from "./backup-config.js";
+import { ledgerDbPath, resolvePath } from "./backup-config.js";
 import { openMigratedStore, PREVIEW_PROJECTION_TABLES } from "./store-open.js";
-import { withVaultMutation } from "../locks/mutation-guard.js";
 
 const PACK_BUDGET = 6000;
 
@@ -90,74 +86,57 @@ async function maintain(ctx: RunContext): Promise<number> {
     }
   }
 
-  // APPLY: acquire the vault lock BEFORE opening the migrating store or grounding
-  // (issue detection, vault snapshot), so a lock loser / git-index-locked invocation
-  // never mutates SQLite nor reads stale grounding before exiting 2. Everything runs
-  // under the held lock. Assemble the SAME seams `enrich` uses — the in-process model
-  // boundary + the in-process integrator (no broker daemon; ADR-0003).
+  // APPLY: the v2 mutation order (runMutation, inside applySynthesis) owns the vault
+  // lock per remediation; the caller must NOT pre-acquire it. Each detected issue's
+  // remediation lands as ONE direct commit (no tier gate, no review-pending). The
+  // store/repo/model boundary is assembled lock-free and shared across issues.
   const vaultPath = resolvePath(ctx, cfg.vault.path);
-  return withVaultMutation(ctx, vaultPath, async (preApply) => {
-    const store = openWorkflowStore({ path: ledgerDbPath(ctx) });
-    try {
-      const issues = detectMaintenanceIssues(store.db);
-      const repo = openRepo(vaultPath);
-      const broker = inProcessAuditBroker();
-      // The in-process model boundary (no egress daemon, no capability mint).
-      const receipts: ModelCallReceipt[] = [];
-      const models = new ModelsClient(createInProcessInvoker({ env: ctx.env }), (r) => { receipts.push(r); });
-      const indexingCfg = { chunker_version: cfg.indexing.chunker_version, embedding_model: cfg.indexing.embedding_model, dimensions: cfg.indexing.dimensions };
-      const snapshot = await readVault(cfg);
-      const noteById = new Map(snapshot.notes.map((n) => [n.id, n]));
-      const generatePlan = makeModelPlanGenerator({
-        models,
-        model: cfg.models.generation_model,
-        maxTokens: PLAN_GENERATION_MAX_TOKENS,
-      });
+  const repo = openRepo(vaultPath);
+  const store = openWorkflowStore({ path: ledgerDbPath(ctx) });
+  try {
+    const issues = detectMaintenanceIssues(store.db);
+    // The in-process model boundary (no egress daemon, no capability mint).
+    const receipts: ModelCallReceipt[] = [];
+    const models = new ModelsClient(createInProcessInvoker({ env: ctx.env }), (r) => { receipts.push(r); });
+    const indexingCfg = { chunker_version: cfg.indexing.chunker_version, embedding_model: cfg.indexing.embedding_model, dimensions: cfg.indexing.dimensions };
+    const snapshot = await readVault(cfg);
+    const noteById = new Map(snapshot.notes.map((n) => [n.id, n]));
+    const generatePlan = makeModelPlanGenerator({
+      models,
+      model: cfg.models.generation_model,
+      maxTokens: PLAN_GENERATION_MAX_TOKENS,
+    });
 
-      const findings: { kind: string; target: string; destructive: boolean; risk: Tier }[] = [];
-      let anyReviewPending = false;
-      for (const issue of issues) {
-        const perRunId = newRunId();
-        const retrieve = await makeRetrieveSeam({ ctx, store, models, indexingCfg, rrf: cfg.retrieval.rrf, fts: cfg.retrieval.fts, defaultSensitivity: cfg.policies.default_sensitivity, runId: perRunId, now: () => new Date().toISOString() });
-        const deps: SynthesisApplyDeps = {
-          retrieve, generatePlan,
-          readNote: (id) => noteById.get(id) ?? null,
-          validationVault: makeStoreValidationVault(store.db),
-          supportingEvidenceStates: () => [],
-          inputsTrusted: () => true,
-          evidenceValid: () => true,
-          config: { packBudgetTokens: PACK_BUDGET, requireSourcesForSynthesis: cfg.policies.require_sources_for_synthesis, risk: riskConfigFrom(cfg.policies) },
-          store, broker, backup: backupConfig(ctx), repo,
-          integrate: makeCanonicalIntegrator(repo),
-          guard: new GeneratedArtifactGuard(quarantineStoreFromContext(ctx)),
-          foldProjections: async () => {
-            const { foldNotesForPaths } = await import("@atlas/sqlite-store");
-            const { resolveAtRef } = await import("../sync/resolve-at-ref.js");
-            const resolve = resolveAtRef(repo, CANONICAL_BRANCH, cfg.vault.note_globs);
-            foldNotesForPaths(store, [issue.noteId], resolve);
-          },
-          worktreesPath: resolvePath(ctx, cfg.git.worktrees_path),
-          canonicalRef: CANONICAL_BRANCH,
-          now: () => new Date().toISOString(),
-          // Threaded INTO applySynthesis so the index.lock re-check fires at the
-          // true post-grounding boundary (after retrieval + model planning, before
-          // the first durable mutation), on every CAS-rebase retry — not before
-          // grounding.
-          preApply,
-        };
-        const res = await applySynthesis("maintain", { target: issue.noteId, instruction: instructionFor(issue) }, deps);
-        if (res.mode === "review-pending") anyReviewPending = true;
-        findings.push(toFinding(issue, res.plan.tier as Tier));
-      }
-
-      const out = { command: "maintain", mode: anyReviewPending ? "review_pending" : "applied", runId, risk: effectiveRisk(findings.map((f) => f.risk)), findings };
-      if (ctx.output.mode === "json") emitJson(out);
-      else ctx.render(`maintain: ${out.mode}, ${findings.length} finding(s)`);
-      return anyReviewPending ? EXIT.ACTION_REQUIRED : EXIT.OK;
-    } finally {
-      store.close();
+    const findings: { kind: string; target: string; destructive: boolean; risk: Tier }[] = [];
+    for (const issue of issues) {
+      const perRunId = newRunId();
+      const retrieve = await makeRetrieveSeam({ ctx, store, models, indexingCfg, rrf: cfg.retrieval.rrf, fts: cfg.retrieval.fts, defaultSensitivity: cfg.policies.default_sensitivity, runId: perRunId, now: () => new Date().toISOString() });
+      const deps: SynthesisApplyDeps = {
+        retrieve, generatePlan,
+        readNote: (id) => noteById.get(id) ?? null,
+        validationVault: makeStoreValidationVault(store.db),
+        supportingEvidenceStates: () => [],
+        config: { packBudgetTokens: PACK_BUDGET, requireSourcesForSynthesis: cfg.policies.require_sources_for_synthesis },
+        ctx, repo, store, vaultPath,
+        refreshProjection: async (noteId) => {
+          const { foldNotesForPaths } = await import("@atlas/sqlite-store");
+          const { resolveAtRef } = await import("../sync/resolve-at-ref.js");
+          const resolve = resolveAtRef(repo, CANONICAL_BRANCH, cfg.vault.note_globs);
+          foldNotesForPaths(store, [noteId], resolve);
+        },
+        now: () => new Date().toISOString(),
+      };
+      await applySynthesis("maintain", { target: issue.noteId, instruction: instructionFor(issue) }, deps);
+      findings.push(toFinding(issue, issue.minTier));
     }
-  });
+
+    const out = { command: "maintain", mode: "applied", runId, risk: effectiveRisk(findings.map((f) => f.risk)), findings };
+    if (ctx.output.mode === "json") emitJson(out);
+    else ctx.render(`maintain: applied, ${findings.length} finding(s)`);
+    return EXIT.OK;
+  } finally {
+    store.close();
+  }
 }
 
 registerCommand("maintain", maintain);

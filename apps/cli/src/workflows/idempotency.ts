@@ -144,7 +144,7 @@ export class IdempotencyInProgressError extends CliError {
       code: "idempotency-in-progress",
       message: `command "${command}" with idempotency key "${key}" is already in progress (run ${runId})`,
       hint: "A duplicate request with this key is running; wait for it to finish, then retry to get its result.",
-      exitCode: EXIT.ACTION_REQUIRED,
+      exitCode: EXIT.CONFIG,
       retryable: true,
       runId,
     });

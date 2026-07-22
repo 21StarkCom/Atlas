@@ -359,7 +359,7 @@ async function absorb(ctx: CycleContext, integration: CaptureIntegration, opts: 
       },
     });
     return {
-      exitCode: plan.quarantined.length > 0 ? EXIT.ACTION_REQUIRED : EXIT.OK,
+      exitCode: plan.quarantined.length > 0 ? EXIT.CONFIG : EXIT.OK,
       envelope: envelopeFor(row, upstreamHead, plan, null),
     };
   }
@@ -455,7 +455,7 @@ async function absorb(ctx: CycleContext, integration: CaptureIntegration, opts: 
     await cleanupWorktree(deps.repo, worktreeDir);
     worktreeDir = null;
     return {
-      exitCode: plan.quarantined.length > 0 ? EXIT.ACTION_REQUIRED : EXIT.OK,
+      exitCode: plan.quarantined.length > 0 ? EXIT.CONFIG : EXIT.OK,
       envelope: envelopeFor(row, upstreamHead, plan, reconcileJobId),
     };
   } finally {

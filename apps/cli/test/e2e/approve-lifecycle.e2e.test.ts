@@ -1,62 +1,24 @@
 /**
- * `approve-lifecycle.e2e` (Task 4.9) — the Tier-3 review lifecycle over the real engine +
- * broker: a review-pending run (from `applySynthesis` Tier-3) is APPROVED → integrated onto
- * canonical → reindexed → finalized; a moved base is a stable `refresh-required` (approve never
- * rebases); a reject terminates the run; and the broker AUTHORITY refuses a forged-signature
- * canonical advance (a model/agent cannot forge an approval).
+ * `approve-lifecycle.e2e` — the review-gate approve/reject engine over the real store + broker:
+ * a review-pending run is APPROVED → integrated onto canonical → reindexed → finalized; a moved
+ * base is a stable `refresh-required` (approve never rebases); a reject terminates the run; and
+ * the broker AUTHORITY refuses a forged-signature canonical advance.
+ *
+ * NOTE: no production path produces a `review-pending` run any more (the Tier-3 synthesis review
+ * loop is retired, ADR-0003) — the gate precondition is synthesized directly in the ledger so the
+ * SURVIVING approve/reject engine + broker authority stay covered.
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { ChangePlan, ChangePlanOperation, ParsedNote } from "@atlas/contracts";
 import { BrokerClient, BrokerRefusal } from "@atlas/broker";
-import { GeneratedArtifactGuard, type QuarantineSink, type SecretFinding } from "@atlas/scan";
-import type { RetrievalResult } from "../../src/retrieval/layers.js";
-import { splitFrontmatter } from "../../src/markdown/parse.js";
-import { buildSectionTree, resolveSections } from "../../src/markdown/sections.js";
-import { sectionContentHash } from "../../src/markdown/patch.js";
-import { riskConfigFrom } from "../../src/policies/risk.js";
-import type { ValidationVault } from "../../src/validation/index.js";
+import { newRunId } from "@atlas/contracts";
 import type { IntegrationContext, RunIntegrator } from "../../src/workflows/index.js";
-import { applySynthesis, type SynthesisApplyDeps } from "../../src/workflows/synthesis.js";
 import { approveRun, rejectRun, type ApproveDeps } from "../../src/workflows/index.js";
+import { gitOpId, gitOpUpsert } from "../../src/workflows/checkpoints.js";
 import { makePhase2Harness, prepareForbiddenAuthorizedAdvance, CANONICAL_REF, type Phase2Harness } from "./phase2-support.js";
 
-const RISK = riskConfigFrom({ tier2_min_confidence: 0.8, tier2_max_changed_lines: 50, tier2_max_sections: 3 });
-const ALPHA_PATH = "note-alpha.md";
-const ALPHA_ID = "concept-alpha";
-
-class RecordingQuarantine implements QuarantineSink {
-  quarantine(_input: { bytes: Uint8Array; origin: string; findings: readonly SecretFinding[] }): Promise<void> {
-    return Promise.resolve();
-  }
-}
-
-function alphaNote(h: Phase2Harness): ParsedNote {
-  const raw = readFileSync(join(h.vaultDir, ALPHA_PATH), "utf8").replace(/\r\n/g, "\n");
-  const { body } = splitFrontmatter(raw);
-  return {
-    id: ALPHA_ID, path: ALPHA_PATH, type: "concept", schemaVersion: 1, title: "Alpha", status: "active",
-    created: "2026-07-14", updated: "2026-07-14", aliases: [], sources: [], declaredSensitivity: "internal",
-    links: [], sections: buildSectionTree(body), contentHash: "sha256:0", raw,
-  };
-}
-
-function updateAlphaPlan(h: Phase2Harness): ChangePlan {
-  const { body } = splitFrontmatter(alphaNote(h).raw);
-  const alpha = resolveSections(body).find((s) => s.path === "Alpha")!;
-  const hash = sectionContentHash(body.slice(alpha.bodyStart, alpha.bodyEnd));
-  const operation: ChangePlanOperation = { op: "UpdateSection", opVersion: 1, selector: { path: "Alpha", expectedContentHash: hash }, newContent: "The alpha note, enriched. Links [[concept-beta]].\n" };
-  return { target: ALPHA_ID, rationale: "enrich", sourceIds: ["src-1"], retrievedEvidence: [], confidence: 0.95, proposedRisk: "tier-1", reversibility: "reversible", schemaVersion: 1, operation } as ChangePlan;
-}
-
-function retrieval(): RetrievalResult {
-  return { items: [{ noteId: ALPHA_ID, sectionPath: "Alpha", score: 1, contributions: [{ layer: "vector", rank: 0, weightedContribution: 1 }], sensitivity: "internal", trust: "verified", sections: [{ sectionPath: "Alpha", text: "The alpha note." }] }] as RetrievalResult["items"], layersUsed: ["vector"], retrievalRunId: "ret-1", mode: "vector", degraded: false };
-}
-
-function vault(): ValidationVault {
-  return { hasNoteId: () => true, identityOwners: () => [], hasSourceRef: () => true, hasClaimKey: () => true, hasEvidenceLineage: () => true, hasEvidenceId: () => true, attachWouldDuplicate: () => false };
-}
+const NOW = "2026-07-14T00:00:00.000Z";
 
 /** A CAS integrator that honours the broker contract: refuse on a moved base, else FF canonical. */
 function casIntegrator(h: Phase2Harness): RunIntegrator {
@@ -68,7 +30,7 @@ function casIntegrator(h: Phase2Harness): RunIntegrator {
   };
 }
 
-describe("Tier-3 approve lifecycle (Task 4.9)", () => {
+describe("review-gate approve lifecycle", () => {
   let h: Phase2Harness;
   let client: BrokerClient;
 
@@ -81,43 +43,38 @@ describe("Tier-3 approve lifecycle (Task 4.9)", () => {
     await h.cleanup();
   });
 
-  function common(store: ReturnType<Phase2Harness["openStore"]>) {
-    return {
-      retrieve: async () => retrieval(),
-      generatePlan: async () => updateAlphaPlan(h),
-      readNote: () => alphaNote(h),
-      validationVault: vault(),
-      supportingEvidenceStates: () => [],
-      evidenceValid: () => true,
-      config: { packBudgetTokens: 4000, requireSourcesForSynthesis: true, risk: RISK },
-      store, broker: client, backup: h.backup, repo: h.repo(),
-      guard: new GeneratedArtifactGuard(new RecordingQuarantine()),
-      worktreesPath: h.worktreesPath, canonicalRef: CANONICAL_REF,
-      now: () => "2026-07-14T00:00:00.000Z",
-    };
-  }
-
   async function withStore<T>(fn: (s: ReturnType<Phase2Harness["openStore"]>) => Promise<T>): Promise<T> {
     const s = h.openStore();
     try { return await fn(s); } finally { s.close(); }
   }
 
-  async function makeReviewPending(): Promise<{ runId: string; commitSha: string }> {
-    return withStore(async (store) => {
-      const deps: SynthesisApplyDeps = { ...common(store), inputsTrusted: () => false, integrate: casIntegrator(h), foldProjections: async () => {} };
-      const res = await applySynthesis("enrich", { target: ALPHA_ID, instruction: "x" }, deps);
-      expect(res.mode).toBe("review-pending");
-      return { runId: res.runId, commitSha: res.commitSha };
-    });
+  /** Synthesize a durable review-pending run + a real agent commit that FF-installs onto canonical. */
+  function seedReviewPending(): { runId: string; commitSha: string } {
+    const runId = newRunId();
+    const base = h.git(["rev-parse", CANONICAL_REF]);
+    const agentRef = `refs/agent/${runId}`;
+    const commitSha = h.gitIn(h.vaultDir, ["commit-tree", `${base}^{tree}`, "-p", base, "-m", `agent ${runId}`], Buffer.from(""));
+    h.git(["update-ref", agentRef, commitSha]);
+    const store = h.openStore();
+    try {
+      store.ledger.upsertAgentRun({ run_id: runId, operation: "enrich", status: "review-pending", tier: 3, started_at: NOW, updated_at: NOW });
+      store.db.prepare(`INSERT INTO change_plans (plan_id, run_id, tier, confidence, summary, plan_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .run(`${runId}-plan`, runId, 3, 0.5, "enrich alpha", "sha256:plan", NOW);
+      for (const stmt of [
+        gitOpUpsert({ gitOpId: gitOpId(runId, "agent-committed"), runId, opType: "agent-committed", refName: agentRef, commitSha, now: NOW }),
+        gitOpUpsert({ gitOpId: gitOpId(runId, "base"), runId, opType: "base", refName: CANONICAL_REF, commitSha: base, now: NOW }),
+      ]) store.db.prepare(stmt.sql).run(stmt.params);
+    } finally { store.close(); }
+    return { runId, commitSha };
   }
 
   function approveDeps(store: ReturnType<Phase2Harness["openStore"]>): ApproveDeps {
-    return { store, broker: client, backup: h.backup, repo: h.repo(), integrate: casIntegrator(h), foldProjections: async () => {}, canonicalRef: CANONICAL_REF, now: () => "2026-07-14T00:00:00.000Z" };
+    return { store, broker: client, backup: h.backup, repo: h.repo(), integrate: casIntegrator(h), foldProjections: async () => {}, canonicalRef: CANONICAL_REF, now: () => NOW };
   }
 
   it("approves a review-pending run → integrated onto canonical + finalized", async () => {
     const before = h.git(["rev-parse", CANONICAL_REF]);
-    const { runId, commitSha } = await makeReviewPending();
+    const { runId, commitSha } = seedReviewPending();
     const out = await withStore((store) => approveRun(runId, approveDeps(store)));
     expect(out.mode).toBe("integrated");
     // Canonical advanced to the reviewed commit; the run is finalized.
@@ -130,7 +87,7 @@ describe("Tier-3 approve lifecycle (Task 4.9)", () => {
   });
 
   it("a moved base is refresh-required — approve NEVER rebases", async () => {
-    const { runId } = await makeReviewPending();
+    const { runId } = seedReviewPending();
     // A concurrent writer advances canonical after the run reached review-pending.
     const wt = join(h.worktreesPath, "concurrent");
     h.git(["worktree", "add", "-q", "-b", "concurrent", wt, CANONICAL_REF]);
@@ -150,7 +107,7 @@ describe("Tier-3 approve lifecycle (Task 4.9)", () => {
   });
 
   it("rejects a review-pending run → rejected terminal", async () => {
-    const { runId } = await makeReviewPending();
+    const { runId } = seedReviewPending();
     const out = await withStore((store) => rejectRun(runId, "not accurate", approveDeps(store)));
     expect(out.state).toBe("rejected");
     await withStore(async (store) => {

@@ -196,7 +196,7 @@ export async function rebuildIndexFromVault(ctx: RunContext, db: SqliteDatabase,
  * expressed as exit 6 (action-required) — the retryability a jobs runner consumes lives
  * on each `unresolved[].retryable` flag, not on a code the exit set does not define. */
 function partialExit(unresolved: readonly UnresolvedNote[]): number {
-  return unresolved.length > 0 ? EXIT.ACTION_REQUIRED : EXIT.OK;
+  return unresolved.length > 0 ? EXIT.CONFIG : EXIT.OK;
 }
 
 // ---------------------------------------------------------------------------

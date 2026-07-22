@@ -339,67 +339,7 @@ function sourceShow(ctx: RunContext): number {
   }
 }
 
-// ---------------------------------------------------------------------------
-// source trust show
-// ---------------------------------------------------------------------------
-
-function sourceTrustShow(ctx: RunContext): number {
-  const { raw, handle } = parseHandleArg("source trust show", ctx.argv);
-  const store = openMigratedStore(ctx);
-  try {
-    const blob = resolveBlob("source trust show", store.db, handle);
-    const contentId = serializeContentId({
-      kind: "content",
-      rawContentHash: blob.raw_content_hash,
-      canonicalMediaType: blob.canonical_media_type,
-    });
-    const active = activeRenditionBinding(store.db, blob);
-    // The `0010_trust_state` projection holds the LATEST transition only (one row
-    // per blob; the trust ledger is the history SSOT but its Phase-1 advance is
-    // authorize-only), so `history` carries at most that one entry. Fail-closed:
-    // no row ⇒ untrusted with empty history; a suspended row reads effective
-    // `untrusted`, and the only production writer of `suspended` is a revoke.
-    const record = readTrustRecord(store.db, {
-      rawContentHash: blob.raw_content_hash,
-      canonicalMediaType: blob.canonical_media_type,
-    });
-    const effective = effectiveTrustLevel(record);
-    const out: Record<string, unknown> = {
-      command: "source trust show",
-      sourceHandle: raw,
-      contentId,
-      effectiveTrustLevel: effective,
-      suspended: record?.suspended ?? false,
-      history:
-        record === null
-          ? []
-          : [
-              {
-                at: record.updatedAt,
-                action: record.suspended ? "revoke" : "promote",
-                toLevel: record.level,
-                ...(record.reason !== null ? { reason: record.reason } : {}),
-              },
-            ],
-    };
-    // `reviewedTrustLevel` = the promoted level, present iff a live (unsuspended)
-    // promotion exists; after a revoke the projection no longer carries it.
-    if (record !== null && !record.suspended && record.level !== "untrusted") {
-      out.reviewedTrustLevel = record.level;
-    }
-    if (record?.suspended) out.suspensionReason = "revoked";
-    if (active !== undefined) out.activeRendition = active;
-
-    if (ctx.output.mode === "json") emitJson(out);
-    else ctx.render(`${contentId}: ${effective}${record?.suspended ? " (suspended)" : ""}`);
-    return EXIT.OK;
-  } finally {
-    store.close();
-  }
-}
-
 registerCommand("source list", sourceList);
 registerCommand("source show", sourceShow);
-registerCommand("source trust show", sourceTrustShow);
 
-export { sourceList, sourceShow, sourceTrustShow };
+export { sourceList, sourceShow };

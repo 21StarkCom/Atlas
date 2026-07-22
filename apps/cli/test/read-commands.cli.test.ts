@@ -84,7 +84,7 @@ function seedBlob(store: Store): { contentId: string; renditionId: string } {
   return { contentId: `sha256:${raw}:${media}`, renditionId: `sha256:${raw}:${media}:1:1` };
 }
 
-describe("source show / source trust show", () => {
+describe("source show", () => {
   it("source show validates + reports captures/renditions with the active pointer", async () => {
     const store = openStore({ path: dbPath });
     let ids: { contentId: string; renditionId: string };
@@ -96,20 +96,6 @@ describe("source show / source trust show", () => {
     expect(out.source.activeRenditionId).toBe(ids.renditionId);
     expect(out.source.renditions[0].active).toBe(true);
     expect(out.source.captures.length).toBe(1);
-  });
-
-  it("source trust show reports default untrusted, not suspended, empty history", async () => {
-    const store = openStore({ path: dbPath });
-    let ids: { contentId: string; renditionId: string };
-    try { ids = seedBlob(store); } finally { store.close(); }
-    const r = await cli(["source", "trust", "show", ids.contentId, "--json"]);
-    expect(r.code, r.out).toBe(0);
-    const out = JSON.parse(r.out);
-    validateSchema("source-trust-show", out);
-    expect(out.effectiveTrustLevel).toBe("untrusted");
-    expect(out.suspended).toBe(false);
-    expect(out.history).toEqual([]);
-    expect(out.contentId).toBe(ids.contentId);
   });
 
   it("missing arg ⇒ usage (5); malformed handle ⇒ invalid-source-handle (1); unknown ⇒ source-not-found (1)", async () => {

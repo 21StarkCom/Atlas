@@ -6,7 +6,6 @@
  * machinery (Task 4.9/4.11).
  */
 export { trustStateFor, isTrusted, DEFAULT_TRUST, type TrustState } from "./state.js";
-export { taintOf, type Taint } from "./taint.js";
 export {
   promoteTrust,
   revokeTrust,

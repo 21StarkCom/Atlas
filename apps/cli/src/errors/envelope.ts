@@ -6,24 +6,23 @@
  * `docs/specs/cli-contract/error-envelope.schema.json`; `emitError` is the JSON
  * emitter (the ONLY module besides the renderer permitted to write to stdout).
  *
- * Every `CliError` carries an `exitCode` from the plan §2.5 process-exit set:
- *   0 ok · 1 validation · 2 config/vault/lock · 3 secret-scan · 4 internal ·
- *   5 user/usage · 6 action-required.
+ * Every `CliError` carries an `exitCode` from the v2 process-exit set:
+ *   0 ok · 1 validation · 2 config/vault/lock · 4 internal · 5 user/usage.
+ * (The retired security architecture's secret-scan (3) and action-required (6)
+ * codes were removed with the trust/scan-gate demolition — Phase-3, ADR-0003.)
  */
 
-/** The plan §2.5 process-exit categories. `0` never carries an error. */
+/** The v2 process-exit categories. `0` never carries an error. */
 export const EXIT = {
   OK: 0,
   VALIDATION: 1,
   CONFIG: 2,
-  SECRET_SCAN: 3,
   INTERNAL: 4,
   USAGE: 5,
-  ACTION_REQUIRED: 6,
 } as const;
 
 /** A non-`OK` process-exit code. */
-export type ExitCode = 1 | 2 | 3 | 4 | 5 | 6;
+export type ExitCode = 1 | 2 | 4 | 5;
 
 /** Source location for a failure that maps to a concrete file (schema `$defs.location`). */
 export interface ErrorLocation {
@@ -127,21 +126,6 @@ export class CliError extends Error {
       code: "internal",
       message,
       exitCode: EXIT.INTERNAL,
-      ...(cause !== undefined ? { cause } : {}),
-    });
-  }
-
-  /**
-   * Convenience: a `secret-scan` refusal (exit 3). Maps a scan guard's
-   * {@link SecretDetectedError} to the CLI boundary — the offending bytes are
-   * already quarantined (AEAD, ciphertext-only) by the time this is raised.
-   */
-  static secretScan(message: string, hint = "", cause?: unknown): CliError {
-    return new CliError({
-      code: "secret-scan",
-      message,
-      hint,
-      exitCode: EXIT.SECRET_SCAN,
       ...(cause !== undefined ? { cause } : {}),
     });
   }

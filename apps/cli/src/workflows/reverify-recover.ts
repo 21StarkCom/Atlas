@@ -44,18 +44,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseSourceHandle } from "@atlas/contracts";
 import { openRepo, type Repo } from "@atlas/git";
-import { GeneratedArtifactGuard, SecretDetectedError, type PrePersistenceGuard } from "@atlas/scan";
+import { SecretDetectedError, type PrePersistenceGuard } from "@atlas/scan";
 import { normalize } from "@atlas/sources";
 import { ProvenanceRepo, type SqliteDatabase } from "@atlas/sqlite-store";
 import type { JobHandlerDeps } from "../commands/job-handlers.js";
-import { backupConfig, resolvePath } from "../commands/backup-config.js";
+import type { RunContext } from "../handlers.js";
+import { resolvePath } from "../commands/backup-config.js";
 import { buildGuard } from "../ingest/wiring.js";
-import { quarantineStoreFromContext } from "../quarantine/config.js";
-import { riskConfigFrom } from "../policies/risk.js";
 import { makeStoreValidationVault } from "../validation/store-vault.js";
 import { resolveAtRef } from "../sync/resolve-at-ref.js";
 import type { RetrievalResult } from "../retrieval/layers.js";
-import { makeCanonicalIntegrator, inProcessAuditBroker, CANONICAL_BRANCH } from "./direct-integrator.js";
+import { CANONICAL_BRANCH } from "./mutation-order.js";
 import { applySynthesis, type SynthesisApplyDeps } from "./synthesis.js";
 import type { EvidenceHeadRow, ReanchorApplyRequest, ReanchorApplyResult } from "./reverify-handler.js";
 import type { ReanchorInput } from "./reverify-match.js";
@@ -268,42 +267,40 @@ export async function applyReanchorViaBroker(deps: JobHandlerDeps, req: Reanchor
   const store = deps.store; // already open + migrated by the drain — never closed here
   const provenance = new ProvenanceRepo(store.db);
   const repo = openRepo(resolvePath(ctx, cfg.vault.path));
-  const broker = inProcessAuditBroker();
+  const vaultPath = resolvePath(ctx, cfg.vault.path);
 
-  // Notes are read AT THE CANONICAL REF, never the working tree (review round-1
-  // finding): the working tree does not advance when canonical does (#260), so a
-  // multi-head reverify integrating head N+1 from a working-tree snapshot would
-  // patch PRE-head-N text and clobber head N's integrated edit. A FRESH resolver is
-  // built per readNote invocation (round-2 finding): applySynthesis retries a
-  // broker.cas_failed integration against the ADVANCED canonical, and a resolver
-  // cached across attempts would serve the pre-retry text — silently reverting the
-  // concurrent edit the CAS retry exists to accommodate.
+  // Notes are read AT THE CANONICAL REF (= `refs/heads/main`, which in v2 IS the
+  // working tree's HEAD). A FRESH resolver is built per readNote invocation so a
+  // multi-head reverify sees the latest committed text.
   const readNoteAtCanonical = (id: string) => resolveAtRef(repo, CANONICAL_BRANCH, cfg.vault.note_globs)(id);
 
-  // In-process re-anchor (ADR-0003): the canonical FF-advance + run state-machine
-  // run in-process — no broker daemon, no audit/WORM append. A `broker.cas_failed`
-  // from a concurrent canonical move is still surfaced (via the in-process CAS) so
-  // the multi-head sequential integration + retry semantics are unchanged.
+  // In-process re-anchor (v2, ADR-0003): the validated plan lands as one direct commit
+  // onto `refs/heads/main` via the mutation order — no broker, no worktree, no CAS,
+  // no tier gate.
+  //
+  // This runs INSIDE the `reverify` job handler during a `jobs run` drain, which
+  // ALREADY holds `jobs-runner`. `runMutation` would otherwise re-take
+  // `vault-maintenance` and trip the broad→narrow lock-order assert (exit 4). The
+  // drain serializes handlers, so the apply is lock-free here: swap in a passthrough
+  // `withLock` (the jobs runner passes the same passthrough into its own drain).
+  const lockFreeCtx: RunContext = { ...ctx, withLock: (_scope, fn) => Promise.resolve(fn()) };
   const sdeps: SynthesisApplyDeps = {
     retrieve: (q) => Promise.resolve(stubRetrieve(req.owningNoteId, req.evidenceId + q.text.length)),
     generatePlan: () => Promise.resolve(req.plan),
     readNote: (id) => readNoteAtCanonical(id),
     validationVault: makeStoreValidationVault(store.db),
     supportingEvidenceStates: () => ["valid"],
-    inputsTrusted: () => true,
-    // Only a proven-`exact` re-anchor reaches this seam: the evidence gate sees a
-    // valid state and the plan lands Tier-2 (auto-integrate under the in-process CAS).
-    evidenceValid: () => true,
-    config: { packBudgetTokens: 6000, requireSourcesForSynthesis: false, risk: riskConfigFrom(cfg.policies) },
-    store,
-    broker,
-    backup: backupConfig(ctx),
-    repo,
-    integrate: makeCanonicalIntegrator(repo),
-    guard: new GeneratedArtifactGuard(quarantineStoreFromContext(ctx)),
-    foldProjections: async () => {},
-    worktreesPath: resolvePath(ctx, cfg.git.worktrees_path),
-    canonicalRef: CANONICAL_BRANCH,
+    config: { packBudgetTokens: 6000, requireSourcesForSynthesis: false },
+    ctx: lockFreeCtx, repo, store, vaultPath,
+    // Fold the committed note back into the projection (same seam `evidence resolve`
+    // uses). Without this, `notes.content_hash` stays at its pre-commit value and the
+    // NEXT head's apply on the same note trips the mutation order's dirty-vault gate
+    // (on-disk hash ≠ projection hash) — a multi-head reverify would land only its
+    // first head.
+    refreshProjection: async (noteId) => {
+      const { foldNotesForPaths } = await import("@atlas/sqlite-store");
+      foldNotesForPaths(store, [noteId], readNoteAtCanonical);
+    },
     now: () => new Date().toISOString(),
     resolveRendition: (h) => {
       try {
@@ -316,5 +313,5 @@ export async function applyReanchorViaBroker(deps: JobHandlerDeps, req: Reanchor
     hasNote: (id) => store.db.prepare(`SELECT 1 FROM notes WHERE note_id = ?`).get(id) !== undefined,
   };
   const res = await applySynthesis("maintain", { target: req.owningNoteId, instruction: `re-anchor ${req.evidenceId}` }, sdeps);
-  return { mode: res.mode === "review-pending" ? "review-pending" : "integrated", runId: res.runId };
+  return { mode: "integrated", runId: res.runId };
 }
