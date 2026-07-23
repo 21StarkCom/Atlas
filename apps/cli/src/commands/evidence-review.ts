@@ -1,9 +1,14 @@
 /**
- * `brain evidence review [<note>]` (Task 4.7 / #59) — a paginated, READ-ONLY listing of evidence
- * that needs attention: current heads whose verification is not `valid` (stale / pending / failed
- * re-verification), optionally scoped to a single note. Non-mutating, no audit event. Deterministic
- * order (updatedAt desc, evidenceId tie-break). Output ⇒ `evidence-review.schema.json`.
+ * `brain evidence review [<note>]` — a paginated, READ-ONLY listing of v2
+ * vault-derived evidence needing attention: rows whose `status` is anything other
+ * than `resolved` (pending / failed / needs-review), optionally scoped to a single
+ * note. Non-mutating, no ledger/audit — reads the flat `evidence` projection only
+ * (Phase-4 task 4-4). Each item's `target` is a best-effort read-time resolution of
+ * the SOFT `noteId`: a note that no longer resolves surfaces as `target: missing`
+ * (eligible for `needs-review`) — never a crash, never silently dropped.
+ * Deterministic order (createdAt desc, id tie-break). Output ⇒ `evidence-review.schema.json`.
  */
+import { EvidenceRepo, type EvidenceRow } from "@atlas/sqlite-store";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { openWorkflowStore } from "../workflows/index.js";
@@ -26,25 +31,35 @@ function parseArgs(argv: string[]): Parsed {
   return { ...(note !== undefined ? { note } : {}), limit, offset };
 }
 
-interface Item { evidenceId: string; noteId: string; state: string; updatedAt: string }
+interface Item { evidenceId: string; noteId: string; state: string; target: "present" | "missing"; updatedAt: string }
+
+/** Map a v2 evidence row's status to the review `state` enum (NULL = not-yet-checked ⇒ pending). */
+function stateOf(row: EvidenceRow): string {
+  return row.status ?? "pending";
+}
 
 async function evidenceReview(ctx: RunContext): Promise<number> {
   const p = parseArgs(ctx.argv);
   const store = openWorkflowStore({ path: ledgerDbPath(ctx) });
   try {
-    const scope = p.note !== undefined ? " AND c.owning_note_id = @note" : "";
-    const where = `WHERE e.current = 1 AND e.verification != 'valid'${scope}`;
-    const params = p.note !== undefined ? { note: p.note } : {};
-    const total = (store.db.prepare(`SELECT COUNT(*) AS n FROM claim_evidence e JOIN claims c ON c.claim_id = e.claim_id ${where}`).get(params) as { n: number }).n;
+    const repo = new EvidenceRepo(store.db);
+    const total = repo.countNeedingAttention(p.note);
     assertOffsetInRange("evidence review", p.offset, total);
-    // Deterministic total order: (updatedAt desc, evidenceId) — created_at is the head's entry time.
-    const rows = store.db.prepare(
-      `SELECT e.evidence_id AS evidenceId, c.owning_note_id AS noteId, e.verification AS state, e.created_at AS updatedAt
-       FROM claim_evidence e JOIN claims c ON c.claim_id = e.claim_id ${where}
-       ORDER BY e.created_at DESC, e.evidence_id ASC LIMIT @limit OFFSET @offset`,
-    ).all({ ...params, limit: p.limit, offset: p.offset }) as Item[];
+    const rows = repo.needingAttention({ ...(p.note !== undefined ? { noteId: p.note } : {}), limit: p.limit, offset: p.offset });
 
-    const out = { command: "evidence review", items: rows, pagination: buildPagination({ limit: p.limit, offset: p.offset }, total, rows.length) };
+    // Best-effort read-time target resolution: does the soft-referenced note still
+    // resolve to a live projection row? A missing note ⇒ target:missing (eligible
+    // for needs-review) — never a crash.
+    const noteExists = store.db.prepare(`SELECT 1 FROM notes WHERE note_id = ?`);
+    const items: Item[] = rows.map((r) => ({
+      evidenceId: r.id,
+      noteId: r.noteId ?? "(unknown)",
+      state: stateOf(r),
+      target: r.noteId !== null && noteExists.get(r.noteId) !== undefined ? "present" : "missing",
+      updatedAt: r.lastCheckedAt ?? r.createdAt ?? "",
+    }));
+
+    const out = { command: "evidence review", items, pagination: buildPagination({ limit: p.limit, offset: p.offset }, total, rows.length) };
     if (ctx.output.mode === "json") emitJson(out);
     else ctx.render(`evidence review: ${rows.length} of ${total} needing attention`);
     return EXIT.OK;

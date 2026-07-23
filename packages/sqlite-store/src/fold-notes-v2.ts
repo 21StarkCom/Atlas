@@ -42,6 +42,7 @@ import type { Store } from "./store.js";
 import { deriveAndPersistNote } from "./note-derivation.js";
 import { IDENTITY_NORMALIZER_VERSION, noteIdentityKeys } from "./rebuild.js";
 import { ProjectionRepo } from "./repos/projections.js";
+import { replaceNoteEvidence } from "./evidence/fold.js";
 
 /** Resolve a wiki-link target (raw note_id, slug, or alias) against the CURRENT projection. */
 function resolveLinkTarget(db: SqliteDatabase, raw: string): string | undefined {
@@ -99,9 +100,15 @@ export function foldNotesV2(
     //   (ii) `note_identity_keys` + plain `note_links` — delete every affected owner's rows.
     for (const id of ids) neutralizeSlug.run(id);
     for (const id of ids) {
-      deriveAndPersistNote(store.db, id, parsedById.get(id) ?? null);
+      const parsed = parsedById.get(id) ?? null;
+      deriveAndPersistNote(store.db, id, parsed);
       delKeys.run(id);
       delOutLinks.run(id);
+      // Evidence is a vault-derived projection (task 4-4): re-fold this note's
+      // evidence rows from its frontmatter in the same reconciling transaction
+      // (self-guarded no-op when 0014 is unapplied). A resolved note replaces its
+      // rows; an archived (parsed === null) note has them dropped.
+      replaceNoteEvidence(store.db, id, parsed);
     }
 
     // Pass 1b — INSERT the complete final identity namespace, now that no stale key from any

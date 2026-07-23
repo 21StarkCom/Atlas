@@ -38,6 +38,10 @@ import { migration0014EvidenceV2 } from "../migrations/0014_evidence_v2.js";
 // renditions its evidence references.
 import "./provenance/fold.js";
 import "./claims/fold.js";
+// The v2 vault-derived evidence fold (task 4-4): reconstructs the `evidence`
+// projection from note frontmatter on `db rebuild`. Self-guarded when 0014 is
+// unapplied. (The claims fold above is retired in the same phase-4 arc.)
+import "./evidence/fold.js";
 
 /** A wall-clock supplier for `applied_at` timestamps (injectable for tests). */
 export type Clock = () => string;

@@ -73,6 +73,14 @@ export {
   DanglingEvidenceError,
 } from "./claims/fold.js";
 
+export {
+  foldEvidenceManifests,
+  clearEvidenceProjection,
+  replaceNoteEvidence,
+  noteEvidenceInputs,
+  EvidenceFoldError,
+} from "./evidence/fold.js";
+
 export { verify, checkQueryPlans } from "./verify.js";
 export type { VerifyReport, InvariantViolation, QueryPlanViolation } from "./verify.js";
 
@@ -176,6 +184,8 @@ export type {
 } from "./repos/provenance.js";
 
 export { ClaimsRepo, payloadHash, evidenceIdFor, SENTINEL_NONE } from "./repos/claims.js";
+export { EvidenceRepo } from "./repos/evidence.js";
+export type { EvidenceRow, EvidenceInput, EvidenceStatus } from "./repos/evidence.js";
 export type {
   ClaimRow,
   ClaimEvidenceRow,
