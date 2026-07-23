@@ -43,7 +43,7 @@ export interface Registry {
  * contract's `stateTable` is checked for completeness against — it must not be
  * silently widened (that would mask a missing state in the contract).
  *
- *   planned → patched → worktree-applied → agent-committed → [review-pending] →
+ *   planned → patched → worktree-applied → agent-committed →
  *   integrated → reindexed → finalized;
  *   terminals rejected, rolled-back, failed, cancelled
  *   (recorded failed@<checkpoint> / cancelled@<checkpoint>).
@@ -53,7 +53,6 @@ export const RECOVERY_CHECKPOINTS = [
   "patched",
   "worktree-applied",
   "agent-committed",
-  "review-pending",
   "integrated",
   "reindexed",
 ] as const;
@@ -74,7 +73,6 @@ export const FAILABLE_CHECKPOINTS = [
   "patched",
   "worktree-applied",
   "agent-committed",
-  "review-pending",
 ] as const;
 export type FailableCheckpoint = (typeof FAILABLE_CHECKPOINTS)[number];
 
@@ -138,7 +136,12 @@ export const DATA_DICTIONARY_PATH = "docs/specs/sqlite-data-dictionary.md";
 export const SECURITY_BROKER_CONTRACT_PATH = "docs/specs/security-broker-contract.md";
 
 /** The plan §2.5 exit-code set. Every drift-rejection error code maps to one of these. */
-export const EXIT_CODES = [0, 1, 2, 3, 4, 5, 6] as const;
+// v2 (#335, ADR-0003): the envelope EXIT set is {0,1,2,4,5} — secret-scan (3) and
+// action-required (6) are retired with the scan/review architecture. Exit 7 is the
+// jobs-run batch aggregate's sole use (a transient-but-exhausted item), so it is
+// permitted in the per-command exitCodes lint too; exit-codes.test.ts enforces the
+// stronger runtime property (no command emits 3/6; 7 only from jobs run).
+export const EXIT_CODES = [0, 1, 2, 4, 5, 7] as const;
 export type ExitCode = (typeof EXIT_CODES)[number];
 
 /**

@@ -4,30 +4,29 @@
  * that is not `valid` (stale/pending/failed, needing re-verification) — and turns each into a
  * maintenance proposal the synthesis pipeline (Task 4.5) drives through preview/apply.
  *
- * DESTRUCTIVE maintenance (archiving an orphan, dropping a link) is ALWAYS Tier-3 — it can
- * never auto-commit; a human approves it at the review gate. Non-destructive prompts (flagging
- * stale evidence for re-verification) may be Tier-2-eligible. This module is the deterministic
- * read-only detector; turning an issue into a validated ChangePlan + running it is the command.
+ * v2 (#335, ADR-0003): the Tier-3 review gate is retired — every remediation
+ * (destructive included) applies directly, exactly like `enrich`. Git is the undo
+ * (`git revert` + `brain sync`). This module is the deterministic read-only
+ * detector; turning an issue into a validated ChangePlan + running it is the command.
  */
 import { ClaimsRepo, type SqliteDatabase } from "@atlas/sqlite-store";
 
-/** A detected maintenance issue + the tier its remediation must land at. */
+/** A detected maintenance issue. */
 export interface MaintenanceIssue {
   readonly kind: "orphan-note" | "unverified-evidence";
   /** The note the issue concerns (owning note for evidence). */
   readonly noteId: string;
   /** A short, allowlisted description (never raw content). */
   readonly detail: string;
-  /** The minimum tier the remediation must land at (destructive ⇒ tier-3). */
-  readonly minTier: "tier-2" | "tier-3";
+  /** `true` ⇒ the remediation removes content (archive/merge an orphan). */
+  readonly destructive: boolean;
 }
 
 /**
  * Detect maintenance issues in the current projection (deterministic, read-only, sorted):
- *  - `orphan-note` — a note with NO inbound and NO outbound link. Remediating an orphan
- *    (archive/merge) is destructive ⇒ Tier-3.
+ *  - `orphan-note` — a note with NO inbound and NO outbound link (remediation is destructive).
  *  - `unverified-evidence` — a current evidence head whose verification is not `valid`
- *    (stale/pending/failed). Flagging it for re-verification is non-destructive ⇒ Tier-2.
+ *    (stale/pending/failed); flagging it for re-verification is non-destructive.
  */
 export function detectMaintenanceIssues(db: SqliteDatabase): MaintenanceIssue[] {
   const issues: MaintenanceIssue[] = [];
@@ -40,7 +39,7 @@ export function detectMaintenanceIssues(db: SqliteDatabase): MaintenanceIssue[] 
     )
     .all() as { note_id: string }[];
   for (const o of orphans) {
-    issues.push({ kind: "orphan-note", noteId: o.note_id, detail: `note "${o.note_id}" has no links (orphan)`, minTier: "tier-3" });
+    issues.push({ kind: "orphan-note", noteId: o.note_id, detail: `note "${o.note_id}" has no links (orphan)`, destructive: true });
   }
 
   const unverified = new ClaimsRepo(db)
@@ -59,7 +58,7 @@ export function detectMaintenanceIssues(db: SqliteDatabase): MaintenanceIssue[] 
       kind: "unverified-evidence",
       noteId: row.owning_note_id,
       detail: `claim "${e.claim_id}" has ${e.verification} evidence needing re-verification`,
-      minTier: "tier-2",
+      destructive: false,
     });
   }
 

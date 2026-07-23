@@ -12,12 +12,10 @@
  *      action the contract table pins for its checkpoint:
  *        - `integrated`  → integrated-but-unfinalized: advance reindexed → finalized
  *                          (a durable canonical mutation is forward-only).
- *        - `review-pending` → leave intact (never auto-advanced; waits for
- *                          `git approve`/`git reject`).
- *        - `worktree-applied` → applied-uncommitted: commit iff planHash + baseRef
+*        - `worktree-applied` → applied-uncommitted: commit iff planHash + baseRef
  *                          unmoved, else `failed@worktree-applied` (reason
  *                          `base-moved`) and clean the orphaned worktree.
- *        - `agent-committed` → route by tier (Tier-2 integrate; Tier-3 leave).
+ *        - `agent-committed` → integrate the committed run (v2 #335: no Tier-3 park).
  *        - `planned`/`patched` → pure, no side effects past the row; safe to leave
  *                          for a fresh re-drive (recompute is deterministic).
  *   3. **Orphan sweep** — any worktree recorded for a now-terminal run that still
@@ -241,7 +239,7 @@ export async function reconcileRunsOnStartup(deps: ReconcileDeps): Promise<Recon
   const rows = store.db
     .prepare(
       `SELECT run_id, operation, status, tier FROM agent_runs
-        WHERE status IN ('planned','patched','worktree-applied','agent-committed','review-pending','integrated','reindexed')
+        WHERE status IN ('planned','patched','worktree-applied','agent-committed','integrated','reindexed')
         ORDER BY started_at ASC`,
     )
     .all() as AgentRunRow[];
@@ -292,10 +290,6 @@ async function recoverRun(
       // the reconciler never fabricates a plan/patch — so a hook-less pass leaves
       // the run and a `recomputePlan`/`recomputePatch` hook advances it.
       return recoverPure(deps, row, ctx);
-
-    case "review-pending":
-      // Never auto-advanced — waits for git approve/reject (§ recovery).
-      return { runId: row.run_id, from: row.status, action: "left" };
 
     case "worktree-applied":
       return recoverWorktreeApplied(deps, row, ctx, now);
@@ -472,8 +466,8 @@ async function recoverWorktreeApplied(
 }
 
 /**
- * `agent-committed` recovery (§ recovery): commit present ⇒ route by tier (Tier-2
- * integrate; Tier-3 leave for review). Commit MISSING but worktree present ⇒ the
+ * `agent-committed` recovery (§ recovery): commit present ⇒ integrate the run
+ * (v2 #335: no Tier-3 review park). Commit MISSING but worktree present ⇒ the
  * commit never landed — recover as `worktree-applied` (round-2 finding: the
  * missing-commit branch was absent).
  */
@@ -499,9 +493,10 @@ async function recoverAgentCommitted(
     }
     return { runId: row.run_id, from: "agent-committed", action: "left" };
   }
-  // Auto-integration is for Tier-1 (source capture) AND Tier-2 (round finding #6:
-  // the prior `=== 2` excluded Tier-1). Tier-3 always parks for the review gate.
-  if ((row.tier === 1 || row.tier === 2) && deps.hooks?.integrate) {
+  // Auto-integration covers every committed run (v2 #335: captures tier-1,
+  // synthesis tier-2; there is no Tier-3 review park to hold one back). A run with
+  // no integrate hook is left for the producer's re-drive.
+  if (deps.hooks?.integrate) {
     // Enforce the normative git checks on the STORED commit BEFORE integrating
     // (round finding #6): trust neither the recorded `commitSha` nor `treeHash` on
     // faith. (1) The agent ref must actually CONTAIN the commit (its head resolves
@@ -550,7 +545,7 @@ async function recoverAgentCommitted(
     recordIntegration(deps.store, { runId: row.run_id, operation: row.operation, artifacts, now: now() });
     return { runId: row.run_id, from: "agent-committed", action: "integrated", to: "integrated" };
   }
-  // Tier-3 (or no integrate hook): leave for the review gate / producer re-drive.
+  // No integrate hook: leave for the producer's re-drive.
   return { runId: row.run_id, from: "agent-committed", action: "left" };
 }
 

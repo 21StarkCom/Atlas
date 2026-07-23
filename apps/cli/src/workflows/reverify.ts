@@ -97,27 +97,20 @@ export function enqueueReverification(tx: LedgerTx, bump: RenditionBump): JobId[
 /** The three re-anchor match classes the deterministic quote matcher yields. */
 export type ReanchorMatch = "exact" | "ambiguous" | "moved" | "not-found";
 
-/** A re-anchor outcome: the new verification verdict + whether it must escalate to review. */
+/** A re-anchor outcome: the new verification verdict. */
 export interface ReanchorOutcome {
   readonly verification: EvidenceVerification;
-  /** `true` ⇒ the re-anchored head is uncertain and the change must land at Tier-3 review. */
-  readonly escalateTier3: boolean;
 }
 
 /**
- * Map a deterministic quote-match result to its verification outcome (spec §staleness):
- *  - `exact` ⇒ re-pinned `valid` (auto);
- *  - `ambiguous` / `moved` ⇒ `pending` + Tier-3 escalation (operator resolves);
- *  - `not-found` ⇒ `failed` (the quote no longer exists in the new rendition).
+ * Map a deterministic quote-match result to its verification outcome (spec §staleness).
+ * v2 (#335): the Tier-3 review escalation is retired — an uncertain re-anchor
+ * (`ambiguous`/`moved`) can no longer park for human resolution, so it fails
+ * closed exactly like a vanished quote:
+ *  - `exact` ⇒ re-pinned `valid` (auto-integrated);
+ *  - `ambiguous` / `moved` / `not-found` ⇒ `failed` (evidence stays stale, gated
+ *    out of trusted grounding; no auto re-pin).
  */
 export function classifyReanchor(match: ReanchorMatch): ReanchorOutcome {
-  switch (match) {
-    case "exact":
-      return { verification: "valid", escalateTier3: false };
-    case "ambiguous":
-    case "moved":
-      return { verification: "pending", escalateTier3: true };
-    case "not-found":
-      return { verification: "failed", escalateTier3: false };
-  }
+  return { verification: match === "exact" ? "valid" : "failed" };
 }

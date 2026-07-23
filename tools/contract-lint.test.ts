@@ -5,12 +5,11 @@
  * determinism. Part of the Phase-0 bootstrap; never reverted.
  */
 import { readFileSync, existsSync } from "node:fs";
-import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { describe, expect, it } from "vitest";
-import { ProviderErrorSchema, CHANGE_PLAN_OPS, SCHEMA_VERSION } from "@atlas/contracts";
+import { ProviderErrorSchema, CHANGE_PLAN_OPS } from "@atlas/contracts";
 import {
   checkFixtureConsistency,
   checkImplementedSchemas,
@@ -143,7 +142,9 @@ describe("recovery-state-machine stateTable", () => {
 
   it("covers both failed@ and cancelled@ checkpoint-suffixed terminals", () => {
     const present = new Set(stateTable.states.map((s) => s.state));
-    for (const cp of ["planned", "patched", "worktree-applied", "agent-committed", "review-pending"]) {
+    // v2 (#335): the review-pending checkpoint (and its failed@/cancelled@ suffixed
+    // terminals) are retired — a run advances agent-committed → integrated directly.
+    for (const cp of ["planned", "patched", "worktree-applied", "agent-committed"]) {
       expect(present.has(`failed@${cp}`), `missing failed@${cp}`).toBe(true);
       expect(present.has(`cancelled@${cp}`), `missing cancelled@${cp}`).toBe(true);
     }
@@ -992,26 +993,19 @@ describe("Phase-4 key-accepting commands expose --idempotency-key + request-hash
   });
 });
 
-describe("Phase-4 confidence inputs are two independently-typed fields (no single `confidence`)", () => {
+describe("validate confidence inputs are two independently-typed fields (no single `confidence`)", () => {
   const load = (name: string) =>
     JSON.parse(readFileSync(join(root, "docs/specs/cli-contract", name), "utf8"));
-  const mutationSchemas = ["enrich.schema.json", "maintain.schema.json"]; // reconcile folded into sync (#333)
 
-  for (const file of mutationSchemas) {
-    it(`${file}: exposes modelConfidence + validationConfidence and no single confidence`, () => {
-      const s = load(file);
-      expect(s.properties.modelConfidence?.type).toBe("number");
-      expect(s.properties.validationConfidence?.type).toBe("number");
-      // the collapsed single-field `confidence` is gone
-      expect(s.properties.confidence, `${file} still exposes a single confidence`).toBeUndefined();
-      // a Tier-2 APPLIED result requires BOTH inputs (neither can be absent)
-      const branch = (s.allOf as any[]).find(
-        (a) => a.if?.properties?.mode?.const === "applied" && a.if?.properties?.risk?.const === "tier-2",
-      );
-      expect(branch, `${file} tier-2 applied conditional`).toBeTruthy();
-      expect(branch.then.required).toEqual(expect.arrayContaining(["modelConfidence", "validationConfidence"]));
-    });
-  }
+  // v2 (#335): the enrich/maintain Tier-2 confidence THRESHOLD is retired with the
+  // review gate (a validated synthesis applies directly), so those schemas no longer
+  // carry modelConfidence/validationConfidence. `validate`'s ValidationReport still
+  // reports both (a deterministic audit surface), which this gate keeps pinned.
+  it("neither enrich nor maintain exposes a collapsed single `confidence` field", () => {
+    for (const file of ["enrich.schema.json", "maintain.schema.json"]) {
+      expect(load(file).properties.confidence, `${file} still exposes a single confidence`).toBeUndefined();
+    }
+  });
 
   it("validate.schema.json ValidationReport exposes BOTH typed confidences (not only tier2Eligible)", () => {
     const gates = load("validate.schema.json").properties.gates;
@@ -1027,23 +1021,20 @@ describe("Phase-4 discriminated outcomes (evidence resolve)", () => {
   const load = (name: string) =>
     JSON.parse(readFileSync(join(root, "docs/specs/cli-contract", name), "utf8"));
 
-  it("evidence resolve: integrated requires integratedCommit; pending/failed forbid it and pending exits 6", () => {
+  it("evidence resolve: integrated requires integratedCommit; failed forbids it (v2 #335: no review_pending outcome, no exit 6)", () => {
     const s = load("evidence-resolve.schema.json");
-    expect(s.properties.outcome.enum.sort()).toEqual(["failed", "integrated", "review_pending"]);
+    // v2: an uncertain re-anchor fails closed — the Tier-3 review_pending outcome is retired.
+    expect(s.properties.outcome.enum.sort()).toEqual(["failed", "integrated"]);
     const branchFor = (outcome: string) =>
       (s.allOf as any[]).find((a) => a.if?.properties?.outcome?.const === outcome);
     // integrated ⇒ requires the canonical commit + full superseding head
     expect(branchFor("integrated").then.required).toEqual(
       expect.arrayContaining(["evidenceId", "integratedCommit"]),
     );
-    // pending/failed ⇒ integratedCommit is forbidden (never auto-integrates)
-    expect(branchFor("review_pending").then.properties.integratedCommit).toBe(false);
+    // failed ⇒ integratedCommit is forbidden (never fabricates an integration)
     expect(branchFor("failed").then.properties.integratedCommit).toBe(false);
-    // exit 6 surfaced for the pending escalation
-    const exits = s["x-atlas-contract"].exitCodes as number[];
-    expect(exits).toContain(6);
-    const reviewPending = (s["x-atlas-contract"].errorCodes as any[]).find((e) => e.code === "review-pending");
-    expect(reviewPending?.exit).toBe(6);
+    // no exit 6 (the review escalation is retired)
+    expect(s["x-atlas-contract"].exitCodes as number[]).not.toContain(6);
   });
 
 });

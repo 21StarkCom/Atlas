@@ -71,7 +71,6 @@ export {
   type PatchedArtifacts,
   type WorktreeAppliedArtifacts,
   type AgentCommittedArtifacts,
-  type ReviewPendingArtifacts,
   type IntegratedArtifacts,
   type ReindexedArtifacts,
 } from "./checkpoints.js";

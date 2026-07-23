@@ -101,10 +101,10 @@ describe("rendition-bump re-verification (Task 4.7)", () => {
     }
   });
 
-  it("classifies the three re-anchor outcomes", () => {
-    expect(classifyReanchor("exact")).toEqual({ verification: "valid", escalateTier3: false });
-    expect(classifyReanchor("ambiguous")).toEqual({ verification: "pending", escalateTier3: true });
-    expect(classifyReanchor("moved")).toEqual({ verification: "pending", escalateTier3: true });
-    expect(classifyReanchor("not-found")).toEqual({ verification: "failed", escalateTier3: false });
+  it("classifies re-anchor outcomes: exact ⇒ valid, everything else ⇒ failed (v2 #335: no Tier-3 pending park)", () => {
+    expect(classifyReanchor("exact")).toEqual({ verification: "valid" });
+    expect(classifyReanchor("ambiguous")).toEqual({ verification: "failed" });
+    expect(classifyReanchor("moved")).toEqual({ verification: "failed" });
+    expect(classifyReanchor("not-found")).toEqual({ verification: "failed" });
   });
 });

@@ -282,7 +282,7 @@ describe("workflows-core: legal transitions persist their contract artifacts", (
     }
   });
 
-  it("terminals persist correctly: fail@planned, cancel@patched, reject@review-pending", async () => {
+  it("terminals persist correctly: fail@planned, cancel@patched (v2 #335: reject/review-pending retired)", async () => {
     // fail from planned → status=failed, failed_checkpoint=planned, run.failed.
     {
       const store = h.openStore();
@@ -316,40 +316,21 @@ describe("workflows-core: legal transitions persist their contract artifacts", (
         store.close();
       }
     }
-    // reject from review-pending → status=rejected, failed_checkpoint NULL (CHECK), run.rejected.
-    {
-      const store = h.openStore();
-      try {
-        const handle = await startRun(depsWith(store), { operation: "reconcile" });
-        const rid = () => `refs/agent/${handle.runId}`;
-        await handle.checkpoint("planned", plannedArtifacts(handle.runId, h.mainSha(), { tier: 3 }));
-        await handle.checkpoint("patched", patched(handle.runId));
-        await handle.checkpoint("worktree-applied", { worktreePath: join(h.root, "wtr"), treeHash: "a".repeat(40), agentRef: rid() });
-        await handle.checkpoint("agent-committed", { commitSha: "b".repeat(40), treeHash: "a".repeat(40), agentRef: rid(), tier: 3 });
-        await handle.checkpoint("review-pending", { commitSha: "b".repeat(40), agentRef: rid() });
-        const term = await handle.reject("not-good");
-        expect(term).toMatchObject({ state: "rejected", from: "review-pending", reason: "not-good" });
-        const run = store.ledger.getAgentRun(handle.runId)!;
-        expect(run.status).toBe("rejected");
-        expect(run.failed_checkpoint).toBeNull(); // CHECK: rejected carries no failed_checkpoint
-        expect(auditKinds(store, handle.runId)).toContain("run.rejected");
-      } finally {
-        store.close();
-      }
-    }
   });
 
-  it("agent-committed can transition to review-pending (Tier-3 path)", async () => {
+  it("agent-committed integrates directly (v2 #335: no review-pending park)", async () => {
     const store = h.openStore();
     try {
       const base = h.mainSha();
-      const handle = await startRun(depsWith(store), { operation: "reconcile" });
-      await handle.checkpoint("planned", plannedArtifacts(handle.runId, base, { tier: 3 }));
+      const handle = await startRun(depsWith(store, openRepo(h.repoDir)), { operation: "reconcile" });
+      await handle.checkpoint("planned", plannedArtifacts(handle.runId, base, { tier: 2 }));
       await handle.checkpoint("patched", patched(handle.runId));
       await handle.checkpoint("worktree-applied", { worktreePath: join(h.root, "wt3"), treeHash: "a".repeat(40), agentRef: `refs/agent/${handle.runId}` });
-      await handle.checkpoint("agent-committed", { commitSha: "b".repeat(40), treeHash: "a".repeat(40), agentRef: `refs/agent/${handle.runId}`, tier: 3 });
-      await handle.checkpoint("review-pending", { commitSha: "b".repeat(40), agentRef: `refs/agent/${handle.runId}` });
-      expect(store.ledger.getAgentRun(handle.runId)!.status).toBe("review-pending");
+      const commitSha = agentCommit(h, base, handle.runId);
+      await handle.checkpoint("agent-committed", { commitSha, treeHash: "a".repeat(40), agentRef: `refs/agent/${handle.runId}`, tier: 2 });
+      const r = await handle.integrate(performIntegration(h, service));
+      expect(store.ledger.getAgentRun(handle.runId)!.status).toBe("integrated");
+      expect(r.canonicalSha).toBe(commitSha);
     } finally {
       store.close();
     }
@@ -402,17 +383,6 @@ describe("workflows-core: illegal transitions throw", () => {
     }
   });
 
-  it("rejects reject() from a non-review-pending state", async () => {
-    const store = h.openStore();
-    try {
-      const base = h.mainSha();
-      const handle = await startRun(depsWith(store), { operation: "ingest" });
-      await handle.checkpoint("planned", plannedArtifacts(handle.runId, base));
-      await expect(handle.reject("nope")).rejects.toBeInstanceOf(IllegalTransitionError);
-    } finally {
-      store.close();
-    }
-  });
 
   it("integrate() cannot be reached via checkpoint('integrated')", async () => {
     const store = h.openStore();
@@ -433,8 +403,8 @@ describe("workflows-core: illegal transitions throw", () => {
 describe("workflows-core: kill -9 survival + reconcile per the table", () => {
   /** Drive a run to `stopAfter`, then simulate a crash: reopen store + broker and reconcile. */
   async function driveTo(
-    stopAfter: "planned" | "patched" | "worktree-applied" | "agent-committed" | "review-pending" | "integrated" | "reindexed",
-    opts: { tier?: 1 | 2 | 3; realWorktree?: boolean } = {},
+    stopAfter: "planned" | "patched" | "worktree-applied" | "agent-committed" | "integrated" | "reindexed",
+    opts: { tier?: 1 | 2; realWorktree?: boolean } = {},
   ): Promise<{ runId: string; base: string; worktreePath: string; agentRef: string; wt?: Worktree }> {
     const store = h.openStore();
     const base = h.mainSha();
@@ -450,7 +420,7 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
     let canonicalSha = "";
     let treeHash = "a".repeat(40);
 
-    const order = ["planned", "patched", "worktree-applied", "agent-committed", "review-pending", "integrated", "reindexed"] as const;
+    const order = ["planned", "patched", "worktree-applied", "agent-committed", "integrated", "reindexed"] as const;
     const tier = opts.tier ?? 2;
     try {
       for (const step of order) {
@@ -484,10 +454,6 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
             agentSha = agentCommit(h, base, runId);
           }
           await handle.checkpoint("agent-committed", { commitSha: agentSha, treeHash, agentRef, tier });
-        }
-        else if (step === "review-pending") {
-          if (tier !== 3) continue; // Tier-2 skips review-pending
-          await handle.checkpoint("review-pending", { commitSha: agentSha, agentRef });
         } else if (step === "integrated") { const r = await handle.integrate(performIntegration(h, service)); canonicalSha = r.canonicalSha; }
         else if (step === "reindexed") await handle.checkpoint("reindexed", { indexGeneration: 1, canonicalSha });
         if (step === stopAfter) break;
@@ -643,10 +609,12 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
     }
   });
 
-  it("crash at agent-committed, Tier-3 → left for the review gate", async () => {
-    const { runId } = await driveTo("agent-committed", { tier: 3, realWorktree: true });
+  it("crash at agent-committed with NO integrate hook → left for the producer re-drive (v2 #335)", async () => {
+    const { runId } = await driveTo("agent-committed", { tier: 2, realWorktree: true });
     const store = h.openStore();
     try {
+      // No integrate hook supplied ⇒ the reconciler leaves the committed run for the
+      // producer (v2: there is no Tier-3 review park; a hook-bearing pass integrates it).
       const rep = await reconcileRunsOnStartup({ store, broker: service, repo: openRepo(h.repoDir), backup: h.backup, now: tick });
       expect(rep.runs.find((r) => r.runId === runId)).toMatchObject({ action: "left" });
       expect(store.ledger.getAgentRun(runId)!.status).toBe("agent-committed");
@@ -778,17 +746,6 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
     }
   });
 
-  it("crash at review-pending → left intact", async () => {
-    const { runId } = await driveTo("review-pending", { tier: 3 });
-    const store = h.openStore();
-    try {
-      const rep = await reconcileRunsOnStartup({ store, broker: service, repo: openRepo(h.repoDir), backup: h.backup, now: tick });
-      expect(rep.runs.find((r) => r.runId === runId)).toMatchObject({ action: "left" });
-      expect(store.ledger.getAgentRun(runId)!.status).toBe("review-pending");
-    } finally {
-      store.close();
-    }
-  });
 
   it("crash at worktree-applied with base UNMOVED → the ORIGINAL worktree is committed (tree verified)", async () => {
     const { runId, base, worktreePath } = await driveTo("worktree-applied", { realWorktree: true });
@@ -1414,7 +1371,7 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
         ).rejects.toMatchObject({ code: "gating-evidence-invalid" });
         // divergent tier.
         await expect(
-          r.checkpoint("agent-committed", { commitSha: c.commit_sha!, treeHash: "a".repeat(40), agentRef, tier: 3 }),
+          r.checkpoint("agent-committed", { commitSha: c.commit_sha!, treeHash: "a".repeat(40), agentRef, tier: 1 }),
         ).rejects.toMatchObject({ code: "gating-evidence-invalid" });
       } finally { store.close(); }
     }

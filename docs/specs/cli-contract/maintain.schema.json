@@ -2,24 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "atlas://cli-contract/maintain.schema.json",
   "title": "brain maintain [--apply] — --json success output",
-  "description": "Vault maintenance: turns orphans, broken links, and stale content into proposals. Non-mutating PREVIEW by default (no sinks, no audit-ref event); --apply runs tiered integration per workflow-risk-contract.md. Destructive proposals are ALWAYS Tier-3 (review-pending, exit 6). --dry-run + --apply ⇒ exit 5. --yes never authorizes. Thresholds per acceptance-thresholds.md §workflow.",
+  "description": "Vault maintenance: turns orphans, broken links, and stale content into proposals. Non-mutating PREVIEW by default (no sinks); --apply drives each remediation directly through the v2 mutation order (runMutation → commitPaths), exactly like `enrich`. v2 (#335, ADR-0003): the Tier-3 review gate is retired — destructive remediations apply directly (git revert + brain sync is the undo), there is no review-pending mode and no exit 6. --dry-run + --apply ⇒ exit 5.",
   "type": "object",
   "unevaluatedProperties": false,
-  "required": ["command", "mode", "runId", "risk", "findings"],
-  "allOf": [
-    {
-      "description": "A Tier-2 auto-integrated result MUST carry BOTH independently-typed confidence inputs (acceptance-thresholds.md §workflow): a Tier-2 applied outcome cannot validate with either input absent — the min-reduction is fail-closed.",
-      "if": { "properties": { "mode": { "const": "applied" }, "risk": { "const": "tier-2" } }, "required": ["mode", "risk"] },
-      "then": { "required": ["modelConfidence", "validationConfidence"] }
-    }
-  ],
+  "required": ["command", "mode", "runId", "findings"],
   "properties": {
     "command": { "const": "maintain" },
-    "mode": { "enum": ["preview", "applied", "review_pending"] },
+    "mode": { "enum": ["preview", "applied"] },
     "runId": { "type": "string", "minLength": 1 },
-    "risk": { "enum": ["tier-0", "tier-1", "tier-2", "tier-3"], "description": "effectiveRisk; destructive proposals always tier-3." },
-    "modelConfidence": { "type": "number", "minimum": 0, "maximum": 1, "description": "The generation model's self-reported confidence (acceptance-thresholds.md §workflow modelConfidence); independently gated at >= 0.8." },
-    "validationConfidence": { "type": "number", "minimum": 0, "maximum": 1, "description": "The deterministic validator's confidence (acceptance-thresholds.md §workflow validationConfidence); independently gated at >= 0.8. Tier-2 requires min(modelConfidence, validationConfidence) >= 0.8." },
     "changedLines": { "type": "integer", "minimum": 0 },
     "sections": { "type": "integer", "minimum": 0 },
     "findings": {
@@ -32,14 +22,13 @@
         "properties": {
           "kind": { "enum": ["orphan", "broken-link", "stale-content"] },
           "target": { "type": "string", "minLength": 1 },
-          "destructive": { "type": "boolean", "description": "true ⇒ the remediation removes content ⇒ forced Tier-3." },
-          "risk": { "enum": ["tier-0", "tier-1", "tier-2", "tier-3"] }
+          "destructive": { "type": "boolean", "description": "true ⇒ the remediation removes content (v2: applied directly regardless; git is the undo)." }
         }
       }
     }
   },
   "examples": [
-    { "command": "maintain", "mode": "preview", "runId": "01J9Z8Q0000000000000000020", "risk": "tier-3", "modelConfidence": 0.88, "validationConfidence": 0.9, "changedLines": 6, "sections": 1, "findings": [ { "kind": "orphan", "target": "concept-orphan", "destructive": true, "risk": "tier-3" } ] }
+    { "command": "maintain", "mode": "preview", "runId": "01J9Z8Q0000000000000000020", "changedLines": 6, "sections": 1, "findings": [ { "kind": "orphan", "target": "concept-orphan", "destructive": true } ] }
   ],
   "x-atlas-contract": {
     "command": "maintain",
@@ -47,39 +36,33 @@
     "privilege": "shared",
     "idempotency": "key-accepting",
     "requestHashScope": ["command", "planHash", "idempotencyKey"],
-    "executionClass": "ledger-writing",
-    "summary": "Maintain the vault (orphans/broken-links/stale ⇒ proposals): non-mutating preview by default; destructive proposals always Tier-3 (review-pending, exit 6).",
+    "executionClass": "mutating",
+    "summary": "Maintain the vault (orphans/broken-links/stale ⇒ proposals): non-mutating preview by default; --apply lands each remediation directly (v2: no tier gate, no review-pending).",
     "args": [],
     "flags": [
-      { "flag": "--apply", "type": "boolean", "default": false, "description": "Perform the mutation (tiered integration); without it, emit a non-mutating preview." },
+      { "flag": "--apply", "type": "boolean", "default": false, "description": "Perform the mutation (direct apply per remediation); without it, emit a non-mutating preview." },
       { "flag": "--dry-run", "type": "boolean", "default": false, "description": "Explicit preview; combined with --apply ⇒ exit 5." },
-      { "flag": "--idempotency-key <key>", "type": "string", "default": null, "description": "Caller-supplied idempotency key; a repeat --apply with the same key + request-hash (requestHashScope) returns the existing run rather than starting a duplicate (registry idempotency: key-accepting)." }
+      { "flag": "--idempotency-key <key>", "type": "string", "default": null, "description": "Caller-supplied idempotency key; a repeat --apply with the same key + request-hash returns the existing run rather than starting a duplicate (registry idempotency: key-accepting)." }
     ],
     "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
     "sideEffects": [
       "preview: none (no sink written)",
-      "apply non-destructive Tier-1/2: broker CAS integrate + finalizeLedgerWrite (run.integrated)",
-      "apply destructive/Tier-3: durable plan/branch/worktree/commit, stops at review-pending (run.planned)"
+      "apply: one direct commit per remediation onto refs/heads/main via the mutation order + projection fold"
     ],
     "prohibitedEffects": [
       "preview writes to no sink",
-      "destructive proposals never auto-integrate",
-      "--yes never authorizes"
+      "no review-pending park — every remediation applies directly (git is the undo)"
     ],
     "locks": [
-      { "scope": "canonical-integration", "mode": "exclusive", "when": "--apply Tier-1/2 integration" },
-      { "scope": "shared", "mode": "shared" }
+      { "scope": "vault-maintenance", "mode": "exclusive", "when": "--apply" }
     ],
-    "exitCodes": [0, 1, 2, 3, 4, 5, 6],
+    "exitCodes": [0, 1, 2, 4, 5],
     "errorCodes": [
       { "code": "usage", "exit": 5, "when": "unknown flag/argument or --dry-run combined with --apply" },
       { "code": "validation-failed", "exit": 1, "when": "the generated plan fails validation (Task 4.4)" },
       { "code": "config-invalid", "exit": 2, "when": "brain.config.yaml fails schema validation" },
       { "code": "vault-error", "exit": 2, "when": "the vault repo is missing or unreadable" },
-      { "code": "locked:canonical-integration", "exit": 2, "when": "another integration holder is active" },
-      { "code": "backup-unhealthy", "exit": 2, "retryable": true, "when": "the fail-closed backup watermark blocks a ledger-writing run" },
-      { "code": "secret-scan-blocked", "exit": 3, "when": "an egress/persisted artifact fails the fail-closed secret scan" },
-      { "code": "review-pending", "exit": 6, "when": "the run is Tier-3 (incl. every destructive proposal) and stops at the review gate (success-shaped)" },
+      { "code": "locked:vault-maintenance", "exit": 2, "retryable": true, "when": "another maintenance op holds the vault lock" },
       { "code": "internal", "exit": 4, "when": "unexpected internal failure" }
     ],
     "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"

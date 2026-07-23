@@ -58,7 +58,6 @@ import {
   patchInsert,
   readAgentRunStatus,
   readGitOp,
-  readPlannedTier,
   GatingEvidenceError,
   IllegalTransitionError,
   CHECKPOINT_AUDIT,
@@ -67,7 +66,6 @@ import {
   type PatchedArtifacts,
   type PlannedArtifacts,
   type ReindexedArtifacts,
-  type ReviewPendingArtifacts,
   type WorktreeAppliedArtifacts,
 } from "./checkpoints.js";
 import {
@@ -103,14 +101,15 @@ const EXPECTED_PRIOR: Record<Exclude<WorkflowState, "integrated">, readonly (Wor
   patched: ["planned", "patched"],
   "worktree-applied": ["patched", "worktree-applied"],
   "agent-committed": ["worktree-applied", "agent-committed"],
-  "review-pending": ["agent-committed", "review-pending"],
   reindexed: ["integrated", "reindexed"],
-  // Terminals are governed by terminate()/reject(); listed for completeness.
+  // Terminals are governed by terminate(); listed for completeness. v2 (#335):
+  // the `review-pending` park + the `rejected` terminal reachable only from it
+  // are retired — a run advances agent-committed → integrated directly.
   finalized: ["reindexed", "finalized"],
-  rejected: ["review-pending"],
+  rejected: [],
   "rolled-back": ["integrated", "reindexed", "finalized"],
-  failed: ["planned", "patched", "worktree-applied", "agent-committed", "review-pending"],
-  cancelled: ["planned", "patched", "worktree-applied", "agent-committed", "review-pending"],
+  failed: ["planned", "patched", "worktree-applied", "agent-committed"],
+  cancelled: ["planned", "patched", "worktree-applied", "agent-committed"],
 } as Record<Exclude<WorkflowState, "integrated">, readonly (WorkflowState | null)[]>;
 
 /** Everything the engine needs to persist + audit a run. */
@@ -353,7 +352,6 @@ export class RunHandle {
   async checkpoint(state: "patched", artifacts: PatchedArtifacts): Promise<void>;
   async checkpoint(state: "worktree-applied", artifacts: WorktreeAppliedArtifacts): Promise<void>;
   async checkpoint(state: "agent-committed", artifacts: AgentCommittedArtifacts): Promise<void>;
-  async checkpoint(state: "review-pending", artifacts: ReviewPendingArtifacts): Promise<void>;
   async checkpoint(state: "reindexed", artifacts: ReindexedArtifacts): Promise<void>;
   async checkpoint(state: WorkflowState, artifacts: unknown): Promise<void> {
     if (state === "integrated") {
@@ -472,9 +470,8 @@ export class RunHandle {
    * (the broker replays the anchored `(runId,seq)` before its kind gate). A crash
    * between steps 1 and 2 leaves an un-anchored `pending` `run.integrated` intent,
    * which the startup reconciler's pre-pass drops so the run re-drives from
-   * `agent-committed` (§ recovery case (a)). Tier-3 runs must reach `integrated`
-   * only through `review-pending` — a direct `agent-committed → integrated` on a
-   * Tier-3 run is refused here.
+   * `agent-committed` (§ recovery case (a)). v2 (#335): every committed run
+   * integrates directly — the Tier-3 review park is retired.
    */
   async integrate(perform: RunIntegrator, opts?: IntegrateOptions): Promise<IntegratedResult> {
     this.throwIfAborted("integrated");
@@ -488,12 +485,8 @@ export class RunHandle {
     const base = readGitOp(db, this.runId, "base");
     if (!committed?.commitSha) throw new GatingEvidenceError("integrated", "no agent-committed commit to integrate");
     if (!base) throw new GatingEvidenceError("integrated", "no recorded planned base");
-    const tier = readPlannedTier(db, this.runId);
-    if (tier === 3 && this.#state === "agent-committed") {
-      throw new IllegalTransitionError("agent-committed", "integrated", "Tier-3 must be approved via review-pending before integration");
-    }
     // Persisted-state CAS: only an agent-committed (or already-integrated re-drive) run integrates.
-    assertPersistedState(db, this.runId, "integrated", ["agent-committed", "review-pending", "integrated"]);
+    assertPersistedState(db, this.runId, "integrated", ["agent-committed", "integrated"]);
 
     const now = this.now();
     // `run.integrated` asserts "canonical now points at this commit" — its
@@ -739,14 +732,6 @@ export class RunHandle {
     return this.terminate("cancelled", "run.cancelled", at, undefined, completion, extras);
   }
 
-  /** Reject a `review-pending` run at review (`rejected`, `run.rejected`). */
-  async reject(reason: string, completion?: LedgerStatement, extras?: TerminalExtras): Promise<TerminalRun> {
-    if (this.#state !== "review-pending") {
-      throw new IllegalTransitionError(this.#state, "rejected", "rejected is only reachable from review-pending");
-    }
-    return this.terminate("rejected", "run.rejected", "review-pending", reason, completion, extras);
-  }
-
   /**
    * The atomic SUCCESS-terminal API (round-2 finding W2): advance `reindexed →
    * finalized` and, in the SAME transaction, publish the caller-idempotency slot to
@@ -847,24 +832,22 @@ export class RunHandle {
   }
 
   private async terminate(
-    status: "failed" | "cancelled" | "rejected",
+    status: "failed" | "cancelled",
     auditKind: AuditEventKind,
     at: WorkflowState,
     reason?: string,
     completion?: LedgerStatement,
     extras?: TerminalExtras,
   ): Promise<TerminalRun> {
-    if (status === "rejected") {
-      if (at !== "review-pending") throw new IllegalTransitionError(this.#state, "rejected", "rejected is only reachable from review-pending");
-    } else {
-      // fail/cancel are only reachable from a terminable checkpoint, and only
-      // from the run's CURRENT state (you terminate where you are).
-      if (this.#state !== null && this.#state !== at) {
-        throw new IllegalTransitionError(this.#state, status, `cannot terminate at ${at} from ${this.#state}`);
-      }
-      if (!canTerminateFrom(at)) {
-        throw new IllegalTransitionError(at, status, "past integration a run is not fail/cancel-reversible (forward recovery only)");
-      }
+    // fail/cancel are only reachable from a terminable checkpoint, and only
+    // from the run's CURRENT state (you terminate where you are). v2 (#335):
+    // the `rejected` terminal (reachable only from the retired review-pending
+    // park) is gone.
+    if (this.#state !== null && this.#state !== at) {
+      throw new IllegalTransitionError(this.#state, status, `cannot terminate at ${at} from ${this.#state}`);
+    }
+    if (!canTerminateFrom(at)) {
+      throw new IllegalTransitionError(at, status, "past integration a run is not fail/cancel-reversible (forward recovery only)");
     }
 
     const now = this.now();
@@ -898,9 +881,8 @@ export class RunHandle {
           operation: this.operation,
           status,
           // The `agent_runs` CHECK pins `failed_checkpoint` non-null IFF status is
-          // `failed`/`cancelled`. `rejected` is a distinct terminal — it records
-          // the from-checkpoint in the run.rejected audit `detail`, not the column.
-          failedCheckpoint: status === "rejected" ? null : at,
+          // `failed`/`cancelled` — always the from-checkpoint here.
+          failedCheckpoint: at,
           targetNoteId: this.input.targetNoteId ?? null,
           startedAt: now,
           now,
@@ -1191,7 +1173,7 @@ function integrationLedgerWrite(args: {
       targetNoteId: args.targetNoteId,
       startedAt: args.now,
       now: args.now,
-      expectedFrom: ["agent-committed", "review-pending", "integrated"],
+      expectedFrom: ["agent-committed", "integrated"],
     }),
     gitOpUpsert({
       gitOpId: gitOpId(args.runId, "integrated"),
@@ -1314,8 +1296,6 @@ function gatingStatements(
       const a = artifacts as AgentCommittedArtifacts;
       return [gitOpUpsert({ gitOpId: gitOpId(runId, "agent-committed"), runId, opType: "agent-committed", refName: a.agentRef, commitSha: a.commitSha, now })];
     }
-    case "review-pending":
-      return []; // gated on the agent-committed commitSha already recorded.
     case "reindexed": {
       const a = artifacts as ReindexedArtifacts;
       return [gitOpUpsert({ gitOpId: gitOpId(runId, "reindexed"), runId, opType: "reindexed", refName: `index-generation:${a.indexGeneration}`, commitSha: a.canonicalSha, now })];

@@ -1,18 +1,46 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "atlas://cli-contract/note-add.schema.json",
-  "title": "brain note add — --json success output",
-  "description": "Deterministic Tier-1 ingest of a PRE-AUTHORED vault note that APPLIES immediately (#262) — no preview mode. Funnels through addNote: scan-before-persist (secret detection ⇒ exit 3, quarantined, nothing persisted), vault-reader frontmatter validation, id/alias/path collision refusal against the current projections, then broker Tier-1 CAS integration under the additions-only \"note\" scope (the commit may only ADD *.md files outside sources/). Unlike source add (immutable blob + manifest stub), the file itself lands at <dest>/<basename> on canonical as first-class vault content; it becomes projection-visible and retrievable after the next `db rebuild` + `index rebuild` (there is no ingest→index auto-hook yet — #60).",
+  "title": "brain note add \u2014 --json success output",
+  "description": "Deterministic Tier-1 ingest of a PRE-AUTHORED vault note that APPLIES immediately (#262) \u2014 no preview mode. Funnels through addNote: scan-before-persist (secret detection \u21d2 exit 3, quarantined, nothing persisted), vault-reader frontmatter validation, id/alias/path collision refusal against the current projections, then broker Tier-1 CAS integration under the additions-only \"note\" scope (the commit may only ADD *.md files outside sources/). Unlike source add (immutable blob + manifest stub), the file itself lands at <dest>/<basename> on canonical as first-class vault content; it becomes projection-visible and retrievable after the next `db rebuild` + `index rebuild` (there is no ingest\u2192index auto-hook yet \u2014 #60).",
   "type": "object",
   "unevaluatedProperties": false,
-  "required": ["command", "noteId", "path", "contentHash", "runId", "canonicalSha"],
+  "required": [
+    "command",
+    "noteId",
+    "path",
+    "contentHash",
+    "runId",
+    "canonicalSha"
+  ],
   "properties": {
-    "command": { "const": "note add" },
-    "noteId": { "type": "string", "minLength": 1, "description": "The note's frontmatter id (NOT a derived source-* id)." },
-    "path": { "type": "string", "minLength": 1, "description": "The vault-relative path the note landed at (<dest>/<input basename>)." },
-    "contentHash": { "type": "string", "minLength": 1, "description": "sha256:<hex> over the exact bytes installed." },
-    "runId": { "type": "string", "minLength": 1 },
-    "canonicalSha": { "type": "string", "minLength": 1, "description": "The canonical tip after the Tier-1 CAS installed the note." }
+    "command": {
+      "const": "note add"
+    },
+    "noteId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The note's frontmatter id (NOT a derived source-* id)."
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The vault-relative path the note landed at (<dest>/<input basename>)."
+    },
+    "contentHash": {
+      "type": "string",
+      "minLength": 1,
+      "description": "sha256:<hex> over the exact bytes installed."
+    },
+    "runId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "canonicalSha": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The canonical tip after the Tier-1 CAS installed the note."
+    }
   },
   "examples": [
     {
@@ -31,12 +59,32 @@
     "idempotency": "key-accepting",
     "executionClass": "mutating",
     "summary": "Deterministic Tier-1 authored-note ingest; applies immediately.",
-    "args": [{ "name": "<path>", "required": true, "description": "Path to the authored markdown note to ingest." }],
-    "flags": [
-      { "name": "--dest <folder>", "required": true, "description": "Vault-relative folder the note lands in (never sources/)." },
-      { "name": "--idempotency-key <key>" }
+    "args": [
+      {
+        "name": "<path>",
+        "required": true,
+        "description": "Path to the authored markdown note to ingest."
+      }
     ],
-    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "flags": [
+      {
+        "name": "--dest <folder>",
+        "required": true,
+        "description": "Vault-relative folder the note lands in (never sources/)."
+      },
+      {
+        "name": "--idempotency-key <key>"
+      }
+    ],
+    "commonFlags": [
+      "--json",
+      "--quiet",
+      "--verbose",
+      "--plain",
+      "--no-color",
+      "--config <path>",
+      "--vault <path>"
+    ],
     "sideEffects": [
       "writes the note file verbatim at <dest>/<basename> on an agent branch",
       "integrates the note-add commit via broker Tier-1 CAS under scope \"note\" (advances canonical exactly one commit)",
@@ -48,17 +96,51 @@
       "never writes under sources/ (the capture-only namespace)"
     ],
     "locks": [
-      { "scope": "canonical-integration", "mode": "exclusive" }
+      {
+        "scope": "canonical-integration",
+        "mode": "exclusive"
+      }
     ],
-    "exitCodes": [0, 1, 2, 3, 4, 5, 6],
+    "exitCodes": [
+      0,
+      1,
+      2,
+      4,
+      5
+    ],
     "errorCodes": [
-      { "code": "usage", "exit": 5, "when": "missing <path> or --dest" },
-      { "code": "validation-error", "exit": 1, "when": "the note fails normalization, frontmatter validation, or collides with an existing id/alias/path" },
-      { "code": "secret-detected", "exit": 3, "when": "the secret scanner flagged the bytes; note quarantined, nothing persisted" },
-      { "code": "locked:canonical-integration", "exit": 2, "when": "an integration holds the lock", "retryable": true },
-      { "code": "backup-unhealthy", "exit": 2, "when": "ledger-writing is blocked pending a verified backup" },
-      { "code": "idempotency-in-progress", "exit": 6, "when": "a concurrent run holds the same --idempotency-key slot (key-accepting)", "retryable": true },
-      { "code": "internal", "exit": 4, "when": "unexpected internal failure" }
+      {
+        "code": "usage",
+        "exit": 5,
+        "when": "missing <path> or --dest"
+      },
+      {
+        "code": "validation-error",
+        "exit": 1,
+        "when": "the note fails normalization, frontmatter validation, or collides with an existing id/alias/path"
+      },
+      {
+        "code": "locked:canonical-integration",
+        "exit": 2,
+        "when": "an integration holds the lock",
+        "retryable": true
+      },
+      {
+        "code": "backup-unhealthy",
+        "exit": 2,
+        "when": "ledger-writing is blocked pending a verified backup"
+      },
+      {
+        "code": "idempotency-in-progress",
+        "exit": 2,
+        "retryable": true,
+        "when": "a concurrent run holds the same --idempotency-key slot (key-accepting)"
+      },
+      {
+        "code": "internal",
+        "exit": 4,
+        "when": "unexpected internal failure"
+      }
     ],
     "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
   }

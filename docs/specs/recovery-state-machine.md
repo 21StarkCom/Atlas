@@ -392,7 +392,6 @@ that no state lacks a `recoveryAction`.
     "patched",
     "worktree-applied",
     "agent-committed",
-    "review-pending",
     "integrated",
     "reindexed"
   ],
@@ -458,27 +457,12 @@ that no state lacks a `recoveryAction`.
         { "artifact": "applied tree", "hash": "treeHash" }
       ],
       "atomicWrite": "agent_runs.state='agent-committed' with commitSha (gated on treeHash)",
-      "nextStates": ["review-pending", "integrated", "failed@agent-committed", "cancelled@agent-committed"],
+      "nextStates": ["integrated", "failed@agent-committed", "cancelled@agent-committed"],
       "idempotencyCheck": "commitSha exists on agent branch and its tree hashes to treeHash",
       "retainedArtifacts": ["ChangePlan", "patches", "agent-branch commit"],
       "worktreeCleanup": "worktree may be removed after commit; the commit is the durable artifact",
       "auditEmission": null,
-      "recoveryAction": "commit present: route by tier (Tier-2 integrate; Tier-3 leave for review); commit missing but worktree present: recover as worktree-applied"
-    },
-    {
-      "state": "review-pending",
-      "kind": "checkpoint",
-      "requiredArtifacts": [
-        { "artifact": "agent-branch commit", "hash": "commitSha" },
-        { "artifact": "review request record", "hash": null }
-      ],
-      "atomicWrite": "agent_runs.state='review-pending' (gated on commitSha)",
-      "nextStates": ["integrated", "rejected", "failed@review-pending", "cancelled@review-pending"],
-      "idempotencyCheck": "state='review-pending' with a live agent-branch commitSha",
-      "retainedArtifacts": ["agent-branch commit", "review record"],
-      "worktreeCleanup": "worktree removed; only the branch commit is retained",
-      "auditEmission": null,
-      "recoveryAction": "leave intact — never auto-advanced by the reconciler; waits for git approve/git reject"
+      "recoveryAction": "commit present: integrate directly (v2 #335: no Tier-3 review park); commit missing but worktree present: recover as worktree-applied"
     },
     {
       "state": "integrated",
@@ -714,38 +698,6 @@ that no state lacks a `recoveryAction`.
       "worktreeCleanup": "any orphaned worktree removed; the branch commit is retained",
       "auditEmission": "run.cancelled",
       "recoveryAction": "terminal — re-run the §2.8 protocol from the first incomplete step keyed on (runId, seq, payloadHash) and clean any orphaned worktree"
-    },
-    {
-      "state": "failed@review-pending",
-      "kind": "terminal",
-      "checkpoint": "review-pending",
-      "requiredArtifacts": [
-        { "artifact": "failedAt=review-pending + reason", "hash": "commitSha (retained)" },
-        { "artifact": "audit intent (§2.8 step 1) for run.failed", "hash": "(runId, seq, payloadHash)" }
-      ],
-      "atomicWrite": "§2.8 step-3 CAS: single SQLite tx setting state='failed@review-pending' with reason AND completing the audit intent for (runId, seq); step-1 intent + step-2 append precede it",
-      "nextStates": [],
-      "idempotencyCheck": "state='failed@review-pending' AND audit_intents row for (runId, seq) present with matching payloadHash",
-      "retainedArtifacts": ["agent-branch commit", "review record", "ledger row", "audit intent"],
-      "worktreeCleanup": "worktree already removed at review-pending; nothing to clean",
-      "auditEmission": "run.failed",
-      "recoveryAction": "terminal — re-run the §2.8 protocol from the first incomplete step keyed on (runId, seq, payloadHash); distinct from the rejected terminal (an explicit review decision)"
-    },
-    {
-      "state": "cancelled@review-pending",
-      "kind": "terminal",
-      "checkpoint": "review-pending",
-      "requiredArtifacts": [
-        { "artifact": "cancelledAt=review-pending", "hash": "commitSha (retained)" },
-        { "artifact": "audit intent (§2.8 step 1) for run.cancelled", "hash": "(runId, seq, payloadHash)" }
-      ],
-      "atomicWrite": "§2.8 step-3 CAS: single SQLite tx setting state='cancelled@review-pending' AND completing the audit intent for (runId, seq); step-1 intent + step-2 append precede it",
-      "nextStates": [],
-      "idempotencyCheck": "state='cancelled@review-pending' AND audit_intents row for (runId, seq) present with matching payloadHash",
-      "retainedArtifacts": ["agent-branch commit", "review record", "ledger row", "audit intent"],
-      "worktreeCleanup": "worktree already removed at review-pending; nothing to clean",
-      "auditEmission": "run.cancelled",
-      "recoveryAction": "terminal — re-run the §2.8 protocol from the first incomplete step keyed on (runId, seq, payloadHash); distinct from the rejected terminal (an explicit review decision)"
     }
   ]
 }

@@ -12,7 +12,7 @@
  *   2. **Payload validation** — a malformed payload is a PERMANENT `validation` failure,
  *      never a transient one that retries forever.
  *   3. **Deterministic classification** — each `ReanchorMatch` verdict drives a distinct,
- *      fail-closed outcome (exact ⇒ auto-integrate; moved/ambiguous ⇒ Tier-3 review;
+ *      fail-closed outcome (v2 #335: exact ⇒ auto-integrate; moved/ambiguous/
  *      not-found ⇒ terminal, no auto-commit).
  *   4. **Cooperative cancel** — a pre-aborted signal throws `AbortError` before any work.
  *   5. **No self-apply** — the durable verification change flows through the emitted
@@ -110,7 +110,7 @@ interface ApplyCall {
 function seams(
   anchor: ReanchorInput | null,
   applyCalls: ApplyCall[],
-  applyResult: { mode: "integrated" | "review-pending"; runId: string } = { mode: "integrated", runId: "run-applied" },
+  applyResult: { mode: "integrated"; runId: string } = { mode: "integrated", runId: "run-applied" },
 ): ReverifySeams {
   return {
     recoverAnchor: async () => anchor,
@@ -179,27 +179,27 @@ describe("buildReverifyHandler — classification paths", () => {
     }
   });
 
-  it("moved ⇒ Tier-3 review (action-required), never an auto-commit", async () => {
+  it("moved ⇒ fail-closed (v2 #335: no Tier-3 review park), never an auto-commit", async () => {
     const { store, evidenceId } = seededStore();
     const calls: ApplyCall[] = [];
     try {
       const s = seams({ quote: "rises", previousStart: 0, newText: "Merid rises" }, calls); // found once, offset moved
       const res = await runHandler({ store } as JobHandlerDeps, s, payloadFor(evidenceId));
-      expect(res.actionRequired).toBe(true);
+      expect(res.actionRequired).toBeFalsy();
       expect(res.commit).toBeUndefined();
-      expect(calls).toHaveLength(0); // Tier-3 is never auto-integrated
+      expect(calls).toHaveLength(0); // an uncertain re-anchor never integrates
     } finally {
       store.close();
     }
   });
 
-  it("ambiguous ⇒ Tier-3 review (action-required)", async () => {
+  it("ambiguous ⇒ fail-closed (v2 #335), never an auto-commit", async () => {
     const { store, evidenceId } = seededStore();
     const calls: ApplyCall[] = [];
     try {
       const s = seams({ quote: "ab", previousStart: 0, newText: "ab cd ab" }, calls);
       const res = await runHandler({ store } as JobHandlerDeps, s, payloadFor(evidenceId));
-      expect(res.actionRequired).toBe(true);
+      expect(res.actionRequired).toBeFalsy();
       expect(calls).toHaveLength(0);
     } finally {
       store.close();
@@ -221,13 +221,13 @@ describe("buildReverifyHandler — classification paths", () => {
     }
   });
 
-  it("unrecoverable anchor ⇒ fail-closed to Tier-3 review (never a fabricated valid)", async () => {
+  it("unrecoverable anchor ⇒ fail-closed (v2 #335: never a fabricated valid, no review park)", async () => {
     const { store, evidenceId } = seededStore();
     const calls: ApplyCall[] = [];
     try {
-      const s = seams(null, calls); // no recoverable quote/text ⇒ pending, per spec
+      const s = seams(null, calls); // no recoverable quote/text ⇒ failed, fail-closed
       const res = await runHandler({ store } as JobHandlerDeps, s, payloadFor(evidenceId));
-      expect(res.actionRequired).toBe(true);
+      expect(res.actionRequired).toBeFalsy();
       expect(calls).toHaveLength(0);
     } finally {
       store.close();

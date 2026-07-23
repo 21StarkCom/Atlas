@@ -88,7 +88,7 @@ export interface ReanchorApplyRequest {
 
 /** The terminal outcome of an applied re-anchor (mirrors `SynthesisApplyResult.mode`). */
 export interface ReanchorApplyResult {
-  readonly mode: "integrated" | "review-pending";
+  readonly mode: "integrated";
   readonly runId: string;
 }
 
@@ -151,8 +151,7 @@ function buildReanchorPlan(
   ev: EvidenceHeadRow,
   owningNoteId: string,
   newRenditionId: string,
-  verification: "valid" | "pending",
-  escalateTier3: boolean,
+  verification: "valid",
 ): ChangePlan {
   const pinnedHandle = serializeRenditionId({
     kind: "rendition",
@@ -166,8 +165,8 @@ function buildReanchorPlan(
     rationale: `re-anchor evidence ${ev.evidence_id} on claim ${ev.claim_id} → ${verification}`,
     sourceIds: [],
     retrievedEvidence: [],
-    confidence: verification === "valid" ? 1 : 0.5,
-    [ADVISORY_RISK_KEY]: escalateTier3 ? "tier-3" : "tier-2",
+    confidence: 1,
+    [ADVISORY_RISK_KEY]: "tier-2",
     reversibility: "reversible",
     schemaVersion: 1,
     operation: {
@@ -189,6 +188,9 @@ function buildReanchorPlan(
   return plan;
 }
 
+// NB: the `pending` re-anchor plan comment above refers to the retired review
+// path (v2 #335); only `valid` re-anchors are ever emitted now.
+
 /** Per-head verdict: the match class + the head it was computed for. */
 interface HeadVerdict {
   readonly ev: EvidenceHeadRow;
@@ -202,10 +204,11 @@ interface HeadVerdict {
  * `pending` (Tier-3 review). A note is auto-committed only when EVERY head re-matched
  * exactly; anything less goes to a human.
  */
-function aggregate(verdicts: readonly HeadVerdict[]): "valid" | "pending" | "failed" {
-  if (verdicts.every((v) => v.match === "exact")) return "valid";
-  if (verdicts.every((v) => v.match === "not-found")) return "failed";
-  return "pending";
+// v2 (#335): re-anchor outcomes collapse to valid|failed — the Tier-3 `pending`
+// review park is retired, so ANY head that does not re-match exactly fails closed
+// (the evidence stays stale + gated out; no auto re-pin, no human resolution park).
+function aggregate(verdicts: readonly HeadVerdict[]): "valid" | "failed" {
+  return verdicts.every((v) => v.match === "exact") ? "valid" : "failed";
 }
 
 /** Throw the runner's cooperative-cancel error iff the signal is aborted. */
@@ -256,36 +259,23 @@ export function buildReverifyHandler(deps: JobHandlerDeps, seams: ReverifySeams 
 
     const outcome = aggregate(verdicts);
 
-    // 3. `failed` (every quote vanished): no re-anchor ChangePlan is expressible (the op
-    //    requires a locatable quote), so the durable change is deferred to operator
-    //    resolution; the affected heads remain effectively stale and are gated out of
-    //    trusted grounding. The job itself SUCCEEDED at producing the deterministic verdict.
+    // 3. `failed` (v2 #335: any head not re-matching exactly — vanished, ambiguous,
+    //    or moved): no re-anchor ChangePlan is emitted (the Tier-3 review park is
+    //    retired, so there is nothing to escalate to); the affected heads remain
+    //    stale and gated out of trusted grounding. The job itself SUCCEEDED at
+    //    producing the deterministic verdict.
     if (outcome === "failed") return {};
 
-    const escalateTier3 = classifyReanchor(verdicts[0]!.match).escalateTier3 || outcome === "pending";
-
-    // 4. `pending` (Tier-3): EMIT the validated ChangePlan (proving the change is
-    //    expressible as the sanctioned op) but NEVER auto-integrate it — a Tier-3 re-anchor
-    //    is resolved by a human via `brain evidence resolve`. Surface `action-required`
-    //    (item outcome → exit 6) so the operator is signalled.
-    if (outcome === "pending") {
-      for (const { ev } of verdicts) buildReanchorPlan(ev, payload.owningNoteId, payload.newRenditionId, "pending", true);
-      return { actionRequired: true };
-    }
-
-    // 5. `valid` (every head re-matched exactly): emit + integrate the re-anchor through the
-    //    broker/git ChangePlan path (Markdown SSOT). We integrate each head's plan; the
+    // 4. `valid` (every head re-matched exactly): emit + integrate the re-anchor through
+    //    the ChangePlan apply path (Markdown SSOT). We integrate each head's plan; the
     //    projection is re-derived by the apply seam's fold, so the handler never writes it.
     let lastRunId: string | undefined;
-    let anyReviewPending = false;
     for (const { ev } of verdicts) {
-      const plan = buildReanchorPlan(ev, payload.owningNoteId, payload.newRenditionId, "valid", escalateTier3);
+      const plan = buildReanchorPlan(ev, payload.owningNoteId, payload.newRenditionId, "valid");
       const res = await seams.applyReanchor(deps, { owningNoteId: payload.owningNoteId, evidenceId: ev.evidence_id, plan });
       lastRunId = res.runId;
-      if (res.mode === "review-pending") anyReviewPending = true;
       throwIfAborted(ctx.signal, "between re-anchor integrations");
     }
-    const result: JobHandlerResult = anyReviewPending ? { actionRequired: true } : {};
-    return lastRunId !== undefined ? { ...result, runId: lastRunId } : result;
+    return lastRunId !== undefined ? { runId: lastRunId } : {};
   };
 }

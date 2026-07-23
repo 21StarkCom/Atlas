@@ -41,13 +41,13 @@ import { CliError, EXIT } from "../errors/envelope.js";
 /** A `git_operations.op_type` this module writes to encode a checkpoint artifact. */
 export type GitOpType = "base" | "worktree-applied" | "agent-committed" | "integrated" | "reindexed";
 
-/** The progression checkpoints (non-terminal), in order. */
+/** The progression checkpoints (non-terminal), in order. v2 (#335): the
+ * `review-pending` park is retired — a run advances agent-committed → integrated. */
 export const CHECKPOINT_STATES = [
   "planned",
   "patched",
   "worktree-applied",
   "agent-committed",
-  "review-pending",
   "integrated",
   "reindexed",
 ] as const satisfies readonly WorkflowState[];
@@ -76,8 +76,7 @@ export const CHECKPOINT_NEXT: Readonly<Record<CheckpointState, readonly Workflow
   planned: ["patched"],
   patched: ["worktree-applied"],
   "worktree-applied": ["agent-committed"],
-  "agent-committed": ["review-pending", "integrated"],
-  "review-pending": ["integrated"],
+  "agent-committed": ["integrated"],
   integrated: ["reindexed"],
   reindexed: ["finalized"],
 };
@@ -93,11 +92,7 @@ export const TERMINABLE_FROM = [
   "patched",
   "worktree-applied",
   "agent-committed",
-  "review-pending",
 ] as const satisfies readonly CheckpointState[];
-
-/** The only checkpoint an explicit `rejected` decision is reachable from. */
-export const REJECTABLE_FROM = ["review-pending"] as const satisfies readonly CheckpointState[];
 
 /** The audit event a transition INTO each state emits, if any (§2.5 closed set). */
 export const CHECKPOINT_AUDIT: Partial<Record<WorkflowState, AuditEventKind>> = {
@@ -204,7 +199,8 @@ export function sha256Canonical(v: unknown): string {
 /** The `planned` gating artifacts: the plan + its hash + the base it was computed against. */
 export interface PlannedArtifacts {
   readonly planId: string;
-  readonly tier: 1 | 2 | 3;
+  /** Advisory risk tier (v2 #335: tier-1 captures / tier-2 synthesis; no tier-3). */
+  readonly tier: 1 | 2;
   readonly confidence: number;
   readonly summary: string;
   /** `sha256(canonical(ChangePlan))` — recomputed by the reconciler's idempotency check. */
@@ -242,19 +238,14 @@ export interface WorktreeAppliedArtifacts {
   readonly agentRef: string;
 }
 
-/** The `agent-committed` gating artifacts (gated on `treeHash`). */
+/** The `agent-committed` gating artifacts (gated on `treeHash`). v2 (#335): every
+ * committed run integrates directly — there is no Tier-3 review park to route to. */
 export interface AgentCommittedArtifacts {
   readonly commitSha: string;
   readonly treeHash: string;
   readonly agentRef: string;
-  /** Route on completion: Tier-2 → integrate; Tier-3 → review-pending. */
-  readonly tier: 1 | 2 | 3;
-}
-
-/** The `review-pending` gating artifacts (gated on `commitSha`). */
-export interface ReviewPendingArtifacts {
-  readonly commitSha: string;
-  readonly agentRef: string;
+  /** Advisory only (captures tier-1, synthesis tier-2); never routes to a review park. */
+  readonly tier: 1 | 2;
 }
 
 /**
@@ -553,9 +544,7 @@ export function assertPersistedState(
  *  - `worktree-applied` → the run's stored `patchHash` exists (gated on `patched`).
  *  - `agent-committed` → the recorded `worktree-applied` `treeHash` matches the
  *    commit's declared `treeHash`, and its `tier` matches the planned tier
- *    (Tier routing is decided at planning, not re-litigated at commit).
- *  - `review-pending` → the recorded `agent-committed` `commitSha` matches, and
- *    the run is Tier-3 (Tier-2 auto-commit runs never park for review).
+ *    (advisory only; v2 has no review park to route to).
  *  - `reindexed` → the recorded `integrated` `canonicalSha` matches.
  */
 export function assertGatingEvidence(
@@ -598,19 +587,6 @@ export function assertGatingEvidence(
       }
       return;
     }
-    case "review-pending": {
-      const a = artifacts as ReviewPendingArtifacts;
-      const committed = readGitOp(db, runId, "agent-committed");
-      if (!committed) throw new GatingEvidenceError(state, "no recorded agent-committed commit");
-      if (committed.commitSha !== a.commitSha) {
-        throw new GatingEvidenceError(state, `review commitSha ${a.commitSha} ≠ committed ${committed.commitSha}`);
-      }
-      const tier = readPlannedTier(db, runId);
-      if (tier !== null && tier !== 3) {
-        throw new GatingEvidenceError(state, `review-pending is Tier-3 only; run is Tier-${tier} (auto-commit)`);
-      }
-      return;
-    }
     case "reindexed": {
       const a = artifacts as ReindexedArtifacts;
       const integrated = readGitOp(db, runId, "integrated");
@@ -644,8 +620,8 @@ export function assertResumeArtifactsMatch(
   // DERIVABLE identity every checkpoint that carries `agentRef` must match on resume
   // (round-3 finding on checkpoints.ts:643-685: agentRef was ignored). The
   // worktree-applied checkpoint records no agent-ref row, so it is validated against
-  // this derivable convention; agent-committed/review-pending validate it against the
-  // durable `agent-committed` git op's `ref_name` too.
+  // this derivable convention; agent-committed validates it against the durable
+  // `agent-committed` git op's `ref_name` too.
   const expectedAgentRef = `refs/agent/${runId}`;
   switch (state) {
     case "planned": {
@@ -700,18 +676,6 @@ export function assertResumeArtifactsMatch(
       }
       if (c.refName !== a.agentRef) {
         throw new GatingEvidenceError(state, `resume agentRef ${a.agentRef} ≠ durable ${c.refName}`);
-      }
-      return;
-    }
-    case "review-pending": {
-      const a = artifacts as ReviewPendingArtifacts;
-      const c = readGitOp(db, runId, "agent-committed");
-      if (!c || c.commitSha !== a.commitSha) {
-        throw new GatingEvidenceError(state, `resume review commit ${a.commitSha} diverges from durable ${c?.commitSha ?? "<none>"}`);
-      }
-      // agentRef was ignored before (round-3 finding): validate against the durable ref.
-      if (c.refName !== a.agentRef) {
-        throw new GatingEvidenceError(state, `resume review agentRef ${a.agentRef} ≠ durable ${c.refName}`);
       }
       return;
     }

@@ -55,7 +55,7 @@ function storeWith(notes: ParsedNote[]): Store {
 }
 
 describe("maintain issue detection (Task 4.11)", () => {
-  it("flags an orphan note (no links) as a Tier-3 remediation", () => {
+  it("flags an orphan note (no links) as a destructive remediation", () => {
     // linked-a ↔ linked-b are linked; orphan has no links.
     const s = storeWith([
       makeNote("---\nid: linked-a\ntype: concept\nschema_version: 1\ntitle: a\ncreated: 2026-07-11\nupdated: 2026-07-11\n---\n# a\n[[linked-b]]\n", { id: "linked-a", links: [link("linked-b")] }),
@@ -65,7 +65,7 @@ describe("maintain issue detection (Task 4.11)", () => {
     try {
       const issues = detectMaintenanceIssues(s.db);
       const orphan = issues.find((i) => i.kind === "orphan-note");
-      expect(orphan).toMatchObject({ kind: "orphan-note", noteId: "orphan", minTier: "tier-3" });
+      expect(orphan).toMatchObject({ kind: "orphan-note", noteId: "orphan", destructive: true });
       // linked-a / linked-b are NOT orphans.
       expect(issues.some((i) => i.kind === "orphan-note" && i.noteId === "linked-a")).toBe(false);
     } finally {
@@ -73,12 +73,12 @@ describe("maintain issue detection (Task 4.11)", () => {
     }
   });
 
-  it("flags non-valid evidence as a Tier-2 re-verification prompt; valid evidence is clean", () => {
+  it("flags non-valid evidence as a non-destructive re-verification prompt; valid evidence is clean", () => {
     const s = storeWith([sourceNote(), claimNote("note-stale", "pending")]);
     try {
       const issues = detectMaintenanceIssues(s.db);
       const ev = issues.find((i) => i.kind === "unverified-evidence");
-      expect(ev).toMatchObject({ kind: "unverified-evidence", noteId: "note-stale", minTier: "tier-2" });
+      expect(ev).toMatchObject({ kind: "unverified-evidence", noteId: "note-stale", destructive: false });
     } finally {
       s.close();
     }

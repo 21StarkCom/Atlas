@@ -13,7 +13,9 @@ export const WORKFLOW_STATES = [
   "patched",
   "worktree-applied",
   "agent-committed",
-  "review-pending",
+  // v2 (#335, ADR-0003): `review-pending` is retired — Tier-3 review, the
+  // git approve/reject surface, and the human-in-the-loop park are gone; a run
+  // advances agent-committed → integrated directly.
   "integrated",
   "reindexed",
   "finalized",
