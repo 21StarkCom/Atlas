@@ -29,12 +29,10 @@ completeness gates provide.
   SQLite's default `MATCH SIMPLE`: if **any** referencing column is `NULL` the constraint is not
   enforced — this is exactly how the nullable active-rendition pointer (§4.1) works.
 - **Composite identifiers are component scalar columns, never packed strings** (design *Normative
-  schema*, plan Review-Hint; fixes R3-F6). `content_blobs` PK = (`raw_content_hash`,
-  `canonical_media_type`); `source_renditions` PK = (`raw_content_hash`, `canonical_media_type`,
-  `extractor_version`, `normalizer_version`). Every table that "references a `renditionId`/`contentId`"
-  carries the **same component columns** as a composite FK. The CLI-facing single `sourceId`/`contentId`
-  handle is a **serialized convenience only**, parsed to components at the command boundary
-  (`packages/contracts/src/ids.ts`) — it is **never** persisted as a packed string.
+  schema*, plan Review-Hint; fixes R3-F6). (The v1 `content_blobs`/`source_renditions` composite-PK
+  provenance tables that embodied this rule are retired — #340 — but the CLI-facing `sourceId`/
+  `contentId`/`renditionId` handle parsing survives in `packages/contracts/src/ids.ts` as a serialized
+  convenience parsed to components at the command boundary, never persisted as a packed string.)
 - **Two classes of state** (design *Two classes of state*): **vault projections** are deterministically
   rebuildable from canonical Markdown; `atlas db rebuild` replaces them in one transaction. The
   **operational/audit ledger** is primary state, has no Markdown form, and MUST be backed up.
@@ -59,11 +57,12 @@ Migration ownership (verbatim from §2.7):
 |---|---|---|---|
 | `0001_core` | `sqlite-store` | 1 | `notes`, `note_identity_keys`, `note_links`, `vault_schema_migrations`, `agent_runs`, `model_calls`, `retrieval_runs`, `retrieval_results`, `change_plans`, `patches`, `patch_operations`, `validation_results`, `git_operations` ~~`audit_events`, `audit_intents`, `backup_watermark`, `raw_payloads`~~ *(created by `0001`, forward-dropped by `0014_evidence_v2` — #338; absent from a fresh DB)* |
 | `0002_jobs` | `jobs` | 2 PR-B | `jobs`, `job_attempts` |
-| `0003_provenance` | `sqlite-store` | 2 PR-A (retained) | `content_blobs`, `source_captures`, `source_renditions`, `note_sources` |
+| `0003_provenance` | `sqlite-store` | 2 PR-A (retained) | ~~`content_blobs`, `source_captures`, `source_renditions`, `note_sources`~~ *(created by `0003`, forward-dropped by `0015_source_registry` — #340; absent from a fresh DB)* |
 | `0004_claims` | `sqlite-store` | 4 PR-A (retained) | ~~`claims`, `claim_evidence`~~ *(created by `0004`, forward-dropped by `0014_evidence_v2` — #337; absent from a fresh DB)* |
 | `0008_index_config_revision` | `sqlite-store` (feature migration) | 3 (Task 3.2) | `index_config_revisions` |
 | `0013_links_v2` | `sqlite-store` (default set) | 3 (task 3-4) | *(no new table — table-rebuilds `note_links` into the v2 shape)* |
 | `0014_evidence_v2` | `sqlite-store` (default set) | 4 (task 4-2/4-4) | `evidence` *(and forward-DROPs the v1 `claims`/`claim_evidence`)* |
+| `0015_source_registry` | `sqlite-store` (default set) | 4 (task 4-3) | `source` *(and forward-DROPs the v1 `content_blobs`/`source_captures`/`source_renditions`/`note_sources` — #340)* |
 | (runner bootstrap) | `sqlite-store` | 1 | `db_schema_migrations` |
 
 ---
@@ -490,154 +489,19 @@ CREATE TABLE job_attempts (
 
 ---
 
-## 5. Provenance (retained PR-A)
+## 5. Provenance — RETIRED (#340)
 
-### `content_blobs` — `0003_provenance` (vault projection)
-
-Immutable content blob. PK is the composite `(raw_content_hash, canonical_media_type)`. The **active
-rendition pointer is the component column pair** `active_extractor_version` + `active_normalizer_version`
-(nullable pair) — **not** a packed `renditionId` (fixes R3-F6). Together with the blob's own PK columns
-it forms a composite FK → `source_renditions`, inserted via a **two-step transaction** (blob row first
-with a `NULL` pointer, then a validated pointer update after the rendition exists) using a
-`DEFERRABLE INITIALLY DEFERRED` constraint.
-
-```sql
-CREATE TABLE content_blobs (
-  raw_content_hash           TEXT    NOT NULL,
-  canonical_media_type       TEXT    NOT NULL,
-  size_bytes                 INTEGER NOT NULL,
-  vault_path                 TEXT    NOT NULL,            -- immutable copy under sources/
-  first_seen_at              TEXT    NOT NULL,
-  active_extractor_version   INTEGER,                     -- nullable pointer component
-  active_normalizer_version  INTEGER,                     -- nullable pointer component
-  PRIMARY KEY (raw_content_hash, canonical_media_type),
-  FOREIGN KEY (raw_content_hash, canonical_media_type, active_extractor_version, active_normalizer_version)
-    REFERENCES source_renditions(raw_content_hash, canonical_media_type, extractor_version, normalizer_version)
-    ON DELETE RESTRICT
-    DEFERRABLE INITIALLY DEFERRED,
-  CHECK ((active_extractor_version IS NULL) = (active_normalizer_version IS NULL))
-) STRICT;
-```
-
-- **FK:** the active-rendition composite FK **`ON DELETE RESTRICT`** (the active rendition cannot be
-  deleted out from under the pointer). Nullable: `MATCH SIMPLE` skips the check while the pair is `NULL`
-  (blob exists, no rendition activated yet). By construction the active rendition shares the blob's own
-  key columns, so it always belongs to the same content blob.
-- **CHECK:** the pointer pair is null-together / set-together (exactly one active rendition or none).
-- **Upsert:** conflict target **`(raw_content_hash, canonical_media_type)`** —
-  `ON CONFLICT(raw_content_hash, canonical_media_type) DO NOTHING` for the blob body (immutable);
-  the pointer is re-pointed by an explicit `UPDATE` in the activation transaction (design
-  rendition-upgrade protocol), never by the initial upsert.
-
-### `source_captures` — `0003_provenance` (vault projection)
-
-Mutable **origin-observation aggregate** — one row per `(contentId, origin)`, counters updated on
-re-observation (design). `capture_id` is a deterministic surrogate hash of the components (a scalar
-surrogate, like `evidence_id` — not a packed identifier used as a foreign key).
-
-```sql
-CREATE TABLE source_captures (
-  capture_id            TEXT    NOT NULL PRIMARY KEY,     -- deterministic hash of (contentId, origin)
-  raw_content_hash      TEXT    NOT NULL,
-  canonical_media_type  TEXT    NOT NULL,
-  origin                TEXT    NOT NULL,                 -- original path snapshot
-  first_seen_at         TEXT    NOT NULL,
-  last_seen_at          TEXT    NOT NULL,
-  observation_count     INTEGER NOT NULL DEFAULT 1 CHECK (observation_count >= 1),
-  UNIQUE (raw_content_hash, canonical_media_type, origin),
-  FOREIGN KEY (raw_content_hash, canonical_media_type)
-    REFERENCES content_blobs(raw_content_hash, canonical_media_type) ON DELETE CASCADE
-) STRICT;
-```
-
-- **FK:** `(raw_content_hash, canonical_media_type) → content_blobs` **`ON DELETE CASCADE`** (a capture is
-  detail of its blob, both projections rebuilt together).
-- **Upsert:** conflict target **`(raw_content_hash, canonical_media_type, origin)`** —
-  `ON CONFLICT(raw_content_hash, canonical_media_type, origin) DO UPDATE SET last_seen_at = excluded.last_seen_at,
-  observation_count = source_captures.observation_count + 1`. A per-ingest idempotency key deduplicates
-  retries so re-observation counters are not inflated by retries.
-
-### `source_renditions` — `0003_provenance` (vault projection)
-
-PK = the full component set `(raw_content_hash, canonical_media_type, extractor_version,
-normalizer_version)` (composite-identifier rule). A parser/normalizer bump produces a **new rendition**
-under the same content, never overwriting locator namespaces.
-
-```sql
-CREATE TABLE source_renditions (
-  raw_content_hash         TEXT    NOT NULL,
-  canonical_media_type     TEXT    NOT NULL,
-  extractor_version        INTEGER NOT NULL,
-  normalizer_version       INTEGER NOT NULL,
-  normalized_content_hash  TEXT    NOT NULL,
-  size_bytes               INTEGER NOT NULL,
-  locator_scheme           TEXT    NOT NULL,              -- byte/char | page+span | dom-anchor
-  created_at               TEXT    NOT NULL,
-  PRIMARY KEY (raw_content_hash, canonical_media_type, extractor_version, normalizer_version),
-  FOREIGN KEY (raw_content_hash, canonical_media_type)
-    REFERENCES content_blobs(raw_content_hash, canonical_media_type) ON DELETE CASCADE
-) STRICT;
-```
-
-- **FK:** `(raw_content_hash, canonical_media_type) → content_blobs` **`ON DELETE CASCADE`**.
-- **Upsert:** conflict target **`(raw_content_hash, canonical_media_type, extractor_version,
-  normalizer_version)`** — `ON CONFLICT(...) DO NOTHING` (renditions are immutable; deterministic output
-  means a re-extraction at the same versions reproduces the identical row).
-
-### `note_sources` — `0003_provenance` (vault projection)
-
-Note-level provenance: pins the immutable `contentId` (blob-general citation) **or** a specific
-`renditionId` (extraction-specific citation) as component columns — **never** the mutable `sourceId`
-alias (design). A citation is one of two kinds, distinguished by the extractor/normalizer version pair:
-
-- **blob-general** — `extractor_version`/`normalizer_version` are **`NULL`** (cite the content blob
-  regardless of extraction). The rendition composite FK uses `MATCH SIMPLE`, so a `NULL` component
-  **skips** that FK — a blob-general citation is valid before any rendition exists.
-- **rendition-specific** — both versions are set (**`≥ 1`**; real renditions start at 1). Here the
-  **composite FK to `source_renditions` is enforced** (all four components non-`NULL`), so the extractor
-  and normalizer are FK-checked, not merely validated by a query.
-
-`NULL`s can't be used directly in a PK/UNIQUE (SQLite treats each `NULL` as distinct, so duplicate
-blob-general citations would slip through). The row identity is therefore a **UNIQUE index over the
-coalesced key** (`NULL → 0`), which both keeps blob-general citations unique and is the upsert conflict
-target. The `0` appears **only inside that index expression**, never as a stored sentinel — stored
-version columns are either `NULL` (blob-general) or `≥ 1` (rendition-specific).
-
-```sql
-CREATE TABLE note_sources (
-  note_id               TEXT    NOT NULL,                 -- scalar note id (projection→projection FK ok)
-  raw_content_hash      TEXT    NOT NULL,
-  canonical_media_type  TEXT    NOT NULL,
-  extractor_version     INTEGER,                          -- NULL = cite blob generally; ≥1 = specific rendition
-  normalizer_version    INTEGER,                          -- NULL together with extractor_version, or both ≥1
-  FOREIGN KEY (note_id) REFERENCES notes(note_id) ON DELETE CASCADE,
-  FOREIGN KEY (raw_content_hash, canonical_media_type)
-    REFERENCES content_blobs(raw_content_hash, canonical_media_type) ON DELETE RESTRICT,
-  FOREIGN KEY (raw_content_hash, canonical_media_type, extractor_version, normalizer_version)
-    REFERENCES source_renditions(raw_content_hash, canonical_media_type, extractor_version, normalizer_version)
-    ON DELETE RESTRICT,
-  CHECK ((extractor_version IS NULL) = (normalizer_version IS NULL)),
-  CHECK (extractor_version IS NULL OR (extractor_version >= 1 AND normalizer_version >= 1))
-) STRICT;
-
-CREATE UNIQUE INDEX idx_note_sources_identity ON note_sources(
-  note_id, raw_content_hash, canonical_media_type,
-  COALESCE(extractor_version, 0), COALESCE(normalizer_version, 0));
-```
-
-- **FK:** `note_id → notes(note_id)` **`ON DELETE CASCADE`** (the link is detail of the citing note);
-  `(raw_content_hash, canonical_media_type) → content_blobs` **`ON DELETE RESTRICT`** (a cited source
-  cannot be deleted while a note still cites it — the citation is meaning-bearing, not disposable detail);
-  the rendition composite FK `(raw_content_hash, canonical_media_type, extractor_version,
-  normalizer_version) → source_renditions` **`ON DELETE RESTRICT`** (enforced for rendition-specific
-  citations; `MATCH SIMPLE`-skipped while the version pair is `NULL`).
-- **CHECK:** the version pair is `NULL`-together / set-together, and when set both are `≥ 1` (a citation
-  is either blob-general or a complete, real rendition reference).
-- **Upsert:** conflict target **`(note_id, raw_content_hash, canonical_media_type,
-  COALESCE(extractor_version, 0), COALESCE(normalizer_version, 0))`** (via `idx_note_sources_identity`) —
-  `ON CONFLICT(...) DO NOTHING`.
-- **Invariant:** the §7 query is now a belt-and-suspenders re-check of the enforced composite FK (it
-  reports any rendition-specific citation whose rendition is missing — which the FK already forbids).
+**The v1 content-addressed provenance model is gone.** The four projection tables
+(`content_blobs` + `source_captures` + `source_renditions` + `note_sources`, `0003_provenance`, with
+their rendition-pinning / active-rendition-pointer / origin-observation machinery) are
+**forward-dropped by `0015_source_registry`** (children-first: `note_sources`, then `source_captures` +
+`source_renditions`, then `content_blobs`). v2 replaces them with ONE flat operational **`source`
+registry** (§5.7) — one row per source, keyed by a stable `id`, deduped on a UNIQUE `locator` — and
+`ingest` produces a first-class note committed directly onto `refs/heads/main` (the canonical mutation
+order), whose `sources:` frontmatter cites the registry `id`. `0003_provenance` still runs (it is an
+immutable applied migration) but its four tables are dropped in the same forward migration that creates
+`source`, so a fresh DB never carries them. Their CREATE DDL is retained only in the immutable
+`0003_provenance.ts` migration file (historical vocabulary), never in this dictionary.
 
 **Retired (#337): the v1 `claims` / `claim_evidence` model.** The rendition-pinned evidence model
 (`claims` + `claim_evidence`, `0004_claims`, with its lineage/payload_hash/supersession machinery
@@ -816,24 +680,10 @@ INDEX` is asserted.
      ON k.note_id = n.note_id
    WHERE COALESCE(k.c, 0) <> 1;
    ```
-2. **`note_sources` rendition-specific citations resolve** (belt-and-suspenders over the enforced
-   composite FK; a rendition-specific citation carries a non-`NULL` version pair).
-   ```sql
-   SELECT s.note_id FROM note_sources s
-   LEFT JOIN source_renditions r
-     ON r.raw_content_hash = s.raw_content_hash AND r.canonical_media_type = s.canonical_media_type
-    AND r.extractor_version = s.extractor_version AND r.normalizer_version = s.normalizer_version
-   WHERE s.extractor_version IS NOT NULL AND r.raw_content_hash IS NULL;
-   ```
-3. **Active-rendition consistency.** Every blob with a set pointer points at an existing rendition of
-   itself (belt-and-suspenders over the deferred composite FK).
-   ```sql
-   SELECT b.raw_content_hash FROM content_blobs b
-   LEFT JOIN source_renditions r
-     ON r.raw_content_hash = b.raw_content_hash AND r.canonical_media_type = b.canonical_media_type
-    AND r.extractor_version = b.active_extractor_version AND r.normalizer_version = b.active_normalizer_version
-   WHERE b.active_extractor_version IS NOT NULL AND r.raw_content_hash IS NULL;
-   ```
+   (The v1 `note_sources` rendition-specific-citation-resolves + active-rendition-consistency
+   invariants were retired with the content-addressed provenance model — #340; `0015_source_registry`
+   forward-drops `content_blobs`/`source_captures`/`source_renditions`/`note_sources`, and the flat
+   `source` registry has no rendition graph to cross-check.)
 
    (The v1 `claim_evidence` invariants — no-dangling-evidence-rendition, exactly-one-current-head-per-
    lineage, effective-staleness — were retired with the claims model (#337); `0014_evidence_v2`
@@ -851,10 +701,11 @@ INDEX` is asserted.
 transaction, and **never** touches ledger tables or `db_schema_migrations`:
 
 - Always: `notes`, `note_identity_keys`, `note_links`, `vault_schema_migrations`.
-- Once `0003_provenance` (PR-A) has landed: `content_blobs`, `source_captures`, `source_renditions`,
-  `note_sources` (via `foldProvenanceManifests`).
 - Once `0014_evidence_v2` has landed: `evidence` (via the v2 evidence fold). (The v1 `claims`/
-  `claim_evidence` model + its claims fold were retired — #337 — and `0014` forward-drops the tables.)
+  `claim_evidence` model + its claims fold were retired — #337 — and `0014` forward-drops the tables.
+  The v1 `content_blobs`/`source_captures`/`source_renditions`/`note_sources` provenance projections +
+  their `foldProvenanceManifests` fold were retired — #340 — and `0015` forward-drops those tables; the
+  flat `source` registry is OPERATIONAL, never rebuilt from Markdown.)
 
 Because ledger tables reference projections only by scalar identifier (no cross-class FK), the
 delete-and-reinsert of the projection set inside the rebuild transaction can never violate a restrictive

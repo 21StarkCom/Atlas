@@ -623,6 +623,73 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
     }
   });
 
+  it("crash at agent-committed with canonical ALREADY containing the commit → finalized FORWARD, integrate hook NOT called (#338 crash-after-FF)", async () => {
+    // A crash AFTER the FF landed on canonical but BEFORE the CLI-side `integrated`
+    // CAS flip: the run row is still `agent-committed` while `refs/heads/main` already
+    // contains the agent commit. Re-running the integrate hook would advance from a
+    // stale base and throw broker.cas_failed; the reconciler must instead detect
+    // containment and record `integrated` FORWARD (no hook, no double commit).
+    const { runId } = await driveTo("agent-committed", { tier: 2, realWorktree: true });
+    const store = h.openStore();
+    const agentSha = gitOp(store, runId, "agent-committed")!.commit_sha!;
+    // Simulate the landed-but-unflipped FF: canonical already points at the agent commit.
+    gitIn(h.repoDir, ["update-ref", "refs/heads/main", agentSha]);
+    let integrateCalled = false;
+    try {
+      const rep = await reconcileRunsOnStartup({
+        store,
+        repo: openRepo(h.repoDir),
+        now: tick,
+        hooks: {
+          integrate: async () => {
+            integrateCalled = true;
+            throw new Error("integrate must NOT run when canonical already contains the commit");
+          },
+        },
+      });
+      expect(rep.runs.find((r) => r.runId === runId)).toMatchObject({ action: "integrated", to: "integrated" });
+      expect(integrateCalled).toBe(false); // finalized forward, never re-FF'd
+      expect(store.ledger.getAgentRun(runId)!.status).toBe("integrated");
+      // No double commit — canonical stays exactly at the agent commit.
+      expect(h.mainSha()).toBe(agentSha);
+      expect(gitOp(store, runId, "integrated")!.commit_sha).toBe(agentSha);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("a per-row recovery failure does not abort recovery of the other rows (#338 startup-sweep isolation)", async () => {
+    // Two crashed agent-committed runs. Run A's recovery THROWS (its integrate hook
+    // fails); the per-row try/catch in the startup sweep must isolate it (recorded
+    // `left` with a recovery-error reason) and STILL recover run B forward.
+    const a = await driveTo("agent-committed", { tier: 2, realWorktree: true });
+    const b = await driveTo("agent-committed", { tier: 2, realWorktree: true });
+    const store = h.openStore();
+    try {
+      const realHook = reconcileIntegrateHook(store, h);
+      const rep = await reconcileRunsOnStartup({
+        store,
+        repo: openRepo(h.repoDir),
+        now: tick,
+        hooks: {
+          integrate: async (ctx) => {
+            if (ctx.runId === a.runId) throw new Error("boom: run A recovery fails");
+            return realHook(ctx);
+          },
+        },
+      });
+      const outA = rep.runs.find((r) => r.runId === a.runId)!;
+      expect(outA).toMatchObject({ action: "left" });
+      expect(outA.reason).toMatch(/recovery-error/);
+      expect(store.ledger.getAgentRun(a.runId)!.status).toBe("agent-committed"); // untouched
+      // Run B was recovered despite A's failure.
+      expect(rep.runs.find((r) => r.runId === b.runId)).toMatchObject({ action: "integrated", to: "integrated" });
+      expect(store.ledger.getAgentRun(b.runId)!.status).toBe("integrated");
+    } finally {
+      store.close();
+    }
+  });
+
   it("crash at agent-committed, agent ref does NOT contain the commit → LEFT, never integrated (round finding #6)", async () => {
     // Round finding #6: the reconciler must PROVE the agent ref resolves to the
     // stored commit before auto-integrating — it may not trust the recorded

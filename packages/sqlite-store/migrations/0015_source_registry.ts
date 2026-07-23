@@ -28,6 +28,24 @@
  * FK-free by construction: `source` has no foreign keys, so a fresh `db migrate`
  * cannot trip a restrictive FK. The whole sequence runs inside the migration
  * runner's single `BEGIN IMMEDIATE`.
+ *
+ * CONTRACT half (task 4-3b / #340): the DROP of the v1 content-addressed
+ * provenance model (`note_sources`/`source_captures`/`source_renditions`/
+ * `content_blobs`) is appended to this migration's DDL now that its last consumers
+ * are gone — `ingest` is rebased onto the flat `source` registry + the canonical
+ * mutation order, and `apps/cli/src/validation/{provenance,store-vault}.ts` resolve
+ * `sources:` ids against the `source` registry, not the v1 provenance tables. This
+ * mirrors the `0014_evidence_v2` claims/ledger DROP pattern (a whole-table DROP is
+ * not blocked by the row-level RESTRICT FKs). Children-first order keeps the drop
+ * FK-safe: `note_sources` (RESTRICT FKs → `content_blobs` + `source_renditions`)
+ * first, then `source_captures` + `source_renditions` (CASCADE FKs → `content_blobs`),
+ * then `content_blobs` last (its `active_*` RESTRICT FK → `source_renditions` is
+ * DEFERRABLE INITIALLY DEFERRED, checked at COMMIT by which point both are gone; the
+ * tables are empty on a fresh migrate regardless). This is the newest migration on an
+ * unreleased branch, never applied to a real DB before the Phase-5 verified
+ * pre-migration snapshot exists, so growing its DDL is not editing a *released*
+ * migration (migrations stay append-only: `0003_provenance` is forward-DROPped here,
+ * never edited).
  */
 import type { Migration } from "../src/migrate.js";
 import { migrationChecksum } from "../src/migrate.js";
@@ -40,10 +58,9 @@ import { migrationChecksum } from "../src/migrate.js";
  * carries a CHECK enum (`'file'` | `'url'`). Column names are the v2 camelCase form
  * the plan pins (`addedAt`/`lastIngestedAt`).
  *
- * ADDITIVE in #339 — the DROP of the v1 provenance tables (`content_blobs`,
- * `source_captures`, `source_renditions`, `note_sources`) is appended here in task
- * 4-3b/#340, children-first, once `ingest` + provenance validation are rebased off
- * them (expand-and-contract).
+ * The CREATE is followed by the CONTRACT half of the expand-and-contract cutover
+ * (task 4-3b / #340): DROP the v1 provenance tables, children-first, once `ingest` +
+ * provenance validation are rebased off them.
  */
 export const SOURCE_REGISTRY_DDL = `CREATE TABLE source (
   id             TEXT NOT NULL PRIMARY KEY,
@@ -52,7 +69,11 @@ export const SOURCE_REGISTRY_DDL = `CREATE TABLE source (
   title          TEXT,
   addedAt        TEXT NOT NULL,
   lastIngestedAt TEXT
-) STRICT;`;
+) STRICT;
+DROP TABLE note_sources;
+DROP TABLE source_captures;
+DROP TABLE source_renditions;
+DROP TABLE content_blobs;`;
 
 /** The `0015_source_registry` migration (registered in `openStore`'s default set). */
 export const migration0015SourceRegistry: Migration = {

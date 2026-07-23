@@ -1,10 +1,18 @@
 /**
  * Provenance + reference-integrity validation (Task 4.4). Catches dangling
- * references (target note, relationship object, provenance/rendition handles)
- * PRE-COMMIT, so a ChangePlan can never be applied against entities that do not
- * exist. The resolvers live on {@link ValidationContext} (the pipeline wires them
- * to the vault graph); this module is pure over that interface. (The v1
- * claim/evidence dangling checks were retired with the claims model — #337.)
+ * references (target note, relationship object) PRE-COMMIT, so a ChangePlan can
+ * never be applied against entities that do not exist. The resolvers live on
+ * {@link ValidationContext} (the pipeline wires them to the vault graph); this
+ * module is pure over that interface. (The v1 claim/evidence dangling checks were
+ * retired with the claims model — #337.)
+ *
+ * v2 (#340): a note's `sources:` id now resolves against the flat `source` REGISTRY
+ * (`ValidationVault.hasSourceRef`, wired in `store-vault.ts`), not the retired v1
+ * content-addressed provenance model. A `sources:` id that resolves to a registry row
+ * is correct; a dangling `sources:` reference (a legacy `sha256:…` handle, or an id with
+ * no registry row) is a **NON-FATAL** condition — the validator NEVER emits a blocking
+ * `dangling-source` finding for it, so a legacy reference can never block the v2 cutover
+ * or enrich/ingest grounding (exit 1). Only the note/relationship targets below block.
  */
 import type { ChangePlan } from "@atlas/contracts";
 import type { ValidationContext, ValidationFinding } from "./index.js";

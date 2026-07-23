@@ -7,9 +7,10 @@
  * the core `0013_links_v2` (v2 `note_links` reshape), the core
  * `0014_evidence_v2` (v2 vault-derived `evidence` projection, which also
  * forward-DROPs the v1 `0004_claims` tables), and the core `0015_source_registry`
- * (v2 operational `source` registry) migrations are registered on open (so
- * the public `migrate()`/`rebuildProjections()` path creates the provenance +
- * evidence tables and neither fold is ever a silent no-op, §2.7 / §4.1);
+ * (v2 operational `source` registry, which forward-DROPs the v1 `0003_provenance`
+ * content-addressed provenance tables — #340) migrations are registered on open (so
+ * the public `migrate()`/`rebuildProjections()` path creates the v2 evidence + source
+ * tables and the evidence fold is never a silent no-op, §2.7 / §4.1);
  * `@atlas/jobs` registers `0002` via {@link Store.registerMigration} before calling
  * {@link Store.migrate}. The gap-tolerant runner (Task 1.4) applies `0003`/`0004`
  * even though `0002` is absent — do NOT assume contiguous numbering.
@@ -21,7 +22,6 @@ import { rebuildProjections, type RebuildOptions, type RebuildReport } from "./r
 import { verify, type VerifyReport } from "./verify.js";
 import { LedgerRepo } from "./repos/ledger.js";
 import { ProjectionRepo } from "./repos/projections.js";
-import { ProvenanceRepo } from "./repos/provenance.js";
 import { GenerationRepo } from "./repos/generation.js";
 import { migration0001Core } from "../migrations/0001_core.js";
 import { migration0003Provenance } from "../migrations/0003_provenance.js";
@@ -32,15 +32,13 @@ import { migration0012SyncCursors } from "../migrations/0012_sync_cursors.js";
 import { migration0013LinksV2 } from "../migrations/0013_links_v2.js";
 import { migration0014EvidenceV2 } from "../migrations/0014_evidence_v2.js";
 import { migration0015SourceRegistry } from "../migrations/0015_source_registry.js";
-// Side-effect imports: register the retained-PR-A projection folds into the
-// rebuild pipeline (§2.7 / §4.1) so `rebuildProjections`/`db rebuild` reproduce
-// the provenance + evidence projections from canonical Markdown.
-import "./provenance/fold.js";
-// The v2 vault-derived evidence fold (task 4-4): reconstructs the flat `evidence`
+// Side-effect import: register the v2 vault-derived evidence fold (task 4-4) into
+// the rebuild pipeline (§2.7 / §4.1) — it reconstructs the flat `evidence`
 // projection from note frontmatter on `db rebuild`. Self-guarded when 0014 is
 // unapplied. It replaces the retired v1 claims fold — 0014 forward-DROPs the v1
-// `claims`/`claim_evidence` tables the claims fold used to reconstruct.
-import "./evidence/fold.js";
+// `claims`/`claim_evidence` tables the claims fold used to reconstruct. The v1
+// content-addressed provenance fold is GONE with its four tables (0015 forward-DROPs
+// `content_blobs`/`source_captures`/`source_renditions`/`note_sources`, #340).
 
 /** A wall-clock supplier for `applied_at` timestamps (injectable for tests). */
 export type Clock = () => string;
@@ -53,8 +51,6 @@ export interface Store {
   readonly projections: ProjectionRepo;
   /** Ledger-table repository. */
   readonly ledger: LedgerRepo;
-  /** Provenance-projection repository (`0003_provenance`). */
-  readonly provenance: ProvenanceRepo;
   /** Retrieval-index generation fence repository — the sole activation authority (Task 3.2). */
   readonly generation: GenerationRepo;
   /**
@@ -144,7 +140,6 @@ export function openStore(cfg: SqliteConfig, clock: Clock = rfc3339Now): Store {
     db,
     projections: new ProjectionRepo(db),
     ledger: new LedgerRepo(db),
-    provenance: new ProvenanceRepo(db),
     generation,
     activateGeneration(
       noteId: string,

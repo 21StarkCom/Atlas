@@ -71,24 +71,11 @@ const INVARIANTS: readonly InvariantSpec[] = [
         ON k.note_id = n.note_id
       WHERE COALESCE(k.c, 0) <> 1;`,
   },
-  {
-    name: "note-sources-renditions-resolve",
-    tables: ["note_sources", "source_renditions"],
-    sql: `SELECT s.note_id FROM note_sources s
-      LEFT JOIN source_renditions r
-        ON r.raw_content_hash = s.raw_content_hash AND r.canonical_media_type = s.canonical_media_type
-       AND r.extractor_version = s.extractor_version AND r.normalizer_version = s.normalizer_version
-      WHERE s.extractor_version IS NOT NULL AND r.raw_content_hash IS NULL;`,
-  },
-  {
-    name: "active-rendition-consistency",
-    tables: ["content_blobs", "source_renditions"],
-    sql: `SELECT b.raw_content_hash FROM content_blobs b
-      LEFT JOIN source_renditions r
-        ON r.raw_content_hash = b.raw_content_hash AND r.canonical_media_type = b.canonical_media_type
-       AND r.extractor_version = b.active_extractor_version AND r.normalizer_version = b.active_normalizer_version
-      WHERE b.active_extractor_version IS NOT NULL AND r.raw_content_hash IS NULL;`,
-  },
+  // v2 (#340): the `note-sources-renditions-resolve` + `active-rendition-consistency`
+  // invariants are RETIRED with the v1 content-addressed provenance model — 0015
+  // forward-DROPs `content_blobs`/`source_captures`/`source_renditions`/`note_sources`,
+  // so there is nothing left to cross-check (git is the safety mechanism; `source` is a
+  // flat operational registry with no rendition graph).
 ];
 
 interface QueryPlanSpec {

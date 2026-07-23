@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "atlas://cli-contract/ingest.schema.json",
-  "title": "brain ingest \u2014 --json success output",
-  "description": "Capture + extraction/classification PREVIEW by default (D11): prints the planned capture + extraction preview and persists nothing (no audit-ref event). `--apply` performs the capture (same captureSource path as source add). `--dry-run` + `--apply` together \u21d2 exit 5. Scan-before-persist applies in both modes (a secret in the raw/normalized bytes \u21d2 exit 3, quarantined).",
+  "title": "brain ingest — --json success output",
+  "description": "Normalize a REGISTERED source (by id) + commit it as a note. PREVIEW by default (D11): resolve the `source` registry row by id, read its bytes at the `locator`, normalize via @atlas/sources, and print what a capture WOULD produce — persisting nothing. `--apply` grounds a deterministic note (id derived from source id + output key) and commits it DIRECTLY onto refs/heads/main through the common mutation order, then stamps `source.lastIngestedAt`. `--dry-run` + `--apply` together ⇒ exit 5. Idempotent: a re-ingest of identical input is a NOOP (no duplicate note, no second commit) that still re-stamps.",
   "type": "object",
   "unevaluatedProperties": false,
   "required": [
     "command",
-    "path",
+    "id",
     "mode",
     "applied"
   ],
@@ -15,9 +15,10 @@
     "command": {
       "const": "ingest"
     },
-    "path": {
+    "id": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "description": "The source registry id being ingested."
     },
     "mode": {
       "enum": [
@@ -27,20 +28,26 @@
     },
     "applied": {
       "type": "boolean",
-      "description": "True only when --apply performed the capture."
+      "description": "True only when --apply performed the ingest."
     },
     "preview": {
       "type": "object",
-      "description": "Present in preview mode: what a capture WOULD produce (no persistence).",
+      "description": "Present in preview mode: what an ingest WOULD produce (no persistence).",
       "unevaluatedProperties": false,
       "required": [
-        "contentId",
+        "sourceId",
+        "noteId",
         "canonicalMediaType"
       ],
       "properties": {
-        "contentId": {
+        "sourceId": {
           "type": "string",
           "minLength": 1
+        },
+        "noteId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The deterministic produced-note id (source id + output key)."
         },
         "canonicalMediaType": {
           "type": "string",
@@ -49,9 +56,6 @@
         "sizeBytes": {
           "type": "integer",
           "minimum": 0
-        },
-        "wouldReuseBlob": {
-          "type": "boolean"
         },
         "extraction": {
           "type": "object",
@@ -84,26 +88,18 @@
     },
     "capture": {
       "type": "object",
-      "description": "Present in apply mode: the committed capture result.",
+      "description": "Present in apply mode: the committed (or NOOP-confirmed) ingest result.",
       "unevaluatedProperties": false,
       "required": [
-        "contentId",
-        "captureId",
-        "renditionId",
+        "sourceId",
         "noteId",
-        "runId",
-        "reused"
+        "path",
+        "contentHash",
+        "committed",
+        "lastIngestedAt"
       ],
       "properties": {
-        "contentId": {
-          "type": "string",
-          "minLength": 1
-        },
-        "captureId": {
-          "type": "string",
-          "minLength": 1
-        },
-        "renditionId": {
+        "sourceId": {
           "type": "string",
           "minLength": 1
         },
@@ -111,25 +107,30 @@
           "type": "string",
           "minLength": 1
         },
-        "runId": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The vault-relative path the ingested note lands at."
+        },
+        "contentHash": {
           "type": "string",
           "minLength": 1
         },
-        "reused": {
-          "type": "object",
-          "unevaluatedProperties": false,
-          "required": [
-            "blob",
-            "capture"
+        "committed": {
+          "type": "boolean",
+          "description": "True iff a new commit landed; false on an idempotent NOOP (identical input)."
+        },
+        "canonicalSha": {
+          "type": [
+            "string",
+            "null"
           ],
-          "properties": {
-            "blob": {
-              "type": "boolean"
-            },
-            "capture": {
-              "type": "boolean"
-            }
-          }
+          "description": "The canonical head after ingest; null only if unresolved."
+        },
+        "lastIngestedAt": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The RFC-3339 time stamped onto source.lastIngestedAt (last, after commit+refresh)."
         }
       }
     }
@@ -164,7 +165,7 @@
       }
     },
     {
-      "$comment": "apply mode: applied true, committed capture present (carrying runId), no preview payload.",
+      "$comment": "apply mode: applied true, committed capture present, no preview payload.",
       "if": {
         "properties": {
           "mode": {
@@ -195,14 +196,14 @@
   "examples": [
     {
       "command": "ingest",
-      "path": "/inbox/sample.md",
+      "id": "src-9f8e7d6c5b4a39281706",
       "mode": "preview",
       "applied": false,
       "preview": {
-        "contentId": "sha256:aaaa:text/markdown",
+        "sourceId": "src-9f8e7d6c5b4a39281706",
+        "noteId": "src-1a2b3c4d5e6f70819200",
         "canonicalMediaType": "text/markdown",
         "sizeBytes": 1024,
-        "wouldReuseBlob": false,
         "extraction": {
           "extractorVersion": 1,
           "normalizerVersion": 1,
@@ -213,19 +214,17 @@
     },
     {
       "command": "ingest",
-      "path": "/inbox/sample.md",
+      "id": "src-9f8e7d6c5b4a39281706",
       "mode": "apply",
       "applied": true,
       "capture": {
-        "contentId": "sha256:aaaa:text/markdown",
-        "captureId": "cap-1",
-        "renditionId": "sha256:aaaa:text/markdown:1:1",
-        "noteId": "source-sample",
-        "runId": "01J9Z8Q0000000000000000000",
-        "reused": {
-          "blob": false,
-          "capture": false
-        }
+        "sourceId": "src-9f8e7d6c5b4a39281706",
+        "noteId": "src-1a2b3c4d5e6f70819200",
+        "path": "sources/src-1a2b3c4d5e6f70819200.md",
+        "contentHash": "sha256:cccc",
+        "committed": true,
+        "canonicalSha": "0123456789abcdef0123456789abcdef01234567",
+        "lastIngestedAt": "2026-07-23T00:00:00.000Z"
       }
     }
   ],
@@ -233,27 +232,24 @@
     "command": "ingest",
     "phase": 2,
     "privilege": "shared",
-    "idempotency": "key-accepting",
+    "idempotency": "intrinsic",
     "executionClass": "preview-or-mutating",
-    "summary": "Capture + extraction/classification preview; --apply performs it.",
+    "summary": "Normalize a registered source (by id) + commit it as a note; --apply performs it. Intrinsically idempotent — the deterministic produced-note id makes a re-ingest of identical input a NOOP.",
     "args": [
       {
-        "name": "<path>",
+        "name": "<id>",
         "required": true,
-        "description": "Path to the source file to ingest."
+        "description": "The source registry id to ingest (from `source add`)."
       }
     ],
     "flags": [
       {
         "name": "--apply",
-        "description": "Perform the capture (default is a non-persisting preview)."
+        "description": "Perform the ingest (default is a non-persisting preview)."
       },
       {
         "name": "--dry-run",
-        "description": "Explicit preview; combined with --apply \u21d2 exit 5."
-      },
-      {
-        "name": "--idempotency-key <key>"
+        "description": "Explicit preview; combined with --apply ⇒ exit 5."
       }
     ],
     "commonFlags": [
@@ -266,18 +262,18 @@
       "--vault <path>"
     ],
     "sideEffects": [
-      "preview: NONE (no vault/projection/ledger/git/temp persistence, no audit-ref event)",
-      "apply: same as source add \u2014 immutable raw copy, manifests, broker Tier-1 CAS, finalizeLedgerWrite"
+      "preview: NONE (no vault/projection/git persistence)",
+      "apply: one direct commit of the produced note onto refs/heads/main (the common mutation order) + a projection refresh + a source.lastIngestedAt stamp; an idempotent NOOP re-ingest commits nothing and only re-stamps"
     ],
     "prohibitedEffects": [
       "preview must persist nothing to any sink",
-      "no byte persists or transmits before the secret scan passes (scan-before-persist)"
+      "a re-ingest of identical input must not produce a duplicate note or a second commit"
     ],
     "locks": [
       {
-        "scope": "canonical-integration",
+        "scope": "vault-maintenance",
         "mode": "exclusive",
-        "note": "apply mode only"
+        "note": "apply mode only — the common runMutation order"
       }
     ],
     "exitCodes": [
@@ -291,23 +287,23 @@
       {
         "code": "usage",
         "exit": 5,
-        "when": "missing <path>, unknown flag, or --dry-run with --apply"
+        "when": "missing <id>, unknown flag, --dry-run with --apply, url source, or an unsupported/irregular file"
       },
       {
         "code": "validation-error",
         "exit": 1,
-        "when": "typed normalization rejection (unsupported-encoding/encrypted-source/no-extractable-text)"
+        "when": "unknown source id, unreadable source file, or a typed normalization rejection"
       },
       {
-        "code": "locked:canonical-integration",
+        "code": "head-not-canonical",
         "exit": 2,
-        "when": "apply blocked by an active integration",
+        "when": "apply on a detached/feature-branch HEAD (not refs/heads/main)"
+      },
+      {
+        "code": "locked:vault-maintenance",
+        "exit": 2,
+        "when": "apply blocked by another vault mutation",
         "retryable": true
-      },
-      {
-        "code": "backup-unhealthy",
-        "exit": 2,
-        "when": "apply blocked pending a verified backup"
       },
       {
         "code": "internal",

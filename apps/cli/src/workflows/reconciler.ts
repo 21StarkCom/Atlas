@@ -201,7 +201,19 @@ export async function reconcileRunsOnStartup(deps: ReconcileDeps): Promise<Recon
 
   const runs: RunReconcileOutcome[] = [];
   for (const row of rows) {
-    runs.push(await recoverRun(deps, row, now));
+    // Per-row isolation: one row's recovery failure (a git error, a CAS conflict, a
+    // hook throw) must NOT abort recovery of the remaining rows. Record it as `left`
+    // with the reason and continue — the row stays non-terminal for the next pass.
+    try {
+      runs.push(await recoverRun(deps, row, now));
+    } catch (err) {
+      runs.push({
+        runId: row.run_id,
+        from: row.status,
+        action: "left",
+        reason: `recovery-error: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
   }
 
   // Layer 2: orphan-worktree sweep — a worktree recorded for a now-terminal run
@@ -469,6 +481,25 @@ async function recoverAgentCommitted(
     if (commitTree !== ctx.treeHash) {
       return { runId: row.run_id, from: "agent-committed", action: "left", reason: "commit-tree-mismatch" };
     }
+    // Crash-after-FF-before-agent_runs-flip: if canonical ALREADY contains the recorded
+    // commit, a prior (crashed) attempt landed the FF but never wrote the CLI-side
+    // `integrated` CAS. Re-running the integrate hook here would advance from a STALE
+    // base and throw `broker.cas_failed`. Finalize FORWARD instead — record `integrated`
+    // directly from the DURABLE ctx values (mirrors engine.ts `resolveIntegrationCrash`).
+    // The commit is already proven contained-in-agent-ref + tree-matched above, so this
+    // records only a genuinely-installed commit.
+    if (ctx.canonicalRef !== null) {
+      const canonicalHead = await deps.repo.readRef(ctx.canonicalRef);
+      if (canonicalHead !== null && (await deps.repo.isAncestor(ctx.commitSha, canonicalHead))) {
+        recordIntegration(deps.store, {
+          runId: row.run_id,
+          operation: row.operation,
+          artifacts: { canonicalRef: ctx.canonicalRef, canonicalSha: ctx.commitSha },
+          now: now(),
+        });
+        return { runId: row.run_id, from: "agent-committed", action: "integrated", to: "integrated" };
+      }
+    }
     const artifacts = await deps.hooks.integrate(ctx);
     // Bind the hook's result to the run's DURABLE integration intent (round-3 finding
     // on reconciler.ts:504-513): a hook that returns the UNCHANGED base sha or a
@@ -499,10 +530,12 @@ async function recoverAgentCommitted(
 /**
  * Integrated-but-unfinalized (§ recovery): a durable canonical mutation is
  * forward-only. Reproject (real hook, verified to cover `canonicalSha`) → record
- * `reindexed`; then finalize ONLY once the §2.8 step-4 backup covering the run's
- * seq is verified — a backup failure leaves the run `integrated`/`reindexed` for a
- * later retry rather than declaring `finalized` without durable coverage
- * (round-2 finding).
+ * `reindexed`, then advance `reindexed → finalized`. v2 (#338): the §2.8 audit
+ * ledger + AEAD backup/watermark are retired, so there is NO step-4 backup-coverage
+ * gate on `finalized` — git (one commit per ChangePlan on `refs/heads/main`) is the
+ * only safety mechanism, and `finalized` is durable on the commit. Reprojection stays
+ * producer-owned: without a `reindex` hook the run is LEFT `integrated` for the
+ * producer's idempotent re-drive (the reconciler never invents an index generation).
  */
 async function recoverIntegrated(
   deps: ReconcileDeps,

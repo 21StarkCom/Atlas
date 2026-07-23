@@ -2,14 +2,13 @@
  * `migrate.source-registry` — `0015_source_registry` creates the v2 operational
  * `source` registry with the exact six-column schema (Phase-4 task 4-3a / #339).
  *
- * EXPAND-AND-CONTRACT stage note: task 4-3a lands the ADDITIVE half of `0015`
- * (`CREATE TABLE source` ONLY). Task 4-3b (#340) appends the CONTRACT half — the DROP
+ * EXPAND-AND-CONTRACT: task 4-3a landed the ADDITIVE half of `0015`
+ * (`CREATE TABLE source` ONLY); task 4-3b (#340) appended the CONTRACT half — the DROP
  * of the v1 provenance model (`content_blobs`/`source_captures`/`source_renditions`/
- * `note_sources`, `0003`) once `ingest` + provenance validation are rebased off it.
- * So THIS test asserts the ADDITIVE state: after `db migrate` the v2 `source` table
- * exists with the exact schema (locator UNIQUE + kind CHECK enforced), AND the v1
- * provenance tables STILL COEXIST (their DROP is deferred to #340) — mirroring
- * `migrate.evidence-v2`'s coexistence-then-flip pattern.
+ * `note_sources`, `0003`), now that `ingest` + validation are rebased off it. So THIS
+ * test asserts the CONTRACTED state: after `db migrate` the v2 `source` table exists
+ * with the exact schema (locator UNIQUE + kind CHECK enforced), AND the four v1
+ * provenance tables are GONE — mirroring `migrate.evidence-v2`'s coexistence-then-flip.
  */
 import { describe, expect, it } from "vitest";
 import { openStore } from "../src/index.js";
@@ -110,17 +109,17 @@ describe("migrate.source-registry (0015_source_registry)", () => {
     }
   });
 
-  it("the v1 provenance tables STILL COEXIST after 0015 (the DROP is deferred to task 4-3b/#340)", () => {
+  it("the v1 provenance tables are GONE after 0015 (the CONTRACT DROP, task 4-3b/#340)", () => {
     const store = openStore({ path: ":memory:" });
     try {
       store.migrate();
       const tables = userTables(store.db);
       expect(tables.has("source")).toBe(true);
-      // ADDITIVE stage: `ingest` + provenance validation still consume the v1
-      // provenance model, so `0015` must NOT drop it yet — the DROP rides `0015` in
-      // the #340 commit that rebases those consumers off provenance.
+      // CONTRACT stage (#340): `ingest` + validation are rebased onto the flat `source`
+      // registry, so `0015` forward-DROPs the four v1 provenance tables — none survives
+      // a fresh migrate (`source` is the only table 0015 leaves standing).
       for (const t of ["content_blobs", "source_captures", "source_renditions", "note_sources"]) {
-        expect(tables.has(t), `${t} must still coexist`).toBe(true);
+        expect(tables.has(t), `${t} must be dropped`).toBe(false);
       }
     } finally {
       store.close();

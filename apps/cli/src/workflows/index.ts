@@ -81,7 +81,6 @@ export {
 
 export {
   makeCanonicalIntegrator,
-  makeDirectCaptureIntegration,
   CANONICAL_BRANCH,
 } from "./direct-integrator.js";
 

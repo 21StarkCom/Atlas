@@ -178,7 +178,13 @@ export const MIGRATION_OWNERSHIP: Readonly<Record<string, readonly string[]>> = 
     "git_operations",
   ],
   "0002_jobs": ["jobs", "job_attempts"],
-  "0003_provenance": ["content_blobs", "source_captures", "source_renditions", "note_sources"],
+  // `0003_provenance` created the v1 content-addressed provenance tables
+  // (`content_blobs`/`source_captures`/`source_renditions`/`note_sources`), but
+  // `0015_source_registry` forward-DROPs all four (#340 — the v1 provenance model is
+  // retired; `ingest` is rebased onto the flat `source` registry + the canonical
+  // mutation order). None survives a fresh migrate, so the dictionary no longer defines
+  // them and they are absent here — the `checkTableInventory` bijection stays intact
+  // (flattened == dictionary CREATE TABLEs).
   // `0004_claims` created `claims`/`claim_evidence`, but `0014_evidence_v2`
   // forward-DROPs them (#337). Neither table survives a fresh migrate, so the
   // dictionary no longer defines them and they are absent from the ownership map —
@@ -192,11 +198,10 @@ export const MIGRATION_OWNERSHIP: Readonly<Record<string, readonly string[]>> = 
   // task-4-4 commit that removes their last consumer).
   "0014_evidence_v2": ["evidence"],
   // v2 operational source registry (task 4-3a, in `openStore`'s DEFAULT set) — the
-  // flat `source` table `source add`/`list`/`show` read/write. ADDITIVE in #339: the
-  // DROP of the v1 provenance tables (`content_blobs`/`source_captures`/
-  // `source_renditions`/`note_sources`) rides this same migration in the task-4-3b/#340
-  // commit that rebases `ingest` + provenance validation off them (expand-and-contract),
-  // so they still COEXIST here and stay attributed to `0003_provenance` above.
+  // flat `source` table `source add`/`list`/`show`/`ingest` read/write. This migration
+  // also forward-DROPs the four v1 provenance tables (task 4-3b/#340) once `ingest` +
+  // provenance validation are rebased off them (expand-and-contract), so `source` is
+  // the ONLY table it leaves standing.
   "0015_source_registry": ["source"],
   "(runner bootstrap)": ["db_schema_migrations"],
 } as const;

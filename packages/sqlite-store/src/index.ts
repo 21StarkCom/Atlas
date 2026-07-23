@@ -57,12 +57,6 @@ export { foldNotesForPaths } from "./fold-notes-for-paths.js";
 export { foldNotesV2 } from "./fold-notes-v2.js";
 
 export {
-  foldProvenanceManifests,
-  MalformedManifestError,
-  DanglingSourceError,
-} from "./provenance/fold.js";
-
-export {
   foldEvidenceManifests,
   clearEvidenceProjection,
   replaceNoteEvidence,
@@ -118,15 +112,6 @@ export { migration0012SyncCursors, SYNC_CURSORS_DDL } from "../migrations/0012_s
 export { migration0013LinksV2, LINKS_V2_DDL } from "../migrations/0013_links_v2.js";
 export { migration0014EvidenceV2, EVIDENCE_V2_DDL } from "../migrations/0014_evidence_v2.js";
 export { migration0015SourceRegistry, SOURCE_REGISTRY_DDL } from "../migrations/0015_source_registry.js";
-
-export { ProvenanceRepo, captureId } from "./repos/provenance.js";
-export type {
-  ContentBlobRow,
-  SourceCaptureRow,
-  SourceRenditionRow,
-  NoteSourceRow,
-  RenditionComponents,
-} from "./repos/provenance.js";
 
 export { EvidenceRepo } from "./repos/evidence.js";
 export type { EvidenceRow, EvidenceInput, EvidenceStatus } from "./repos/evidence.js";

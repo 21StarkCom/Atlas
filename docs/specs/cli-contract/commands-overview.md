@@ -11,7 +11,7 @@ Registry version: **2** · Commands: **24**
 | 1 | `db migrate` | intrinsic | shared | yes | `docs/specs/cli-contract/db-migrate.schema.json` |
 | 1 | `db rebuild` | intrinsic | shared | yes | `docs/specs/cli-contract/db-rebuild.schema.json` |
 | 1 | `status` | none | shared | yes | `docs/specs/cli-contract/status.schema.json` |
-| 2 | `ingest` | key-accepting | shared | yes | `docs/specs/cli-contract/ingest.schema.json` |
+| 2 | `ingest` | intrinsic | shared | yes | `docs/specs/cli-contract/ingest.schema.json` |
 | 2 | `jobs list` | none | shared | yes | `docs/specs/cli-contract/jobs-list.schema.json` |
 | 2 | `jobs run` | key-accepting | shared | yes | `docs/specs/cli-contract/jobs-run.schema.json` |
 | 2 | `note add` | key-accepting | shared | yes | `docs/specs/cli-contract/note-add.schema.json` |

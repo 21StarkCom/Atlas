@@ -70,7 +70,7 @@
       "name": "ingest",
       "schemaRef": "docs/specs/cli-contract/ingest.schema.json",
       "phase": 2,
-      "idempotency": "key-accepting",
+      "idempotency": "intrinsic",
       "privilege": "shared",
       "implemented": true
     },

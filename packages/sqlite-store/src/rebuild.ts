@@ -311,11 +311,12 @@ export function rebuildProjections(
 
     // Run every registered projection fold INSIDE the same transaction, after
     // the core `notes` projection exists (folds resolve their citations against
-    // `notes`). `foldProvenanceManifests` (0003 PR-A) and `foldEvidenceManifests`
-    // (0014, the v2 vault-derived evidence projection) register here. A fold whose
-    // tables are absent (migration not yet applied) is a self-guarded no-op, so a
-    // Phase-1 DB still rebuilds. A fold that throws rolls the whole rebuild back —
-    // the old projection stays readable (dictionary §8).
+    // `notes`). `foldEvidenceManifests` (0014, the v2 vault-derived evidence
+    // projection) registers here. (The v1 `foldProvenanceManifests` is GONE — 0015
+    // forward-DROPs its four content-addressed tables, #340.) A fold whose tables are
+    // absent (migration not yet applied) is a self-guarded no-op, so a Phase-1 DB
+    // still rebuilds. A fold that throws rolls the whole rebuild back — the old
+    // projection stays readable (dictionary §8).
     for (const fold of projectionFolds) fold(snapshot, db);
 
     // Restore the generation fences for surviving note_ids (see the snapshot above).
@@ -334,15 +335,15 @@ export function rebuildProjections(
 }
 
 // ---------------------------------------------------------------------------
-// Projection fold registry (§2.7 / §8): the provenance (0003) & v2 evidence
-// (0014) folds.
+// Projection fold registry (§2.7 / §8): the v2 evidence (0014) fold. (The v1
+// provenance fold is retired — 0015 forward-DROPs its four tables, #340.)
 // ---------------------------------------------------------------------------
 
 /**
  * A projection fold reconstructs additional retained-PR projection tables from a
  * `VaultSnapshot` (its canonical Markdown manifests) inside the rebuild
  * transaction. `db` is the transaction-scoped connection (the "`tx`" of the
- * task's `foldProvenanceManifests(snapshot, tx)` signature).
+ * task's `foldEvidenceManifests(snapshot, tx)` signature).
  */
 export type ProjectionFold = (snapshot: VaultSnapshot, db: SqliteDatabase) => void;
 
@@ -350,9 +351,9 @@ const projectionFolds: ProjectionFold[] = [];
 
 /**
  * Register a projection fold to run inside every {@link rebuildProjections}
- * transaction (Task 2.1 registers {@link foldProvenanceManifests}). Idempotent
- * per fold reference — registering the same function twice is a no-op, so
- * importing the provenance module more than once cannot double-apply it.
+ * transaction (the v2 `foldEvidenceManifests` registers here; the v1 provenance fold
+ * is retired — #340). Idempotent per fold reference — registering the same function
+ * twice is a no-op, so importing a fold module more than once cannot double-apply it.
  */
 export function registerProjectionFold(fold: ProjectionFold): void {
   if (!projectionFolds.includes(fold)) projectionFolds.push(fold);
