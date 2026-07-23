@@ -11,7 +11,7 @@
  *   - **rebuild** full regeneration from Markdown: clear the table, re-embed every note.
  *
  * Every EXECUTED index operation is a projection-class op: it appends EXACTLY ONE
- * terminal `run.projection` git-ref audit event (via {@link runReadAudit} →
+ * (v2 #334: the formerly-appended `run.projection` audit event is retired; via
  * `finalizeLedgerWrite`, §2.8) and — because a projection is a real state change — takes
  * its mandatory covering backup (`strictBackup`, never coalesced). status/verify write
  * NO ledger business row; repair/rebuild mutate only the LanceDB projection + the SQLite
@@ -50,7 +50,6 @@ import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { openMigratedStore } from "./store-open.js";
 import { resolvePath } from "./backup-config.js";
-import { runReadAudit } from "../audit/readonly.js";
 
 // Per-run egress ceilings for the index-embedding capability (D19) — generous; the
 // payload scan + capability enforce the real limits.
@@ -243,8 +242,8 @@ async function indexRebuildCmd(ctx: RunContext): Promise<number> {
         durationMs,
       };
 
-      const audit = await runReadAudit(ctx, "run.projection", "index rebuild", store, { strictBackup: true });
-      ctx.log.info("index.rebuild", { notesIndexed: report.notesIndexed, chunksWritten: report.chunksWritten, unresolved: report.unresolved.length, audited: audit.recorded, runId: audit.runId });
+      // v2 (#334): the run.projection audit append is retired (ADR-0003).
+      ctx.log.info("index.rebuild", { notesIndexed: report.notesIndexed, chunksWritten: report.chunksWritten, unresolved: report.unresolved.length, runId: ctx.runId });
       if (ctx.output.mode === "json") emitJson(out);
       else ctx.render(`index rebuild — ${report.notesIndexed} note(s), ${report.chunksWritten} chunk(s), ${report.generationsRetired} retired (${durationMs}ms)`);
       return partialExit(report.unresolved);

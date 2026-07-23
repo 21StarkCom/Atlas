@@ -32,7 +32,7 @@ import {
   isNoteAddAllowedPath,
   isSyncAllowedPath,
   type CaptureScope,
-} from "@atlas/broker";
+} from "./capture-scope.js";
 import type { AuditBroker, UnsignedAuditEvent } from "@atlas/sqlite-store";
 import type { BrokerIntegration, IntegrationContext, RunIntegrator } from "./index.js";
 import type { CaptureIntegration } from "../ingest/capture.js";

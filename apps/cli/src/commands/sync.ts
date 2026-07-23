@@ -46,9 +46,7 @@ import { resolvePath } from "./backup-config.js";
 import { openMigratedStore } from "./store-open.js";
 import { readVault } from "../vault/reader.js";
 import { buildEmbedder, indexingConfig } from "./index-ops.js";
-import type { SyncCycleDeps } from "../sync/cycle.js";
 import { reconcile, type ReconcileResult } from "../sync/diff.js";
-import type { ScanOutcome } from "../sync/plan.js";
 
 interface SyncArgs {
   readonly dryRun: boolean;
@@ -64,26 +62,6 @@ function parseSyncArgs(argv: readonly string[]): SyncArgs {
     throw CliError.usage(`unknown argument for sync: ${a}`);
   }
   return { dryRun };
-}
-
-/**
- * v2 (#326, ADR-0003): the secret scan is retired EVERYWHERE — production
- * scanners are always-clean no-ops, so an absorb cycle can never quarantine and
- * exit 3 is unreachable. #329 rewrote the `sync` COMMAND onto the reconcile path
- * below (no scanners at all); these no-op scanners now serve ONLY the retained
- * absorb-cycle engine that still backs `sync reset` (cycle tests inject their own
- * scanners to exercise the surviving verdict-handling seam).
- */
-export function realScanners(_ctx: RunContext): Pick<SyncCycleDeps, "scanNoteBytes" | "scanGeneratedArtifact"> {
-  return {
-    scanNoteBytes: async (): Promise<ScanOutcome> => {
-      await Promise.resolve();
-      return { clean: true };
-    },
-    scanGeneratedArtifact: async () => {
-      await Promise.resolve();
-    },
-  };
 }
 
 /**

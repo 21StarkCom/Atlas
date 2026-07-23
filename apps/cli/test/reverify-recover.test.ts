@@ -23,7 +23,7 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { platform, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -32,22 +32,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.setConfig({ testTimeout: 30_000 });
 import { openStore, type Store } from "@atlas/sqlite-store";
 import { openRepo, type Repo } from "@atlas/git";
-import { PrePersistenceGuard, type QuarantineSink, type SecretFinding } from "@atlas/scan";
-import { normalize, probeSandbox } from "@atlas/sources";
+import { normalize } from "@atlas/sources";
 import { recoverAnchorFrom, parseLocatorRange, type RecoverAnchorEnv } from "../src/workflows/reverify-recover.js";
 import type { EvidenceHeadRow } from "../src/workflows/reverify-handler.js";
 
-// `recoverAnchorFrom` runs the sandboxed parser worker — same #29 gate as the other
-// capture-driving suites: STRICT on a provisioned host, LOUD SKIP otherwise
-// (stock hosted Linux lacks delegated cgroups; macOS CI is the strict platform).
-const RR_SANDBOX = await probeSandbox();
-const RR_REQUIRE = process.env.ATLAS_SANDBOX_REQUIRE === "1" || (process.env.CI === "true" && platform() === "darwin");
-if (!RR_SANDBOX.supported && RR_REQUIRE) {
-  const missing = RR_SANDBOX.checks.filter((c) => !c.available).map((c) => c.guarantee).join(", ");
-  throw new Error(`[reverify-recover] provisioned host must support the sandbox but does not (${RR_SANDBOX.host}: ${missing})`);
-}
-if (!RR_SANDBOX.supported) console.warn(`[reverify-recover] SKIP sandbox-dependent tests: sandbox unsupported on ${RR_SANDBOX.host}`);
-const describeIfSandbox = RR_SANDBOX.supported ? describe : describe.skip;
+// v2 (#334): the sandbox jail + scan guard are retired — re-normalization is an
+// in-process pure parse, so these rows run unconditionally.
+const describeIfSandbox = describe;
 
 const CANONICAL_REF = "refs/heads/main";
 const CONTENT = "# Alpha\n\nThe quick brown fox jumps over the lazy dog.\n";
@@ -56,18 +47,9 @@ const VAULT_PATH = `sources/${NOTE_ID}.blob`;
 
 const sha256 = (s: string | Uint8Array): string => createHash("sha256").update(s).digest("hex");
 
-class RecordingSink implements QuarantineSink {
-  readonly entries: { origin: string; findings: readonly SecretFinding[] }[] = [];
-  quarantine(input: { bytes: Uint8Array; origin: string; findings: readonly SecretFinding[] }): Promise<void> {
-    this.entries.push({ origin: input.origin, findings: input.findings });
-    return Promise.resolve();
-  }
-}
-
 let base: string;
 let repo: Repo;
 let store: Store;
-let sink: RecordingSink;
 
 /** Commit `bytes` at the blob's vault path on the canonical ref. */
 function commitBlob(bytes: string | Buffer, path = VAULT_PATH): void {
@@ -97,7 +79,7 @@ function seedProjection(rawHash: string, normalizedHash: string, extractor = 1, 
 }
 
 function env(): RecoverAnchorEnv {
-  return { repo, canonicalRef: CANONICAL_REF, guard: new PrePersistenceGuard(sink), db: store.db };
+  return { repo, canonicalRef: CANONICAL_REF, db: store.db };
 }
 
 function head(over: Partial<EvidenceHeadRow> = {}): EvidenceHeadRow {
@@ -123,7 +105,7 @@ async function realRendition(): Promise<{ normalizedHash: string; text: string; 
   const p = join(dir, "probe.md");
   writeFileSync(p, CONTENT, "utf8");
   try {
-    const r = await normalize({ path: p, guard: new PrePersistenceGuard(new RecordingSink()) });
+    const r = await normalize({ path: p });
     if (!r.ok) throw new Error(`probe normalize rejected: ${r.rejection.code}`);
     return {
       normalizedHash: r.rendition.normalizedContentHash,
@@ -143,7 +125,6 @@ beforeEach(() => {
   repo = openRepo(join(base, "vault"));
   store = openStore({ path: ":memory:" });
   store.migrate();
-  sink = new RecordingSink();
 });
 afterEach(() => {
   store.close();
@@ -210,7 +191,7 @@ describeIfSandbox("recoverAnchorFrom (#217, real sandbox)", () => {
     let ext: number;
     let norm: number;
     try {
-      const r = await normalize({ path: p2, guard: new PrePersistenceGuard(new RecordingSink()) });
+      const r = await normalize({ path: p2 });
       if (!r.ok) throw new Error(`probe rejected: ${r.rejection.code}`);
       text = r.rendition.text;
       normalizedHash = r.rendition.normalizedContentHash;
@@ -303,23 +284,6 @@ describeIfSandbox("recoverAnchorFrom (#217, real sandbox)", () => {
     expect(await recoverAnchorFrom(env(), head(), rendId(real.extractor, real.normalizer))).toBeNull();
   });
 
-  it("a secret detected during re-normalization quarantines and throws PERMANENT (never retry-burn)", async () => {
-    const secret = "AKIA" + "A".repeat(16);
-    const dirty = `# Note\n\nembedded credential: ${secret}\n`;
-    commitBlob(dirty);
-    seedProjection(sha256(dirty), "sha256:" + "1".repeat(64));
-
-    let thrown: unknown;
-    try {
-      await recoverAnchorFrom(env(), head({ raw_content_hash: sha256(dirty) }), rendId(1, 1, sha256(dirty)));
-    } catch (e) {
-      thrown = e;
-    }
-    expect(thrown, "a dirty blob must throw, not return").toBeDefined();
-    // The runner's classifyError must see this as PERMANENT (kind validation /
-    // code secret-detected) — a deterministic failure must not burn the budget.
-    const t = thrown as { kind?: string; code?: string };
-    expect(t.kind === "validation" || t.code === "secret-detected").toBe(true);
-    expect(sink.entries.length).toBeGreaterThan(0); // quarantined BEFORE the throw
-  });
+  // v2 (#334): the secret-scan gate is retired — a credential-bearing blob
+  // re-normalizes like any other bytes; there is no quarantine path to prove.
 });

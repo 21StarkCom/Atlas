@@ -1,40 +1,28 @@
 /**
  * `support/sweep-harness` — the arrangement world for the §13.8 `--json`
- * conformance sweep (SP-1 Phase 6). Stands up, ONCE per suite:
+ * conformance sweep. v2 (#334): DAEMON-FREE — the broker/egress processes are
+ * retired (ADR-0003), so the harness stands up only:
  *
  *  - a seeded git vault (two canonical Markdown notes),
- *  - a real `BrokerService` over its Unix-socket server (test mode; the fixture
- *    `atlas-test-approver` signer enrolled for the privileged read ops),
- *  - the gated in-process fake provider (`ATLAS_FAKE_PROVIDER=1`): post the Phase-2
- *    cutover the Gemini adapter runs in-process in the `brain` child, so there is no
- *    egress daemon to inject an adapter into — the same DETERMINISTIC hash-embedding
- *    fake (identical text ⇒ identical vector, so retrieval ranks an exact-text eval
- *    query at 1) is selected by env instead,
- *  - a `brain.config.yaml` + env (test mode, custody seam, fake-provider flag),
+ *  - the gated in-process fake provider (`ATLAS_FAKE_PROVIDER=1`) — the same
+ *    DETERMINISTIC hash-embedding fake (identical text ⇒ identical vector, so
+ *    retrieval ranks an exact-text eval query at 1),
+ *  - a `brain.config.yaml` + env (test mode, fake-provider flag),
  *
  * then arranges state THROUGH THE REAL BINARY (`db migrate` → `db rebuild` →
  * `index rebuild`) plus targeted SQL seeding for row-addressed commands. The
  * sweep itself only consumes `run()` + the seeded ids.
  */
-import { randomBytes } from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  BrokerService,
-  generateEd25519,
-  parsePrivateKeyFlexible,
-  signBytes,
-  startBrokerServer,
-  type AttestationKey,
-} from "@atlas/broker";
 
 const REPO_ROOT = join(import.meta.dirname, "..", "..");
 const BIN = join(REPO_ROOT, "apps", "cli", "dist", "bin.js");
 const DIMENSIONS = 768;
 
-/** A completed child invocation (async — the broker server lives in THIS process). */
+/** A completed child invocation. */
 export interface RunResult {
   status: number | null;
   stdout: string;
@@ -49,32 +37,20 @@ export interface SweepHarness {
   readonly seeded: {
     noteId: string;
     sourceId: string;
-    reviewRunId: string;
-    quarantineId: string | null;
     queriesPath: string;
     labelsPath: string;
-    gradSource: string;
-    gradCopy: string;
   };
   run(argv: string[], opts?: { env?: Record<string, string> }): Promise<RunResult>;
-  /** export-challenge → fixture-sign → authorization file; returns the file path. */
-  authorize(challengeJson: string): string;
   cleanup(): Promise<void>;
 }
 
 export async function makeSweepHarness(): Promise<SweepHarness> {
   const root = mkdtempSync(join(tmpdir(), "atlas-sweep-"));
-  // The quarantine store must be OUTSIDE the repo + vault (isolation boundary,
-  // `quarantine-dir-invalid`) — a dedicated sibling temp dir, not under `root`.
   const quarantineDir = mkdtempSync(join(tmpdir(), "atlas-sweep-quarantine-"));
   const vaultDir = join(root, "vault");
   const atlasDir = join(root, ".atlas");
-  const custodyDir = join(atlasDir, "custody");
-  const keysDir = join(root, "keys");
   const dbPath = join(atlasDir, "atlas.db");
-  const brokerSocket = join(root, "broker.sock");
-  const egressSocket = join(root, "egress.sock");
-  for (const d of [vaultDir, atlasDir, custodyDir, keysDir, join(atlasDir, "worktrees"), join(atlasDir, "logs")]) {
+  for (const d of [vaultDir, atlasDir, join(atlasDir, "worktrees"), join(atlasDir, "logs")]) {
     mkdirSync(d, { recursive: true });
   }
 
@@ -107,36 +83,8 @@ export async function makeSweepHarness(): Promise<SweepHarness> {
   git(["add", "-A"]);
   git(["commit", "-q", "-m", "seed"]);
 
-  // --- broker (test mode; fixture approver enrolled for the privileged reads) ---
-  const attKp = generateEd25519();
-  const attestation: AttestationKey = {
-    signerId: "atlas-audit-attestation-v1",
-    privateKey: attKp.privateKey,
-    publicKey: attKp.publicKey,
-  };
-  const approverKp = generateEd25519();
-  writeFileSync(join(keysDir, "atlas-test-approver.key"), approverKp.privateKeyString ?? "", "utf8");
-  const service = new BrokerService({
-    repoDir: vaultDir,
-    refs: { canonical: "refs/heads/main", audit: "refs/audit/runs", trust: "refs/atlas/trust" },
-    anchorPath: join(root, "anchor", "audit-anchor"),
-    signers: [
-      { signerId: attestation.signerId, publicKey: attKp.publicKeyString, permittedOps: [], status: "active", enrolledAt: "2026-07-01T00:00:00.000Z" },
-      { signerId: "atlas-test-approver", publicKey: approverKp.publicKeyString, permittedOps: ["quarantine inspect", "quarantine resolve"], status: "active", enrolledAt: "2026-07-01T00:00:00.000Z" },
-    ],
-    attestation,
-    testMode: true,
-  });
-  await service.start();
-  const brokerServer = await startBrokerServer(service, brokerSocket);
-
-  // --- provider: the gated in-process fake (selected by env below) ----------
-  // No egress daemon post-cutover; `egressSocket` is a dead config value the schema
-  // still requires (`broker.egress_socket_path`, `.min(1)`) but nothing dials.
-
-  // --- config + env ---------------------------------------------------------
-  const backupKey = randomBytes(32);
-  writeFileSync(join(custodyDir, "test-key-v1.key"), backupKey.toString("base64"), "utf8");
+  // --- config + env (the broker/quarantine sections are dead knobs the strict
+  // schema still requires until the #343 config rebase; nothing dials them) ---
   writeFileSync(
     join(root, "brain.config.yaml"),
     [
@@ -148,7 +96,7 @@ export async function makeSweepHarness(): Promise<SweepHarness> {
       "models: {}", "policies: {}",
       "logs:", `  dir: ${join(atlasDir, "logs")}`,
       "quarantine:", `  dir: ${quarantineDir}`,
-      "broker:", `  socket_path: ${brokerSocket}`, `  egress_socket_path: ${egressSocket}`, "",
+      "broker:", `  socket_path: ${join(root, "broker.sock")}`, `  egress_socket_path: ${join(root, "egress.sock")}`, "",
     ].join("\n"),
     "utf8",
   );
@@ -156,15 +104,10 @@ export async function makeSweepHarness(): Promise<SweepHarness> {
     ...(process.env as Record<string, string>),
     NO_COLOR: "1",
     ATLAS_TEST_MODE: "1",
-    ATLAS_CUSTODY_TEST_DIR: custodyDir,
-    // Select the gated in-process fake provider (no key, no network) — the Phase-2
-    // replacement for the pre-cutover socket EgressService fake adapter.
+    // Select the gated in-process fake provider (no key, no network).
     ATLAS_FAKE_PROVIDER: "1",
   };
 
-  // ASYNC by necessity, not preference: the broker/egress socket servers run in
-  // THIS process. A spawnSync child that RPCs the broker deadlocks — the child
-  // waits on the socket while the blocked parent can never service the accept.
   const run = (argv: string[], opts: { env?: Record<string, string> } = {}): Promise<RunResult> =>
     new Promise((resolve, reject) => {
       const child = spawn(process.execPath, [BIN, ...argv], {
@@ -194,9 +137,8 @@ export async function makeSweepHarness(): Promise<SweepHarness> {
   // --- targeted SQL seeding for row-addressed commands -----------------------
   const sourceHash = "b".repeat(64);
   const sourceId = `sha256:${sourceHash}:text/plain`;
-  const reviewRunId = "01SWEEPRUNREVIEWPENDING000";
   {
-    // Direct writes through a plain connection (the arrangement writer, not watch).
+    // Direct writes through a plain connection (the arrangement writer).
     const mod = (await import("@atlas/sqlite-store")) as typeof import("@atlas/sqlite-store");
     const db = mod.openConnection({ path: dbPath });
     try {
@@ -204,69 +146,8 @@ export async function makeSweepHarness(): Promise<SweepHarness> {
         `INSERT INTO content_blobs (raw_content_hash, canonical_media_type, size_bytes, vault_path, first_seen_at)
          VALUES (?, 'text/plain', 10, 'sources/sweep', '2026-07-19')`,
       ).run(sourceHash);
-      db.prepare(
-        `INSERT INTO agent_runs (run_id, operation, status, checkpoint_seq, tier, started_at, updated_at)
-         VALUES (?, 'enrich', 'review-pending', 4, 3, '2026-07-19T00:00:00.000Z', '2026-07-19T00:00:00.000Z')`,
-      ).run(reviewRunId);
-      const head = git(["rev-parse", "HEAD"]);
-      db.prepare(
-        `INSERT INTO git_operations (git_op_id, run_id, op_type, ref_name, commit_sha, created_at)
-         VALUES (?, ?, 'base', 'refs/heads/main', ?, '2026-07-19T00:00:01.000Z')`,
-      ).run(`${reviewRunId}:base`, reviewRunId, head);
-      db.prepare(
-        `INSERT INTO git_operations (git_op_id, run_id, op_type, ref_name, commit_sha, created_at)
-         VALUES (?, ?, 'agent-committed', ?, ?, '2026-07-19T00:00:02.000Z')`,
-      ).run(`${reviewRunId}:agent-committed`, reviewRunId, `refs/agent/${reviewRunId}`, head);
-      // `sync status` (60-B) reads the adoption cursor row — seed the zero-state
-      // exactly as provisioning/adopt-vault.sh does (the 0012 table exists after
-      // the real `db migrate` above).
-      db.prepare(
-        `INSERT OR IGNORE INTO sync_cursors (source_id, upstream_ref, last_absorbed_oid, last_synced_at, cycle_seq, pending_quarantine)
-         VALUES ('main-vault', 'refs/heads/main', NULL, '2026-07-19T00:00:00.000Z', 0, '[]')`,
-      ).run();
     } finally {
       db.close();
-    }
-  }
-
-  // --- a quarantined item, produced by the REAL fail-closed ingest path ------
-  // Quarantine AEAD key custody: `<custody>/agent/quarantine-aead.key`, parent 0700
-  // (the trusted-CLI custody posture the store enforces before any bundle write).
-  const agentCustody = join(custodyDir, "agent");
-  mkdirSync(agentCustody, { recursive: true, mode: 0o700 });
-  writeFileSync(join(agentCustody, "quarantine-aead.key"), randomBytes(32), { mode: 0o600 }); // exactly 32 RAW bytes
-
-  // The inspectable class is GRADUATION-quarantined items (bootstrap-migration §7),
-  // so the arrangement runs a real `graduation scan` over a dirty source: a
-  // secret-bearing vault whose finding hard-fails the scan (exit 3) and lands in
-  // the quarantine store WITH graduation metadata.
-  const dirtySource = join(root, "dirty-vault");
-  mkdirSync(dirtySource, { recursive: true });
-  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: dirtySource });
-  execFileSync("git", ["config", "commit.gpgsign", "false"], { cwd: dirtySource });
-  writeFileSync(join(dirtySource, "leaky.md"), `# Leaky\n\naws key AKIA${"A".repeat(16)} lives here\n`, "utf8");
-  execFileSync("git", ["add", "-A"], { cwd: dirtySource });
-  execFileSync("git", ["-c", "user.name=Aryeh Stark", "-c", "user.email=aryeh@21stark.com", "commit", "-q", "-m", "seed"], { cwd: dirtySource });
-  const ingest = await run(["graduation", "scan", "--source", dirtySource, "--copy", join(root, "dirty-copy"), "--json"]);
-  let quarantineId: string | null = null;
-  if (ingest.status === 3) {
-    const qdir = quarantineDir;
-    try {
-      // Bundle filenames are `q-<hex32>.qbundle`; the store's read() takes the BARE
-      // hex id (it re-prefixes `q-` itself), so strip both prefix and suffix.
-      const bundle = readdirSync(qdir).find((f) => /^q-[0-9a-f]{32}\./.test(f));
-      if (bundle !== undefined) quarantineId = bundle.replace(/^q-/, "").replace(/\.[^.]+$/, "");
-    } catch {
-      quarantineId = null;
-    }
-    // Prefer the id the envelope itself reports, when present.
-    try {
-      const envl = JSON.parse(ingest.stdout.trim().split("\n").pop()!);
-      const fromEnvelope =
-        envl?.details?.quarantineId ?? envl?.details?.id ?? envl?.errors?.[0]?.details?.quarantineId;
-      if (typeof fromEnvelope === "string") quarantineId = fromEnvelope;
-    } catch {
-      /* keep the directory-derived id */
     }
   }
 
@@ -276,20 +157,6 @@ export async function makeSweepHarness(): Promise<SweepHarness> {
   writeFileSync(queriesPath, JSON.stringify({ version: 1, queries: [{ id: "q1", text: alphaBody }] }), "utf8");
   writeFileSync(labelsPath, JSON.stringify({ version: 1, labels: { q1: ["concept-alpha"] } }), "utf8");
 
-  // --- graduation scan/audit source + copy -----------------------------------
-  const gradSource = vaultDir; // the clean seeded vault IS a valid graduation source
-  const gradCopy = join(root, "grad-copy");
-
-  const authorize = (challengeJson: string): string => {
-    const challenge = JSON.parse(challengeJson) as { signingPayload: string };
-    const privateKey = parsePrivateKeyFlexible(readFileSync(join(keysDir, "atlas-test-approver.key"), "utf8"));
-    const signature = signBytes(new TextEncoder().encode(challenge.signingPayload), privateKey);
-    const response = { schemaVersion: 1, challenge, signature, signerId: "atlas-test-approver" };
-    const authPath = join(root, `auth-${randomBytes(4).toString("hex")}.json`);
-    writeFileSync(authPath, JSON.stringify(response), "utf8");
-    return authPath;
-  };
-
   return {
     root,
     dbPath,
@@ -297,17 +164,11 @@ export async function makeSweepHarness(): Promise<SweepHarness> {
     seeded: {
       noteId: "concept-alpha",
       sourceId,
-      reviewRunId,
-      quarantineId,
       queriesPath,
       labelsPath,
-      gradSource,
-      gradCopy,
     },
     run,
-    authorize,
     async cleanup(): Promise<void> {
-      await brokerServer.close();
       rmSync(root, { recursive: true, force: true });
       rmSync(quarantineDir, { recursive: true, force: true });
     },

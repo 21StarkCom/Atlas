@@ -27,13 +27,8 @@
 import type { JobHandler } from "@atlas/jobs";
 import type { Store } from "@atlas/sqlite-store";
 import type { RunContext } from "../handlers.js";
-import { RETENTION_WORKFLOWS } from "../retention/jobs.js";
-import { buildRetentionHandlers } from "../retention/handlers.js";
-import { REMEDIATION_WORKFLOW } from "../trust/revoke.js";
-import { buildRemediationHandler } from "../trust/remediation.js";
 import { REVERIFY_WORKFLOW } from "../workflows/reverify.js";
 import { buildReverifyHandler } from "../workflows/reverify-handler.js";
-import { INDEX_RECONCILE_WORKFLOW, buildIndexReconcileHandler } from "../sync/reconcile-handler.js";
 
 /** Everything a production job handler may need, resolved lazily per execution. */
 export interface JobHandlerDeps {
@@ -46,10 +41,10 @@ export interface JobHandlerDeps {
  * constants by the completeness gate — this list is not free-form.
  */
 export const PRODUCTION_WORKFLOWS = [
-  ...RETENTION_WORKFLOWS,
-  REMEDIATION_WORKFLOW,
+  // v2 (#334): reverify is the ONE surviving production workflow — retention
+  // sweeps, trust remediation, and the absorb-cycle index:reconcile died with
+  // their enqueuers (ADR-0003). `evidence retry` is the live enqueuer.
   REVERIFY_WORKFLOW,
-  INDEX_RECONCILE_WORKFLOW,
 ] as const;
 
 export type ProductionWorkflow = (typeof PRODUCTION_WORKFLOWS)[number];
@@ -61,9 +56,6 @@ export type ProductionWorkflow = (typeof PRODUCTION_WORKFLOWS)[number];
  */
 export function buildJobHandlers(deps: JobHandlerDeps): Record<string, JobHandler> {
   return {
-    ...buildRetentionHandlers(deps),
-    [REMEDIATION_WORKFLOW]: buildRemediationHandler(deps),
     [REVERIFY_WORKFLOW]: buildReverifyHandler(deps),
-    [INDEX_RECONCILE_WORKFLOW]: buildIndexReconcileHandler(deps),
   };
 }

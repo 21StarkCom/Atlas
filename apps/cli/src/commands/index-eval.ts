@@ -31,7 +31,6 @@ import { registerCommand, type RunContext } from "../handlers.js";
 import { openMigratedStore } from "./store-open.js";
 import { makeRetrieveSeam } from "../retrieval/wiring.js";
 import { QueryEmbedError } from "../retrieval/layers.js";
-import { runReadAudit } from "../audit/readonly.js";
 
 export interface ParsedIndexEvalArgs {
   readonly queriesPath: string;
@@ -264,15 +263,14 @@ async function indexEvalCmd(ctx: RunContext): Promise<number> {
 
     const out = evalOutput(result, { minRecall: p.minRecall, minMrr: p.minMrr }, degradedQueries);
     // Best-effort Tier-0 audit — reuse THIS store (the status/inspect pure-read pattern).
-    const audit = await runReadAudit(ctx, "run.readonly", "index eval", store, { runId });
+    // v2 (#334): the run.readonly audit append is retired (ADR-0003).
     ctx.log.info("index.eval", {
       queries: out.queries,
       recallAt10: out.metrics.recallAt10,
       mrr: out.metrics.mrr,
       pass: out.pass,
       degradedQueries,
-      audited: audit.recorded,
-      runId: audit.runId,
+      runId,
     });
     if (ctx.output.mode === "json") emitJson(out);
     else

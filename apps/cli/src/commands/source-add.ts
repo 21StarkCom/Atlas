@@ -9,7 +9,7 @@ import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { serializeContentId, serializeRenditionId } from "@atlas/contracts";
 import { captureSource, CaptureRejectedError } from "../ingest/capture.js";
-import { buildCaptureDeps, buildGuard } from "../ingest/wiring.js";
+import { buildCaptureDeps } from "../ingest/wiring.js";
 import { resolvePath } from "./backup-config.js";
 import { withVaultMutation } from "../locks/mutation-guard.js";
 
@@ -42,9 +42,7 @@ function parseArgs(argv: string[]): ParsedArgs {
 
 async function sourceAdd(ctx: RunContext): Promise<number> {
   const args = parseArgs(ctx.argv);
-  // PREFLIGHT guard is built here; captureSource runs the scan-before-persist
   // BEFORE assembling any mutating dep (DEFECT #1).
-  const guard = buildGuard(ctx);
   const deps = buildCaptureDeps(ctx, "source add", args.idempotencyKey);
   const vaultPath = resolvePath(ctx, ctx.config.config.vault.path);
 
@@ -55,7 +53,7 @@ async function sourceAdd(ctx: RunContext): Promise<number> {
     // index.lock re-check fires at the true post-grounding boundary (after the
     // sandboxed normalize, before the first durable mutation), not before grounding.
     result = await withVaultMutation(ctx, vaultPath, (preApply) =>
-      captureSource({ path: args.path, guard, deps, preApply }),
+      captureSource({ path: args.path, deps, preApply }),
     );
   } catch (e) {
     if (e instanceof CaptureRejectedError) {

@@ -8,21 +8,14 @@
  * (DEFECT #1). The broker-side integration seam signs the `run.integrated` event —
  * the CLI never holds the audit-attestation key (DEFECT #2).
  */
-import { type CaptureScope } from "@atlas/broker";
-import { PrePersistenceGuard } from "@atlas/scan";
 import { openRepo } from "@atlas/git";
 import type { RunContext } from "../handlers.js";
-import { quarantineStoreFromContext } from "../quarantine/config.js";
+import type { CaptureScope } from "../workflows/capture-scope.js";
 import { openWorkflowStore } from "../workflows/index.js";
 import { makeDirectCaptureIntegration, CANONICAL_BRANCH } from "../workflows/direct-integrator.js";
 import { openMigratedStore } from "../commands/store-open.js";
 import { backupConfig, ledgerDbPath, resolvePath } from "../commands/backup-config.js";
 import { type CaptureDeps, type CaptureIntegration } from "./capture.js";
-
-/** Build the required scan-before-persist guard (quarantine sink outside the vault). */
-export function buildGuard(ctx: RunContext): PrePersistenceGuard {
-  return new PrePersistenceGuard(quarantineStoreFromContext(ctx));
-}
 
 /** A read-only projection probe for `ingest` preview (never creates/migrates a store). */
 export function probeStore(ctx: RunContext): (() => ReturnType<typeof openMigratedStore> | null) {

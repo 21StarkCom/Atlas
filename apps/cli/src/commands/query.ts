@@ -90,11 +90,10 @@ import {
   type GenerateTextResult,
   type ModelCallReceipt,
 } from "@atlas/models";
-import { BrokerClient } from "@atlas/broker";
 import {
   assertBackupHealthy,
   BackupUnhealthyError,
-  finalizeLedgerWrite,
+  applyLedgerWrite,
   type LedgerStatement,
   type Store,
 } from "@atlas/sqlite-store";
@@ -103,7 +102,6 @@ import { registerCommand, type RunContext } from "../handlers.js";
 import { openMigratedStore } from "./store-open.js";
 import { resolvePath, backupConfig } from "./backup-config.js";
 import { agentRunUpsert } from "../workflows/checkpoints.js";
-import { runReadAudit } from "../audit/readonly.js";
 import {
   retrieve,
   AmbiguousNoteError,
@@ -452,27 +450,13 @@ export async function recordFailedTransmissions(
   now: () => string,
 ): Promise<void> {
   if (receipts.length === 0) return;
-  let broker: BrokerClient;
-  try {
-    broker = await BrokerClient.connect(ctx.config.config.broker.socket_path);
-  } catch {
-    return; // audit broker unreachable — surface the original error (WORM retains receipts)
-  }
+  // v2 (#334): no audit event, no broker — the receipts + the failed-run row land
+  // as plain observability rows, best-effort (the caller surfaces the original
+  // model error regardless).
   try {
     const ts = now();
-    await finalizeLedgerWrite(store, broker, {
-      runId,
-      event: {
-        schemaVersion: 1,
-        eventId: newRunId(),
-        kind: "run.failed",
-        occurredAt: ts,
-        runId,
-        subjects: [],
-        canonicalCommit: "0".repeat(40),
-        detail: { failedAt: "retrieve", reason },
-      },
-      ledgerWrite: [
+    store.db.transaction(() =>
+      applyLedgerWrite(store.db, [
         agentRunUpsert({
           runId,
           operation: "retrieve",
@@ -483,14 +467,15 @@ export async function recordFailedTransmissions(
           finishedAt: ts,
         }),
         ...receipts.map((r) => buildModelCallStatement(r, { now, operation: operationFor(r) })),
-      ],
-      backup: backupConfig(ctx),
-    });
-  } catch {
-    // Best-effort: the caller surfaces the original model error regardless.
-  } finally {
-    broker.close();
+      ]),
+    )();
+  } catch (e) {
+    // Best-effort: the caller surfaces the original model error regardless —
+    // but the swallow is LOGGED (#334 review): a deterministic row failure here
+    // would otherwise silently lose all failed-run model-call accounting.
+    ctx.log?.warn?.("query.failed-transmission-rows", { error: e instanceof Error ? e.message : String(e) });
   }
+  await Promise.resolve();
 }
 
 // ---------------------------------------------------------------------------
@@ -695,19 +680,16 @@ async function query(ctx: RunContext): Promise<number> {
         throw e;
       }
 
-      // Record the SINGLE terminal `run.readonly` + the correlated business rows via
-      // 1.9's audited read path (→ finalizeLedgerWrite). STRICT (round-2 finding F1): a
-      // ledger-WRITING read is not best-effort — `runReadAudit` treats a non-empty
-      // `ledgerWrite` as strict, and `strictBackup` makes the mandatory covering backup
-      // load-bearing, so a failed finalize or failed covering backup FAILS the command
-      // rather than returning an exit-0 answer without the durable audit + rows.
-      const audit = await runReadAudit(ctx, "run.readonly", "query", store, { runId, ledgerWrite: exec.ledgerWrite, strictBackup: true });
+      // v2 (#334): the run.readonly audit event + covering backup are retired with
+      // the audit machinery (ADR-0003). The correlated BUSINESS rows (retrieval
+      // run/results + model_calls receipts) still land, in one plain transaction —
+      // observability data, not an audit chain. #338 owns any further strip.
+      store.db.transaction(() => applyLedgerWrite(store.db, exec.ledgerWrite))();
       ctx.log.info("query", {
         mode: exec.output.mode,
         items: exec.output.items.length,
         modelCalls: receipts.length,
         degraded: exec.output.degraded,
-        audited: audit.recorded,
         runId,
       });
 

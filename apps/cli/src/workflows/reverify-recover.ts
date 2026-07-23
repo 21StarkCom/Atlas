@@ -44,13 +44,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseSourceHandle } from "@atlas/contracts";
 import { openRepo, type Repo } from "@atlas/git";
-import { SecretDetectedError, type PrePersistenceGuard } from "@atlas/scan";
 import { normalize } from "@atlas/sources";
 import { ProvenanceRepo, type SqliteDatabase } from "@atlas/sqlite-store";
 import type { JobHandlerDeps } from "../commands/job-handlers.js";
 import type { RunContext } from "../handlers.js";
 import { resolvePath } from "../commands/backup-config.js";
-import { buildGuard } from "../ingest/wiring.js";
 import { makeStoreValidationVault } from "../validation/store-vault.js";
 import { resolveAtRef } from "../sync/resolve-at-ref.js";
 import type { RetrievalResult } from "../retrieval/layers.js";
@@ -102,8 +100,6 @@ export interface RecoverAnchorEnv {
   /** The vault git repo (blob bytes are read at {@link RecoverAnchorEnv.canonicalRef}). */
   readonly repo: Repo;
   readonly canonicalRef: string;
-  /** The scan-before-persist guard the sandbox re-normalization runs under (D15). */
-  readonly guard: PrePersistenceGuard;
   readonly db: SqliteDatabase;
 }
 
@@ -182,18 +178,8 @@ export async function recoverAnchorFrom(
   try {
     const staged = join(stageDir, `source${ext}`);
     writeFileSync(staged, raw);
-    let result: Awaited<ReturnType<typeof normalize>>;
-    try {
-      result = await normalize({ path: staged, guard: env.guard });
-    } catch (e) {
-      if (e instanceof SecretDetectedError) {
-        // Quarantined by the guard already. Rethrow PERMANENT — the runner's
-        // classifier would treat the bare class as unknown ⇒ transient and burn the
-        // attempt budget on a deterministic failure (the #216 bug class).
-        throw { kind: "validation", code: "secret-detected", message: `reverify re-normalization detected a secret in ${blobRow.vault_path} (quarantined)` };
-      }
-      throw e;
-    }
+    // v2 (#334): the scan gate is retired — re-normalization is a pure parse.
+    const result = await normalize({ path: staged });
     if (!result.ok) return null;
     const r = result.rendition;
 
@@ -231,7 +217,6 @@ export function recoverReverifyAnchor(
     {
       repo: openRepo(resolvePath(deps.ctx, cfg.vault.path)),
       canonicalRef: CANONICAL_BRANCH,
-      guard: buildGuard(deps.ctx),
       db: deps.store.db,
     },
     ev,

@@ -25,7 +25,6 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
-import { probeSandbox } from "@atlas/sources";
 import { openStore, ProjectionRepo, type Store } from "@atlas/sqlite-store";
 import { addNote, deriveDestPath, NoteAddRejectedError, type NoteAddResult } from "../src/ingest/note-add.js";
 import type { RunContext } from "../src/handlers.js";
@@ -133,14 +132,9 @@ async function rejectedCode(p: Promise<unknown>): Promise<string> {
 
 // `normalize` runs the sandboxed parser worker — same #29 gate as the other
 // capture-driving suites: STRICT on a provisioned host, LOUD SKIP otherwise.
-const NA_SANDBOX = await probeSandbox();
-const NA_REQUIRE = process.env.ATLAS_SANDBOX_REQUIRE === "1" || (process.env.CI === "true" && platform() === "darwin");
-if (!NA_SANDBOX.supported && NA_REQUIRE) {
-  const missing = NA_SANDBOX.checks.filter((c) => !c.available).map((c) => c.guarantee).join(", ");
-  throw new Error(`[note-add] provisioned host must support the sandbox but does not (${NA_SANDBOX.host}: ${missing})`);
-}
-if (!NA_SANDBOX.supported) console.warn(`[note-add] SKIP sandbox-dependent tests: sandbox unsupported on ${NA_SANDBOX.host}`);
-const describeIfSandbox = NA_SANDBOX.supported ? describe : describe.skip;
+// v2 (#334): the sandbox jail is retired — normalize() parses in-process, so
+// the formerly sandbox-gated rows run unconditionally.
+const describeIfSandbox = describe;
 
 describeIfSandbox("note add — v2 direct-commit onto refs/heads/main", () => {
   it("happy path: a schema-valid authored note lands at <dest>/<basename> on canonical, byte-exact, projected", async () => {

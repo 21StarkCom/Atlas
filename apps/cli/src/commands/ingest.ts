@@ -9,7 +9,7 @@ import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { serializeContentId, serializeRenditionId } from "@atlas/contracts";
 import { captureSource, previewCapture, CaptureRejectedError } from "../ingest/capture.js";
-import { buildCaptureDeps, buildGuard, probeStore } from "../ingest/wiring.js";
+import { buildCaptureDeps, probeStore } from "../ingest/wiring.js";
 import { resolvePath } from "./backup-config.js";
 import { withVaultMutation } from "../locks/mutation-guard.js";
 
@@ -44,11 +44,10 @@ function parseArgs(argv: string[]): ParsedArgs {
 
 async function ingest(ctx: RunContext): Promise<number> {
   const args = parseArgs(ctx.argv);
-  const guard = buildGuard(ctx);
 
   if (!args.apply) {
     // PREVIEW (default): scan-before-persist still runs; nothing is persisted.
-    const preview = await previewCapture(args.path, guard, probeStore(ctx));
+    const preview = await previewCapture(args.path, probeStore(ctx));
     if ("rejection" in preview) {
       throw new CliError({
         code: "validation-error",
@@ -87,7 +86,7 @@ async function ingest(ctx: RunContext): Promise<number> {
     // post-grounding boundary (after the sandboxed normalize, before the first
     // durable mutation), not before grounding.
     result = await withVaultMutation(ctx, vaultPath, (preApply) =>
-      captureSource({ path: args.path, guard, deps, preApply }),
+      captureSource({ path: args.path, deps, preApply }),
     );
   } catch (e) {
     if (e instanceof CaptureRejectedError) {

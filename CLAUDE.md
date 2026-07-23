@@ -12,12 +12,10 @@ This file is the constitution — read it, then reach for the directory's own `C
 |------|--------------------------------|
 | [`apps/cli/CLAUDE.md`](apps/cli/CLAUDE.md) | `@atlas/cli` — the single app, the `brain` binary. Router, config, render, errors, diag, and every command handler + the workflow/graduation/quarantine/trust/retrieval engine. |
 | [`packages/contracts/CLAUDE.md`](packages/contracts/CLAUDE.md) | `@atlas/contracts` — zero-dep-besides-zod **leaf**. Stable IDs, `atlas-jcs-v1` canonical serialization, identity-key algorithm, the 17-op ChangePlan, audit/authorization Zod mirrors, shared DTOs. Byte-identity across the CLI↔broker seam. |
-| [`packages/scan/CLAUDE.md`](packages/scan/CLAUDE.md) | `@atlas/scan` — the fail-closed secret detector (leaf). One versioned engine, two guards (`PrePersistenceGuard`, `GeneratedArtifactGuard`), quarantine-before-throw. |
-| [`packages/sources/CLAUDE.md`](packages/sources/CLAUDE.md) | `@atlas/sources` — the sandboxed parser worker (macOS Seatbelt / Linux userns+seccomp+cgroup) + md/txt/pdf/html normalizers. Scan-before-persist inside the jail (D15). |
+| [`packages/sources/CLAUDE.md`](packages/sources/CLAUDE.md) | `@atlas/sources` — the md/txt/pdf/html normalizers (v2 #334: the sandbox jail + scan guard are retired; `normalize()` parses in-process). |
 | [`packages/sqlite-store/CLAUDE.md`](packages/sqlite-store/CLAUDE.md) | `@atlas/sqlite-store` — persistence core. Migration runner, projection rebuild, the §2.8 ledger write protocol, AEAD backup/restore, `db verify`. |
 | [`packages/lancedb-index/CLAUDE.md`](packages/lancedb-index/CLAUDE.md) | `@atlas/lancedb-index` — chunk → embed → fenced write; FTS + vector retrieval layers; staleness/verify/repair/rebuild; the recall@10 + MRR eval harness. |
-| [`packages/models/CLAUDE.md`](packages/models/CLAUDE.md) | `@atlas/models` — the CLI-side typed IPC client for the egress broker. Capability minting + `model_calls` ledger persistence. Holds **no** credential or network. |
-| [`packages/broker/CLAUDE.md`](packages/broker/CLAUDE.md) | `@atlas/broker` — the security kernel. Integration broker (`atlas-broker`) + egress broker (`atlas-egress`), two OS identities, two socket daemons. Sole protected-ref mutator + sole credential/network holder. |
+| [`packages/models/CLAUDE.md`](packages/models/CLAUDE.md) | `@atlas/models` — the in-process Gemini provider (v2): lazy env→Keychain key resolution, `model_calls` persistence, the prompt registry. |
 | [`packages/git/CLAUDE.md`](packages/git/CLAUDE.md) | `@atlas/git` — typed git plumbing for the **agent side only**; protected-ref writes are structurally impossible (`runGit` unexported). |
 | [`packages/jobs/CLAUDE.md`](packages/jobs/CLAUDE.md) | `@atlas/jobs` — the SQLite-backed durable queue; sole owner of `jobs`/`job_attempts` + their migrations. |
 | [`packages/testing/CLAUDE.md`](packages/testing/CLAUDE.md) | `@atlas/testing` — the `withFixtureVault` harness (copy a fixture into a throwaway git repo, tear down on exit). |
@@ -25,8 +23,6 @@ This file is the constitution — read it, then reach for the directory's own `C
 | [`provisioning/CLAUDE.md`](provisioning/CLAUDE.md) | The one human-led, `sudo`-requiring step: OS identities, groups, key custody, WORM anchor, sockets, sandbox prerequisites. |
 | [`docs/CLAUDE.md`](docs/CLAUDE.md) | The doc map + conventions — where each spec/plan/ADR/retro lives and which are generated. |
 | [`fixtures/CLAUDE.md`](fixtures/CLAUDE.md) | The committed test corpus — which fixture exercises what, which tests consume it. |
-| [`console/CLAUDE.md`](console/CLAUDE.md) | Atlas Console (SP-2) — a SwiftUI macOS app, **outside the pnpm workspace** (its own `swift build`/`swift test`). Pure read-face over `brain watch --json` + privileged-flow driver; opens no broker socket, imports no atlas internal package. |
-| [`console/signer/CLAUDE.md`](console/signer/CLAUDE.md) | `atlas-signer` (SP-3) — the standalone Secure-Enclave P-256 authorization signer. Separate SwiftPM package, ad-hoc-built, **outside the pnpm workspace + not built in CI**. The one component that touches the SE approver key; re-derives + refuses on payload mismatch; its own exit table. |
 
 Public face + runbook: [`README.md`](README.md) and [`docs/install.md`](docs/install.md) (provision → verify).
 

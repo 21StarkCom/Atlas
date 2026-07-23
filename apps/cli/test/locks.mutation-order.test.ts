@@ -27,7 +27,7 @@
  *             lock-entry check alone would miss it).
  *
  * The capture path funnels through the `@atlas/sources` sandbox worker, so the suite
- * gates on `probeSandbox()` (like `note-add.test.ts`) AND the compiled `dist/bin.js`
+ * gates on the compiled `dist/bin.js`
  * (like `jobs.single-runner-exclusion.test.ts`).
  */
 import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
@@ -35,20 +35,16 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSyn
 import { join, relative } from "node:path";
 import { randomBytes, createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { probeSandbox } from "@atlas/sources";
 import { openStore } from "@atlas/sqlite-store";
 
 const BIN = join(import.meta.dirname, "..", "dist", "bin.js");
 const KEY_ID = "cli-custody-v1"; // config-schema default for sqlite.ledger_backup.key_id
 const CANONICAL_REF = "refs/heads/main";
 
-const SANDBOX = await probeSandbox();
-const enabled = SANDBOX.supported && existsSync(BIN);
+// v2 (#334): the sandbox jail is retired — the only gate is the compiled binary.
+const enabled = existsSync(BIN);
 const describeIf = enabled ? describe : describe.skip;
-if (!SANDBOX.supported) {
-  // eslint-disable-next-line no-console
-  console.warn(`[locks.mutation-order] SKIPPED — sandbox unsupported on ${SANDBOX.host}`);
-} else if (!existsSync(BIN)) {
+if (!existsSync(BIN)) {
   // eslint-disable-next-line no-console
   console.warn(`[locks.mutation-order] SKIPPED — dist/bin.js absent (run \`pnpm -r build\`)`);
 }

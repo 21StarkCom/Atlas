@@ -10,7 +10,7 @@
 import { describe, it, expect } from "vitest";
 import * as modelOutput from "../src/synthesis/model-output.js";
 import { OperationForbiddenError, submitModelDerivedOperation, type ModelOutputSubmission } from "../src/synthesis/model-output.js";
-import { validChangePlan } from "./e2e/phase2-support.js";
+import { validChangePlan } from "./support/change-plan-fixtures.js";
 
 describe("model-output export surface: no shipped bypass (round-2 wing finding 1)", () => {
   it("exports EXACTLY the allowlist — no seam symbol, no internals object", () => {

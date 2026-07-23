@@ -77,36 +77,6 @@ export {
 } from "./checkpoints.js";
 
 export {
-  refreshRun,
-  RefreshError,
-  type SynthesisRefreshDeps,
-  type RefreshResult,
-} from "./refresh.js";
-
-export {
-  decideApprove,
-  canReject,
-  type ApproveDecision,
-  type ApproveInput,
-} from "./approve.js";
-
-export {
-  approveRun,
-  rejectRun,
-  ApproveError,
-  type ApproveDeps,
-  type ApproveOutcome,
-} from "./approve-run.js";
-
-export {
-  reviewRun,
-  verifyRun,
-  type ReviewReport,
-  type VerifyReport,
-  type VerifyDivergence,
-} from "./review.js";
-
-export {
   rebuildFromGit,
   type FromGitReport,
   type FromGitGap,
@@ -125,21 +95,6 @@ export {
   type PlanGeneratorDeps,
   type PlanModelsClient,
 } from "./model-plan-generator.js";
-
-export {
-  classifyRollback,
-  renditionDependents,
-  type RollbackClass,
-  type RollbackClassification,
-  type RunToRollback,
-} from "./rollback.js";
-
-export {
-  rollbackRun,
-  RollbackError,
-  type RollbackDeps,
-  type RollbackOutcome,
-} from "./rollback-run.js";
 
 export {
   enqueueReverification,

@@ -19,10 +19,7 @@
 import { describe, expect, it } from "vitest";
 import { buildJobHandlers, PRODUCTION_WORKFLOWS } from "../src/commands/job-handlers.ts";
 import type { JobHandlerDeps } from "../src/commands/job-handlers.ts";
-import { RETENTION_WORKFLOWS } from "../src/retention/jobs.ts";
-import { REMEDIATION_WORKFLOW } from "../src/trust/revoke.ts";
 import { REVERIFY_WORKFLOW } from "../src/workflows/reverify.ts";
-import { INDEX_RECONCILE_WORKFLOW } from "../src/sync/reconcile-handler.ts";
 
 /**
  * Handlers resolve their dependencies lazily INSIDE the closure, so building the
@@ -35,8 +32,10 @@ describe("job handler registry completeness", () => {
   it("declares every enqueueable production workflow", () => {
     // PRODUCTION_WORKFLOWS is the union the registry promises to cover. Assert it
     // against the enqueue-side constants so a new workflow cannot be added to one
-    // side alone.
-    const enqueueable = [...RETENTION_WORKFLOWS, REMEDIATION_WORKFLOW, REVERIFY_WORKFLOW, INDEX_RECONCILE_WORKFLOW];
+    // side alone. v2 (#334): reverify (enqueued by `evidence retry`) is the ONE
+    // surviving production workflow — retention/remediation/index:reconcile died
+    // with their enqueuers.
+    const enqueueable = [REVERIFY_WORKFLOW];
     expect([...PRODUCTION_WORKFLOWS].sort()).toEqual([...enqueueable].sort());
   });
 

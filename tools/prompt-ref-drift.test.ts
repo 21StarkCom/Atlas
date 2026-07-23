@@ -2,10 +2,6 @@ import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { DEFAULT_PROMPT_REGISTRY, PROMPT_REFS } from "@atlas/models";
-import {
-  DEFAULT_PROMPT_REGISTRY as BROKER_PROMPT_REGISTRY,
-  PROMPT_REFS as BROKER_PROMPT_REFS,
-} from "@atlas/broker";
 import { findRepoRoot } from "./cli-contract.js";
 
 /**
@@ -124,12 +120,4 @@ describe("prompt-ref drift (#210)", () => {
   // copy from the models SSOT: any divergence in refs or content fails CI, which
   // keeps the two byte-identical until the broker copy is deleted — a stale broker
   // copy can never silently mask a runtime rejection.
-  it("the @atlas/broker prompt registry is byte-identical to the @atlas/models SSOT (no divergence)", () => {
-    expect(BROKER_PROMPT_REFS, "@atlas/broker PROMPT_REFS drifted from @atlas/models").toEqual(PROMPT_REFS);
-    for (const ref of Object.values(PROMPT_REFS)) {
-      const models = DEFAULT_PROMPT_REGISTRY.resolve(ref);
-      const broker = BROKER_PROMPT_REGISTRY.resolve(ref);
-      expect(broker?.content, `@atlas/broker content for ${ref} drifted from @atlas/models`).toBe(models?.content);
-    }
-  });
 });

@@ -45,7 +45,6 @@ import { captureId as deriveCaptureId, type Store, type LedgerBackupConfig } fro
 import type { AuditBroker } from "@atlas/sqlite-store";
 import type { BrokerIntegration, IntegrationContext, RunIntegrator } from "../workflows/index.js";
 import { normalize, type NormalizeResult } from "@atlas/sources";
-import { PrePersistenceGuard } from "@atlas/scan";
 import type { Repo } from "@atlas/git";
 import {
   startRun,
@@ -73,8 +72,6 @@ import {
 import { readFileSync } from "node:fs";
 
 /** Re-export for ingest surfaces (note-add, wiring) that import from this module. */
-export { DEFAULT_CANONICAL_REF } from "@atlas/broker";
-
 /** The result `captureSource` returns (plan Task 2.6 / source-add.schema.json). */
 export interface CaptureResult {
   readonly contentId: ContentId;
@@ -137,8 +134,8 @@ function rfc3339Ms(): string {
 }
 
 /** Normalize the input, propagating typed rejections as `NormalizeResult`. */
-async function preflight(path: string, guard: PrePersistenceGuard): Promise<NormalizeResult> {
-  return normalize({ path, guard });
+async function preflight(path: string): Promise<NormalizeResult> {
+  return normalize({ path });
 }
 
 interface BlobRow {
@@ -190,10 +187,9 @@ function readRenditions(store: Store, c: ContentId): RenditionRow[] {
  */
 export async function previewCapture(
   path: string,
-  guard: PrePersistenceGuard,
   probeStore: () => Store | null,
 ): Promise<CapturePreview | { rejection: NonNullable<Extract<NormalizeResult, { ok: false }>["rejection"]> }> {
-  const norm = await preflight(path, guard);
+  const norm = await preflight(path);
   if (!norm.ok) return { rejection: norm.rejection };
   const r = norm.rendition;
   let wouldReuseBlob = false;
@@ -353,12 +349,11 @@ export function makeBrokerSignedCaptureIntegrator(opts: {
 }
 
 /**
- * Capture a source through the full Tier-1 pipeline. Requires the guard
- * (scan-before-persist). Returns the minted ids + what was reused.
+ * Capture a source through the full Tier-1 pipeline (v2: no scan gate — the
+ * normalize preflight validates shape only). Returns the minted ids + reuse.
  */
 export async function captureSource(req: {
   path: string;
-  guard: PrePersistenceGuard;
   deps: CaptureDeps;
   /**
    * Invoked at the true post-grounding boundary — AFTER the pure normalize/scan
@@ -370,12 +365,12 @@ export async function captureSource(req: {
    */
   preApply?: () => void;
 }): Promise<CaptureResult> {
-  const { path, guard, deps } = req;
+  const { path, deps } = req;
   const now = deps.now ?? rfc3339Ms;
   const canonicalRef = deps.canonicalRef;
 
   // ── Step 0: PREFLIGHT (DEFECT #1) — before ANY mutating dependency.
-  const norm = await preflight(path, guard);
+  const norm = await preflight(path);
   if (!norm.ok) {
     throw new CaptureRejectedError(norm.rejection.code, norm.rejection.format, norm.rejection.detail);
   }
