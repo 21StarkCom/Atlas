@@ -84,14 +84,6 @@ function validateSyncSchema(value: unknown): void {
   expect(Object.prototype.hasOwnProperty.call(value, "head")).toBe(false);
 }
 
-/** Validate a `sync status --json` envelope against the committed sync-status schema. */
-function validateSyncStatusSchema(value: unknown): void {
-  const ajv = new Ajv({ strict: false, allErrors: true });
-  const schema = JSON.parse(readFileSync(join(REPO_ROOT, "docs/specs/cli-contract", "sync-status.schema.json"), "utf8"));
-  const validate = ajv.compile(schema);
-  if (!validate(value)) throw new Error(`sync status failed schema: ${ajv.errorsText(validate.errors)}\n${JSON.stringify(value)}`);
-}
-
 let root: string;
 let cwd: string;
 let vaultDir: string;
@@ -706,25 +698,28 @@ describe("brain sync (v2) — sync and the read surface share the ONE reconcile 
     }
   }
 
-  /** The v2 `pending` set the REAL `sync status --json` command reports (schema-validated). */
+  /** The four pending counts the REAL merged `status --json` reports (v2, #333 —
+   * `sync status` is retired; `status.sync` rides the SAME readReconcile routine). */
   async function statusPending(): Promise<Record<string, unknown>> {
-    const r = await cli(["sync", "status", "--json"]);
+    const r = await cli(["status", "--json"]);
     expect(r.code, r.out).toBe(0);
-    const envelope = JSON.parse(r.out) as Record<string, unknown>;
-    validateSyncStatusSchema(envelope);
-    return envelope.pending as Record<string, unknown>;
+    const envelope = JSON.parse(r.out) as { sync: Record<string, unknown> };
+    return envelope.sync;
   }
 
-  it("sync status.pending counts == the immediately following sync counts across add / edit / move / drop", async () => {
+  it("status.sync pending counts == the immediately following sync counts across add / edit / move / drop", async () => {
     seedCursorForStatus();
 
     async function readThenAct(): Promise<void> {
-      const pending = await statusPending(); // the REAL sync status command, schema-validated
+      const pending = await statusPending(); // the REAL merged status command
       const acted = await sync();
-      const keys = ["scannedCount", "changedCount", "newCount", "droppedCount", "movedCount", "noop"] as const;
-      for (const k of keys) expect(pending[k], `status.pending.${k} must equal the following sync.${k}`).toEqual(acted[k]);
-      // and it really exercised the state (never a vacuous all-noop comparison)
-      expect(pending).toMatchObject({ scannedCount: acted.scannedCount });
+      const pairs = [
+        ["pendingChangedCount", "changedCount"],
+        ["pendingNewCount", "newCount"],
+        ["pendingDroppedCount", "droppedCount"],
+        ["pendingMovedCount", "movedCount"],
+      ] as const;
+      for (const [pk, sk] of pairs) expect(pending[pk], `status.sync.${pk} must equal the following sync.${sk}`).toEqual(acted[sk]);
     }
 
     // addition

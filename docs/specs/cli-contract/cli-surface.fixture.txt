@@ -12,17 +12,11 @@ headings, and comments (lines starting with a hash) — is ignored, even if it
 contains backticked words. The text after the em dash is descriptive only.
 
 # Health & diagnostics (Phase 1)
-`inspect` — read-only structural summary of the vault + store.
-`doctor` — environment/permission/lock/backup health checks; `--reclaim-locks` for dead-pid locks.
 `status` — the v2 merged read surface: vault/db/index/sync sub-objects + the retained health probes (absorbs doctor, db status, index status, sync status).
 
 # Database / ledger (Phase 1)
-`db status` — projection + ledger + migration status.
-`db verify` — invariant checks over the store (with `--backup` to verify a backup file).
 `db migrate` — apply pending DDL migrations (idempotent, checksum-guarded).
 `db rebuild` — transactional rebuild of the vault-projection tables from Markdown.
-`db backup` — take an encrypted ledger backup (advances the watermark; `--force-unblock` recovery).
-`db restore` — privileged, destructive restore of ledger tables from a backup.
 
 # Ingest & sources (Phase 2)
 `ingest` — capture + extraction/classification preview by default; `--apply` performs it.
@@ -33,8 +27,6 @@ contains backticked words. The text after the em dash is descriptive only.
 # Jobs queue (Phase 2)
 `jobs list` — paginated list of queue jobs.
 `jobs run` — claim and drain queued jobs synchronously (single-runner lock).
-`jobs retry` — re-queue failed jobs.
-`jobs cancel` — cancel pending/claimed/running jobs.
 
 # Notes (Phase 2)
 `note add` — deterministic Tier-1 authored-note ingest; applies immediately.
@@ -43,30 +35,18 @@ contains backticked words. The text after the em dash is descriptive only.
 `note history` — paginated note change history.
 
 # Git workflow — read/maintenance (Phase 2)
-`git status` — paginated open-run status.
-`git cleanup` — prune abandoned agent branches/worktrees (convergent).
 
 # Retrieval (Phase 3)
 `query` — grounded question answering with citations.
-`index status` — index generation + staleness summary.
-`index verify` — verify index consistency.
-`index repair` — convergent index repair.
 `index rebuild` — full deterministic index rebuild from Markdown.
 
 # Workflows — mutation loop (Phase 4)
 `enrich` — enrich a note; preview by default, `--apply` mutates per risk tier.
 `link` — add, re-alias, or remove a plain wiki-link or typed relationship between two notes; noop-idempotent, one commit per applied change.
-`reconcile` — alias/duplicate resolution; preview by default, `--apply` mutates.
 `maintain` — orphans/broken-links/stale maintenance; preview by default, `--apply` mutates.
 `validate` — deterministic vault validation checks.
 
 # Git workflow — review gate & privileged integration (Phase 4)
-`git review` — show a review-pending run's diff.
-`git refresh` — privileged: rebase + regenerate a superseded run (new commit + manifest).
-`git approve` — privileged: integrate an exact reviewed commit.
-`git reject` — reject a review-pending run (convergent).
-`git rollback` — privileged: roll back an integrated run.
-`git verify` — convergent manifest↔index reconciliation repair.
 
 # Evidence & claims (Phase 4)
 `evidence review` — review flagged evidence/claims.
@@ -76,20 +56,11 @@ contains backticked words. The text after the em dash is descriptive only.
 # Trust (Phase 4)
 
 # Erasure (Phase 4)
-`purge` — privileged, broker-authorized selector-based erasure across all storage classes.
 
 # Graduation & quarantine (Phase 5)
-`graduation scan` — fail-closed full-vault (+ history) secret scan on the disposable copy.
-`graduation audit` — read-only bootstrap audit of legacy notes by quarantine category.
-`graduation migrate` — privileged: deterministic, review-gated bootstrap migration.
-`quarantine inspect` — privileged: inspect quarantined items.
-`quarantine resolve` — privileged: resolve a quarantined item.
 `index eval` — retrieval-quality eval (recall@10 / MRR) against a labeled query set; the graduation gate.
 
 # Live vault sync (Phase 5)
-`sync` — run one upstream→refs/atlas/main absorb cycle over the adopted vault.
-`sync reset` — privileged: re-converge refs/atlas/main to upstream after a divergence halt.
-`sync status` — read the sync cursor, behind-by, pending quarantine, and divergence state.
+`sync` — reconcile the working tree against the projection by per-note content hash (reindex changed/new, purge dropped, move-in-place).
 
 # Console enablement (Phase 6)
-`watch` — long-lived NDJSON stream of jobs, model calls, ledger appends, backup watermark, daemon health.

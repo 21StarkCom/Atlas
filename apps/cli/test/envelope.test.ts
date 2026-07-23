@@ -74,7 +74,7 @@ describe("error envelope", () => {
     const e = new CliError({
       code: "locked:vault-maintenance",
       message: "The vault-maintenance lock is held by another process.",
-      hint: "Wait for the holder to finish, or run `brain doctor --reclaim-locks` if its pid is dead.",
+      hint: "Wait for the holder to finish — a dead holder's lock is reclaimed automatically on the next acquire.",
       exitCode: EXIT.CONFIG,
       retryable: true,
       details: { scope: "vault-maintenance", holderPid: 44122, startedAt: "2026-07-12T09:31:04.512Z" },

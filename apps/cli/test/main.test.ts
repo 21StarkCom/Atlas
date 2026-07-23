@@ -47,15 +47,15 @@ function run(
 
 describe("parseArgv", () => {
   it("matches multi-word commands longest-first", () => {
-    expect(parseArgv(["git", "approve", "x"], registry).command).toBe("git approve");
-    expect(parseArgv(["db", "status"], registry).command).toBe("db status");
+    expect(parseArgv(["evidence", "resolve", "x"], registry).command).toBe("evidence resolve");
+    expect(parseArgv(["db", "migrate"], registry).command).toBe("db migrate");
     expect(parseArgv(["status"], registry).command).toBe("status");
   });
 
   it("strips global flags anywhere and forwards the rest in ORIGINAL order", () => {
-    const p = parseArgv(["--json", "db", "status", "--foo", "bar"], registry);
+    const p = parseArgv(["--json", "db", "migrate", "--foo", "bar"], registry);
     expect(p.flags.json).toBe(true);
-    expect(p.command).toBe("db status");
+    expect(p.command).toBe("db migrate");
     // Order-sensitive: `--foo bar` must not be reordered to `bar --foo`.
     expect(p.rest).toEqual(["--foo", "bar"]);
   });
@@ -98,7 +98,7 @@ describe("runCli", () => {
     const { code, out } = await run(["--help"]);
     expect(code).toBe(EXIT.OK);
     expect(out).toContain("brain — Atlas CLI");
-    expect(out).toContain("db status");
+    expect(out).toContain("db migrate");
   });
 
   it("dispatches a registered handler and returns its exit code", async () => {

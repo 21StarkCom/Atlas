@@ -130,9 +130,7 @@ describe("no capability mint / ATLAS_EGRESS_CAPABILITY_KEY on the provider path"
     "apps/cli/src/commands/index-ops.ts",
     "apps/cli/src/commands/index-eval.ts",
     "apps/cli/src/commands/enrich.ts",
-    "apps/cli/src/commands/reconcile.ts",
     "apps/cli/src/commands/maintain.ts",
-    "apps/cli/src/commands/git-refresh.ts",
     "apps/cli/src/retrieval/wiring.ts",
     "apps/cli/src/workflows/model-plan-generator.ts",
   ];

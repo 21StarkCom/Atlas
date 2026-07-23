@@ -14,9 +14,13 @@
  * Each held lock is a file `<scope>.lock` under the lock dir carrying the owner's
  * `{ scope, pid, startedAt }`. A second acquirer of a scope held by a LIVE pid
  * fails with `locked:<scope>` (exit 2) carrying the holder's pid + start time.
- * Stale locks (dead holder pid) are NOT auto-reclaimed on acquire — reclamation
- * is explicit via `doctor --reclaim-locks` (see {@link LockManager.reclaimLocks}),
- * so a crash never silently races two writers.
+ * Stale locks (a PROVABLY-dead holder pid) are auto-reclaimed on acquire (v2,
+ * #333 review finding): the explicit `doctor --reclaim-locks` escape hatch died
+ * with `doctor`, and a crash must not wedge every writer behind a dead pid until
+ * someone hand-deletes a lock file. Reclamation happens under the acquire guard
+ * (atomic against racing acquirers) and ONLY on a readable owner whose pid is
+ * positively dead — a live holder, or an unreadable/corrupt lock file, is never
+ * touched. {@link LockManager.reclaimLocks} remains as the manual sweep API.
  */
 import { mkdirSync, readFileSync, writeFileSync, rmSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -130,8 +134,8 @@ function readGuardPid(file: string): string {
 function lockedError(owner: LockOwner): CliError {
   return new CliError({
     code: `locked:${owner.scope}`,
-    message: `The ${owner.scope} lock is held by another process.`,
-    hint: `Wait for the holder to finish, or run \`brain doctor --reclaim-locks\` if its pid is dead.`,
+    message: `The ${owner.scope} lock is held by another live process.`,
+    hint: `Wait for the holder to finish — a dead holder's lock is reclaimed automatically on the next acquire.`,
     exitCode: EXIT.CONFIG,
     retryable: true,
     details: { scope: owner.scope, holderPid: owner.pid, startedAt: owner.startedAt },
@@ -150,8 +154,9 @@ export interface LockManager {
   /** Scopes currently held by THIS manager instance, in acquisition order. */
   heldScopes(): LockScope[];
   /**
-   * Remove lock files whose holder pid is dead. Returns the reclaimed scopes.
-   * Backs `doctor --reclaim-locks`.
+   * Remove lock files whose holder pid is dead (or whose file is unreadable).
+   * Returns the reclaimed scopes. The manual sweep counterpart of the
+   * acquire-time auto-reclaim (which handles only PROVABLY-dead readable owners).
    */
   reclaimLocks(): LockScope[];
   /** Inspect the on-disk owner of `scope`, or null if unlocked. */
@@ -276,16 +281,23 @@ export function createLockManager(options: LockManagerOptions): LockManager {
           throw new CliError({
             code: `locked:${heldScope}`,
             message: `The ${heldScope} lock file exists but is unreadable.`,
-            hint: `Run \`brain doctor --reclaim-locks\` to clear a stale lock.`,
+            hint: `If no other \`brain\` process is running, delete the corrupt lock file under the vault's lock directory and retry.`,
             exitCode: EXIT.CONFIG,
             retryable: true,
             details: { scope: heldScope },
           });
         }
         if (owner.pid === pid) continue; // our own outer lock (legal nesting)
-        // A dead holder is NOT auto-reclaimed on acquire — reclamation is explicit
-        // via `doctor --reclaim-locks`, so a crash never silently races two
-        // writers. The block is unconditional whether the holder is alive or dead.
+        if (!isAlive(owner.pid)) {
+          // v2 (#333 review finding): a PROVABLY-dead holder is reclaimed HERE —
+          // the explicit `doctor --reclaim-locks` escape hatch is retired, and a
+          // crash (SIGKILL, power loss, plain Ctrl-C) must not wedge every writer
+          // until someone hand-deletes the file. Safe under the acquire guard
+          // (atomic against racing acquirers); a live holder is never touched,
+          // and the unreadable-file case above still blocks (owner unprovable).
+          rmSync(file, { force: true });
+          continue;
+        }
         throw lockedError(owner);
       }
       const file = lockFile(dir, scope);

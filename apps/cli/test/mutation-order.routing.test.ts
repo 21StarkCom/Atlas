@@ -6,8 +6,9 @@
  *     (`makeBrokerIntegrator` / `brokerSignedIntegration` / `makeInProcessBrokerClient`);
  *  2. the common mutation-order wrapper exists and exposes `runMutation`;
  *  3. `note add` routes its mutation through that wrapper (`runMutation`);
- *  4. every surviving synthesis mutation entry point (enrich / maintain / reconcile
- *     / evidence resolve) routes its apply through `applySynthesis`, which installs
+ *  4. every surviving synthesis mutation entry point (enrich / maintain /
+ *     evidence resolve — reconcile folded into sync, #333) routes its apply
+ *     through `applySynthesis`, which installs
  *     canonical via the common `runMutation` + direct `commitPaths` order — never a
  *     Phase-2 broker-CAS factory.
  *
@@ -68,7 +69,7 @@ describe("mutation-order routing conformance (#325)", () => {
   });
 
   it("every synthesis entry point routes its apply through applySynthesis, never a Phase-2 factory", () => {
-    for (const rel of ["commands/enrich.ts", "commands/maintain.ts", "commands/reconcile.ts", "commands/evidence-resolve.ts"]) {
+    for (const rel of ["commands/enrich.ts", "commands/maintain.ts", "commands/evidence-resolve.ts"]) { // reconcile folded into sync (#333)
       const src = read(rel);
       expect(src, rel).toContain("applySynthesis");
       for (const name of FORBIDDEN) expect(codeLines(join(SRC, rel)).join("\n"), `${rel} uses ${name}`).not.toContain(name);

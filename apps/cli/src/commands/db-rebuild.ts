@@ -120,7 +120,7 @@ async function dbRebuild(ctx: RunContext): Promise<number> {
           throw new CliError({
             code: "rebuild-failed",
             message: `projection rebuild failed and was rolled back: ${cause.message}`,
-            hint: "Fix the vault issues surfaced by `brain inspect`, then retry (or use --from-git to rebuild the clean subset and surface the rest as gaps).",
+            hint: "Fix the vault issues surfaced by `brain validate`, then retry (or use --from-git to rebuild the clean subset and surface the rest as gaps).",
             exitCode: EXIT.INTERNAL,
             cause,
           });

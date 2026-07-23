@@ -1,5 +1,5 @@
 /**
- * `brain index status|verify|repair|rebuild` (Task 3.5 / #42) — retrieval-index
+ * `brain index rebuild` (Task 3.5 / #42; v2 #333 folded status→`status`, repair/verify→rebuild) — retrieval-index
  * maintenance, per `retrieval-index-contract.md` §3/§4 and the four committed
  * `cli-contract/index-*.schema.json` contracts.
  *
@@ -217,128 +217,10 @@ function partialExit(unresolved: readonly UnresolvedNote[]): number {
 }
 
 // ---------------------------------------------------------------------------
-// index status (read-only)
-// ---------------------------------------------------------------------------
-
-async function indexStatus(ctx: RunContext): Promise<number> {
-  noFlags("index status", ctx.argv);
-  const cfg = indexingConfig(ctx);
-  const store = openMigratedStore(ctx);
-  try {
-    const table = await openTableOrNull(ctx, cfg);
-    const fences = noteFences(store);
-    const staleness = await computeStaleness(fences, table, cfg);
-
-    let indexed = 0;
-    let stale = 0;
-    let missing = 0;
-    for (const s of staleness) {
-      if (s.status === "indexed") indexed++;
-      else if (s.status === "stale") stale++;
-      else missing++;
-    }
-    const chunkCount = table === null ? 0 : await table.countRows();
-
-    const out = {
-      command: "index status" as const,
-      index: { configured: table !== null, chunkCount },
-      generation: {
-        chunkerVersion: cfg.chunker_version,
-        embeddingModel: cfg.embedding_model,
-        embeddingDimensions: cfg.dimensions,
-      },
-      notes: { total: fences.length, indexed, stale, missing },
-      staleness: staleness
-        .filter((s) => s.status !== "indexed")
-        .map((s) => ({ noteId: s.noteId, triggers: s.triggers })),
-    };
-
-    const audit = await runReadAudit(ctx, "run.projection", "index status", store, { strictBackup: true });
-    ctx.log.info("index.status", { indexed, stale, missing, configured: out.index.configured, audited: audit.recorded, runId: audit.runId });
-    if (ctx.output.mode === "json") emitJson(out);
-    else ctx.render(`index status — ${indexed} indexed, ${stale} stale, ${missing} missing (${out.index.configured ? `${chunkCount} chunks` : "not configured"})`);
-    return EXIT.OK;
-  } finally {
-    store.close();
-  }
-}
-
-// ---------------------------------------------------------------------------
-// index verify (read-only; exit 1 on divergence)
-// ---------------------------------------------------------------------------
-
-async function indexVerifyCmd(ctx: RunContext): Promise<number> {
-  noFlags("index verify", ctx.argv);
-  const cfg = indexingConfig(ctx);
-  const store = openMigratedStore(ctx);
-  try {
-    const table = await openTableOrNull(ctx, cfg);
-    const report = await indexVerify({
-      notes: noteFences(store),
-      table,
-      config: cfg,
-      activeGenerationIds: store.generation.activeGenerationIds(),
-    });
-
-    const out = {
-      command: "index verify" as const,
-      consistent: report.consistent,
-      checked: report.checked,
-      divergences: report.divergences.map((d) => ({ noteId: d.noteId, kind: d.kind, ...(d.detail !== undefined ? { detail: d.detail } : {}) })),
-    };
-
-    const audit = await runReadAudit(ctx, "run.projection", "index verify", store, { strictBackup: true });
-    ctx.log.info("index.verify", { consistent: report.consistent, checked: report.checked, divergences: report.divergences.length, audited: audit.recorded, runId: audit.runId });
-    if (ctx.output.mode === "json") emitJson(out);
-    else ctx.render(`index verify — ${report.consistent ? "consistent" : `${report.divergences.length} divergence(s)`} (${report.checked} checked)`);
-    return report.consistent ? EXIT.OK : EXIT.VALIDATION;
-  } finally {
-    store.close();
-  }
-}
-
-// ---------------------------------------------------------------------------
-// index repair (projection-write)
-// ---------------------------------------------------------------------------
-
-async function indexRepairCmd(ctx: RunContext): Promise<number> {
-  noFlags("index repair", ctx.argv);
-  const cfg = indexingConfig(ctx);
-  const runId = ctx.runId;
-  return ctx.withLock("vault-maintenance", async () => {
-    const store = openMigratedStore(ctx);
-    const table = await requireTable(ctx, cfg);
-    const { embed, close } = await buildEmbedder(ctx, cfg, runId);
-    try {
-      const started = Date.now();
-      const notes = await readNotes(ctx);
-      const report = await indexRepair(indexDeps(ctx, cfg, store, table, embed, notes));
-      // Re-derive the `text` FTS index to cover any newly written rows (§6, #156).
-      await ensureFtsIndex(table);
-      const durationMs = Date.now() - started;
-
-      const out = {
-        command: "index repair" as const,
-        outcome: report.outcome,
-        repaired: report.repaired.map((r) => ({ noteId: r.noteId, action: r.action, ...(r.generationId !== undefined ? { generationId: r.generationId } : {}) })),
-        ...(report.outcome === "partial" ? { unresolved: report.unresolved.map(serializeUnresolved) } : {}),
-        durationMs,
-      };
-
-      const audit = await runReadAudit(ctx, "run.projection", "index repair", store, { strictBackup: true });
-      ctx.log.info("index.repair", { outcome: report.outcome, repaired: report.repaired.length, unresolved: report.unresolved.length, audited: audit.recorded, runId: audit.runId });
-      if (ctx.output.mode === "json") emitJson(out);
-      else ctx.render(`index repair — ${report.outcome}: ${report.repaired.length} repaired, ${report.unresolved.length} unresolved (${durationMs}ms)`);
-      return partialExit(report.unresolved);
-    } finally {
-      close();
-      store.close();
-    }
-  });
-}
-
-// ---------------------------------------------------------------------------
-// index rebuild (projection-write; full regeneration)
+// index rebuild (projection-write; full regeneration) — the ONE surviving
+// index maintenance command (v2, #333): status folded into `status`,
+// repair/verify folded into rebuild (a full deterministic regeneration
+// subsumes convergent repair for a single-user vault).
 // ---------------------------------------------------------------------------
 
 async function indexRebuildCmd(ctx: RunContext): Promise<number> {
@@ -397,9 +279,6 @@ function serializeUnresolved(u: UnresolvedNote): Record<string, unknown> {
   };
 }
 
-registerCommand("index status", indexStatus);
-registerCommand("index verify", indexVerifyCmd);
-registerCommand("index repair", indexRepairCmd);
 registerCommand("index rebuild", indexRebuildCmd);
 
-export { indexStatus, indexVerifyCmd, indexRepairCmd, indexRebuildCmd };
+export { indexRebuildCmd };

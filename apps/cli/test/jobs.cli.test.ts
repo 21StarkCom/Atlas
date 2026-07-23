@@ -92,22 +92,10 @@ async function cli(argv: string[]): Promise<{ code: number; out: string }> {
 }
 
 describe("jobs.cli", () => {
-  it("`jobs retry` with NO selector exits 5 (never a silent select-all)", async () => {
-    const { code, out } = await cli(["jobs", "retry", "--json"]);
+  it("`<jobId>` and `--all` together exit 5 (mutually exclusive)", async () => {
+    // v2 (#333): `jobs retry|cancel` are retired — `run` is the one selector-taking survivor.
+    const { code } = await cli(["jobs", "run", "job-x", "--all", "--json"]);
     expect(code).toBe(5);
-    expect(JSON.parse(out).code).toBe("usage");
-  });
-
-  it("`jobs cancel` with NO selector exits 5", async () => {
-    const { code } = await cli(["jobs", "cancel", "--json"]);
-    expect(code).toBe(5);
-  });
-
-  it("`<jobId>` and `--all` together exit 5 (mutually exclusive) for run/retry/cancel", async () => {
-    for (const cmd of ["run", "retry", "cancel"]) {
-      const { code } = await cli(["jobs", cmd, "job-x", "--all", "--json"]);
-      expect(code, cmd).toBe(5);
-    }
   });
 
   it("`jobs run` on an empty queue exits 0 with an empty batch (schema-valid)", async () => {
@@ -175,13 +163,6 @@ describe("jobs.cli", () => {
     expect(obj.pagination).toEqual({ limit: 50, offset: 0, total: 1, hasMore: false });
   });
 
-  it("`jobs retry --all` on an empty queue is a schema-valid no-op batch (exit 0)", async () => {
-    const { code, out } = await cli(["jobs", "retry", "--all", "--json"]);
-    expect(code).toBe(0);
-    const obj = JSON.parse(out);
-    assertSchema("jobs-retry", obj);
-    expect(obj.aggregate).toEqual({ exitCode: 0, succeeded: 0, failed: 0, skipped: 0, actionRequired: 0 });
-  });
 
   it("`jobs list --limit` out of range exits 5", async () => {
     const { code } = await cli(["jobs", "list", "--limit", "9999", "--json"]);
@@ -209,24 +190,25 @@ describe("jobs.cli", () => {
   }
 
   it("reuse of --idempotency-key with a CHANGED request is rejected (exit 1, idempotency-key-conflict)", async () => {
-    const a = await cli(["jobs", "cancel", "job-a", "--idempotency-key", "kdup", "--json"]);
+    // v2 (#333): retry/cancel are retired — `jobs run` carries the caller-idempotency surface.
+    const a = await cli(["jobs", "run", "job-a", "--idempotency-key", "kdup", "--json"]);
     expect(a.code, a.out).toBe(0);
     // Same key, DIFFERENT selector (job-b) ⇒ a different request ⇒ conflict.
-    const b = await cli(["jobs", "cancel", "job-b", "--idempotency-key", "kdup", "--json"]);
+    const b = await cli(["jobs", "run", "job-b", "--idempotency-key", "kdup", "--json"]);
     expect(b.code).toBe(1);
     expect(JSON.parse(b.out).code).toBe("idempotency-key-conflict");
   });
 
   it("a repeated key REPLAYS the prior result without re-executing", async () => {
     seedJob({ workflow: "cap", idempotencyKey: "seed-c", payload: {} }, "job-c");
-    const first = await cli(["jobs", "cancel", "job-c", "--idempotency-key", "kc", "--json"]);
+    const first = await cli(["jobs", "run", "job-c", "--idempotency-key", "kc", "--json"]);
     expect(first.code, first.out).toBe(0);
     const o1 = JSON.parse(first.out);
-    expect(o1.items[0].outcome).toBe("cancelled"); // pending → cancelled
+    expect(o1.items).toHaveLength(1); // the drain processed job-c (outcome per the env's handler registry)
 
     // Replay: same key + same selector returns the IDENTICAL result even though job-c
-    // is now terminal — a non-idempotent re-run would instead report "already-terminal".
-    const second = await cli(["jobs", "cancel", "job-c", "--idempotency-key", "kc", "--json"]);
+    // already ran — a non-idempotent re-run would instead report a different batch.
+    const second = await cli(["jobs", "run", "job-c", "--idempotency-key", "kc", "--json"]);
     expect(second.code).toBe(0);
     expect(JSON.parse(second.out)).toEqual(o1);
   });
@@ -244,11 +226,11 @@ describe("jobs.cli", () => {
              (command, idempotency_key, request_hash, run_id, state, result_json, created_at, updated_at)
            VALUES (?, ?, ?, ?, 'in-progress', NULL, ?, ?)`,
         )
-        .run("jobs cancel", "kx", reqHash("jobs cancel", "job-z", false), "run-other", now, now);
+        .run("jobs run", "kx", reqHash("jobs run", "job-z", false), "run-other", now, now);
     } finally {
       store.close();
     }
-    const r = await cli(["jobs", "cancel", "job-z", "--idempotency-key", "kx", "--json"]);
+    const r = await cli(["jobs", "run", "job-z", "--idempotency-key", "kx", "--json"]);
     expect(r.code).toBe(2);
     expect(JSON.parse(r.out).code).toBe("idempotency-in-progress");
   });
@@ -287,47 +269,7 @@ describe("jobs.cli", () => {
     }
   }
 
-  it("jobs cancel: a crash before the result publish re-drives identically after reconcile (no lost work)", async () => {
-    seedJob({ workflow: "cap", idempotencyKey: "seed-cc", payload: {} }, "job-cc"); // still pending (crash rolled the atomic body back)
-    insertCrashedSlot("jobs cancel", "kcc", reqHash("jobs cancel", "job-cc", false));
-    expect(reconcile()).toBeGreaterThanOrEqual(1); // no agent_runs row → freed
 
-    const r = await cli(["jobs", "cancel", "job-cc", "--idempotency-key", "kcc", "--json"]);
-    expect(r.code, r.out).toBe(0);
-    expect(JSON.parse(r.out).items[0].outcome).toBe("cancelled"); // identical to a fresh run
-    const store = openJobsStore({ path: dbPath() });
-    try {
-      expect(readSnapshot(store, "job-cc")!.state).toBe("cancelled");
-    } finally {
-      store.close();
-    }
-  });
-
-  it("jobs retry: a crashed slot re-drives identically after reconcile", async () => {
-    // Drive job-rc to a terminal `failed` directly (attempts == maxAttempts == 1).
-    seedJob({ workflow: "cap", idempotencyKey: "seed-rc", payload: {}, maxAttempts: 1 }, "job-rc");
-    const store = openJobsStore({ path: dbPath() });
-    try {
-      const now = new Date().toISOString();
-      claimNext(store.db, now, "job-rc");
-      failJob(store.db, "job-rc", 1, now, "validation");
-      expect(readSnapshot(store, "job-rc")!.state).toBe("failed");
-    } finally {
-      store.close();
-    }
-    insertCrashedSlot("jobs retry", "krc", reqHash("jobs retry", "job-rc", false));
-    expect(reconcile()).toBeGreaterThanOrEqual(1);
-
-    const r = await cli(["jobs", "retry", "job-rc", "--idempotency-key", "krc", "--json"]);
-    expect(r.code, r.out).toBe(0);
-    expect(JSON.parse(r.out).items[0].outcome).toBe("requeued");
-    const s2 = openJobsStore({ path: dbPath() });
-    try {
-      expect(readSnapshot(s2, "job-rc")!.state).toBe("pending"); // failed → pending, cleanly
-    } finally {
-      s2.close();
-    }
-  });
 
   it("jobs run: a crashed drain's freed slot never re-executes a job that already completed", async () => {
     // A crashed `jobs run --all --key krun` that drained job-run2 to `succeeded` then

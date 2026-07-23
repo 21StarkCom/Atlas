@@ -39,21 +39,10 @@ type Adapter = (h: SweepHarness) => Arranged | Promise<Arranged>;
 /** The per-command invocation adapter map (plan Phase 6 Task 1). */
 const ADAPTERS: Record<string, Adapter> = {
   status: () => ({ argv: ["status", "--json"] }),
-  // Post-#326 EXIT.ACTION_REQUIRED (6) is retired; doctor's action-required
-  // status (e.g. unprovisioned host) now surfaces as exit 2.
-  doctor: () => ({ argv: ["doctor", "--json"], okCodes: [0, 2] }),
   validate: () => ({ argv: ["validate", "--json"], okCodes: [0, 1] }),
-  "db status": () => ({ argv: ["db", "status", "--json"] }),
-  "db verify": () => ({ argv: ["db", "verify", "--json"], okCodes: [0, 1] }),
   "jobs list": () => ({ argv: ["jobs", "list", "--json"] }),
   "source list": () => ({ argv: ["source", "list", "--json"] }),
   "evidence review": () => ({ argv: ["evidence", "review", "--json"] }),
-  "git status": () => ({ argv: ["git", "status", "--json"] }),
-  "git verify": () => ({ argv: ["git", "verify", "--json"], okCodes: [0, 1] }),
-  "index status": () => ({ argv: ["index", "status", "--json"] }),
-  "index verify": () => ({ argv: ["index", "verify", "--json"], okCodes: [0, 1] }),
-  inspect: () => ({ argv: ["inspect", "--json"] }),
-  "git review": (h) => ({ argv: ["git", "review", h.seeded.reviewRunId, "--json"] }),
   "source show": (h) => ({ argv: ["source", "show", h.seeded.sourceId, "--json"] }),
   "note show": (h) => ({ argv: ["note", "show", h.seeded.noteId, "--json"] }),
   "note history": (h) => ({ argv: ["note", "history", h.seeded.noteId, "--json"] }),
@@ -63,20 +52,13 @@ const ADAPTERS: Record<string, Adapter> = {
     argv: ["index", "eval", "--queries", h.seeded.queriesPath, "--labels", h.seeded.labelsPath, "--json"],
     okCodes: [0, 1], // a below-threshold gate still emits the conformant report
   }),
-  "graduation scan": (h) => ({
-    argv: ["graduation", "scan", "--source", h.seeded.gradSource, "--copy", h.seeded.gradCopy, "--json"],
-  }),
-  "graduation audit": () => ({ argv: ["graduation", "audit", "--json"] }),
-  "sync status": () => ({ argv: ["sync", "status", "--json"] }),
-  watch: () => ({ argv: ["watch", "--json", "--once"], firstLineOnly: true }),
 };
 
 const registry = loadRegistry(root);
-// `quarantine inspect` is un-arrangeable post-#326: the secret scan is retired
-// (nothing ever quarantines), so no arrangement can seed an item. The command
-// itself leaves the registry in the #333 survivor-set shrink; excluded here
-// explicitly rather than skipped silently.
-const RETIRED_ARRANGEMENTS = new Set(["quarantine inspect"]);
+// Empty post-#333: `quarantine inspect` (the one un-arrangeable row) left the
+// registry with the survivor-set shrink; every remaining read-class row has an
+// adapter.
+const RETIRED_ARRANGEMENTS = new Set<string>([]);
 const inventory = registry.commands.filter((r) => {
   if (!r.implemented) return false; // an unimplemented row cannot be invoked; the adapter obligation starts when the flag flips
   if (RETIRED_ARRANGEMENTS.has(r.name)) return false;
@@ -94,9 +76,9 @@ describe.skipIf(!existsSync(BIN))("--json read-surface conformance sweep (§13.8
   });
 
   it("the runtime-derived inventory covers every read-class command and every one has an adapter", () => {
-    // 24 post-#326: `source trust show` left the registry with the trust
-    // semantics, and `quarantine inspect` is excluded (RETIRED_ARRANGEMENTS).
-    expect(inventory.length).toBeGreaterThanOrEqual(24);
+    // 11 post-#333: the survivor set's read-class rows (the killed diagnostic
+    // surfaces folded into `status`, which carries the read contract alone).
+    expect(inventory.length).toBeGreaterThanOrEqual(11);
     for (const r of inventory) {
       expect(ADAPTERS[r.name], `no invocation adapter for \`${r.name}\``).toBeDefined();
     }

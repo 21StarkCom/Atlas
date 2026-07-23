@@ -4,13 +4,13 @@ import { join } from "node:path";
 import { findRepoRoot } from "./cli-contract.js";
 
 /**
- * SP-1 Phase 2 Task 4 — `watch.schema.json`'s `audit.eventType` enum is a REPLICA
- * of the `audit_events` DDL CHECK (the SSOT, `packages/sqlite-store/migrations/
- * 0001_core.ts`), and the two-seq-space classification the spec/schema describe
- * must match the executable predicate in `packages/sqlite-store/src/ledger/
- * intents.ts`. Both sides are derived AT RUNTIME from the owning source files —
- * nothing here is hardcoded — so a new DDL kind, a renamed kind, or a changed
- * allocator predicate fails CI until the schema replica catches up.
+ * Ledger seq-space + DDL-allowlist gates (originally SP-1 Phase 2 Task 4). The
+ * `watch.schema.json` replica half is RETIRED with the `watch` command (v2,
+ * #333); what survives here are the EXECUTABLE gates over the still-live ledger
+ * sources — the `audit_events` DDL CHECK allowlist and the two-seq-space
+ * allocator predicate in `packages/sqlite-store/src/ledger/intents.ts` (the
+ * #217 seq-partition bug class). These die with the ledger itself in Phase 4
+ * (#338), not before.
  */
 
 const root = findRepoRoot();
@@ -25,46 +25,11 @@ function ddlEventTypes(): string[] {
   return kinds;
 }
 
-function schemaEventTypes(): string[] {
-  const schema = JSON.parse(
-    readFileSync(join(root, "docs/specs/cli-contract/watch.schema.json"), "utf8"),
-  ) as { $defs: { audit: { properties: { eventType: { enum: string[] } } } } };
-  return schema.$defs.audit.properties.eventType.enum;
-}
-
-describe("watch.schema.json audit.eventType ↔ audit_events DDL CHECK", () => {
-  it("the schema enum equals the DDL allowlist exactly (order-insensitive, no extras, no omissions)", () => {
-    const ddl = ddlEventTypes();
-    const schema = schemaEventTypes();
-    expect([...schema].sort()).toEqual([...ddl].sort());
-  });
-
+describe("audit_events DDL CHECK allowlist (SSOT shape)", () => {
   it("the DDL allowlist is the expected 14 kinds (10 run.* + 4 non-run.%)", () => {
     const ddl = ddlEventTypes();
     expect(ddl).toHaveLength(14);
     expect(ddl.filter((k) => k.startsWith("run.")).length).toBe(10);
-  });
-});
-
-describe("seq-space classification ↔ ledger/intents.ts (the executable predicate)", () => {
-  const intentsSrc = readFileSync(join(root, "packages/sqlite-store/src/ledger/intents.ts"), "utf8");
-
-  it("DB_EVENT_SEQ_BASE is 10^12 in intents.ts, and the schema's high-space example sits at it", () => {
-    expect(intentsSrc).toMatch(/DB_EVENT_SEQ_BASE\s*=\s*1_000_000_000_000/);
-    const schema = JSON.parse(
-      readFileSync(join(root, "docs/specs/cli-contract/watch.schema.json"), "utf8"),
-    ) as { examples: { event: string; seq?: number; eventType?: string }[] };
-    const audits = schema.examples.filter((e) => e.event === "audit");
-    // one example per space: a run.* row below the base, a non-run.% row at/above it
-    expect(audits.some((e) => e.eventType!.startsWith("run.") && e.seq! < 1_000_000_000_000)).toBe(true);
-    expect(audits.some((e) => !e.eventType!.startsWith("run.") && e.seq! >= 1_000_000_000_000)).toBe(true);
-  });
-
-  it("the high-space allocator counts every non-run.% row (NOT LIKE 'run.%'), never db.%-only", () => {
-    const alloc = /function nextDbEventSeq[\s\S]*?\n\}/.exec(intentsSrc);
-    expect(alloc, "nextDbEventSeq not found in intents.ts").toBeTruthy();
-    expect(alloc![0]).toContain("NOT LIKE 'run.%'");
-    expect(alloc![0]).not.toContain("LIKE 'db.%'");
   });
 
   it("the DDL's non-run.% kinds are exactly the 3 db.* kinds plus evidence.retry_enqueued", () => {
@@ -72,5 +37,20 @@ describe("seq-space classification ↔ ledger/intents.ts (the executable predica
     expect(high.sort()).toEqual(
       ["db.backup", "db.force_unblock", "db.restore", "evidence.retry_enqueued"].sort(),
     );
+  });
+});
+
+describe("seq-space classification ↔ ledger/intents.ts (the executable predicate)", () => {
+  const intentsSrc = readFileSync(join(root, "packages/sqlite-store/src/ledger/intents.ts"), "utf8");
+
+  it("DB_EVENT_SEQ_BASE is 10^12 in intents.ts", () => {
+    expect(intentsSrc).toMatch(/DB_EVENT_SEQ_BASE\s*=\s*1_000_000_000_000/);
+  });
+
+  it("the high-space allocator counts every non-run.% row (NOT LIKE 'run.%'), never db.%-only", () => {
+    const alloc = /function nextDbEventSeq[\s\S]*?\n\}/.exec(intentsSrc);
+    expect(alloc, "nextDbEventSeq not found in intents.ts").toBeTruthy();
+    expect(alloc![0]).toContain("NOT LIKE 'run.%'");
+    expect(alloc![0]).not.toContain("LIKE 'db.%'");
   });
 });

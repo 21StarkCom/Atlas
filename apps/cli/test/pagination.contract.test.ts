@@ -1,7 +1,7 @@
 /**
  * `pagination.contract.test` — the Task 2.9 pagination CONTRACT (the load-bearing
  * part). Proves, across the four paginated read commands (`source list`,
- * `note related`, `note history`, `git status`):
+ * `note related`, `note history`; `git status` retired v2, #333):
  *
  *  1. DETERMINISTIC ordering with a UNIQUE tie-breaker — rows sharing the primary
  *     sort key are ordered by the unique secondary key, so offset pagination is
@@ -23,7 +23,6 @@ import { runCli } from "../src/main.js";
 import { openStore, rebuildProjections, type Store } from "@atlas/sqlite-store";
 import type { ParsedNote, VaultSnapshot } from "@atlas/contracts";
 import { querySources } from "../src/commands/source.js";
-import { queryOpenRuns } from "../src/commands/git-status.js";
 import { traverseRelated } from "../src/commands/note.js";
 import {
   parseLimit,
@@ -187,18 +186,6 @@ describe("deterministic ordering + unique tie-breaker", () => {
     }
   });
 
-  it("git status: ties on updatedAt broken by runId (ascending)", async () => {
-    await cli(["db", "migrate", "--json"]);
-    const store = openStore({ path: dbPath });
-    try {
-      for (const n of [4, 2, 5, 1, 3]) seedOpenRun(store, n, iso(0));
-      const { rows } = queryOpenRuns(store.db, { limit: 50, offset: 0 });
-      const ids = rows.map((r) => r.run_id);
-      expect(ids).toEqual([...ids].sort());
-    } finally {
-      store.close();
-    }
-  });
 
   it("note related: ordered by (distance asc, noteId asc), each noteId once", async () => {
     await cli(["db", "migrate", "--json"]);
@@ -355,7 +342,6 @@ describe("command-level pagination bounds (all four commands, via the CLI)", () 
     const store = openStore({ path: dbPath });
     try {
       for (const n of [1, 2, 3] as const) seedBlob(store, n, iso(n)); // source list total=3
-      for (const n of [1, 2, 3] as const) seedOpenRun(store, n, iso(n)); // git status total=3
       // note related: a seed note linking to 3 others (related total=3).
       const mk = (id: string) => store.projections.insertNote({ note_id: id, slug: id, title: id, type: "concept", schema_version: 1, status: "active", file_path: `${id}.md`, content_hash: `sha256:${hash(1)}`, created: iso(0), updated: iso(0) });
       ["rseed", "r1", "r2", "r3"].forEach(mk);
@@ -370,7 +356,6 @@ describe("command-level pagination bounds (all four commands, via the CLI)", () 
   };
   const COMMANDS: { name: string; argv: (flags: string[]) => string[] }[] = [
     { name: "source list", argv: (f) => ["source", "list", ...f, "--json"] },
-    { name: "git status", argv: (f) => ["git", "status", ...f, "--json"] },
     { name: "note related", argv: (f) => ["note", "related", "rseed", ...f, "--json"] },
     { name: "note history", argv: (f) => ["note", "history", "hseed", ...f, "--json"] },
   ];
@@ -452,11 +437,6 @@ describe("stable JSON schemas (every paginated success validates)", () => {
     const r = await cli(["source", "list", "--json"]);
     expect(r.code, r.out).toBe(0);
     validateSchema("source-list", JSON.parse(r.out));
-  });
-  it("git status", async () => {
-    const r = await cli(["git", "status", "--json"]);
-    expect(r.code, r.out).toBe(0);
-    validateSchema("git-status", JSON.parse(r.out));
   });
   it("note history", async () => {
     const r = await cli(["note", "history", "concept-atlas", "--json"]);

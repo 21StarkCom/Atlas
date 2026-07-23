@@ -384,14 +384,17 @@ export function checkImplementedSchemas(root: string, reg: Registry): string[] {
   return errors;
 }
 
-/** Full consistency pass used by both `--check` and the lint test. */
+/** Full consistency pass used by both `--check` and the lint test.
+ * v2 (#333, ADR-0003): the authzContract cross-check is retired with the
+ * privilege boundary — the registry holds no privileged rows (asserted by
+ * contract-lint's all-shared gate), so the security-broker-contract's
+ * privileged-op map is a historical V1 artifact, not a live SSOT. */
 export function lintAll(root: string, reg: Registry, fixtureNames: string[]): string[] {
   return [
     ...validateRegistry(reg),
     ...checkFixtureConsistency(reg, fixtureNames),
     ...checkImplementedSchemas(root, reg),
     ...checkTableInventory(loadDataDictionaryTables(root)),
-    ...checkAuthzContractCompleteness(loadAuthzContract(root), reg),
   ];
 }
 

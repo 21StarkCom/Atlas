@@ -1,5 +1,5 @@
 /**
- * `sync` + `sync status` command handlers.
+ * The `sync` command handler.
  *
  * **`sync` (v2, #329)** reconciles the vault WORKING TREE against the SQLite
  * projection by per-note content hash — there is NO HEAD cursor; the projection's
@@ -14,15 +14,12 @@
  * the orphan-vector sweep belongs to `index rebuild` alone. Exit 0 (incl. noop), 2
  * on config/vault/lock preconditions, 4 internal, 5 usage.
  *
- * **`sync status`** carries the read-only v1 absorb-cycle surface (cursor,
- * behind-by, pending-quarantine set, divergence, exit-3 block — still riding the
- * retained absorb-cycle engine `sync/cycle.ts` for `sync reset`'s benefit) PLUS a
- * `pending` object derived from the SAME {@link readReconcile} routine `sync` acts
- * on — so `status.pending` counts can never disagree with the next `sync`. The v2
- * `status` merge (task 7) supersedes the legacy absorb-cycle half.
+ * `sync status` is RETIRED (v2, #333) — the merged `status` carries the four
+ * pending counts from the SAME {@link readReconcile} routine, so the two
+ * surfaces still cannot disagree; the absorb-cycle status surface died with its
+ * engine's last command consumers.
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { openRepo, type Repo } from "@atlas/git";
 import * as lancedb from "@lancedb/lancedb";
 import type { ParsedNote } from "@atlas/contracts";
 import { foldNotesV2, type Store } from "@atlas/sqlite-store";
@@ -45,13 +42,12 @@ import {
 } from "@atlas/lancedb-index";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
-import { CANONICAL_BRANCH } from "../workflows/direct-integrator.js";
 import { resolvePath } from "./backup-config.js";
 import { openMigratedStore } from "./store-open.js";
 import { readVault } from "../vault/reader.js";
 import { buildEmbedder, indexingConfig } from "./index-ops.js";
-import { readSingleCursor, computeBlocked, type SyncCycleDeps } from "../sync/cycle.js";
-import { detectDivergence, countBehind, reconcile, type ReconcileResult } from "../sync/diff.js";
+import type { SyncCycleDeps } from "../sync/cycle.js";
+import { reconcile, type ReconcileResult } from "../sync/diff.js";
 import type { ScanOutcome } from "../sync/plan.js";
 
 interface SyncArgs {
@@ -597,110 +593,4 @@ function renderSync(ctx: RunContext, env: SyncV2Envelope): void {
   );
 }
 
-/** The `sync status` success envelope (mirrors sync-status.schema.json). */
-export interface SyncStatusEnvelope {
-  readonly command: "sync status";
-  readonly sourceId: string;
-  readonly upstreamRef: string;
-  readonly lastAbsorbedOid: string | null;
-  readonly upstreamHead: string;
-  readonly behindBy: number | null;
-  readonly lastSyncedAt: string;
-  readonly cycleSeq: number;
-  readonly pendingQuarantine: readonly { path: string; quarantineId: string; firstSeenOid: string }[];
-  readonly divergence: { state: string; cursorOid: string | null; upstreamHead: string };
-  readonly blocked: { commitOid: string; reason: string } | null;
-}
-
-/**
- * The `sync status` command's emitted envelope: the legacy absorb-cycle state
- * ({@link SyncStatusEnvelope}) PLUS the v2 reconcile-derived pending set (#329
- * round-2, wing finding 3). `pending` is produced by the SAME {@link readReconcile}
- * routine `sync` acts on, so `status.pending` counts exactly equal the counts the
- * very next `sync` reports — the two surfaces can never disagree about the pending
- * set. Read-only; nothing mutates.
- */
-export interface SyncStatusV2Envelope extends SyncStatusEnvelope {
-  readonly pending: Omit<SyncV2Envelope, "command">;
-}
-
-/**
- * Assemble the read-only LEGACY status envelope: cursor row + live-derived
- * divergence, behind-by (null across a divergence — the count is undefined), and
- * the deterministic exit-3 block (re-derived because the cursor never advances on
- * exit 3). Everything beyond the row is read-time-derived; nothing mutates. The v2
- * reconcile pending set is layered on by {@link syncStatusHandler}, keeping this
- * absorb-cycle read (which sources git refs, not the working tree) independent.
- */
-export async function readSyncStatus(
-  store: Store,
-  repo: Repo,
-  noteGlobs: readonly string[],
-  canonicalRef: string,
-): Promise<SyncStatusEnvelope> {
-  const row = readSingleCursor(store);
-  const upstreamHead = await repo.readRef(row.upstreamRef);
-  if (upstreamHead === null) {
-    throw new CliError({
-      code: "vault-error",
-      message: `upstream ref ${row.upstreamRef} does not resolve`,
-      hint: "The adopted vault's upstream branch is missing.",
-      exitCode: EXIT.CONFIG,
-    });
-  }
-  const divergence = await detectDivergence(repo, row.lastAbsorbedOid, upstreamHead);
-  const ok = divergence.state === "ok";
-  const behindBy = ok ? await countBehind(repo, row.lastAbsorbedOid, upstreamHead) : null;
-  // The archived-id block derivation needs the REAL canonical base (#289 round-2)
-  // so status and the live cycle agree; a missing canonical ref means no block.
-  const canonicalBase = ok && behindBy !== null && behindBy > 0 ? await repo.readRef(canonicalRef) : null;
-  const blocked =
-    canonicalBase !== null ? await computeBlocked({ repo, noteGlobs }, row, upstreamHead, canonicalBase) : null;
-  return {
-    command: "sync status",
-    sourceId: row.sourceId,
-    upstreamRef: row.upstreamRef,
-    lastAbsorbedOid: row.lastAbsorbedOid,
-    upstreamHead,
-    behindBy,
-    lastSyncedAt: row.lastSyncedAt,
-    cycleSeq: row.cycleSeq,
-    pendingQuarantine: row.pendingQuarantine,
-    divergence: {
-      state: divergence.state,
-      cursorOid: divergence.state === "ok" ? row.lastAbsorbedOid : divergence.cursorOid,
-      upstreamHead,
-    },
-    blocked,
-  };
-}
-
-async function syncStatusHandler(ctx: RunContext): Promise<number> {
-  if (ctx.argv.length > 0) throw CliError.usage(`unknown argument for sync status: ${ctx.argv[0]}`);
-  const store = openMigratedStore(ctx);
-  try {
-    const repo = openRepo(resolvePath(ctx, ctx.config.config.vault.path));
-    const legacy = await readSyncStatus(store, repo, ctx.config.config.vault.note_globs, CANONICAL_BRANCH);
-    // Layer the v2 reconcile pending set on via the SHARED routine `sync` acts on
-    // (wing finding 3) — status and sync can never disagree about the pending set.
-    const env: SyncStatusV2Envelope = { ...legacy, pending: reconcileCounts(await readReconcile(ctx, store)) };
-    if (ctx.output.mode === "json") {
-      emitJson(env);
-    } else {
-      const p = env.pending;
-      const lines = [
-        `source ${env.sourceId} · upstream ${env.upstreamRef}`,
-        `cursor ${env.lastAbsorbedOid ?? "zero-state"} · behind by ${env.behindBy ?? "?? (diverged)"} · cycle ${env.cycleSeq}`,
-        `pending: ${p.noop ? "noop" : `changed ${p.changedCount} · new ${p.newCount} · dropped ${p.droppedCount} · moved ${p.movedCount}`} (${p.scannedCount} scanned)`,
-        `divergence: ${env.divergence.state} · pending quarantine: ${env.pendingQuarantine.length}${env.blocked ? ` · BLOCKED at ${env.blocked.commitOid.slice(0, 12)} (${env.blocked.reason})` : ""}`,
-      ];
-      ctx.render(lines.join("\n"));
-    }
-    return EXIT.OK;
-  } finally {
-    store.close();
-  }
-}
-
 registerCommand("sync", syncHandler);
-registerCommand("sync status", syncStatusHandler);

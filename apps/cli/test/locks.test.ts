@@ -1,5 +1,5 @@
 /**
- * locks.conflict-matrix — coexistence, ordering, and dead-pid reclaim.
+ * locks.conflict-matrix — coexistence, ordering, and dead-pid auto-reclaim (v2, #333).
  *
  * Two independent managers over the SAME lock dir stand in for two processes.
  * `isAlive` is injected so liveness is deterministic (no real forking).
@@ -164,17 +164,37 @@ describe("locks.conflict-matrix", () => {
     await a.withLock("ledger-maintenance", () => undefined);
   });
 
-  it("does NOT auto-reclaim a dead holder on acquire (crash-safety)", async () => {
-    // Simulate a crashed holder: a stale lock file whose pid is not alive.
+  it("auto-reclaims a PROVABLY-dead holder on acquire (v2 #333 — doctor --reclaim-locks is retired)", async () => {
+    // Simulate a crashed holder: a stale lock file whose pid is not alive. The
+    // next acquirer reclaims it in place — a crash never wedges the writers
+    // behind a dead pid (the explicit reclaim command died with `doctor`).
     writeFileSync(
       join(dir, "jobs-runner.lock"),
       JSON.stringify({ scope: "jobs-runner", pid: 999999, startedAt: "2026-07-12T00:00:00.000Z" }),
     );
     const b = mgr(501); // 999999 is not in ALIVE
-    await expectLocked(() => b.withLock("jobs-runner", async () => undefined), "jobs-runner");
+    let ran = false;
+    await b.withLock("jobs-runner", async () => {
+      ran = true;
+    });
+    expect(ran).toBe(true);
+    expect(b.inspect("jobs-runner")).toBeNull(); // released cleanly after the reclaim-and-take
   });
 
-  it("doctor --reclaim-locks clears dead locks and leaves live ones", async () => {
+  it("never reclaims a LIVE holder on acquire", async () => {
+    const live = mgr(701);
+    let free!: () => void;
+    const gate = new Promise<void>((r) => (free = r));
+    const held = live.withLock("jobs-runner", async () => {
+      await gate;
+    });
+    const b = mgr(501);
+    await expectLocked(() => b.withLock("jobs-runner", async () => undefined), "jobs-runner");
+    free();
+    await held;
+  });
+
+  it("reclaimLocks() — the manual sweep — clears dead locks and leaves live ones", async () => {
     const live = mgr(601);
     // A live holder on vault-maintenance…
     let free!: () => void;
