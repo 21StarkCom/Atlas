@@ -124,6 +124,31 @@ export function hasGeminiApiKey(env: NodeJS.ProcessEnv = process.env): boolean {
 export const FAKE_PROVIDER_ENV = "ATLAS_FAKE_PROVIDER";
 
 /**
+ * OPTIONAL per-case steering for the deterministic fake, read ONLY when the fake is
+ * already active (i.e. BOTH {@link FAKE_PROVIDER_ENV} and `ATLAS_TEST_MODE` are `"1"`
+ * and no explicit adapter/transport/resolver was supplied — see {@link fakeProviderActive}).
+ * It exists so the agentic-apply E2E (`apps/cli/test/agentic.e2e.test.ts`) can drive the
+ * model-authored ChangePlan matrix — a VALID grounded plan vs a MALFORMED/unparseable
+ * response, a validator-rejected plan, and a provider fault — through the SAME in-process
+ * fake, with no daemon and no network.
+ *
+ * STRICTLY test-only + INERT by default: it is never consulted unless {@link fakeProviderActive}
+ * is already true (which production, with neither env var set, can never reach), and when the
+ * var is ABSENT the fake behaves EXACTLY as before (`generateObject` ⇒ `{}`), so the
+ * CLI-contract `--json` sweep is unaffected. Modes:
+ *   - `valid`          — `generateObject` returns a grounded `AppendSection` ChangePlan
+ *                        targeting the request's own `target` (applies cleanly).
+ *   - `malformed`      — `parse` throws a `ProviderCallError` (an unparseable response).
+ *   - `schema-invalid` — returns a Zod-valid ChangePlan the ChangePlan VALIDATOR rejects
+ *                        (a RESERVED task op ⇒ `reserved-operation`).
+ *   - `error`          — `transmit` throws a `ProviderCallError` (a provider fault/timeout).
+ * A GROUNDING failure (unknown target / missing grounding) needs no mode — it is driven at
+ * the synthesis layer (the caller supplies an unknown target / empty retrieval) with the
+ * fake in `valid` mode.
+ */
+export const FAKE_PROVIDER_MODE_ENV = "ATLAS_FAKE_PROVIDER_MODE";
+
+/**
  * Whether the gated fake-provider test seam is active for this config + env. Reads
  * the invoker's `env` mapping (the command's RunContext env), NOT `process.env`, so a
  * child-process CLI drive that passes `ATLAS_TEST_MODE`/`ATLAS_FAKE_PROVIDER` only
@@ -155,20 +180,46 @@ function fakeHashVector(text: string, dims: number): number[] {
 }
 
 /**
+ * The `target` a steered fake `generateObject` plan addresses: the request's own grounded
+ * `target` (the synthesis pipeline serializes `{ …, target }` into `input`), falling back to
+ * a stable sentinel when the input is not the synthesis shape. Never throws.
+ */
+function fakePlanTarget(input: string): string {
+  try {
+    const parsed = JSON.parse(input) as { target?: unknown };
+    if (typeof parsed.target === "string" && parsed.target.length > 0) return parsed.target;
+  } catch {
+    /* not the synthesis input shape — fall through to the sentinel */
+  }
+  return "fake-target";
+}
+
+/**
  * A deterministic in-process fake adapter (embed hashes each text; text ops return
  * `"ok"`; `generateObject` returns `{}`). Byte-for-byte the behaviour the pre-cutover
  * sweep harness's socket adapter had, so the same fixtures rank an exact-text query
  * at 1. Needs no credential and makes no network call.
+ *
+ * `mode` is the OPTIONAL per-case steering ({@link FAKE_PROVIDER_MODE_ENV}); when ABSENT the
+ * behaviour is UNCHANGED (`generateObject` ⇒ `{}`). It only ever affects the `generateObject`
+ * op (and, for `error`, `transmit`) — `embed`/`generateText` stay deterministic so retrieval
+ * grounding is unaffected across every mode.
  */
-function createFakeProviderAdapter(): ProviderAdapter {
+function createFakeProviderAdapter(mode?: string): ProviderAdapter {
   return {
     provider: "gemini",
     host: "generativelanguage.googleapis.com",
     serialize: (_op, req) => ({ path: "/fake", bytes: Buffer.from(JSON.stringify(req), "utf8") }),
-    transmit: (s, signal) =>
-      signal?.aborted
-        ? Promise.reject(new ProviderCallError({ kind: "cancelled", retryable: false, message: "aborted before request" }))
-        : Promise.resolve({ rawResponse: s.bytes, retries: 0 }),
+    transmit: (s, signal) => {
+      if (signal?.aborted) {
+        return Promise.reject(new ProviderCallError({ kind: "cancelled", retryable: false, message: "aborted before request" }));
+      }
+      // Steered provider fault/timeout (test-only): the round-trip itself fails.
+      if (mode === "error") {
+        return Promise.reject(new ProviderCallError({ kind: "timeout", retryable: true, message: "fake provider fault (ATLAS_FAKE_PROVIDER_MODE=error)" }));
+      }
+      return Promise.resolve({ rawResponse: s.bytes, retries: 0 });
+    },
     parse: (op, req, raw) => {
       const usage: Usage = { inputTokens: 10, outputTokens: 5 };
       if (op === "embed") {
@@ -179,7 +230,37 @@ function createFakeProviderAdapter(): ProviderAdapter {
           model: req.model,
         };
       }
-      if (op === "generateObject") return { result: {}, usage, model: req.model };
+      if (op === "generateObject") {
+        // Steered model-authored ChangePlan (test-only). INERT unless a mode is set —
+        // an absent mode returns `{}` EXACTLY as before (the --json sweep depends on it).
+        if (mode === "malformed") {
+          throw new ProviderCallError({ kind: "validation", retryable: false, message: "malformed/unparseable provider response (ATLAS_FAKE_PROVIDER_MODE=malformed)" });
+        }
+        if (mode === "valid" || mode === "schema-invalid") {
+          const target = fakePlanTarget((req as { input?: string }).input ?? "");
+          const operation =
+            mode === "schema-invalid"
+              ? // Zod-VALID ChangePlan the ChangePlan VALIDATOR rejects: a RESERVED task op.
+                { op: "CreateTask", opVersion: 1, title: "reserved-op from the fake double" }
+              : { op: "AppendSection", opVersion: 1, content: "Appended by the deterministic fake double.\n", createIfAbsent: true, selector: { path: "Log" } };
+          return {
+            result: {
+              target,
+              rationale: "fake-provider synthesis",
+              sourceIds: [],
+              retrievedEvidence: [],
+              confidence: 0.9,
+              proposedRisk: "tier-1",
+              reversibility: "reversible",
+              schemaVersion: 1,
+              operation,
+            },
+            usage,
+            model: req.model,
+          };
+        }
+        return { result: {}, usage, model: req.model };
+      }
       return { result: { text: "ok", usage, model: req.model }, usage, model: req.model };
     },
     costMicros: (_m: string, u: Usage) => u.inputTokens + (u.outputTokens ?? 0),
@@ -275,8 +356,10 @@ export function createInProcessInvoker(cfg: InProcessInvokerConfig = {}): Invoke
     // Lazy first-use construction: resolve the key ONLY now (never at import).
     if (adapter === undefined) {
       if (fakeProviderActive(cfg, env)) {
-        // Gated test seam — no credential resolved, no network. Still lazy.
-        adapter = createFakeProviderAdapter();
+        // Gated test seam — no credential resolved, no network. Still lazy. The
+        // per-case steering mode is read ONLY here (inside the already-gated branch),
+        // so it is unreachable on any production provider path.
+        adapter = createFakeProviderAdapter(env[FAKE_PROVIDER_MODE_ENV]);
       } else {
         const apiKey = (cfg.resolveApiKey ?? (() => resolveGeminiApiKey(env)))();
         adapter = new GeminiAdapter({ apiKey, ...(cfg.transport !== undefined ? { transport: cfg.transport } : {}) });
