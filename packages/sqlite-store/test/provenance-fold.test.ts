@@ -42,7 +42,7 @@ function provenanceStore(): Store {
   const store = openStore({ path: ":memory:" });
   const report = store.migrate();
   expect(new Set(report.newlyApplied)).toEqual(
-    new Set(["0001_core", "0003_provenance", "0004_claims", "0005_ledger_finalize", "0013_links_v2", "0014_evidence_v2"]),
+    new Set(["0001_core", "0003_provenance", "0004_claims", "0005_ledger_finalize", "0013_links_v2", "0014_evidence_v2", "0015_source_registry"]),
   );
   return store;
 }

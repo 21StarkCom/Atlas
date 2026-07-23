@@ -147,10 +147,10 @@ describe("brain status — the v2 merged read surface", () => {
     expect(s.vault).toMatchObject({ path: vaultDir, dirty: false, noteCount: 2 });
     expect(s.vault.headSha).toBe(git(["rev-parse", "HEAD"]));
 
-    // db — projection counts from the migrated store; schema head is 0014.
+    // db — projection counts from the migrated store; schema head is 0015.
     expect(s.db.noteCount).toBe(2);
     expect(s.db.linkCount).toBe(0);
-    expect(s.db.schemaVersion).toBe(14);
+    expect(s.db.schemaVersion).toBe(15);
     expect(s.db.sectionCount).toBeGreaterThan(0); // vault-derived (## Detail per note)
 
     // index — the baseline sync embedded both notes; nothing stale.
@@ -202,26 +202,26 @@ describe("brain status — the v2 merged read surface", () => {
     for (const c of s.checks.filter((c) => c.name !== "provider-key-present")) expect(c.ok, c.name).toBe(true);
   });
 
-  it("0014 pending ⇒ migrations-current fails, ok:false, exit 0 — and status NEVER auto-applies", async () => {
-    // Arrange "0014 pending" (this phase's core migration) at the read surface the
-    // check consumes: the schema-version table (migrations-current is a read-only
-    // version read). Deleting the newest applied row leaves 0013 as the head.
+  it("0015 pending ⇒ migrations-current fails, ok:false, exit 0 — and status NEVER auto-applies", async () => {
+    // Arrange "0015 pending" (this phase's newest core migration) at the read surface
+    // the check consumes: the schema-version table (migrations-current is a read-only
+    // version read). Deleting the newest applied row leaves 0014 as the head.
     const s0 = openStore({ path: dbPath });
-    s0.db.prepare(`DELETE FROM db_schema_migrations WHERE id = '0014_evidence_v2'`).run();
+    s0.db.prepare(`DELETE FROM db_schema_migrations WHERE id = '0015_source_registry'`).run();
     s0.close();
 
     const s = await status();
     expect(s.ok).toBe(false);
     const check = s.checks.find((c) => c.name === "migrations-current")!;
     expect(check.ok).toBe(false);
-    expect(check.detail).toMatch(/0014_evidence_v2/);
+    expect(check.detail).toMatch(/0015_source_registry/);
     expect(check.detail).toMatch(/db migrate/);
-    expect(s.db.schemaVersion).toBe(13); // the latest APPLIED id is now 0013
+    expect(s.db.schemaVersion).toBe(14); // the latest APPLIED id is now 0014
 
     // Never auto-applies: the version row is still absent after the read.
     const s1 = openStore({ path: dbPath });
     try {
-      expect(s1.db.prepare(`SELECT 1 FROM db_schema_migrations WHERE id = '0014_evidence_v2'`).get()).toBeUndefined();
+      expect(s1.db.prepare(`SELECT 1 FROM db_schema_migrations WHERE id = '0015_source_registry'`).get()).toBeUndefined();
     } finally {
       s1.close();
     }

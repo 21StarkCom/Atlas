@@ -191,6 +191,13 @@ export const MIGRATION_OWNERSHIP: Readonly<Record<string, readonly string[]>> = 
   // claims/claim_evidence model (the DROP of those rides this same migration in the
   // task-4-4 commit that removes their last consumer).
   "0014_evidence_v2": ["evidence"],
+  // v2 operational source registry (task 4-3a, in `openStore`'s DEFAULT set) — the
+  // flat `source` table `source add`/`list`/`show` read/write. ADDITIVE in #339: the
+  // DROP of the v1 provenance tables (`content_blobs`/`source_captures`/
+  // `source_renditions`/`note_sources`) rides this same migration in the task-4-3b/#340
+  // commit that rebases `ingest` + provenance validation off them (expand-and-contract),
+  // so they still COEXIST here and stay attributed to `0003_provenance` above.
+  "0015_source_registry": ["source"],
   "(runner bootstrap)": ["db_schema_migrations"],
 } as const;
 

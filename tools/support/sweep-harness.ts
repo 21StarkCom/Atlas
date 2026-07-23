@@ -135,17 +135,18 @@ export async function makeSweepHarness(): Promise<SweepHarness> {
   await must(run(["index", "rebuild", "--json"]), "index rebuild");
 
   // --- targeted SQL seeding for row-addressed commands -----------------------
-  const sourceHash = "b".repeat(64);
-  const sourceId = `sha256:${sourceHash}:text/plain`;
+  // v2 (#339): `source show` reads the flat `source` registry (not the v1
+  // content-addressed provenance model), so seed a registry row + address it by id.
+  const sourceId = "src-sweep";
   {
     // Direct writes through a plain connection (the arrangement writer).
     const mod = (await import("@atlas/sqlite-store")) as typeof import("@atlas/sqlite-store");
     const db = mod.openConnection({ path: dbPath });
     try {
       db.prepare(
-        `INSERT INTO content_blobs (raw_content_hash, canonical_media_type, size_bytes, vault_path, first_seen_at)
-         VALUES (?, 'text/plain', 10, 'sources/sweep', '2026-07-19')`,
-      ).run(sourceHash);
+        `INSERT INTO source (id, kind, locator, title, addedAt)
+         VALUES (?, 'file', 'sources/sweep.txt', 'sweep source', '2026-07-19')`,
+      ).run(sourceId);
     } finally {
       db.close();
     }

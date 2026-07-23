@@ -734,6 +734,43 @@ CREATE TABLE evidence (
 
 ---
 
+## 5.7 Source registry — `0015_source_registry`
+
+### `source` — `0015_source_registry`
+
+The v2 **flat operational source registry** (Phase-4 persistence strip). It replaces the v1
+content-addressed provenance model (`content_blobs` + `source_captures` + `source_renditions` +
+`note_sources`, `0003`, with its rendition-pinning coupled to the run ledger) with ONE row per source.
+
+**Operational, NOT vault-derived — the system-of-record for source rows.** Unlike the evidence/provenance
+projections, `source` is primary operational state: a plain SQLite table `db rebuild` never touches and
+never re-derives from Markdown, so an operator's `source add` survives a projection rebuild. `source add`
+writes it directly (no git commit, no capture/normalize — that is `ingest`, which stamps `lastIngestedAt`);
+`source list`/`show` read it. Dedup is on the UNIQUE `locator`: a duplicate locator is a NOOP SUCCESS
+returning the existing row's id, so a repeated `source add <same-locator>` is intrinsically idempotent.
+
+```sql
+CREATE TABLE source (
+  id             TEXT NOT NULL PRIMARY KEY,
+  kind           TEXT NOT NULL CHECK (kind IN ('file', 'url')),
+  locator        TEXT NOT NULL UNIQUE,
+  title          TEXT,
+  addedAt        TEXT NOT NULL,
+  lastIngestedAt TEXT
+) STRICT;
+```
+
+- **FK:** none by construction (a self-contained operational registry; no cross-table reference).
+- **Invariant:** `locator` is UNIQUE — at most one row per locator; the insert is `ON CONFLICT(locator) DO
+  NOTHING` then a SELECT of the existing id (noop success). `kind` is constrained to `'file'`/`'url'`.
+- **Class:** operational — `db rebuild` never touches it (like `agent_runs`/`model_calls`), and it is not
+  re-derived from the vault. Column names are the v2 camelCase form (`addedAt`/`lastIngestedAt`).
+- **Staged cutover (expand-and-contract):** `0015_source_registry` is ADDITIVE in #339 (this table only);
+  the v1 provenance tables (§5.4) still COEXIST because `ingest` + provenance validation still consume them,
+  and their DROP is appended to `0015` in task 4-3b/#340 once those are rebased off provenance.
+
+---
+
 ## 6. Versioned index contract
 
 **Version: 1.** These indexes map the design's *access patterns* to composite indexes, verified with

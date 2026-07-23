@@ -1,10 +1,12 @@
 /**
  * `db.migrate-ownership` — every §2.7 table is created by *exactly* its declared
  * migration. `openStore` pre-registers the retained migrations `0001_core` +
- * `0003_provenance` + `0004_claims` + `0005` + `0013` + `0014`. `0004_claims` still
- * runs (creating the v1 `claims`/`claim_evidence` tables) but `0014_evidence_v2`
- * forward-DROPs them, so a fresh DB carries the dictionary's `0001_core` ∪
- * `0003_provenance` ∪ {`evidence`} table sets plus the runner-bootstrap
+ * `0003_provenance` + `0004_claims` + `0005` + `0013` + `0014` + `0015`.
+ * `0004_claims` still runs (creating the v1 `claims`/`claim_evidence` tables) but
+ * `0014_evidence_v2` forward-DROPs them; `0015_source_registry` adds the v2 `source`
+ * registry (its v1-provenance DROP is deferred to #340, so provenance still
+ * coexists). So a fresh DB carries the dictionary's `0001_core` ∪
+ * `0003_provenance` ∪ {`evidence`} ∪ {`source`} table sets plus the runner-bootstrap
  * `db_schema_migrations` — no missing, extra, or duplicate table, and no v1 claims table.
  */
 import { describe, expect, it } from "vitest";
@@ -16,13 +18,15 @@ describe("db.migrate-ownership", () => {
     const store = openStore({ path: ":memory:" });
     try {
       const report = store.migrate();
-      // `0013_links_v2` and `0014_evidence_v2` are in `openStore`'s default set, so
-      // a fresh `migrate` applies them too. `0004_claims` still RUNS (it creates the
-      // v1 `claims`/`claim_evidence` tables) but `0014` then forward-DROPs them, so
-      // they are absent from the fresh DB. `0013` creates NO new table (it rebuilds
-      // `note_links` in place); `0014` creates the v2 `evidence` projection table. So
-      // the fresh-DB table diff below is the §2.7 core set (0001 + 0003) plus
-      // `evidence`, with the v1 claims tables gone.
+      // `0013_links_v2`, `0014_evidence_v2`, and `0015_source_registry` are in
+      // `openStore`'s default set, so a fresh `migrate` applies them too.
+      // `0004_claims` still RUNS (it creates the v1 `claims`/`claim_evidence` tables)
+      // but `0014` then forward-DROPs them, so they are absent from the fresh DB.
+      // `0013` creates NO new table (it rebuilds `note_links` in place); `0014`
+      // creates the v2 `evidence` projection table; `0015` creates the v2 operational
+      // `source` registry (its v1-provenance DROP is deferred to #340, so the v1
+      // provenance tables still coexist). So the fresh-DB table diff below is the §2.7
+      // core set (0001 + 0003) plus `evidence` + `source`, with the v1 claims tables gone.
       expect(new Set(report.newlyApplied)).toEqual(
         new Set([
           "0001_core",
@@ -31,6 +35,7 @@ describe("db.migrate-ownership", () => {
           "0005_ledger_finalize",
           "0013_links_v2",
           "0014_evidence_v2",
+          "0015_source_registry",
         ]),
       );
 
@@ -41,6 +46,7 @@ describe("db.migrate-ownership", () => {
       const expected = dictionaryTablesFor("0001_core");
       for (const t of dictionaryTablesFor("0003_provenance")) expected.add(t);
       for (const t of dictionaryTablesFor("0014_evidence_v2")) expected.add(t);
+      for (const t of dictionaryTablesFor("0015_source_registry")) expected.add(t);
       expected.add("db_schema_migrations"); // runner bootstrap
       // Sanity: the dictionary really did attribute the core tables to 0001_core…
       expect(expected.has("notes")).toBe(true);
@@ -53,8 +59,11 @@ describe("db.migrate-ownership", () => {
       // …the provenance tables to 0003_provenance…
       expect(expected.has("content_blobs")).toBe(true);
       expect(expected.has("note_sources")).toBe(true);
-      // …and the v2 evidence projection to 0014_evidence_v2.
+      // …the v2 evidence projection to 0014_evidence_v2…
       expect(expected.has("evidence")).toBe(true);
+      // …and the v2 operational source registry to 0015_source_registry (the v1
+      // provenance tables still coexist — their DROP is deferred to #340).
+      expect(expected.has("source")).toBe(true);
       // The v1 claims tables are forward-dropped by 0014 — absent from the fresh DB.
       expect(expected.has("claims")).toBe(false);
       expect(expected.has("claim_evidence")).toBe(false);

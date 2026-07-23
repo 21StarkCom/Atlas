@@ -20,9 +20,8 @@ import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import _Ajv2020 from "ajv/dist/2020.js";
 import { runCli } from "../src/main.js";
-import { openStore, rebuildProjections, type Store } from "@atlas/sqlite-store";
+import { openStore, rebuildProjections, SourceRepo, type Store } from "@atlas/sqlite-store";
 import type { ParsedNote, VaultSnapshot } from "@atlas/contracts";
-import { querySources } from "../src/commands/source.js";
 import { traverseRelated } from "../src/commands/note.js";
 import {
   parseLimit,
@@ -71,15 +70,18 @@ const hash = (n: number): string => n.toString(16).padStart(64, "0");
 const iso = (n: number): string => `2026-07-13T10:00:${String(n % 60).padStart(2, "0")}.000Z`;
 // A valid ULID (26 Crockford chars, first ≤ 7) that sorts by n via its numeric suffix.
 const ulid = (n: number): string => `01J9Z8Q${"0".repeat(17)}${String(n).padStart(2, "0")}`;
+/** The deterministic `source` id `seedSource(n)` writes (matches its `src-NN`). */
+const sid = (n: number): string => `src-${String(n).padStart(2, "0")}`;
 
-/** Seed a captured blob (+ one rendition, active). */
-function seedBlob(store: Store, n: number, firstSeenAt: string): void {
-  const raw = hash(n);
-  const media = "text/markdown";
-  store.provenance.upsertBlob({ raw_content_hash: raw, canonical_media_type: media, size_bytes: 100 + n, vault_path: `blob/${n}`, first_seen_at: firstSeenAt });
-  store.provenance.recordCapture({ raw_content_hash: raw, canonical_media_type: media, origin: `/inbox/${n}.md`, first_seen_at: firstSeenAt, last_seen_at: firstSeenAt });
-  store.provenance.recordRendition({ raw_content_hash: raw, canonical_media_type: media, extractor_version: 1, normalizer_version: 1, normalized_content_hash: `sha256:${hash(1000 + n)}`, size_bytes: 90 + n, locator_scheme: "char", created_at: firstSeenAt });
-  store.provenance.setActiveRendition({ raw_content_hash: raw, canonical_media_type: media, extractor_version: 1, normalizer_version: 1 });
+/** Seed a v2 `source` registry row (id `src-NN`, unique locator, given addedAt). */
+function seedSource(store: Store, n: number, addedAt: string): void {
+  new SourceRepo(store.db).insert({
+    id: `src-${String(n).padStart(2, "0")}`,
+    kind: "file",
+    locator: `sources/${n}.txt`,
+    title: `source ${n}`,
+    addedAt,
+  });
 }
 
 /** Seed an open agent run. */
@@ -166,20 +168,20 @@ describe("jobs list routes through the shared pagination contract (SP-1 Phase 6 
 });
 
 describe("deterministic ordering + unique tie-breaker", () => {
-  it("source list: ties on capturedAt broken by contentId (ascending), stable across offset", async () => {
-    (await cli(["db", "migrate", "--json"])).code;
+  it("source list: ties on addedAt broken by id (ascending), stable across offset", async () => {
+    await cli(["db", "migrate", "--json"]);
     const store = openStore({ path: dbPath });
     try {
-      // All share the SAME first_seen_at → the tie-breaker (contentId) decides order.
-      for (const n of [5, 1, 3, 2, 4]) seedBlob(store, n, iso(0));
-      const { rows, total } = querySources(store.db, { limit: 50, offset: 0 });
-      expect(total).toBe(5);
-      const ids = rows.map((r) => r.raw_content_hash);
-      expect(ids).toEqual([...ids].sort()); // contentId (raw_content_hash) ascending
-      // Page boundary is stable: page1 ++ page2 === full order, no dup/skip.
-      const p1 = querySources(store.db, { limit: 2, offset: 0 }).rows.map((r) => r.raw_content_hash);
-      const p2 = querySources(store.db, { limit: 2, offset: 2 }).rows.map((r) => r.raw_content_hash);
-      const p3 = querySources(store.db, { limit: 2, offset: 4 }).rows.map((r) => r.raw_content_hash);
+      const repo = new SourceRepo(store.db);
+      // All share the SAME addedAt → the v2 tie-breaker (id ASC) decides order.
+      for (const n of [5, 1, 3, 2, 4]) seedSource(store, n, iso(0));
+      expect(repo.count()).toBe(5);
+      const ids = repo.list({ limit: 50, offset: 0 }).map((r) => r.id);
+      expect(ids).toEqual([...ids].sort()); // id ascending (the total-order tie-breaker)
+      // Page boundary is stable: page1 ++ page2 ++ page3 === full order, no dup/skip.
+      const p1 = repo.list({ limit: 2, offset: 0 }).map((r) => r.id);
+      const p2 = repo.list({ limit: 2, offset: 2 }).map((r) => r.id);
+      const p3 = repo.list({ limit: 2, offset: 4 }).map((r) => r.id);
       expect([...p1, ...p2, ...p3]).toEqual(ids);
     } finally {
       store.close();
@@ -261,7 +263,7 @@ describe("deterministic ordering + unique tie-breaker", () => {
       const mkNote = (id: string, links: ParsedNote["links"]): ParsedNote => ({
         id, path: `${id}.md`, type: "concept", schemaVersion: 1, title: id, status: "active",
         created: iso(0), updated: iso(0), aliases: [], sources: [], declaredSensitivity: "internal",
-        links, sections: { heading: "", level: 0, path: "", children: [] },
+        links, relationships: [], sections: { heading: "", level: 0, path: "", children: [] },
         contentHash: `sha256:${hash(1)}`, raw: `# ${id}\n`,
       });
       // `pseed` plainly wiki-links `ptarget` (with a display alias) — no predicate.
@@ -306,7 +308,7 @@ describe("out-of-range bounds ⇒ exit 5 (via the CLI)", () => {
     await cli(["db", "migrate", "--json"]);
     const store = openStore({ path: dbPath });
     try {
-      for (const n of [1, 2, 3] as const) seedBlob(store, n, iso(n));
+      for (const n of [1, 2, 3] as const) seedSource(store, n, iso(n));
     } finally {
       store.close();
     }
@@ -341,7 +343,7 @@ describe("command-level pagination bounds (all four commands, via the CLI)", () 
   const seed = (): void => {
     const store = openStore({ path: dbPath });
     try {
-      for (const n of [1, 2, 3] as const) seedBlob(store, n, iso(n)); // source list total=3
+      for (const n of [1, 2, 3] as const) seedSource(store, n, iso(n)); // source list total=3
       // note related: a seed note linking to 3 others (related total=3).
       const mk = (id: string) => store.projections.insertNote({ note_id: id, slug: id, title: id, type: "concept", schema_version: 1, status: "active", file_path: `${id}.md`, content_hash: `sha256:${hash(1)}`, created: iso(0), updated: iso(0) });
       ["rseed", "r1", "r2", "r3"].forEach(mk);
@@ -425,7 +427,7 @@ describe("stable JSON schemas (every paginated success validates)", () => {
     await cli(["db", "migrate", "--json"]);
     const store = openStore({ path: dbPath });
     try {
-      for (const n of [1, 2, 3] as const) seedBlob(store, n, iso(n));
+      for (const n of [1, 2, 3] as const) seedSource(store, n, iso(n));
       seedOpenRun(store, 1, iso(1));
       // A note with run history (one integrated run).
       store.projections.insertNote({ note_id: "concept-atlas", slug: "atlas", title: "Atlas", type: "concept", schema_version: 1, status: "active", file_path: "atlas.md", content_hash: `sha256:${hash(9)}`, created: iso(0), updated: iso(0) });
@@ -457,19 +459,21 @@ describe("concurrent-insert anomaly bound", () => {
     await cli(["db", "migrate", "--json"]);
     const store = openStore({ path: dbPath });
     try {
-      // 6 blobs with STRICTLY DESCENDING sort key by design (newest first → offset DESC).
-      for (const n of [1, 2, 3, 4, 5, 6]) seedBlob(store, n, iso(n));
+      const repo = new SourceRepo(store.db);
+      // 6 sources with STRICTLY DESCENDING sort key by design (addedAt DESC → newest first).
+      for (const n of [1, 2, 3, 4, 5, 6]) seedSource(store, n, iso(n));
       const limit = 2;
       const seen: string[] = [];
       // Page 1.
-      seen.push(...querySources(store.db, { limit, offset: 0 }).rows.map((r) => r.raw_content_hash));
-      // A concurrent insert AHEAD of the window (newest capturedAt) shifts offsets down by 1.
-      seedBlob(store, 7, iso(59));
+      seen.push(...repo.list({ limit, offset: 0 }).map((r) => r.id));
+      // A concurrent insert AHEAD of the window (newest addedAt) shifts offsets down by 1.
+      seedSource(store, 7, iso(59));
       // Continue the walk from where page 1 ended.
       for (let off = limit; ; off += limit) {
-        const { rows, total } = querySources(store.db, { limit, offset: off });
+        const rows = repo.list({ limit, offset: off });
+        const total = repo.count();
         if (off >= total) break;
-        seen.push(...rows.map((r) => r.raw_content_hash));
+        seen.push(...rows.map((r) => r.id));
         if (off + rows.length >= total) break;
       }
       // Count anomalies EXPLICITLY — both duplicates AND omissions (the documented
@@ -481,12 +485,12 @@ describe("concurrent-insert anomaly bound", () => {
       const counts = new Map<string, number>();
       for (const id of seen) counts.set(id, (counts.get(id) ?? 0) + 1);
       const duplicates = [...counts.values()].filter((c) => c > 1).reduce((a, c) => a + (c - 1), 0);
-      const originals = [1, 2, 3, 4, 5, 6].map(hash);
-      const omissions = originals.filter((h) => !seen.includes(h)).length;
+      const originals = [1, 2, 3, 4, 5, 6].map(sid);
+      const omissions = originals.filter((id) => !seen.includes(id)).length;
       expect(duplicates + omissions).toBeLessThanOrEqual(1);
       // Every ORIGINAL row (1..6) is still reachable in a fresh full scan (ordering total).
-      const full = querySources(store.db, { limit: 50, offset: 0 }).rows.map((r) => r.raw_content_hash);
-      for (const n of [1, 2, 3, 4, 5, 6]) expect(full).toContain(hash(n));
+      const full = repo.list({ limit: 50, offset: 0 }).map((r) => r.id);
+      for (const n of [1, 2, 3, 4, 5, 6]) expect(full).toContain(sid(n));
     } finally {
       store.close();
     }

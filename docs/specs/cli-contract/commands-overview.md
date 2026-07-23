@@ -18,7 +18,7 @@ Registry version: **2** · Commands: **24**
 | 2 | `note history` | none | shared | yes | `docs/specs/cli-contract/note-history.schema.json` |
 | 2 | `note related` | none | shared | yes | `docs/specs/cli-contract/note-related.schema.json` |
 | 2 | `note show` | none | shared | yes | `docs/specs/cli-contract/note-show.schema.json` |
-| 2 | `source add` | key-accepting | shared | yes | `docs/specs/cli-contract/source-add.schema.json` |
+| 2 | `source add` | intrinsic | shared | yes | `docs/specs/cli-contract/source-add.schema.json` |
 | 2 | `source list` | none | shared | yes | `docs/specs/cli-contract/source-list.schema.json` |
 | 2 | `source show` | none | shared | yes | `docs/specs/cli-contract/source-show.schema.json` |
 | 3 | `index rebuild` | intrinsic | shared | yes | `docs/specs/cli-contract/index-rebuild.schema.json` |

@@ -34,6 +34,7 @@ describe("db.migrate-gap-tolerant", () => {
         "0005_ledger_finalize",
         "0013_links_v2",
         "0014_evidence_v2",
+        "0015_source_registry",
       ]);
 
       const appliedIds = () =>
@@ -50,6 +51,7 @@ describe("db.migrate-gap-tolerant", () => {
           "0005_ledger_finalize",
           "0013_links_v2",
           "0014_evidence_v2",
+          "0015_source_registry",
         ]),
       );
       // 0002's table must not exist yet.
@@ -68,6 +70,7 @@ describe("db.migrate-gap-tolerant", () => {
           "0005_ledger_finalize",
           "0013_links_v2",
           "0014_evidence_v2",
+          "0015_source_registry",
         ]),
       );
       expect(store.db.prepare(`SELECT 1 FROM sqlite_master WHERE name='gap_0002'`).get()).toEqual({

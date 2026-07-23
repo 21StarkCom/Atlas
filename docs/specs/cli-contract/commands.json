@@ -150,7 +150,7 @@
       "name": "source add",
       "schemaRef": "docs/specs/cli-contract/source-add.schema.json",
       "phase": 2,
-      "idempotency": "key-accepting",
+      "idempotency": "intrinsic",
       "privilege": "shared",
       "implemented": true
     },

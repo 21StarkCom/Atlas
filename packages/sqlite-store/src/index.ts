@@ -117,6 +117,7 @@ export { migration0011RunInputs, RUN_INPUTS_DDL } from "../migrations/0011_run_i
 export { migration0012SyncCursors, SYNC_CURSORS_DDL } from "../migrations/0012_sync_cursors.js";
 export { migration0013LinksV2, LINKS_V2_DDL } from "../migrations/0013_links_v2.js";
 export { migration0014EvidenceV2, EVIDENCE_V2_DDL } from "../migrations/0014_evidence_v2.js";
+export { migration0015SourceRegistry, SOURCE_REGISTRY_DDL } from "../migrations/0015_source_registry.js";
 
 export { ProvenanceRepo, captureId } from "./repos/provenance.js";
 export type {
@@ -129,3 +130,6 @@ export type {
 
 export { EvidenceRepo } from "./repos/evidence.js";
 export type { EvidenceRow, EvidenceInput, EvidenceStatus } from "./repos/evidence.js";
+
+export { SourceRepo } from "./repos/source.js";
+export type { SourceRow, SourceInput, SourceKind } from "./repos/source.js";

@@ -11,6 +11,12 @@
  * concurrent invocation-2 can be observed losing the lock while nothing has been
  * mutated yet, then invocation-1 is released and commits under the same held lock.
  *
+ * The driving mutation is **`note add`** (v2 #339: `source add` is now a plain
+ * operational registry insert — no vault lock, no git commit, no mutation order — so
+ * it can no longer stand in for a canonical mutation here). `note add` is the
+ * canonical file-reading `runMutation` command: it grounds a note markdown file,
+ * takes `vault-maintenance`, and FF-commits the note onto `refs/heads/main`.
+ *
  *   row d   — an external git `index.lock` PRESENT AT STARTUP + a mutating command
  *             ⇒ a DISTINCT preflight failure (exit 2, `git-index-locked`), separate
  *             from the advisory lock; removing it lets the same command succeed.
@@ -26,9 +32,7 @@
  *             (`git-index-locked`, exit 2) — no commit, no projection change (the
  *             lock-entry check alone would miss it).
  *
- * The capture path funnels through the `@atlas/sources` sandbox worker, so the suite
- * gates on the compiled `dist/bin.js`
- * (like `jobs.single-runner-exclusion.test.ts`).
+ * The suite gates on the compiled `dist/bin.js` (real overlapping processes).
  */
 import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync, statSync } from "node:fs";
@@ -93,8 +97,8 @@ function setup(): Ctx {
   git(["add", "-A"]);
   git(["commit", "-q", "-m", "seed"]);
 
-  // Canonical ref = refs/heads/main (the seed commit) so `source add` FF-advances a
-  // ref our git assertions can read; otherwise the default refs/atlas/main is unborn.
+  // Canonical ref = refs/heads/main (the seed commit) so `note add` FF-advances a
+  // ref our git assertions can read.
   const config = [
     "vault:",
     `  path: ${vaultDir}`,
@@ -171,30 +175,53 @@ function envelope(out: string): { code: string; retryable?: boolean; details?: R
   return JSON.parse(line);
 }
 
-/** Write a source file into the vault and stage+commit it (source add reads the file). */
-function seedSource(c: Ctx, name: string, body: string): string {
-  const p = join(c.vaultDir, name);
-  writeFileSync(p, body, "utf8");
-  c.git(["add", name]);
-  c.git(["commit", "-q", "-m", `add ${name}`]);
+/**
+ * Write a schema-valid note markdown file into an INBOX outside the vault (NOT
+ * committed) and return its path. `note add <path> --dest notes` reads it, validates
+ * a fresh id, and commits it into the vault under `notes/` — the canonical mutation
+ * this suite drives. Distinct `id` per file so overlapping/retried adds never collide.
+ */
+function noteFile(c: Ctx, name: string, id: string): string {
+  const inbox = join(c.root, "inbox");
+  mkdirSync(inbox, { recursive: true });
+  const p = join(inbox, name);
+  writeFileSync(
+    p,
+    [
+      "---",
+      `id: ${id}`,
+      "type: concept",
+      "schema_version: 1",
+      `title: ${id}`,
+      "created: 2026-07-11",
+      "updated: 2026-07-11",
+      "---",
+      "",
+      `# ${id}`,
+      "",
+      "plain body, no secrets.",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
   return p;
 }
 
+/** The `brain note add` argv for a prepared inbox note file. */
+const addArgs = (p: string): string[] => ["note", "add", p, "--dest", "notes", "--json"];
+
 /**
- * The projection/ledger tables a source-capture mutation writes — the notes
- * projection AND the provenance/idempotency/run state a bare `notesCount()` cannot
- * see (a lock loser that partially captured could add a source_captures /
- * source_renditions / content_blobs / workflow_idempotency / agent_runs row without
- * ever touching `notes`). Snapshotting all of them proves ZERO mutation, not just
- * an unchanged note count.
+ * The projection/ledger tables a `note add` mutation writes — the notes projection
+ * AND the idempotency/run state a bare `notesCount()` cannot see (a lock loser that
+ * partially applied could add a note_identity_keys / note_links / workflow_idempotency
+ * / agent_runs row without ever touching `notes`). Snapshotting all of them proves
+ * ZERO mutation, not just an unchanged note count. (The v1 provenance tables are not
+ * written by `note add`; they are dropped from the vault model in task 4-3b/#340.)
  */
 const MUTATION_TABLES = [
   "notes",
   "note_identity_keys",
   "note_links",
-  "content_blobs",
-  "source_captures",
-  "source_renditions",
   "evidence",
   "workflow_idempotency",
   "agent_runs",
@@ -204,7 +231,7 @@ const MUTATION_TABLES = [
  * A deterministic digest of ALL mutation-relevant projection/ledger state — every
  * present table's full row set, column-ordered then row-ordered so the hash is
  * stable regardless of insertion order. "" when the DB does not exist yet. Detects
- * any source/provenance/idempotency/run write a note count would miss.
+ * any projection/idempotency/run write a note count would miss.
  */
 function projectionSnapshot(dbPath: string): string {
   if (!existsSync(dbPath)) return "";
@@ -258,15 +285,15 @@ async function waitFor(pred: () => boolean, timeoutMs = 20000): Promise<void> {
 }
 
 /**
- * Spawn a REAL `brain source add` that parks at the pre-apply Git boundary HOLDING
+ * Spawn a REAL `brain note add` that parks at the pre-apply Git boundary HOLDING
  * the `vault-maintenance` lock (barrier armed via env). Resolves once the started
  * marker proves it is parked (lock held, nothing committed yet); the returned
  * `release` writes the gate file to let it commit, and `done` awaits its exit.
  */
-function parkedMutation(c: Ctx, src: string): { started: Promise<void>; release: () => void; done: Promise<{ code: number | null; out: string; err: string }> } {
+function parkedMutation(c: Ctx, notePath: string): { started: Promise<void>; release: () => void; done: Promise<{ code: number | null; out: string; err: string }> } {
   const startedFile = join(c.root, `started-${randomBytes(4).toString("hex")}`);
   const gateFile = join(c.root, `gate-${randomBytes(4).toString("hex")}`);
-  const { done } = brainAsync(c, ["source", "add", src, "--json"], {
+  const { done } = brainAsync(c, addArgs(notePath), {
     ATLAS_TEST_MUTATION_STARTED_FILE: startedFile,
     ATLAS_TEST_MUTATION_GATE_FILE: gateFile,
   });
@@ -287,14 +314,14 @@ afterEach(() => {
 
 describeIf("locks.mutation-order (Phase-2 task 2.3: d / d2 / d3)", () => {
   it("row d — an external git index.lock present at startup ⇒ distinct preflight exit 2 (git-index-locked)", () => {
-    const src = seedSource(c, "row-d.md", "# row d\n\nplain body, no secrets.\n");
+    const note = noteFile(c, "row-d.md", "row-d");
     const before = c.git(["rev-parse", CANONICAL_REF]);
 
     // Plant an external index.lock: another git process is mid-write.
     const indexLock = join(c.vaultDir, ".git", "index.lock");
     writeFileSync(indexLock, "", "utf8");
 
-    const blocked = brainSync(c, ["source", "add", src, "--json"]);
+    const blocked = brainSync(c, addArgs(note));
     expect(blocked.code).toBe(2);
     const env = envelope(blocked.out);
     expect(env.code).toBe("git-index-locked");
@@ -305,18 +332,18 @@ describeIf("locks.mutation-order (Phase-2 task 2.3: d / d2 / d3)", () => {
 
     // Remove it → the SAME command now succeeds and advances canonical.
     rmSync(indexLock, { force: true });
-    const ok = brainSync(c, ["source", "add", src, "--json"]);
+    const ok = brainSync(c, addArgs(note));
     expect(ok.code, ok.err).toBe(0);
     expect(c.git(["rev-parse", CANONICAL_REF])).not.toBe(before);
   });
 
   it("row d2 — overlapping mutations: exactly one commits, the loser exits 2 with zero working-tree/projection/HEAD change", async () => {
-    const first = seedSource(c, "row-d2-a.md", "# d2 a\n\nfirst mutation body.\n");
-    const second = seedSource(c, "row-d2-b.md", "# d2 b\n\nsecond mutation body.\n");
+    const first = noteFile(c, "row-d2-a.md", "row-d2-a");
+    const second = noteFile(c, "row-d2-b.md", "row-d2-b");
 
     const headBefore = c.git(["rev-parse", CANONICAL_REF]);
 
-    // Invocation-1: a REAL `source add` that acquires the vault lock, grounds, and
+    // Invocation-1: a REAL `note add` that acquires the vault lock, grounds, and
     // PARKS at the pre-apply boundary — holding the lock, before its commit.
     const inv1 = parkedMutation(c, first);
     await inv1.started;
@@ -330,12 +357,12 @@ describeIf("locks.mutation-order (Phase-2 task 2.3: d / d2 / d3)", () => {
     const statusBefore = c.git(["status", "--porcelain"]);
 
     // Invocation-2 (loser): overlaps invocation-1, must fail FAST (no queueing).
-    const loser = brainSync(c, ["source", "add", second, "--json"]);
+    const loser = brainSync(c, addArgs(second));
     expect(loser.code).toBe(2);
     const env = envelope(loser.out);
     expect(env.code).toBe("locked:vault-maintenance");
     expect(env.retryable).toBe(true);
-    // Zero change: HEAD, the FULL projection/ledger snapshot (notes + provenance +
+    // Zero change: HEAD, the FULL projection/ledger snapshot (notes + identity +
     // idempotency + run state), and the working tree exactly as before.
     expect(c.git(["rev-parse", CANONICAL_REF])).toBe(headBefore);
     expect(projectionSnapshot(c.dbPath)).toBe(projectionBefore);
@@ -351,13 +378,13 @@ describeIf("locks.mutation-order (Phase-2 task 2.3: d / d2 / d3)", () => {
     expect(newCommits).toBe("1");
 
     // The previously-losing mutation now commits cleanly (lock free).
-    const retry = brainSync(c, ["source", "add", second, "--json"]);
+    const retry = brainSync(c, addArgs(second));
     expect(retry.code, retry.err).toBe(0);
     expect(c.git(["rev-list", "--count", `${headBefore}..${CANONICAL_REF}`])).toBe("2");
   }, 40000);
 
   it("row d3 — sync launched while a mutation holds the vault lock ⇒ sync exits 2, no partial write to index/cursor/job state", async () => {
-    const src = seedSource(c, "row-d3.md", "# d3\n\nmutation body.\n");
+    const note = noteFile(c, "row-d3.md", "row-d3");
 
     // Migrate so cursor/job tables exist, then seed populated index + cursor + job
     // state whose byte-image must survive a lock-losing sync untouched.
@@ -387,7 +414,7 @@ describeIf("locks.mutation-order (Phase-2 task 2.3: d / d2 / d3)", () => {
     const headBefore = c.git(["rev-parse", CANONICAL_REF]);
 
     // A REAL mutation parks holding vault-maintenance.
-    const inv1 = parkedMutation(c, src);
+    const inv1 = parkedMutation(c, note);
     await inv1.started;
 
     try {
@@ -409,13 +436,16 @@ describeIf("locks.mutation-order (Phase-2 task 2.3: d / d2 / d3)", () => {
   }, 40000);
 
   it("row d.apply — an external index.lock created AFTER grounding (at the apply boundary) ⇒ git-index-locked, no commit/projection change", async () => {
-    const src = seedSource(c, "row-d-apply.md", "# d apply\n\nmutation body.\n");
+    const note = noteFile(c, "row-d-apply.md", "row-d-apply");
     const headBefore = c.git(["rev-parse", CANONICAL_REF]);
-    const projectionBefore = projectionSnapshot(c.dbPath);
 
     // Park at the pre-apply boundary (lock held, grounding done, nothing committed).
-    const inv1 = parkedMutation(c, src);
+    const inv1 = parkedMutation(c, note);
     await inv1.started;
+    // Snapshot AFTER grounding has migrated the DB (openWorkflowStore) — a failed
+    // apply writes no projection row, so the snapshot must be byte-identical. Taken
+    // before the empty-DB state would otherwise differ from the migrated-empty state.
+    const projectionBefore = projectionSnapshot(c.dbPath);
 
     // Plant an external index.lock NOW — after grounding, before the parked apply.
     // The lock-entry preflight already passed; only the pre-apply RE-CHECK can catch it.
@@ -434,7 +464,7 @@ describeIf("locks.mutation-order (Phase-2 task 2.3: d / d2 / d3)", () => {
 
     // Remove it → the same command now succeeds.
     rmSync(indexLock, { force: true });
-    const ok = brainSync(c, ["source", "add", src, "--json"]);
+    const ok = brainSync(c, addArgs(note));
     expect(ok.code, ok.err).toBe(0);
     expect(c.git(["rev-parse", CANONICAL_REF])).not.toBe(headBefore);
   }, 40000);

@@ -11,7 +11,7 @@ import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import _Ajv2020 from "ajv/dist/2020.js";
 import { runCli } from "../src/main.js";
-import { openStore, type Store } from "@atlas/sqlite-store";
+import { openStore, SourceRepo, type Store } from "@atlas/sqlite-store";
 import { openRepo } from "@atlas/git";
 import { normalizeIdentityKey } from "@atlas/contracts";
 
@@ -74,36 +74,33 @@ beforeEach(async () => {
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
-function seedBlob(store: Store): { contentId: string; renditionId: string } {
-  const raw = hash(1);
-  const media = "text/markdown";
-  store.provenance.upsertBlob({ raw_content_hash: raw, canonical_media_type: media, size_bytes: 1024, vault_path: "blob/1", first_seen_at: iso });
-  store.provenance.recordCapture({ raw_content_hash: raw, canonical_media_type: media, origin: "/inbox/a.md", first_seen_at: iso, last_seen_at: iso });
-  store.provenance.recordRendition({ raw_content_hash: raw, canonical_media_type: media, extractor_version: 1, normalizer_version: 1, normalized_content_hash: `sha256:${hash(2)}`, size_bytes: 990, locator_scheme: "char", created_at: iso });
-  store.provenance.setActiveRendition({ raw_content_hash: raw, canonical_media_type: media, extractor_version: 1, normalizer_version: 1 });
-  return { contentId: `sha256:${raw}:${media}`, renditionId: `sha256:${raw}:${media}:1:1` };
+/** Seed one v2 `source` registry row; returns its id + unique locator. */
+function seedSource(store: Store): { id: string; locator: string } {
+  const id = "src-a";
+  const locator = "sources/a.txt";
+  new SourceRepo(store.db).insert({ id, kind: "file", locator, title: "Source A", addedAt: iso });
+  return { id, locator };
 }
 
 describe("source show", () => {
-  it("source show validates + reports captures/renditions with the active pointer", async () => {
+  it("source show validates + reports the registry row, resolvable by id AND by locator", async () => {
     const store = openStore({ path: dbPath });
-    let ids: { contentId: string; renditionId: string };
-    try { ids = seedBlob(store); } finally { store.close(); }
-    const r = await cli(["source", "show", ids.contentId, "--json"]);
+    let s: { id: string; locator: string };
+    try { s = seedSource(store); } finally { store.close(); }
+    const r = await cli(["source", "show", s.id, "--json"]);
     expect(r.code, r.out).toBe(0);
     const out = JSON.parse(r.out);
     validateSchema("source-show", out);
-    expect(out.source.activeRenditionId).toBe(ids.renditionId);
-    expect(out.source.renditions[0].active).toBe(true);
-    expect(out.source.captures.length).toBe(1);
+    expect(out.source).toMatchObject({ id: s.id, kind: "file", locator: s.locator, title: "Source A", addedAt: iso });
+    // The UNIQUE locator resolves to the same row (source show resolves id-then-locator).
+    const byLoc = await cli(["source", "show", s.locator, "--json"]);
+    expect(byLoc.code, byLoc.out).toBe(0);
+    expect(JSON.parse(byLoc.out).source.id).toBe(s.id);
   });
 
-  it("missing arg ⇒ usage (5); malformed handle ⇒ invalid-source-handle (1); unknown ⇒ source-not-found (1)", async () => {
+  it("missing arg ⇒ usage (5); an unknown id/locator ⇒ source-not-found (1)", async () => {
     expect((await cli(["source", "show", "--json"])).code).toBe(5);
-    const bad = await cli(["source", "show", "not-a-handle", "--json"]);
-    expect(bad.code).toBe(1);
-    expect(JSON.parse(bad.out).code).toBe("invalid-source-handle");
-    const missing = await cli(["source", "show", `sha256:${hash(9)}:text/markdown`, "--json"]);
+    const missing = await cli(["source", "show", "no-such-source", "--json"]);
     expect(missing.code).toBe(1);
     expect(JSON.parse(missing.out).code).toBe("source-not-found");
   });

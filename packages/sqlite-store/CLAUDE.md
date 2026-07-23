@@ -43,6 +43,8 @@
 | `0009_run_supersessions` · `0010_trust_state` · `0011_run_inputs` | this pkg | CLI `registerWorkflowMigrations` (`apps/cli/src/workflows/idempotency.ts`) | no |
 | `0012_sync_cursors` | `0012_sync_cursors.ts` (this pkg) | `registerSyncCursorsMigration` (CLI `store-open.ts`) | no |
 | `0013_links_v2` | `0013_links_v2.ts` (this pkg) | `openStore` | **yes** (table-rebuilds `note_links`; creates no new table) |
+| `0014_evidence_v2` | `0014_evidence_v2.ts` (this pkg) | `openStore` | **yes** (creates the v2 `evidence` projection; forward-DROPs the v1 `claims`/`claim_evidence` + retired ledger/backup tables) |
+| `0015_source_registry` | `0015_source_registry.ts` (this pkg) | `openStore` | **yes** (creates the v2 operational `source` registry; the v1-provenance DROP is appended in task 4-3b/#340) |
 
 - **Feature-migration files live here but are registered elsewhere.** `0006/0009/0010/0011` sit in `migrations/` but are registered by the CLI workflows layer; `0008` by `registerGenerationMigration`. Keeping them out of `openStore`'s default set keeps the `db.migrate-ownership` fresh-DB diff exactly the §2.7 core set.
 - **Gap tolerance is load-bearing, not cosmetic.** `0003`/`0004` are retained PR-A and land BEFORE `0002_jobs` (PR-B). A DB can have `0003` applied while `0002` is first registered later; the runner still applies `0002` in id order. **Do not renumber to "fix" gaps.**

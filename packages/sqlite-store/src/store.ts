@@ -4,9 +4,10 @@
  * `Store` bundles the connection with the migration runner, the projection
  * rebuild pipeline, `verify`, and the repositories. The `0001_core`, the
  * retained-PR-A `0003_provenance` + `0004_claims`, the `0005_ledger_finalize`,
- * the core `0013_links_v2` (v2 `note_links` reshape), and the core
+ * the core `0013_links_v2` (v2 `note_links` reshape), the core
  * `0014_evidence_v2` (v2 vault-derived `evidence` projection, which also
- * forward-DROPs the v1 `0004_claims` tables) migrations are registered on open (so
+ * forward-DROPs the v1 `0004_claims` tables), and the core `0015_source_registry`
+ * (v2 operational `source` registry) migrations are registered on open (so
  * the public `migrate()`/`rebuildProjections()` path creates the provenance +
  * evidence tables and neither fold is ever a silent no-op, §2.7 / §4.1);
  * `@atlas/jobs` registers `0002` via {@link Store.registerMigration} before calling
@@ -30,6 +31,7 @@ import { migration0008IndexConfigRevision } from "../migrations/0008_index_confi
 import { migration0012SyncCursors } from "../migrations/0012_sync_cursors.js";
 import { migration0013LinksV2 } from "../migrations/0013_links_v2.js";
 import { migration0014EvidenceV2 } from "../migrations/0014_evidence_v2.js";
+import { migration0015SourceRegistry } from "../migrations/0015_source_registry.js";
 // Side-effect imports: register the retained-PR-A projection folds into the
 // rebuild pipeline (§2.7 / §4.1) so `rebuildProjections`/`db rebuild` reproduce
 // the provenance + evidence projections from canonical Markdown.
@@ -129,6 +131,12 @@ export function openStore(cfg: SqliteConfig, clock: Clock = rfc3339Now): Store {
   // every `db migrate`. Store-open only REGISTERS it — the explicit `db migrate` under
   // the vault lock is the sole apply path (no reader auto-migrates).
   migrations.set(migration0014EvidenceV2.id, migration0014EvidenceV2);
+  // `0015_source_registry` is a CORE table migration (it creates the v2 operational
+  // `source` registry `source add`/`list`/`show` read/write). Like `0013`/`0014` it
+  // belongs in the default retained set, applied by every `db migrate`. The DROP of
+  // the v1 provenance tables rides this migration in the task-4-3b/#340 commit that
+  // rebases ingest + provenance validation off them (expand-and-contract) — additive here.
+  migrations.set(migration0015SourceRegistry.id, migration0015SourceRegistry);
 
   const generation = new GenerationRepo(db, clock);
 

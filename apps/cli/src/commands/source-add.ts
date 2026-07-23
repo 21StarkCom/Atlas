@@ -1,88 +1,96 @@
 /**
- * `brain source add <path>` (D11) — deterministic Tier-1 source capture that
- * APPLIES immediately (no preview mode). Funnels through {@link captureSource}:
- * scan-before-persist (a secret ⇒ exit 3, quarantined, nothing persisted), dedup by
- * `(rawContentHash, canonicalMediaType)`, capture keyed `(contentId, origin)`, and
- * broker Tier-1 CAS integration. Emits the minted ids + what was reused.
+ * `brain source add <locator>` — record a source in the v2 operational `source`
+ * registry (`0015_source_registry`). v2 (#339) retires the v1 content-addressed
+ * capture path (scan → normalize → immutable blob + manifest → broker Tier-1 CAS
+ * commit): this is now a **plain operational SQLite write** — NO git commit, NO
+ * capture/normalize (that is `ingest`), NO mutation order / vault lock.
+ *
+ * It derives `kind` (`file`|`url`) from the locator, generates a stable id
+ * (deterministic from the locator), stamps `addedAt = now`, and inserts one `source`
+ * row. Dedup is on the UNIQUE `locator`: a duplicate locator is a NOOP SUCCESS that
+ * returns the EXISTING row's id (`added:false`) — so a repeated `source add
+ * <same-locator>` is intrinsically idempotent (no `--idempotency-key`).
  */
+import { createHash } from "node:crypto";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
-import { serializeContentId, serializeRenditionId } from "@atlas/contracts";
-import { captureSource, CaptureRejectedError } from "../ingest/capture.js";
-import { buildCaptureDeps } from "../ingest/wiring.js";
-import { resolvePath } from "./paths.js";
-import { withVaultMutation } from "../locks/mutation-guard.js";
+import { SourceRepo, type SourceKind } from "@atlas/sqlite-store";
+import { openMigratedStore } from "./store-open.js";
 
 interface ParsedArgs {
-  readonly path: string;
-  readonly idempotencyKey?: string;
+  readonly locator: string;
+  readonly title?: string;
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
-  let path: string | undefined;
-  let idempotencyKey: string | undefined;
+  let locator: string | undefined;
+  let title: string | undefined;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
-    if (a === "--idempotency-key") {
-      idempotencyKey = argv[++i];
-      if (idempotencyKey === undefined) throw CliError.usage("`--idempotency-key` requires a value");
-    } else if (a.startsWith("--idempotency-key=")) {
-      idempotencyKey = a.slice("--idempotency-key=".length);
+    if (a === "--title") {
+      title = argv[++i];
+      if (title === undefined) throw CliError.usage("`--title` requires a value");
+    } else if (a.startsWith("--title=")) {
+      title = a.slice("--title=".length);
     } else if (a.startsWith("-")) {
       throw CliError.usage(`unknown flag for \`source add\`: ${a}`);
-    } else if (path === undefined) {
-      path = a;
+    } else if (locator === undefined) {
+      locator = a;
     } else {
       throw CliError.usage(`unexpected extra argument for \`source add\`: ${a}`);
     }
   }
-  if (path === undefined) throw CliError.usage("`source add` requires a <path> argument");
-  return idempotencyKey !== undefined ? { path, idempotencyKey } : { path };
+  if (locator === undefined) throw CliError.usage("`source add` requires a <locator> argument");
+  return title !== undefined ? { locator, title } : { locator };
 }
 
-async function sourceAdd(ctx: RunContext): Promise<number> {
+/** A URL locator carries a `<scheme>://` prefix; everything else is a file path. */
+function deriveKind(locator: string): SourceKind {
+  return /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(locator) ? "url" : "file";
+}
+
+/** A stable, deterministic source id derived from the locator (dedup-consistent). */
+function deriveId(locator: string): string {
+  return `src_${createHash("sha256").update(locator, "utf8").digest("hex").slice(0, 16)}`;
+}
+
+function sourceAdd(ctx: RunContext): number {
   const args = parseArgs(ctx.argv);
-  // BEFORE assembling any mutating dep (DEFECT #1).
-  const deps = buildCaptureDeps(ctx, "source add", args.idempotencyKey);
-  const vaultPath = resolvePath(ctx, ctx.config.config.vault.path);
+  const kind = deriveKind(args.locator);
+  const id = deriveId(args.locator);
+  const addedAt = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
 
-  let result;
+  const store = openMigratedStore(ctx, ["source"]);
   try {
-    // Hold the vault lock across the whole capture (grounding → apply → commit →
-    // refresh). `preApply` is threaded INTO captureSource so the pre-apply
-    // index.lock re-check fires at the true post-grounding boundary (after the
-    // sandboxed normalize, before the first durable mutation), not before grounding.
-    result = await withVaultMutation(ctx, vaultPath, (preApply) =>
-      captureSource({ path: args.path, deps, preApply }),
-    );
-  } catch (e) {
-    if (e instanceof CaptureRejectedError) {
-      throw new CliError({
-        code: "validation-error",
-        message: e.message,
-        hint: "The source could not be normalized (see the typed rejection code).",
-        exitCode: EXIT.VALIDATION,
-        cause: e,
-      });
-    }
-    throw e;
-  }
+    const repo = new SourceRepo(store.db);
+    const result = repo.insert({
+      id,
+      kind,
+      locator: args.locator,
+      ...(args.title !== undefined ? { title: args.title } : {}),
+      addedAt,
+    });
 
-  const out = {
-    command: "source add" as const,
-    contentId: serializeContentId(result.contentId),
-    captureId: result.captureId,
-    renditionId: serializeRenditionId(result.renditionId),
-    noteId: result.noteId,
-    runId: result.runId,
-    reused: result.reused,
-  };
-  if (ctx.output.mode === "json") emitJson(out);
-  else
-    ctx.render(
-      `captured ${out.noteId} — content ${out.contentId} (blob ${out.reused.blob ? "reused" : "new"}, capture ${out.reused.capture ? "reused" : "new"}); run ${out.runId}`,
-    );
-  return EXIT.OK;
+    const out: Record<string, unknown> = {
+      command: "source add" as const,
+      id: result.id,
+      kind,
+      locator: args.locator,
+      added: result.inserted,
+    };
+    if (args.title !== undefined) out.title = args.title;
+
+    if (ctx.output.mode === "json") emitJson(out);
+    else
+      ctx.render(
+        result.inserted
+          ? `added source ${result.id} (${kind}) — ${args.locator}`
+          : `source already registered: ${result.id} (${kind}) — ${args.locator}`,
+      );
+    return EXIT.OK;
+  } finally {
+    store.close();
+  }
 }
 
 registerCommand("source add", sourceAdd);
