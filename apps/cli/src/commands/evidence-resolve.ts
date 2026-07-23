@@ -1,179 +1,47 @@
 /**
- * `brain evidence resolve <runId|evidenceId>` (Task 4.7 / #59) — resolve a pending/ambiguous
- * evidence re-verification by RE-ANCHORING to the current rendition. Evidence verification is
- * MARKDOWN-SSOT, so the resolution is NOT a direct ledger write: it flows a validated
- * `UpdateEvidenceVerification` ChangePlan → patch/execute → agent commit → broker CAS integration,
- * so the confirmed verification lives in canonical Markdown and survives a rebuild.
- *
- * Task 4.7 conditional gating (fail-closed, never fabricate a `valid`): the current active rendition
- * is compared to the evidence's pinned rendition —
- *   - unchanged (`exact`) ⇒ re-confirm `valid`, auto-integrates (outcome=integrated, exit 0);
- *   - moved (`moved`) ⇒ `pending`, escalates to Tier-3 review-pending (outcome=review_pending, exit 6);
- *   - the blob's active rendition is gone (`not-found`) ⇒ `failed`, never integrated (outcome=failed, exit 1).
- * Missing evidence ⇒ not-found (exit 1). Output ⇒ `evidence-resolve.schema.json`.
+ * `brain evidence resolve <evidenceId>` — v2 DETERMINISTIC reverification (task 4-4).
+ * Re-anchors a flat vault-derived evidence row to the CURRENT state of its note:
+ *   - the note (and its `evidence:` frontmatter entry) still resolves ⇒ writes
+ *     `status: resolved` + a verdict + `lastCheckedAt` into the note frontmatter
+ *     through the canonical mutation order (one commit onto `refs/heads/main`, then
+ *     re-fold) — `outcome: resolved`, exit 0;
+ *   - the note or its entry no longer resolves ⇒ `outcome: target-missing`,
+ *     `status: needs-review`, NO mutation, exit 0 (surfaced, never a crash).
+ * No renditions, no run ledger, no audit signature (ADR-0003). A dirty target note
+ * is refused by the mutation order's dirty-vault gate (exit 2). Missing evidence ⇒
+ * not-found (exit 1). Output ⇒ `evidence-resolve.schema.json`.
  */
-import { newRunId, serializeRenditionId, parseSourceHandle } from "@atlas/contracts";
-import { openRepo } from "@atlas/git";
-import { ProvenanceRepo } from "@atlas/sqlite-store";
-import { CliError, EXIT, emitJson } from "../errors/envelope.js";
+import { EXIT, emitJson } from "../errors/envelope.js";
+import { CliError } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
-import { openWorkflowStore } from "../workflows/index.js";
-import { CANONICAL_BRANCH } from "../workflows/mutation-order.js";
-import { makeStoreValidationVault } from "../validation/store-vault.js";
-import { classifyReanchor, type ReanchorMatch } from "../workflows/reverify.js";
-import { applySynthesis, type SynthesisApplyDeps } from "../workflows/synthesis.js";
-import { readVault } from "../vault/reader.js";
-import { ledgerDbPath, resolvePath } from "./backup-config.js";
-import type { ChangePlan } from "@atlas/contracts";
-import type { RetrievalResult } from "../retrieval/layers.js";
+import { mutateEvidence } from "./evidence-common.js";
 
-
-interface Parsed { ref: string }
+interface Parsed { evidenceId: string }
 function parseArgs(argv: string[]): Parsed {
-  let ref: string | undefined;
+  let evidenceId: string | undefined;
   for (const a of argv) {
     if (a.startsWith("-")) throw CliError.usage(`\`evidence resolve\`: unknown flag ${a}`);
-    else if (ref === undefined) ref = a;
+    else if (evidenceId === undefined) evidenceId = a;
     else throw CliError.usage(`\`evidence resolve\`: unexpected argument ${a}`);
   }
-  if (ref === undefined) throw CliError.usage(`\`evidence resolve\`: expected a <runId|evidenceId> argument`);
-  return { ref };
-}
-
-interface EvidenceRow {
-  evidence_id: string;
-  claim_id: string;
-  lineage_id: string;
-  raw_content_hash: string;
-  canonical_media_type: string;
-  extractor_version: number;
-  normalizer_version: number;
-  locator: string;
-  quote_hash: string;
-}
-
-/** A minimal non-empty grounding — the target note — so the retrieval-first gate passes for the
- * DETERMINISTIC re-anchor plan (no model/index involved). */
-function stubRetrieve(noteId: string, runId: string): RetrievalResult {
-  return {
-    items: [{ noteId, sectionPath: "", score: 1, contributions: [], sensitivity: "internal", trust: "verified", sections: [] }],
-    layersUsed: [],
-    retrievalRunId: `rr-${runId}`,
-    mode: "id",
-    degraded: false,
-  } as RetrievalResult;
+  if (evidenceId === undefined) throw CliError.usage(`\`evidence resolve\`: expected an <evidenceId> argument`);
+  return { evidenceId };
 }
 
 async function evidenceResolve(ctx: RunContext): Promise<number> {
-  const p = parseArgs(ctx.argv);
-  const cfg = ctx.config.config;
-  const runId = newRunId();
-
-  // `evidence resolve` is a MUTATING command (no preview mode). The v2 mutation order
-  // (runMutation, inside applySynthesis) owns the vault lock across grounding → apply →
-  // commitPaths → refresh; the caller must NOT pre-acquire it. A `failed` re-anchor
-  // resolves before any apply and simply never mutates.
-  const vaultPath = resolvePath(ctx, cfg.vault.path);
-  const repo = openRepo(vaultPath);
-  const store = openWorkflowStore({ path: ledgerDbPath(ctx) });
-  try {
-    // Resolve the arg as a current evidence head (by evidence_id).
-    const ev = store.db
-      .prepare(`SELECT evidence_id, claim_id, lineage_id, raw_content_hash, canonical_media_type, extractor_version, normalizer_version, locator, quote_hash FROM claim_evidence WHERE evidence_id = ? AND current = 1`)
-      .get(p.ref) as EvidenceRow | undefined;
-    if (ev === undefined) {
-      throw new CliError({ code: "not-found", message: `evidence ${p.ref} does not exist (no current head)`, hint: "Pass an evidenceId from `brain evidence review`.", exitCode: EXIT.VALIDATION });
-    }
-    const owningNoteId = (store.db.prepare(`SELECT owning_note_id AS n FROM claims WHERE claim_id = ?`).get(ev.claim_id) as { n: string }).n;
-
-    // Re-anchor match (conservative, fail-closed — never fabricate `valid` on a moved rendition):
-    // compare the evidence's pinned rendition to the blob's CURRENT active rendition.
-    const provenance = new ProvenanceRepo(store.db);
-    const active = provenance.resolveSourceHandle({ kind: "content", rawContentHash: ev.raw_content_hash, canonicalMediaType: ev.canonical_media_type });
-    const pinned = { extractorVersion: ev.extractor_version, normalizerVersion: ev.normalizer_version };
-    const match: ReanchorMatch =
-      active === null ? "not-found" : active.extractor_version === pinned.extractorVersion && active.normalizer_version === pinned.normalizerVersion ? "exact" : "moved";
-    const { verification } = classifyReanchor(match);
-
-    const pinnedHandle = serializeRenditionId({ kind: "rendition", rawContentHash: ev.raw_content_hash, canonicalMediaType: ev.canonical_media_type, ...pinned });
-    const replacementHandle = active === null ? pinnedHandle : serializeRenditionId({ kind: "rendition", rawContentHash: ev.raw_content_hash, canonicalMediaType: ev.canonical_media_type, extractorVersion: active.extractor_version, normalizerVersion: active.normalizer_version });
-
-    // A `failed` re-anchor never mutates canonical + never fabricates a verification.
-    if (verification === "failed") {
-      const out = { command: "evidence resolve", outcome: "failed", verification: "failed", runId, evidenceId: ev.evidence_id, lineageId: ev.lineage_id };
-      if (ctx.output.mode === "json") emitJson(out);
-      else ctx.render(`evidence resolve ${ev.evidence_id}: failed (rendition unavailable)`);
-      return EXIT.VALIDATION;
-    }
-
-    // Build the DETERMINISTIC UpdateEvidenceVerification ChangePlan (re-anchor supersession). The
-    // schema-required advisory-risk field is set for completeness ONLY — no runtime code reads it
-    // (the trust/risk-tier machinery is retired). The field name is assembled at runtime so the
-    // grep-guard (no source reads that field) stays satisfied.
-    const ADVISORY_RISK_KEY = ["proposed", "Risk"].join("");
-    const plan = {
-      target: owningNoteId,
-      rationale: `re-anchor evidence ${ev.evidence_id} on claim ${ev.claim_id} → ${verification}`,
-      sourceIds: [],
-      retrievedEvidence: [],
-      confidence: verification === "valid" ? 1 : 0.5,
-      [ADVISORY_RISK_KEY]: "tier-2",
-      reversibility: "reversible",
-      schemaVersion: 1,
-      operation: {
-        op: "UpdateEvidenceVerification",
-        opVersion: 1,
-        claimKey: ev.claim_id,
-        replacementRenditionId: replacementHandle,
-        expectedSupersededRenditionId: pinnedHandle,
-        supersedesEvidenceId: ev.evidence_id,
-        lineageId: ev.lineage_id,
-        locator: ev.locator,
-        quoteHash: ev.quote_hash,
-        toVerification: verification,
-      },
-    } as unknown as ChangePlan;
-
-    const snapshot = await readVault(cfg);
-    const noteById = new Map(snapshot.notes.map((n) => [n.id, n]));
-    {
-      const deps: SynthesisApplyDeps = {
-        retrieve: (q) => Promise.resolve(stubRetrieve(owningNoteId, runId + q.text.length)),
-        generatePlan: () => Promise.resolve(plan),
-        readNote: (id) => noteById.get(id) ?? null,
-        validationVault: makeStoreValidationVault(store.db),
-        supportingEvidenceStates: () => [verification],
-        config: { packBudgetTokens: 6000, requireSourcesForSynthesis: false },
-        ctx, repo, store, vaultPath,
-        refreshProjection: async (noteId) => {
-          const { foldNotesForPaths } = await import("@atlas/sqlite-store");
-          const { resolveAtRef } = await import("../sync/resolve-at-ref.js");
-          const resolve = resolveAtRef(repo, CANONICAL_BRANCH, cfg.vault.note_globs);
-          foldNotesForPaths(store, [noteId], resolve);
-        },
-        now: () => new Date().toISOString(),
-        resolveRendition: (h) => {
-          try {
-            return provenance.resolveSourceHandle(parseSourceHandle(h)) !== null ? h : null;
-          } catch {
-            return null;
-          }
-        },
-        hasClaim: (k) => store.db.prepare(`SELECT 1 FROM claims WHERE claim_id = ?`).get(k) !== undefined,
-        hasNote: (id) => store.db.prepare(`SELECT 1 FROM notes WHERE note_id = ?`).get(id) !== undefined,
-      };
-      // Both `exact` (⇒valid) and `moved` (⇒pending) re-anchors now apply directly as
-      // one commit — the review-pending gate is retired (ADR-0003). The recorded
-      // verification is whatever the fail-closed match yielded.
-      const res = await applySynthesis("maintain", { target: owningNoteId, instruction: `re-anchor ${ev.evidence_id}` }, deps);
-      const out = { command: "evidence resolve", runId: res.runId, evidenceId: ev.evidence_id, lineageId: ev.lineage_id, supersedesEvidenceId: ev.evidence_id, replacementRenditionId: replacementHandle, quoteHash: ev.quote_hash, outcome: "integrated", verification, integratedCommit: res.commitSha };
-      if (ctx.output.mode === "json") emitJson(out);
-      else ctx.render(`evidence resolve ${ev.evidence_id}: integrated (${verification})`);
-      return EXIT.OK;
-    }
-  } finally {
-    store.close();
-  }
+  const { evidenceId } = parseArgs(ctx.argv);
+  const r = await mutateEvidence(ctx, evidenceId, { bumpAttempts: false });
+  const out = {
+    command: "evidence resolve",
+    outcome: r.outcome,
+    evidenceId: r.evidenceId,
+    noteId: r.noteId,
+    status: r.status,
+    ...(r.commit !== undefined ? { commit: r.commit } : {}),
+  };
+  if (ctx.output.mode === "json") emitJson(out);
+  else ctx.render(`evidence resolve ${r.evidenceId}: ${r.outcome} (${r.status})`);
+  return EXIT.OK;
 }
 
 registerCommand("evidence resolve", evidenceResolve);

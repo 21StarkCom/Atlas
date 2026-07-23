@@ -2,51 +2,77 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "atlas://cli-contract/evidence-retry.schema.json",
   "title": "brain evidence retry <evidenceId> — --json success output",
-  "description": "Re-enqueue a failed evidence re-verification job. Shared, intrinsically idempotent by the (contentId, newRenditionId, owningNoteId) tuple — a repeat retry of an already-queued or in-flight job returns the existing jobId rather than enqueuing a duplicate. Exit 0 on requeue; exit 1 when the evidence does not exist.",
+  "description": "Synchronously re-run the deterministic reverification of `evidence resolve` and, when the target note resolves, ALSO increment the `attempts` counter in the note's `evidence:` frontmatter entry (one commit onto refs/heads/main, then re-fold). `attempts` lives in the note (vault-authoritative) — there is NO jobs queue and NO ledger event in v2 (the rendition-coupled reverify job was retired). A gone target ⇒ outcome=target-missing, attempts unchanged, no mutation. Missing evidence ⇒ not-found (exit 1).",
   "type": "object",
   "unevaluatedProperties": false,
-  "required": ["command", "evidenceId", "jobId", "requeued"],
+  "required": ["command", "outcome", "evidenceId", "noteId", "status", "attempts"],
+  "allOf": [
+    {
+      "description": "outcome=resolved ⇒ status=resolved AND a canonical commit (the Markdown SSOT write, incl. the incremented attempts).",
+      "if": { "properties": { "outcome": { "const": "resolved" } }, "required": ["outcome"] },
+      "then": { "required": ["commit"], "properties": { "status": { "const": "resolved" } } }
+    },
+    {
+      "description": "outcome=target-missing ⇒ status=needs-review, attempts unchanged, no commit.",
+      "if": { "properties": { "outcome": { "const": "target-missing" } }, "required": ["outcome"] },
+      "then": { "properties": { "status": { "const": "needs-review" }, "commit": false } }
+    }
+  ],
   "properties": {
     "command": { "const": "evidence retry" },
-    "evidenceId": { "type": "string", "minLength": 1, "description": "The evidence id whose re-verification was re-enqueued." },
-    "jobId": { "type": "string", "minLength": 1, "description": "The re-verification job id (existing one on an idempotent repeat)." },
-    "requeued": { "type": "boolean", "description": "True when a new job was enqueued; false when an existing queued/in-flight job was returned." }
+    "outcome": {
+      "enum": ["resolved", "target-missing"],
+      "description": "resolved = target resolves, attempts incremented + status written to Markdown + committed; target-missing = the soft noteId/entry no longer resolves, no mutation."
+    },
+    "evidenceId": { "type": "string", "minLength": 1 },
+    "noteId": { "type": "string", "minLength": 1, "description": "The soft-referenced owning note (`(unknown)` when the row carries no noteId)." },
+    "status": {
+      "enum": ["resolved", "needs-review"],
+      "description": "The evidence status after the retry, bound to outcome."
+    },
+    "attempts": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "The attempts counter now recorded in the note (incremented on outcome=resolved; unchanged on target-missing)."
+    },
+    "commit": {
+      "type": "string",
+      "minLength": 1,
+      "description": "40-char hex canonical commit the retry landed as. Present ONLY on outcome=resolved."
+    }
   },
   "examples": [
-    {
-      "command": "evidence retry",
-      "evidenceId": "ev-01J9Z8Q0000000000000000000",
-      "jobId": "job-01J9Z8Q0000000000000000000",
-      "requeued": true
-    }
+    { "command": "evidence retry", "outcome": "resolved", "evidenceId": "ev-meridian-2025", "noteId": "project-meridian", "status": "resolved", "attempts": 3, "commit": "e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4" },
+    { "command": "evidence retry", "outcome": "target-missing", "evidenceId": "ev-orphan", "noteId": "deleted-note", "status": "needs-review", "attempts": 2 }
   ],
   "x-atlas-contract": {
     "command": "evidence retry",
     "phase": 4,
     "privilege": "shared",
-    "idempotency": "intrinsic",
-    "executionClass": "ledger-writing",
-    "summary": "Re-enqueue a failed re-verification job; idempotent by (contentId, newRenditionId, owningNoteId).",
+    "idempotency": "none",
+    "executionClass": "mutating",
+    "summary": "Synchronously reverify + increment attempts in the note frontmatter (one commit); a gone target is target-missing (attempts unchanged, no mutation). No jobs queue, no ledger event.",
     "args": [
-      { "arg": "<evidenceId>", "type": "string", "required": true, "description": "The failed evidence id to retry." }
+      { "arg": "<evidenceId>", "type": "string", "required": true, "description": "The evidence id to retry (from `brain evidence review`)." }
     ],
     "flags": [],
     "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
     "sideEffects": [
-      "enqueues a re-verification job keyed by (contentId, newRenditionId, owningNoteId)",
-      "finalizeLedgerWrite (evidence.retry_enqueued)"
+      "on outcome=resolved: increments attempts + writes status/verdict/lastCheckedAt into the note's evidence frontmatter and commits it onto refs/heads/main via the canonical mutation order, then re-folds the projection"
     ],
     "prohibitedEffects": [
-      "never enqueues a duplicate job for the same (contentId, newRenditionId, owningNoteId)",
-      "no vault content mutation"
+      "never enqueues a job (v2 has no async reverify)",
+      "never writes the attempts/status directly to SQLite bypassing the note-frontmatter mutation order",
+      "no run-id / ledger-seq / audit signature read or write",
+      "never mutates a gone target note"
     ],
-    "locks": [{ "scope": "shared", "mode": "shared" }],
+    "locks": [{ "scope": "vault-maintenance", "mode": "exclusive", "when": "outcome=resolved (the mutation order holds the vault lock)" }],
     "exitCodes": [0, 1, 2, 4, 5],
     "errorCodes": [
       { "code": "usage", "exit": 5, "when": "unknown flag/argument or missing <evidenceId>" },
-      { "code": "not-found", "exit": 1, "when": "the evidence does not exist" },
-      { "code": "vault-error", "exit": 2, "when": "the vault repo is missing or unreadable" },
-      { "code": "internal", "exit": 4, "when": "unexpected internal failure" }
+      { "code": "not-found", "exit": 1, "when": "the evidence id does not exist" },
+      { "code": "vault-error", "exit": 2, "when": "the vault repo is missing/unreadable, HEAD is not main, or the target note is dirty" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure (incl. projection/markdown drift)" }
     ],
     "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
   }

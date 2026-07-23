@@ -1,34 +1,25 @@
 /**
  * `commands/job-handlers` — the PRODUCTION workflow→executor registry.
  *
- * Until this module existed the registry in `jobs.ts` was literally `{}`: every
- * job production code enqueued hit the runner's "no handler registered" path,
- * which classifies `internal` as TRANSIENT — so a permanently mis-registered
- * job burned its whole attempt budget with backoff before failing at exit 4.
+ * **v2 (task 4-4): the production registry is EMPTY.** `reverify` was the last
+ * surviving production workflow; it was rendition-coupled (it re-anchored evidence
+ * across `source_renditions` versions) and has no analog in the v2 flat, vault-
+ * derived evidence model — `evidence retry` is now a synchronous frontmatter
+ * mutation, not an enqueued job. The retention sweeps, trust remediation, and the
+ * absorb-cycle `index:reconcile` had already died with their enqueuers (ADR-0003 /
+ * #334). Nothing production code runs now enqueues a job, so `PRODUCTION_WORKFLOWS`
+ * is empty and `jobs run` drains an empty production set (the durable queue
+ * infrastructure is retained for the survivor `jobs run|list` commands + the
+ * env-gated test handler, and for any future workflow).
  *
- * Two properties this module must keep:
- *
- *  1. **Completeness.** Every workflow name production code can `enqueue()`
- *     appears in `PRODUCTION_WORKFLOWS` and gets a handler here. The enqueue
- *     side and the execute side are bound together by
- *     `test/jobs.registry-completeness.test.ts`; adding one without the other
- *     fails that gate.
- *  2. **Laziness.** Handlers resolve their dependencies INSIDE the closure, not
- *     at build time. `buildJobHandlers` is called once per `jobs run` before any
- *     job is claimed, so build-time work would run even on an empty queue — and
- *     the completeness gate builds the registry with a stub `deps` precisely
- *     because nothing is dereferenced until a job actually executes.
- *
- * The registry is ctx-parameterized rather than populated at import time: real
- * handlers need a `RunContext` and an open `Store`, and both are only in scope
- * inside `jobsRun`. The env-gated test handler (`jobs-test-handler.ts`) keeps its
- * separate import-time seam — it takes no deps and must never ship in this map.
+ * The two properties the completeness gate (`test/jobs.registry-completeness.test.ts`)
+ * still enforces hold vacuously: every enqueueable workflow (none) has a handler,
+ * and no handler exists without an enqueuer. `buildJobHandlers` stays ctx-parameterized
+ * and side-effect-free so it is safe to call with a stub `deps`.
  */
 import type { JobHandler } from "@atlas/jobs";
 import type { Store } from "@atlas/sqlite-store";
 import type { RunContext } from "../handlers.js";
-import { REVERIFY_WORKFLOW } from "../workflows/reverify.js";
-import { buildReverifyHandler } from "../workflows/reverify-handler.js";
 
 /** Everything a production job handler may need, resolved lazily per execution. */
 export interface JobHandlerDeps {
@@ -38,24 +29,18 @@ export interface JobHandlerDeps {
 
 /**
  * The workflows the production registry covers. Bound to the enqueue-side
- * constants by the completeness gate — this list is not free-form.
+ * constants by the completeness gate — this list is not free-form. EMPTY in v2
+ * (no production code enqueues a job — see the module header).
  */
-export const PRODUCTION_WORKFLOWS = [
-  // v2 (#334): reverify is the ONE surviving production workflow — retention
-  // sweeps, trust remediation, and the absorb-cycle index:reconcile died with
-  // their enqueuers (ADR-0003). `evidence retry` is the live enqueuer.
-  REVERIFY_WORKFLOW,
-] as const;
+export const PRODUCTION_WORKFLOWS = [] as const;
 
 export type ProductionWorkflow = (typeof PRODUCTION_WORKFLOWS)[number];
 
 /**
  * Build the production workflow→executor map. Pure and side-effect free: it only
  * closes over `deps`, so it is safe to call before the queue is known to be
- * non-empty (and safe for the completeness gate to call with a stub).
+ * non-empty (and safe for the completeness gate to call with a stub). Empty in v2.
  */
-export function buildJobHandlers(deps: JobHandlerDeps): Record<string, JobHandler> {
-  return {
-    [REVERIFY_WORKFLOW]: buildReverifyHandler(deps),
-  };
+export function buildJobHandlers(_deps: JobHandlerDeps): Record<string, JobHandler> {
+  return {};
 }

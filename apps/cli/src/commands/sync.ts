@@ -535,18 +535,23 @@ async function prepareGeneration(
  * delete `note_links` (both directions) → `note_identity_keys` → the `notes` row.
  * Children are deleted explicitly (FK-pragma-order-independent, the erase.ts
  * pattern) even though `notes` cascades. Scope is exactly the v2 vault-derived
- * projection; Phase 4 task 4 extends this transaction to `evidence` rows.
+ * projection PLUS the vault-derived `evidence` rows (task 4-4): a dropped note's
+ * evidence is deleted in the SAME invisibility-first transaction, so `sync`'s drop
+ * path and `db rebuild` agree (no orphaned evidence). `evidence.noteId` is a soft
+ * reference (no FK), so it must be deleted explicitly.
  */
 function purgeDropped(store: Store, noteIds: readonly string[]): void {
   const ids = [...new Set(noteIds)];
   if (ids.length === 0) return;
   const delLinks = store.db.prepare(`DELETE FROM note_links WHERE source_note_id = ? OR target_note_id = ?`);
   const delKeys = store.db.prepare(`DELETE FROM note_identity_keys WHERE note_id = ?`);
+  const delEvidence = store.db.prepare(`DELETE FROM evidence WHERE noteId = ?`);
   const delNote = store.db.prepare(`DELETE FROM notes WHERE note_id = ?`);
   const run = store.db.transaction(() => {
     for (const id of ids) {
       delLinks.run(id, id);
       delKeys.run(id);
+      delEvidence.run(id);
       delNote.run(id);
     }
   });

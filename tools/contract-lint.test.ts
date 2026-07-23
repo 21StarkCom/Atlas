@@ -1021,19 +1021,20 @@ describe("Phase-4 discriminated outcomes (evidence resolve)", () => {
   const load = (name: string) =>
     JSON.parse(readFileSync(join(root, "docs/specs/cli-contract", name), "utf8"));
 
-  it("evidence resolve: integrated requires integratedCommit; failed forbids it (v2 #335: no review_pending outcome, no exit 6)", () => {
+  it("evidence resolve: resolved requires a commit + status=resolved; target-missing forbids a commit (v2 task 4-4)", () => {
     const s = load("evidence-resolve.schema.json");
-    // v2: an uncertain re-anchor fails closed — the Tier-3 review_pending outcome is retired.
-    expect(s.properties.outcome.enum.sort()).toEqual(["failed", "integrated"]);
+    // v2 flat vault-derived evidence: the two outcomes are `resolved` (Markdown-committed)
+    // and `target-missing` (the gone-note case) — no renditions, no review_pending, no exit 6.
+    expect(s.properties.outcome.enum.sort()).toEqual(["resolved", "target-missing"]);
     const branchFor = (outcome: string) =>
       (s.allOf as any[]).find((a) => a.if?.properties?.outcome?.const === outcome);
-    // integrated ⇒ requires the canonical commit + full superseding head
-    expect(branchFor("integrated").then.required).toEqual(
-      expect.arrayContaining(["evidenceId", "integratedCommit"]),
-    );
-    // failed ⇒ integratedCommit is forbidden (never fabricates an integration)
-    expect(branchFor("failed").then.properties.integratedCommit).toBe(false);
-    // no exit 6 (the review escalation is retired)
+    // resolved ⇒ requires the canonical commit + status=resolved (the Markdown SSOT write)
+    expect(branchFor("resolved").then.required).toEqual(expect.arrayContaining(["commit"]));
+    expect(branchFor("resolved").then.properties.status.const).toBe("resolved");
+    // target-missing ⇒ no commit (nothing was mutated), status=needs-review
+    expect(branchFor("target-missing").then.properties.commit).toBe(false);
+    expect(branchFor("target-missing").then.properties.status.const).toBe("needs-review");
+    // no exit 6 (the review escalation is retired); no ledger coupling
     expect(s["x-atlas-contract"].exitCodes as number[]).not.toContain(6);
   });
 

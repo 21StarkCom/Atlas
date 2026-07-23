@@ -24,8 +24,8 @@ Registry version: **2** · Commands: **24**
 | 3 | `index rebuild` | intrinsic | shared | yes | `docs/specs/cli-contract/index-rebuild.schema.json` |
 | 3 | `query` | none | shared | yes | `docs/specs/cli-contract/query.schema.json` |
 | 4 | `enrich` | key-accepting | shared | yes | `docs/specs/cli-contract/enrich.schema.json` |
-| 4 | `evidence resolve` | intrinsic | shared | yes | `docs/specs/cli-contract/evidence-resolve.schema.json` |
-| 4 | `evidence retry` | intrinsic | shared | yes | `docs/specs/cli-contract/evidence-retry.schema.json` |
+| 4 | `evidence resolve` | none | shared | yes | `docs/specs/cli-contract/evidence-resolve.schema.json` |
+| 4 | `evidence retry` | none | shared | yes | `docs/specs/cli-contract/evidence-retry.schema.json` |
 | 4 | `evidence review` | none | shared | yes | `docs/specs/cli-contract/evidence-review.schema.json` |
 | 4 | `link` | intrinsic | shared | yes | `docs/specs/cli-contract/link.schema.json` |
 | 4 | `maintain` | key-accepting | shared | yes | `docs/specs/cli-contract/maintain.schema.json` |

@@ -30,7 +30,7 @@
       "name": "evidence resolve",
       "schemaRef": "docs/specs/cli-contract/evidence-resolve.schema.json",
       "phase": 4,
-      "idempotency": "intrinsic",
+      "idempotency": "none",
       "privilege": "shared",
       "implemented": true
     },
@@ -38,7 +38,7 @@
       "name": "evidence retry",
       "schemaRef": "docs/specs/cli-contract/evidence-retry.schema.json",
       "phase": 4,
-      "idempotency": "intrinsic",
+      "idempotency": "none",
       "privilege": "shared",
       "implemented": true
     },
