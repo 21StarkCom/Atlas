@@ -14,17 +14,19 @@
  * stale (`needs-review`), never trusted.
  *
  * EXPAND-AND-CONTRACT — this forward migration is authored across the phase-4
- * commits. THIS commit (task 4-2) lands the ADDITIVE half only: `CREATE TABLE
- * evidence`. The DROPs of the v1 evidence model (`claims`/`claim_evidence`), the
- * ledger/backup tables (`audit_events`/`audit_intents`/`backup_watermark`/
- * `raw_payloads`), and the dead `sync_cursors` table (`0012`) ride this SAME forward
- * migration but are appended in the later commits that remove each table's last
- * consumer (task 4-4 for the claims model; task 4-1 for the ledger/cursor tables) —
- * so no intermediate commit migrates against a still-live consumer. This is the
- * newest migration on an unreleased branch and is never applied to a real DB before
- * the Phase-5 verified pre-migration snapshot exists, so growing its DDL here is not
- * editing a *released* migration (migrations stay append-only: `0004`/`0012` are
- * forward-dropped, never edited).
+ * commits. Task 4-2 landed the ADDITIVE half (`CREATE TABLE evidence`). THIS commit
+ * (task 4-4) appends the DROP of the v1 evidence model (`claim_evidence` then
+ * `claims`, children-first) now that the flat vault-derived `evidence` projection +
+ * `EvidenceRepo` + fold + the rewritten evidence commands have fully replaced the
+ * rendition-pinned `claims`/`claim_evidence` model and its last consumer is gone. The
+ * remaining DROPs — the ledger/backup tables (`audit_events`/`audit_intents`/
+ * `backup_watermark`/`raw_payloads`) and the dead `sync_cursors` table (`0012`) —
+ * still ride this SAME forward migration but are appended in the later commit that
+ * removes their last consumer (task 4-1) — so no intermediate commit migrates against
+ * a still-live consumer. This is the newest migration on an unreleased branch and is
+ * never applied to a real DB before the Phase-5 verified pre-migration snapshot
+ * exists, so growing its DDL here is not editing a *released* migration (migrations
+ * stay append-only: `0004`/`0012` are forward-dropped, never edited).
  *
  * FK-free by construction: `evidence` has no foreign keys (`noteId` is soft), so a
  * projection rebuild can never trip a restrictive FK or orphan a row. The whole
@@ -40,6 +42,14 @@ import { migrationChecksum } from "../src/migrate.js";
  * nullability per the column annotations). Column names are the v2 camelCase form
  * the plan pins — the evidence subsystem is authored fresh, with no v1 legacy to
  * match.
+ *
+ * The CREATE is followed by the CONTRACT half of the expand-and-contract cutover:
+ * DROP the v1 `claims`/`claim_evidence` model (task 4-4), children first
+ * (`claim_evidence` carries a `CASCADE` FK onto `claims`, a `RESTRICT` FK onto
+ * `source_renditions`, and a self-`RESTRICT` supersession FK — so it must be dropped
+ * before `claims`; a whole-table DROP is not blocked by the row-level RESTRICT FKs).
+ * The ledger/backup and `sync_cursors` DROPs still ride this migration in the task-4-1
+ * commit (their consumers are not yet removed).
  */
 export const EVIDENCE_V2_DDL = `CREATE TABLE evidence (
   id             TEXT    NOT NULL PRIMARY KEY,
@@ -53,7 +63,9 @@ export const EVIDENCE_V2_DDL = `CREATE TABLE evidence (
   lastCheckedAt  TEXT,
   sourceNoteHash TEXT,                                    -- content-hash staleness guard (row is stale when != note's on-disk hash)
   createdAt      TEXT
-) STRICT;`;
+) STRICT;
+DROP TABLE claim_evidence;
+DROP TABLE claims;`;
 
 /** The `0014_evidence_v2` migration (registered in `openStore`'s default set). */
 export const migration0014EvidenceV2: Migration = {

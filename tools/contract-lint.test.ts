@@ -857,7 +857,7 @@ describe("Phase-4 workflow-risk-contract (Task 4.0)", () => {
       (mutationPolicy.ops as { op: string; policy: Record<string, string> }[]).map((o) => [o.op, o.policy]),
     );
     // sources are immutable for every content op
-    for (const op of ["CreateNote", "UpdateSection", "AppendSection", "SetFrontmatterField", "SetLink", "CreateClaim"]) {
+    for (const op of ["CreateNote", "UpdateSection", "AppendSection", "SetFrontmatterField", "SetLink"]) {
       expect(byOp.get(op)!.source, `${op} on source`).toBe("immutable");
     }
     // the trust ops were retired in v2 — no policy row touches a source as `review`

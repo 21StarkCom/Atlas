@@ -5,13 +5,13 @@
  * rebuild pipeline, `verify`, and the repositories. The `0001_core`, the
  * retained-PR-A `0003_provenance` + `0004_claims`, the `0005_ledger_finalize`,
  * the core `0013_links_v2` (v2 `note_links` reshape), and the core
- * `0014_evidence_v2` (v2 vault-derived `evidence` projection) migrations are
- * registered on open (so the public `migrate()`/`rebuildProjections()` path
- * creates the provenance + claims tables and neither fold is ever a silent no-op, §2.7 /
- * §4.1); `@atlas/jobs` registers `0002` via {@link Store.registerMigration}
- * before calling {@link Store.migrate}. The gap-tolerant runner (Task 1.4)
- * applies `0003`/`0004` even though `0002` is absent — do NOT assume contiguous
- * numbering.
+ * `0014_evidence_v2` (v2 vault-derived `evidence` projection, which also
+ * forward-DROPs the v1 `0004_claims` tables) migrations are registered on open (so
+ * the public `migrate()`/`rebuildProjections()` path creates the provenance +
+ * evidence tables and neither fold is ever a silent no-op, §2.7 / §4.1);
+ * `@atlas/jobs` registers `0002` via {@link Store.registerMigration} before calling
+ * {@link Store.migrate}. The gap-tolerant runner (Task 1.4) applies `0003`/`0004`
+ * even though `0002` is absent — do NOT assume contiguous numbering.
  */
 import type { VaultSnapshot } from "@atlas/contracts";
 import { openConnection, type SqliteConfig, type SqliteDatabase } from "./connection.js";
@@ -21,7 +21,6 @@ import { verify, type VerifyReport } from "./verify.js";
 import { LedgerRepo } from "./repos/ledger.js";
 import { ProjectionRepo } from "./repos/projections.js";
 import { ProvenanceRepo } from "./repos/provenance.js";
-import { ClaimsRepo } from "./repos/claims.js";
 import { GenerationRepo } from "./repos/generation.js";
 import { migration0001Core } from "../migrations/0001_core.js";
 import { migration0003Provenance } from "../migrations/0003_provenance.js";
@@ -33,14 +32,12 @@ import { migration0013LinksV2 } from "../migrations/0013_links_v2.js";
 import { migration0014EvidenceV2 } from "../migrations/0014_evidence_v2.js";
 // Side-effect imports: register the retained-PR-A projection folds into the
 // rebuild pipeline (§2.7 / §4.1) so `rebuildProjections`/`db rebuild` reproduce
-// the provenance + claims projections from canonical Markdown. Provenance is
-// imported first so its fold runs before the claims fold, which pins existing
-// renditions its evidence references.
+// the provenance + evidence projections from canonical Markdown.
 import "./provenance/fold.js";
-import "./claims/fold.js";
-// The v2 vault-derived evidence fold (task 4-4): reconstructs the `evidence`
+// The v2 vault-derived evidence fold (task 4-4): reconstructs the flat `evidence`
 // projection from note frontmatter on `db rebuild`. Self-guarded when 0014 is
-// unapplied. (The claims fold above is retired in the same phase-4 arc.)
+// unapplied. It replaces the retired v1 claims fold — 0014 forward-DROPs the v1
+// `claims`/`claim_evidence` tables the claims fold used to reconstruct.
 import "./evidence/fold.js";
 
 /** A wall-clock supplier for `applied_at` timestamps (injectable for tests). */
@@ -56,8 +53,6 @@ export interface Store {
   readonly ledger: LedgerRepo;
   /** Provenance-projection repository (`0003_provenance`). */
   readonly provenance: ProvenanceRepo;
-  /** Claims-projection repository (`0004_claims`). */
-  readonly claims: ClaimsRepo;
   /** Retrieval-index generation fence repository — the sole activation authority (Task 3.2). */
   readonly generation: GenerationRepo;
   /**
@@ -128,11 +123,11 @@ export function openStore(cfg: SqliteConfig, clock: Clock = rfc3339Now): Store {
   // `note_links` projection into the v2 link shape), NOT a feature migration —
   // so it belongs in the default retained set, applied by every `db migrate`.
   migrations.set(migration0013LinksV2.id, migration0013LinksV2);
-  // `0014_evidence_v2` is a CORE projection migration (it replaces the v1
-  // `claims`/`claim_evidence` evidence model with the flat vault-derived
-  // `evidence` table); like `0013` it belongs in the default retained set,
-  // applied by every `db migrate`. Store-open only REGISTERS it — the explicit
-  // `db migrate` under the vault lock is the sole apply path (no reader auto-migrates).
+  // `0014_evidence_v2` is a CORE projection migration (it creates the flat
+  // vault-derived `evidence` table AND forward-DROPs the v1 `claims`/`claim_evidence`
+  // model it replaces); like `0013` it belongs in the default retained set, applied by
+  // every `db migrate`. Store-open only REGISTERS it — the explicit `db migrate` under
+  // the vault lock is the sole apply path (no reader auto-migrates).
   migrations.set(migration0014EvidenceV2.id, migration0014EvidenceV2);
 
   const generation = new GenerationRepo(db, clock);
@@ -142,7 +137,6 @@ export function openStore(cfg: SqliteConfig, clock: Clock = rfc3339Now): Store {
     projections: new ProjectionRepo(db),
     ledger: new LedgerRepo(db),
     provenance: new ProvenanceRepo(db),
-    claims: new ClaimsRepo(db),
     generation,
     activateGeneration(
       noteId: string,

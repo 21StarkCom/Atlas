@@ -21,10 +21,14 @@ import { parseSourceHandle } from "../ids.js";
  * `contracts.operations.test` fixture matrix are both checked against, so a new
  * op cannot be added to one without the other.
  *
- * 15 operations total (v2 contract demolition): 13 active + the 2 reserved task ops.
- * `ProposeDelete` is intentionally NOT part of this gate — it is the Tier-3
+ * 12 operations total (v2 contract demolition + the phase-4 persistence strip that
+ * retired the rendition-pinned claims/evidence ops): 10 active + the 2 reserved task
+ * ops. `ProposeDelete` is intentionally NOT part of this gate — it is the Tier-3
  * deletion-*proposal* op the Phase-4 `maintain`/`reconcile` loop emits and is
- * gated with that phase (its op file is not in the Task 2.0 file list).
+ * gated with that phase (its op file is not in the Task 2.0 file list). The v1
+ * `CreateClaim`/`AttachEvidence`/`UpdateEvidenceVerification` ops were removed with
+ * the flat vault-derived `evidence` model (#337) — evidence is authored via the
+ * dedicated evidence commands, not a ChangePlan op.
  */
 export const CHANGE_PLAN_OPS = [
   "CreateNote",
@@ -34,9 +38,6 @@ export const CHANGE_PLAN_OPS = [
   "AddAlias",
   "SetLink",
   "CreateRelationship",
-  "CreateClaim",
-  "AttachEvidence",
-  "UpdateEvidenceVerification",
   "ProposeMerge",
   "ProposeRename",
   "ProposeArchive",
@@ -102,48 +103,6 @@ export const ProvenanceRef = z.string().superRefine((s, ctx) => {
   }
 });
 export type ProvenanceRef = z.infer<typeof ProvenanceRef>;
-
-/**
- * A PINNED `renditionId` reference (D3): `sha256:<rawContentHash>:<canonicalMediaType>:
- * <extractorVersion>:<normalizerVersion>` — the four `source_renditions` composite-key
- * components serialized. Evidence is pinned to this concrete rendition, never to the mutable
- * `sourceId` alias (design §"Claims & provenance"): a `sourceId` given at the CLI boundary is
- * resolved to its concrete active `renditionId` there, and only the pinned form is persisted, so
- * a later extractor/normalizer upgrade cannot silently re-point an evidence payload's meaning.
- *
- * Fixes R3-F4: reuses the SSOT `parseSourceHandle` and REQUIRES `kind === "rendition"` — a bare
- * `contentId` (3-segment) or a lenient string no longer passes. `parseSourceHandle` already fixes
- * the lowercase-hex hash + media-type + integer-version rules D3 requires, so there is no separate,
- * looser regex to drift from it.
- */
-export const PinnedRenditionRef = z.string().superRefine((s, ctx) => {
-  let handle: ReturnType<typeof parseSourceHandle>;
-  try {
-    handle = parseSourceHandle(s);
-  } catch (e) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: (e as Error).message });
-    return;
-  }
-  if (handle.kind !== "rendition") {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message:
-        "must be a pinned renditionId (5-segment sha256:<hash>:<mediaType>:<extractorVersion>:<normalizerVersion>), not a bare contentId",
-    });
-  }
-});
-export type PinnedRenditionRef = z.infer<typeof PinnedRenditionRef>;
-
-/**
- * Evidence verification verdicts — the normative set fixed by the design
- * (§"Claims & provenance") and the `claim_evidence.verification` CHECK in the SQLite data
- * dictionary. `valid` (re-matched/anchored), `stale` (pinned rendition superseded, awaiting
- * re-verification), `pending` (ambiguous/legacy — operator resolution), `failed` (quote not
- * found). Canonical Markdown is the SSOT for this value; SQLite only mirrors it.
- */
-export const VERIFICATION_STATES = ["valid", "stale", "pending", "failed"] as const;
-export type VerificationState = (typeof VERIFICATION_STATES)[number];
-export const VerificationState = z.enum(VERIFICATION_STATES);
 
 /** Relationship predicate enum (spec: `CreateRelationship` predicate enum). */
 export const RELATIONSHIP_PREDICATES = [

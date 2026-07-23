@@ -67,13 +67,6 @@ export {
 } from "./provenance/fold.js";
 
 export {
-  foldClaimManifests,
-  clearClaimsProjection,
-  MalformedClaimError,
-  DanglingEvidenceError,
-} from "./claims/fold.js";
-
-export {
   foldEvidenceManifests,
   clearEvidenceProjection,
   replaceNoteEvidence,
@@ -183,12 +176,5 @@ export type {
   RenditionComponents,
 } from "./repos/provenance.js";
 
-export { ClaimsRepo, payloadHash, evidenceIdFor, SENTINEL_NONE } from "./repos/claims.js";
 export { EvidenceRepo } from "./repos/evidence.js";
 export type { EvidenceRow, EvidenceInput, EvidenceStatus } from "./repos/evidence.js";
-export type {
-  ClaimRow,
-  ClaimEvidenceRow,
-  AttachEvidenceInput,
-  EvidenceVerification,
-} from "./repos/claims.js";

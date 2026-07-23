@@ -71,15 +71,6 @@ const INVARIANTS: readonly InvariantSpec[] = [
       WHERE COALESCE(k.c, 0) <> 1;`,
   },
   {
-    name: "no-dangling-evidence-rendition",
-    tables: ["claim_evidence", "source_renditions"],
-    sql: `SELECT e.evidence_id FROM claim_evidence e
-      LEFT JOIN source_renditions r
-        ON r.raw_content_hash = e.raw_content_hash AND r.canonical_media_type = e.canonical_media_type
-       AND r.extractor_version = e.extractor_version AND r.normalizer_version = e.normalizer_version
-      WHERE r.raw_content_hash IS NULL;`,
-  },
-  {
     name: "note-sources-renditions-resolve",
     tables: ["note_sources", "source_renditions"],
     sql: `SELECT s.note_id FROM note_sources s
@@ -89,14 +80,6 @@ const INVARIANTS: readonly InvariantSpec[] = [
       WHERE s.extractor_version IS NOT NULL AND r.raw_content_hash IS NULL;`,
   },
   {
-    name: "one-current-evidence-head-per-lineage",
-    tables: ["claim_evidence"],
-    sql: `SELECT lineage_id, SUM(current) AS current_heads
-      FROM claim_evidence
-      GROUP BY lineage_id
-      HAVING SUM(current) <> 1;`,
-  },
-  {
     name: "active-rendition-consistency",
     tables: ["content_blobs", "source_renditions"],
     sql: `SELECT b.raw_content_hash FROM content_blobs b
@@ -104,16 +87,6 @@ const INVARIANTS: readonly InvariantSpec[] = [
         ON r.raw_content_hash = b.raw_content_hash AND r.canonical_media_type = b.canonical_media_type
        AND r.extractor_version = b.active_extractor_version AND r.normalizer_version = b.active_normalizer_version
       WHERE b.active_extractor_version IS NOT NULL AND r.raw_content_hash IS NULL;`,
-  },
-  {
-    name: "effective-staleness",
-    tables: ["claim_evidence", "content_blobs"],
-    sql: `SELECT e.evidence_id FROM claim_evidence e
-      JOIN content_blobs b
-        ON b.raw_content_hash = e.raw_content_hash AND b.canonical_media_type = e.canonical_media_type
-      WHERE e.current = 1
-        AND (e.extractor_version <> b.active_extractor_version OR e.normalizer_version <> b.active_normalizer_version)
-        AND e.verification = 'valid';`,
   },
   {
     // The closed set of terminal audit-event types (plan §2.5 audit SSOT): the

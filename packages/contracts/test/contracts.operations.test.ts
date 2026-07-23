@@ -64,17 +64,18 @@ function runWorker(): string {
 const samples = OP_SAMPLES as unknown[];
 
 /**
- * The finalized 15-op ChangePlan union (v2 contract demolition) written as a
- * LITERAL tuple — the anti-drift anchor. Comparing the two coupled internal
- * lists to each other would pass even if a finalized op were swapped out in
- * BOTH; pinning to this literal set catches that. The two retired trust ops
- * (`PromoteTrust`/`RevokeTrust`) must be absent from every surface.
+ * The finalized 12-op ChangePlan union (v2 contract demolition + the #337
+ * persistence strip that retired the rendition-pinned claims/evidence ops) written
+ * as a LITERAL tuple — the anti-drift anchor. Comparing the two coupled internal
+ * lists to each other would pass even if a finalized op were swapped out in BOTH;
+ * pinning to this literal set catches that. The retired trust ops
+ * (`PromoteTrust`/`RevokeTrust`) and the retired claims/evidence ops
+ * (`CreateClaim`/`AttachEvidence`/`UpdateEvidenceVerification`) must be absent from
+ * every surface.
  */
-const FINALIZED_15_OPS = [
+const FINALIZED_12_OPS = [
   "AddAlias",
   "AppendSection",
-  "AttachEvidence",
-  "CreateClaim",
   "CreateNote",
   "CreateRelationship",
   "CreateTask",
@@ -83,18 +84,23 @@ const FINALIZED_15_OPS = [
   "ProposeRename",
   "SetFrontmatterField",
   "SetLink",
-  "UpdateEvidenceVerification",
   "UpdateSection",
   "UpdateTaskState",
 ].sort();
 const RETIRED_TRUST_OPS = ["PromoteTrust", "RevokeTrust"];
+const RETIRED_EVIDENCE_OPS = ["CreateClaim", "AttachEvidence", "UpdateEvidenceVerification"];
 
 describe("op sample coverage", () => {
-  it("the union declares EXACTLY the 15 finalized op names (literal), trust ops absent", () => {
+  it("the union declares EXACTLY the 12 finalized op names (literal), trust + evidence ops absent", () => {
     // Pin both the name list and the union to a LITERAL tuple, not to each other.
-    expect([...CHANGE_PLAN_OPS].sort()).toEqual(FINALIZED_15_OPS);
-    expect([...CHANGE_PLAN_OPERATION_NAMES].sort()).toEqual(FINALIZED_15_OPS);
-    expect(CHANGE_PLAN_OPS.length).toBe(15);
+    expect([...CHANGE_PLAN_OPS].sort()).toEqual(FINALIZED_12_OPS);
+    expect([...CHANGE_PLAN_OPERATION_NAMES].sort()).toEqual(FINALIZED_12_OPS);
+    expect(CHANGE_PLAN_OPS.length).toBe(12);
+    // The retired claims/evidence ops are gone from the name list AND the union.
+    for (const op of RETIRED_EVIDENCE_OPS) {
+      expect(CHANGE_PLAN_OPS as readonly string[]).not.toContain(op);
+      expect(CHANGE_PLAN_OPERATION_NAMES as readonly string[]).not.toContain(op);
+    }
     // The retired trust ops are gone from the name list AND the runtime union.
     for (const op of RETIRED_TRUST_OPS) {
       expect(CHANGE_PLAN_OPS as readonly string[]).not.toContain(op);
@@ -179,23 +185,6 @@ describe("per-op cross-field invariants are rejected in-schema (R3-F3)", () => {
         mutateOp("ProposeRename", {}, ["newTitle", "newSlug", "newFilename", "newAliases"]),
       ),
     ).toThrow();
-  });
-
-  it("AttachEvidence: verification=valid without locator/quoteHash is rejected", () => {
-    expect(() =>
-      ChangePlanSchema.parse(mutateOp("AttachEvidence", { verification: "valid" }, ["locator", "quoteHash"])),
-    ).toThrow();
-  });
-
-  it("AttachEvidence: locator without quoteHash (unpaired anchor) is rejected", () => {
-    expect(() =>
-      ChangePlanSchema.parse(mutateOp("AttachEvidence", { verification: "pending" }, ["quoteHash"])),
-    ).toThrow();
-  });
-
-  it("AttachEvidence: a bare contentId (not a rendition) as renditionId is rejected", () => {
-    const contentId = `sha256:${"a".repeat(64)}:text/markdown`;
-    expect(() => ChangePlanSchema.parse(mutateOp("AttachEvidence", { renditionId: contentId }))).toThrow();
   });
 });
 

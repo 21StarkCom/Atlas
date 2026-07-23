@@ -3,7 +3,6 @@ import type { ChangePlan, ChangePlanOperation } from "@atlas/contracts";
 import { validatePlan, type ValidationContext, type ValidationVault } from "../src/validation/index.js";
 
 const H = "a".repeat(64);
-const REND = `sha256:${H}:text/markdown:1:1`;
 
 /** An all-resolving vault; override individual resolvers per test. */
 function vault(over: Partial<ValidationVault> = {}): ValidationVault {
@@ -11,10 +10,6 @@ function vault(over: Partial<ValidationVault> = {}): ValidationVault {
     hasNoteId: () => true,
     identityOwners: () => [],
     hasSourceRef: () => true,
-    hasClaimKey: () => true,
-    hasEvidenceLineage: () => true,
-    hasEvidenceId: () => true,
-    attachWouldDuplicate: () => false,
     ...over,
   };
 }
@@ -121,42 +116,10 @@ describe("validation: dangling references", () => {
     expect(codes(r)).toContain("dangling-note");
   });
 
-  it("flags an unresolved claim provenance ref", () => {
-    const claim = { op: "CreateClaim", opVersion: 1, claimKey: "c/1", claimText: "x", provenance: [REND] } as ChangePlanOperation;
-    const r = validatePlan(plan(claim), ctx({}, { hasSourceRef: () => false }));
-    expect(codes(r)).toContain("dangling-source");
-  });
-
-  it("flags evidence attached to an unknown claim", () => {
-    const attach = { op: "AttachEvidence", opVersion: 1, claimKey: "c/unknown", renditionId: REND, locator: "char:0-1", quoteHash: `sha256:${H}` } as ChangePlanOperation;
-    const r = validatePlan(plan(attach), ctx({}, { hasClaimKey: () => false }));
-    expect(codes(r)).toContain("dangling-claim");
-  });
-
-  it("flags a verification update naming an unknown lineage", () => {
-    const upd = { op: "UpdateEvidenceVerification", opVersion: 1, claimKey: "c/1", lineageId: `sha256:${H}`, supersedesEvidenceId: `sha256:${H}`, expectedSupersededRenditionId: REND, toVerification: "valid", replacementRenditionId: `sha256:${H}:text/markdown:1:2`, locator: "char:0-1", quoteHash: `sha256:${H}` } as ChangePlanOperation;
-    const r = validatePlan(plan(upd), ctx({}, { hasEvidenceLineage: () => false }));
-    expect(codes(r)).toContain("dangling-evidence");
-  });
-
-  it("passes when every reference resolves", () => {
-    const claim = { op: "CreateClaim", opVersion: 1, claimKey: "c/1", claimText: "x", provenance: [REND] } as ChangePlanOperation;
-    expect(codes(validatePlan(plan(claim), ctx()))).not.toContain("dangling-source");
-  });
-});
-
-describe("validation: duplicate evidence (gate)", () => {
-  const attach = { op: "AttachEvidence", opVersion: 1, claimKey: "c/1", renditionId: REND, locator: "char:0-1", quoteHash: `sha256:${H}` } as ChangePlanOperation;
-
-  it("flags an idempotent-duplicate attach as a Tier-2 gate", () => {
-    const r = validatePlan(plan(attach), ctx({}, { attachWouldDuplicate: () => true }));
-    expect(codes(r)).toContain("duplicate-evidence");
-    expect(r.ok).toBe(true);
-    expect(r.gates.tier2Eligible).toBe(false);
-  });
-
-  it("passes a fresh attach", () => {
-    expect(codes(validatePlan(plan(attach), ctx()))).not.toContain("duplicate-evidence");
+  it("flags a relationship object that does not exist", () => {
+    const rel = { op: "CreateRelationship", opVersion: 1, predicate: "depends-on", object: "note/missing" } as ChangePlanOperation;
+    const r = validatePlan(plan(rel), ctx({}, { hasNoteId: (id) => id !== "note/missing" }));
+    expect(codes(r)).toContain("dangling-note");
   });
 });
 

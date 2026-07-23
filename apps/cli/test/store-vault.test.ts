@@ -1,10 +1,10 @@
 /**
- * `store-vault` (Task 4.11) — the production ValidationVault resolves note/identity/provenance/
- * claim/evidence facts from the SQLite projections, so a ChangePlan validates against the real
- * current vault state.
+ * `store-vault` (Task 4.11) — the production ValidationVault resolves note/identity/provenance
+ * facts from the SQLite projections, so a ChangePlan validates against the real current vault
+ * state. (The v1 claim/evidence resolvers were retired with the claims model — #337.)
  */
 import { describe, expect, it } from "vitest";
-import { normalizeIdentityKey, type ContentId, type ParsedNote, type VaultSnapshot } from "@atlas/contracts";
+import { normalizeIdentityKey, type ParsedNote, type VaultSnapshot } from "@atlas/contracts";
 import { openStore, rebuildProjections, type Store } from "@atlas/sqlite-store";
 import { buildSectionTree } from "../src/markdown/sections.js";
 import { splitFrontmatter } from "../src/markdown/parse.js";
@@ -38,7 +38,7 @@ function storeWith(notes: ParsedNote[]): Store {
 }
 
 describe("store-backed ValidationVault (Task 4.11)", () => {
-  it("resolves notes, provenance, and claims from the projections", () => {
+  it("resolves notes and provenance from the projections", () => {
     const s = storeWith([sourceNote(), claimNote()]);
     try {
       const v = makeStoreValidationVault(s.db);
@@ -47,8 +47,6 @@ describe("store-backed ValidationVault (Task 4.11)", () => {
       expect(v.hasSourceRef(`${CONTENT_A}:1:1`)).toBe(true);
       expect(v.hasSourceRef(`sha256:${"c".repeat(64)}:text/plain:1:1`)).toBe(false);
       expect(v.hasSourceRef("garbage")).toBe(false);
-      expect(v.hasClaimKey("claim-a")).toBe(true);
-      expect(v.hasClaimKey("claim-z")).toBe(false);
     } finally { s.close(); }
   });
 
@@ -60,21 +58,6 @@ describe("store-backed ValidationVault (Task 4.11)", () => {
       expect(v.identityOwners(normalizeIdentityKey("note-a"))).toContain("note-a");
       expect(v.identityOwners(normalizeIdentityKey("Alpha Note"))).toContain("note-a");
       expect(v.identityOwners(normalizeIdentityKey("nonexistent-key"))).toEqual([]);
-    } finally { s.close(); }
-  });
-
-  it("attachWouldDuplicate detects a re-attach of an existing current evidence pin", () => {
-    const s = storeWith([sourceNote(), claimNote()]);
-    try {
-      const v = makeStoreValidationVault(s.db);
-      const contentId: ContentId = { kind: "content", rawContentHash: HEX_A, canonicalMediaType: "text/plain" };
-      void contentId;
-      // The seeded evidence pins rendition 1:1 with no locator ((none) sentinel).
-      const dup = v.attachWouldDuplicate({ op: "AttachEvidence", opVersion: 1, claimKey: "claim-a", renditionId: `${CONTENT_A}:1:1` } as never);
-      expect(dup).toBe(true);
-      // A different rendition is not a duplicate.
-      const notDup = v.attachWouldDuplicate({ op: "AttachEvidence", opVersion: 1, claimKey: "claim-a", renditionId: `${CONTENT_A}:2:1` } as never);
-      expect(notDup).toBe(false);
     } finally { s.close(); }
   });
 });

@@ -2,7 +2,7 @@
 
 **Zero-dependency (Zod-only) leaf** owning every value/type that must serialize
 **byte-identically across the CLI ↔ broker process boundary**: stable IDs, canonical
-serialization, the identity-key algorithm, the ChangePlan envelope + all 15 op payloads,
+serialization, the identity-key algorithm, the ChangePlan envelope + all 12 op payloads,
 the run manifest, the audit/WORM/signer/authorization Zod mirrors, the provider-error
 taxonomy, the `generateObject` schema registry, the note-type registry, and the shared
 cross-boundary DTOs (D14).
@@ -44,11 +44,11 @@ see guardrails). `private`, `version 0.0.0`, ESM, single export `.` → `dist/` 
 - `primitives.ts` — shared string-shape Zod: `Ulid`, `OpaqueId`, `CommitHash` (SHA-1),
   `Rfc3339Ms`, `Nonce`, `Ed25519Sig`/`Ed25519PubKey`, `Sha256Digest`, `SchemaVersion1`.
 - `changeplan-envelope.ts` / `changeplan.ts` — stable Phase-1 wrapper + `RISK_TIERS`;
-  `ChangePlanSchema` = `.strict()` envelope over the discriminated union of all 15 ops, with a
+  `ChangePlanSchema` = `.strict()` envelope over the discriminated union of all 12 ops, with a
   load-time coverage invariant + a `superRefine` cross-field dispatcher.
-- `ops/op-result.ts` — cross-op primitives: `CHANGE_PLAN_OPS` (SSOT list of 15 names),
+- `ops/op-result.ts` — cross-op primitives: `CHANGE_PLAN_OPS` (SSOT list of 12 names),
   `RESERVED_OPS`, the enums, the generic `OpResult<Name,ErrorCode>` envelope.
-- `ops/*` (13 files, barrel `ops/index.ts`) — one file per op-group. Each exports
+- `ops/*` (11 files, barrel `ops/index.ts`) — one file per op-group. Each exports
   `<Op>OpSchema`, `<OP>_ERROR_CODES`, `<Op>Result`.
 - `schema-registry.ts` — `SCHEMA_REGISTRY` (`schemaId`→Zod) + `resolveRegisteredSchema`. A Zod
   schema can't cross IPC, so `generateObject` carries a `schemaId` string both sides resolve
@@ -119,10 +119,11 @@ see guardrails). `private`, `version 0.0.0`, ESM, single export `.` → `dist/` 
   evidence.retry_enqueued`) — NOT in the `refs/audit/runs` enumeration and NOT chained into the
   WORM anchor's `eventCount` (`audit.ts:43`). Easy to confuse with `AUDIT_EVENT_KINDS` (the 10
   `run.*` kinds).
-- **`UpdateEvidenceVerification` is intentionally minimal/OPEN** (`ops/evidence.ts:98-102`): it
-  models only the re-anchor-to-`valid` transition. Status-only outcomes (`stale`/`pending`/
-  `failed`, no re-anchor) are **deferred to Phase 4** — add them before the verification workflow
-  lands.
+- **The v1 claims/evidence ops are retired (#337).** `CreateClaim`, `AttachEvidence`, and
+  `UpdateEvidenceVerification` (and `ops/claim.ts`/`ops/evidence.ts`, the `VerificationState` enum,
+  and `PinnedRenditionRef`) were removed with the flat vault-derived `evidence` model — evidence is
+  authored via the dedicated `evidence` commands, not a ChangePlan op. `ProvenanceRef` +
+  `parseSourceHandle` stay (the source/rendition provenance model is untouched).
 - **type-registry is open**: 15 registered types (12 strict + 3 loose); an unknown type resolves
   to a loose def keeping its asserted name (door open for a future type). Kept honest by an
   **unconditional CI drift test** against `test/fixtures/vault-taxonomy.json`, plus an optional
@@ -153,7 +154,6 @@ Landed early and stayed remarkably stable — most later PRs only *append*.
 
 ## Open items
 
-- **`UpdateEvidenceVerification` status-only variants** (`stale`/`pending`/`failed`) — Phase 4.
 - **`SCHEMA_REGISTRY` seeded with `ChangePlan` only** — extraction/classification schemas are
   registered by the tasks that introduce them (or injected as a test overlay).
 - **Opaque-id 16-hex assumption** (see Gotchas) — reconcile the security-broker-contract prose to

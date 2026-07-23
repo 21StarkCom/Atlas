@@ -80,19 +80,19 @@ function firstMissingTable(store: Store, required: readonly string[]): string | 
 
 /**
  * The projection tables a read-only synthesis PREVIEW (`enrich`/`reconcile`/
- * `maintain`) queries: the `0001_core` note projections AND the `0004_claims`
- * claim/evidence projections (read by the validation vault + the reconcile/maintain
- * detectors). `openMigratedStore`'s bare `0001_core` check is NOT enough — a ledger
- * migrated to core but not `0004` would pass it and then die with an internal
- * `no such table: claims` when the preview queries a claim table. Requiring these
- * up front turns that into the typed `db-unavailable` exit 2 (no DDL applied).
+ * `maintain`) queries: the `0001_core` note projections AND the `0014_evidence_v2`
+ * flat `evidence` projection (read by the maintain unverified-evidence detector).
+ * `openMigratedStore`'s bare `0001_core` check is NOT enough — a ledger migrated to
+ * core but not `0014` would pass it and then die with an internal `no such table:
+ * evidence` when the preview queries the evidence table. Requiring these up front
+ * turns that into the typed `db-unavailable` exit 2 (no DDL applied). (The v1
+ * `claims`/`claim_evidence` tables were forward-dropped by `0014` — #337.)
  */
 export const PREVIEW_PROJECTION_TABLES: readonly string[] = [
   "notes",
   "note_identity_keys",
   "note_links",
-  "claims",
-  "claim_evidence",
+  "evidence",
 ];
 
 /**

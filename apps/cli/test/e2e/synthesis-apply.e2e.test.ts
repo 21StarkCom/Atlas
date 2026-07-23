@@ -93,8 +93,7 @@ function rankedItem(): RetrievalResult["items"][number] {
 
 function vault(): ValidationVault {
   return {
-    hasNoteId: () => true, identityOwners: () => [], hasSourceRef: () => true, hasClaimKey: () => true,
-    hasEvidenceLineage: () => true, hasEvidenceId: () => true, attachWouldDuplicate: () => false,
+    hasNoteId: () => true, identityOwners: () => [], hasSourceRef: () => true,
   };
 }
 

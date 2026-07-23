@@ -195,8 +195,7 @@ const MUTATION_TABLES = [
   "content_blobs",
   "source_captures",
   "source_renditions",
-  "claims",
-  "claim_evidence",
+  "evidence",
   "workflow_idempotency",
   "agent_runs",
 ] as const;

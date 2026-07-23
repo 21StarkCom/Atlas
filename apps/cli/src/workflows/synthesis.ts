@@ -254,14 +254,15 @@ export async function applySynthesis(
       }
       note = resolved;
       // The op must have EITHER a materialized patch (section/frontmatter edits, Task 4.2)
-      // OR a projection-serializing executor (claims/evidence, Task 4.6). Anything else
+      // OR a projection-serializing executor. The v1 claims/evidence executors are retired
+      // (#337), so the executable set is currently empty — anything without a patch
       // (CreateNote, ProposeMerge, …) is not yet applicable.
       const op = plan.changePlan.operation;
       if (plan.patch === null && !isExecutableOp(op.op)) {
         throw new SynthesisApplyError({
           code: "synthesis-op-not-applicable",
           message: `operation "${op.op}" has no single-note apply path yet`,
-          hint: "Supported: UpdateSection/AppendSection/SetFrontmatterField/AddAlias (patch) and CreateClaim/AttachEvidence/UpdateEvidenceVerification (executor).",
+          hint: "Supported: UpdateSection/AppendSection/SetFrontmatterField/AddAlias (patch).",
           exitCode: EXIT.VALIDATION,
         });
       }
@@ -284,8 +285,11 @@ export async function applySynthesis(
         }
         nextText = applied.next;
       } else {
-        // Projection-serializing op (claims/evidence). A business-rule violation is a
-        // typed OpExecutionError (validation, exit 1) — it propagates out of runMutation.
+        // Projection-serializing op executor. With the v1 claims/evidence executors
+        // retired (#337) the executable set is empty, so this branch is currently
+        // unreachable (the isExecutableOp guard above throws first); it is retained for
+        // the deferred CreateRelationship executor. A business-rule violation surfaces
+        // as a typed OpExecutionError (validation, exit 1) — it propagates out of runMutation.
         const opCtx: OpContext = {
           note,
           resolveRendition: deps.resolveRendition ?? (() => null),

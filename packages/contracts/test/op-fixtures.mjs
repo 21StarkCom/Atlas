@@ -6,7 +6,7 @@
  * exact same objects — the byte-identity assertion in `contracts.operations.test`
  * is meaningful only if the two sides serialize identical input.
  *
- * There is exactly one sample per member of `CHANGE_PLAN_OPS` (all 15). Keys are
+ * There is exactly one sample per member of `CHANGE_PLAN_OPS` (all 12). Keys are
  * intentionally written in a NON-sorted order so canonical serialization's
  * key-sorting is actually exercised across the seam.
  */
@@ -64,34 +64,6 @@ export const OP_SAMPLES = [
   plan({ op: "AddAlias", opVersion: 1, alias: "אריה Aryeh" }),
   plan({ op: "SetLink", opVersion: 1, action: "add", linkTarget: "note/2026/other", alias: "Other" }),
   plan({ op: "CreateRelationship", opVersion: 1, predicate: "depends-on", object: "note/2026/other" }),
-  plan({
-    op: "CreateClaim",
-    opVersion: 1,
-    claimText: "Atlas serializes deterministically.",
-    claimKey: "claim/determinism",
-    provenance: [RENDITION_ID],
-  }),
-  plan({
-    op: "AttachEvidence",
-    opVersion: 1,
-    claimKey: "claim/determinism",
-    renditionId: RENDITION_ID,
-    locator: "char:0-42",
-    quoteHash: `sha256:${HASH}`,
-    verification: "valid",
-  }),
-  plan({
-    op: "UpdateEvidenceVerification",
-    opVersion: 1,
-    claimKey: "claim/determinism",
-    lineageId: `sha256:${HASH}`,
-    supersedesEvidenceId: `sha256:${HASH}`,
-    expectedSupersededRenditionId: RENDITION_ID,
-    toVerification: "valid",
-    replacementRenditionId: `sha256:${HASH}:text/markdown:1:2`,
-    locator: "char:0-42",
-    quoteHash: `sha256:${HASH}`,
-  }),
   plan({ op: "ProposeMerge", opVersion: 1, survivor: "note/2026/survivor", sourceNotes: ["note/2026/dup"] }),
   plan({ op: "ProposeRename", opVersion: 1, newTitle: "Renamed", newAliases: ["Old Name"] }),
   plan({ op: "ProposeArchive", opVersion: 1, reason: "superseded by a newer note" }),

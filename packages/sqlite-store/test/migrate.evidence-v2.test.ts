@@ -2,14 +2,13 @@
  * `migrate.evidence-v2` — `0014_evidence_v2` creates the v2 vault-derived
  * `evidence` projection with the exact eleven-column schema (Phase-4 task 4-2).
  *
- * EXPAND-AND-CONTRACT stage note: task 4-2 lands the ADDITIVE half of `0014` —
- * `CREATE TABLE evidence` only. The v1-model DROP (`claims`/`claim_evidence`) and
- * the ledger/`sync_cursors` DROPs ride this SAME forward migration but are appended
- * in the later phase-4 commits that remove each table's last consumer (task 4-4 /
- * task 4-1). So THIS test asserts the additive contract: after `db migrate` the v2
- * `evidence` table exists with the exact schema, AND the v1 `claims`/`claim_evidence`
- * tables still coexist (their DROP is deferred, not forgotten). The "v1 tables gone /
- * `sync_cursors` absent" assertions land with those DROPs.
+ * EXPAND-AND-CONTRACT stage note: task 4-2 landed the ADDITIVE half of `0014`
+ * (`CREATE TABLE evidence`); task 4-4 appends the CONTRACT half — the DROP of the v1
+ * `claims`/`claim_evidence` model now that the flat `evidence` projection has fully
+ * replaced it. So THIS test asserts both halves: after `db migrate` the v2 `evidence`
+ * table exists with the exact schema, AND the v1 `claims`/`claim_evidence` tables are
+ * gone. The ledger/`sync_cursors` DROPs ride the same forward migration but land in
+ * the later task-4-1 commit (their consumers are not yet removed).
  */
 import { describe, expect, it } from "vitest";
 import { openStore } from "../src/index.js";
@@ -102,16 +101,17 @@ describe("migrate.evidence-v2 (0014_evidence_v2)", () => {
     }
   });
 
-  it("evidence coexists with the still-present v1 claims model (the DROP is deferred to task 4-4)", () => {
+  it("the v1 claims model is dropped (0014 forward-DROPs claims/claim_evidence in task 4-4)", () => {
     const store = openStore({ path: ":memory:" });
     try {
       store.migrate();
       const tables = userTables(store.db);
       expect(tables.has("evidence")).toBe(true);
-      // The v1 evidence model is NOT yet dropped — its consumers are removed, and the
-      // DROP appended to 0014, in the task-4-4 commit. This documents the staged cutover.
-      expect(tables.has("claims")).toBe(true);
-      expect(tables.has("claim_evidence")).toBe(true);
+      // The v1 evidence model is now dropped — its last consumer is removed and the
+      // DROP is appended to 0014 (children-first: claim_evidence before claims). The
+      // flat vault-derived `evidence` projection has fully replaced it.
+      expect(tables.has("claims")).toBe(false);
+      expect(tables.has("claim_evidence")).toBe(false);
     } finally {
       store.close();
     }

@@ -53,14 +53,6 @@ export interface ValidationVault {
   identityOwners(normalizedKey: string): readonly string[];
   /** A pinned `contentId`/`renditionId` provenance ref resolves to a captured source. */
   hasSourceRef(handle: string): boolean;
-  /** A claim natural key resolves to an existing claim. */
-  hasClaimKey(claimKey: string): boolean;
-  /** An evidence lineage id resolves to an existing lineage. */
-  hasEvidenceLineage(lineageId: string): boolean;
-  /** An evidence surrogate id resolves to an existing head. */
-  hasEvidenceId(evidenceId: string): boolean;
-  /** True when an `AttachEvidence` would re-attach a payload already present (idempotent duplicate). */
-  attachWouldDuplicate(op: ChangePlanOperation): boolean;
 }
 
 /** Data + config the validator consults. */

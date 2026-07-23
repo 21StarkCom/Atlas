@@ -38,7 +38,7 @@ completeness gates provide.
 - **Two classes of state** (design *Two classes of state*): **vault projections** are deterministically
   rebuildable from canonical Markdown; `atlas db rebuild` replaces them in one transaction. The
   **operational/audit ledger** is primary state, has no Markdown form, and MUST be backed up.
-  **Cross-class FKs are forbidden:** ledger tables reference notes/sources/claims **only by immutable
+  **Cross-class FKs are forbidden:** ledger tables reference notes/sources **only by immutable
   scalar historical identifiers**, never a SQL FK into a replaceable projection — so delete-and-reinsert
   of projections during a rebuild can never violate a restrictive FK. FKs therefore exist **only within
   a single class** (projection→projection, ledger→ledger).
@@ -60,9 +60,10 @@ Migration ownership (verbatim from §2.7):
 | `0001_core` | `sqlite-store` | 1 | `notes`, `note_identity_keys`, `note_links`, `vault_schema_migrations`, `agent_runs`, `model_calls`, `retrieval_runs`, `retrieval_results`, `change_plans`, `patches`, `patch_operations`, `validation_results`, `git_operations`, `audit_events`, `audit_intents`, `backup_watermark`, `raw_payloads` |
 | `0002_jobs` | `jobs` | 2 PR-B | `jobs`, `job_attempts` |
 | `0003_provenance` | `sqlite-store` | 2 PR-A (retained) | `content_blobs`, `source_captures`, `source_renditions`, `note_sources` |
-| `0004_claims` | `sqlite-store` | 4 PR-A (retained) | `claims`, `claim_evidence` |
+| `0004_claims` | `sqlite-store` | 4 PR-A (retained) | ~~`claims`, `claim_evidence`~~ *(created by `0004`, forward-dropped by `0014_evidence_v2` — #337; absent from a fresh DB)* |
 | `0008_index_config_revision` | `sqlite-store` (feature migration) | 3 (Task 3.2) | `index_config_revisions` |
 | `0013_links_v2` | `sqlite-store` (default set) | 3 (task 3-4) | *(no new table — table-rebuilds `note_links` into the v2 shape)* |
+| `0014_evidence_v2` | `sqlite-store` (default set) | 4 (task 4-2/4-4) | `evidence` *(and forward-DROPs the v1 `claims`/`claim_evidence`)* |
 | (runner bootstrap) | `sqlite-store` | 1 | `db_schema_migrations` |
 
 ---
@@ -212,7 +213,7 @@ CREATE TABLE vault_schema_migrations (
 ## 3. Operational / audit ledger — `0001_core`
 
 Primary state, **not rebuildable from Markdown**, MUST be backed up. FKs stay **within the ledger
-class**; every reference to a note/source/claim is a **scalar historical identifier with no FK** into
+class**; every reference to a note/source is a **scalar historical identifier with no FK** into
 the projections (so a rebuild never invalidates ledger history).
 
 ### `agent_runs` — `0001_core` (ledger)
@@ -578,7 +579,7 @@ CREATE TABLE job_attempts (
 
 ---
 
-## 5. Provenance & claims (retained PR-A)
+## 5. Provenance (retained PR-A)
 
 ### `content_blobs` — `0003_provenance` (vault projection)
 
@@ -727,91 +728,13 @@ CREATE UNIQUE INDEX idx_note_sources_identity ON note_sources(
 - **Invariant:** the §7 query is now a belt-and-suspenders re-check of the enforced composite FK (it
   reports any rendition-specific citation whose rendition is missing — which the FK already forbids).
 
-### `claims` — `0004_claims` (vault projection)
-
-```sql
-CREATE TABLE claims (
-  claim_id        TEXT    NOT NULL PRIMARY KEY,
-  owning_note_id  TEXT    NOT NULL,                       -- scalar note id (projection→projection FK ok)
-  text            TEXT    NOT NULL,
-  status          TEXT    NOT NULL DEFAULT 'active'
-                    CHECK (status IN ('active', 'disputed', 'superseded')),  -- V1 exercises only 'active'
-  created_at      TEXT    NOT NULL,
-  FOREIGN KEY (owning_note_id) REFERENCES notes(note_id) ON DELETE CASCADE
-) STRICT;
-```
-
-- **FK:** `owning_note_id → notes(note_id)` **`ON DELETE CASCADE`** (a claim is serialized into its
-  owning note's Markdown; both rebuilt together).
-- **Upsert:** conflict target **`claim_id`** — `ON CONFLICT(claim_id) DO UPDATE` (text/status merged from
-  the canonical Markdown on rebuild).
-
-### `claim_evidence` — `0004_claims` (vault projection)
-
-Evidence pins a **`renditionId` as component columns** (composite FK). `evidence_id` is a **non-null
-immutable surrogate** (assigned once, never derived from mutable fields, stable across
-re-anchor/tombstone). A **separate non-null `payload_hash`** carries the UNIQUE index that makes
-`AttachEvidence` idempotent; absent `locator`/`quote_hash` are encoded as an explicit, precisely
-specified **text-safe sentinel** — the fixed **6-byte printable-ASCII string `(none)`** (U+0028 U+006E
-U+006F U+006E U+0065 U+0029; **no control characters, no NUL**), never SQL `NULL` — so a unique index
-can't be bypassed by NULL-distinctness and copying this DDL never emits a binary/NUL byte. The sentinel
-can never collide with a real value: a real `locator` always carries its `locator_scheme` prefix
-(`byte:`/`char:`/`page:`/`dom:`) and a real `quote_hash` is a 64-char lowercase-hex digest, so neither
-domain contains the literal `(none)`. `verification` is a CHECK-constrained enum.
-
-**Evidence lineage identity.** A *lineage* is the re-anchor chain of evidence rows for one logical
-citation on a claim; it must stay identifiable across re-anchor/tombstone. `lineage_id` is a **non-null,
-immutable** lineage key: the **root row's `evidence_id`** (a lineage-founding row sets
-`lineage_id = evidence_id`; a re-anchored successor **inherits the superseded row's `lineage_id`**, so
-it is stable — unlike `payload_hash`, which identifies a *payload*, not a *lineage*, and unlike
-`evidence_id`, which is per-row). The tombstone marker (`current` + `tombstoned_at`) plus a **partial
-UNIQUE index over `lineage_id WHERE current = 1`** enforces **at most one current head per lineage**;
-the §7 query validates **exactly one** (neither zero nor many).
-
-```sql
-CREATE TABLE claim_evidence (
-  evidence_id             TEXT    NOT NULL PRIMARY KEY,   -- immutable surrogate hash, non-null
-  lineage_id              TEXT    NOT NULL,               -- stable lineage key = root row's evidence_id; inherited on re-anchor
-  claim_id                TEXT    NOT NULL,
-  raw_content_hash        TEXT    NOT NULL,               -- pinned renditionId components
-  canonical_media_type    TEXT    NOT NULL,
-  extractor_version       INTEGER NOT NULL,
-  normalizer_version      INTEGER NOT NULL,
-  locator                 TEXT    NOT NULL,               -- sentinel '(none)' when absent, never NULL
-  quote_hash              TEXT    NOT NULL,               -- sentinel '(none)' when absent, never NULL
-  payload_hash            TEXT    NOT NULL,               -- hash of tagged (claimId,renditionId,locator,quoteHash)
-  verification            TEXT    NOT NULL DEFAULT 'pending'
-                            CHECK (verification IN ('valid', 'stale', 'pending', 'failed')),
-  current                 INTEGER NOT NULL DEFAULT 1 CHECK (current IN (0, 1)),
-  tombstoned_at           TEXT,                           -- set iff current = 0
-  supersedes_evidence_id  TEXT,                           -- prior head this row re-anchored from
-  created_at              TEXT    NOT NULL,
-  FOREIGN KEY (claim_id) REFERENCES claims(claim_id) ON DELETE CASCADE,
-  FOREIGN KEY (raw_content_hash, canonical_media_type, extractor_version, normalizer_version)
-    REFERENCES source_renditions(raw_content_hash, canonical_media_type, extractor_version, normalizer_version)
-    ON DELETE RESTRICT,
-  FOREIGN KEY (supersedes_evidence_id) REFERENCES claim_evidence(evidence_id) ON DELETE RESTRICT,
-  CHECK ((current = 1) = (tombstoned_at IS NULL))
-) STRICT;
-
-CREATE UNIQUE INDEX idx_claim_evidence_payload ON claim_evidence(payload_hash);
-CREATE UNIQUE INDEX idx_claim_evidence_current_head ON claim_evidence(lineage_id) WHERE current = 1;
-```
-
-- **FK:** `claim_id → claims(claim_id)` **`ON DELETE CASCADE`**; the pinned-rendition composite FK
-  `→ source_renditions` **`ON DELETE RESTRICT`** (a rendition cited by evidence cannot be deleted — a
-  rendition bump supersedes, never deletes); `supersedes_evidence_id → claim_evidence(evidence_id)`
-  **`ON DELETE RESTRICT`** (the tombstoned predecessor is retained so ledger references to the former
-  `evidence_id` stay interpretable via the tombstone).
-- **CHECK:** `current = 1` iff `tombstoned_at IS NULL` (a row is current exactly when not tombstoned;
-  supersession is an atomic insert-new + tombstone-old).
-- **Lineage invariant:** `idx_claim_evidence_current_head` (partial UNIQUE on `lineage_id WHERE
-  current = 1`) enforces **at most one current head per lineage**; the §7 query asserts **exactly one**
-  (a lineage whose only rows are tombstoned — zero current heads — is a violation the partial index
-  cannot catch).
-- **Upsert:** conflict target **`payload_hash`** (via `idx_claim_evidence_payload`) —
-  `ON CONFLICT(payload_hash) DO NOTHING`; a retry recreating an existing (or tombstoned) payload resolves
-  to the existing row rather than colliding, making `AttachEvidence` idempotent.
+**Retired (#337): the v1 `claims` / `claim_evidence` model.** The rendition-pinned evidence model
+(`claims` + `claim_evidence`, `0004_claims`, with its lineage/payload_hash/supersession machinery
+coupled to the run ledger) is **forward-dropped by `0014_evidence_v2`** and replaced by the flat
+vault-derived `evidence` projection (§5.6). `0004_claims` still runs (it is an immutable applied
+migration) but its two tables are dropped in the same forward migration that creates `evidence`, so a
+fresh DB never carries them. Their CREATE DDL is retained only in the immutable `0004_claims.ts`
+migration file (historical vocabulary), never in this dictionary.
 
 ---
 
@@ -927,7 +850,7 @@ CREATE INDEX idx_notes_needs_index ON notes(active_generation, content_hash);
 All other required indexes are declared inline with their tables (§2–§5): `idx_jobs_eligibility`,
 `idx_note_links_forward`, `idx_note_links_reverse`, `ux_note_links_plain`, `ux_note_links_pred`,
 `idx_agent_runs_status`, `idx_audit_events_run`,
-`idx_note_identity_keys_note`, `idx_model_calls_run`, `idx_claim_evidence_payload`. `db verify`'s
+`idx_note_identity_keys_note`, `idx_model_calls_run`. `db verify`'s
 query-plan assertion suite (Task 1.4) runs each EQP above and fails on any `SCAN` where a `SEARCH … USING
 INDEX` is asserted.
 
@@ -944,15 +867,7 @@ INDEX` is asserted.
      ON k.note_id = n.note_id
    WHERE COALESCE(k.c, 0) <> 1;
    ```
-2. **No dangling evidence rendition.** Every `claim_evidence` composite rendition reference resolves.
-   ```sql
-   SELECT e.evidence_id FROM claim_evidence e
-   LEFT JOIN source_renditions r
-     ON r.raw_content_hash = e.raw_content_hash AND r.canonical_media_type = e.canonical_media_type
-    AND r.extractor_version = e.extractor_version AND r.normalizer_version = e.normalizer_version
-   WHERE r.raw_content_hash IS NULL;
-   ```
-3. **`note_sources` rendition-specific citations resolve** (belt-and-suspenders over the enforced
+2. **`note_sources` rendition-specific citations resolve** (belt-and-suspenders over the enforced
    composite FK; a rendition-specific citation carries a non-`NULL` version pair).
    ```sql
    SELECT s.note_id FROM note_sources s
@@ -961,18 +876,7 @@ INDEX` is asserted.
     AND r.extractor_version = s.extractor_version AND r.normalizer_version = s.normalizer_version
    WHERE s.extractor_version IS NOT NULL AND r.raw_content_hash IS NULL;
    ```
-4. **Exactly one current evidence head per lineage.** Every `lineage_id` must have exactly one
-   `current = 1` row — the partial UNIQUE index `idx_claim_evidence_current_head` enforces *at most* one,
-   this query also catches a lineage with *zero* current heads (all tombstoned). The row-local tombstone
-   consistency (`current = 1` iff `tombstoned_at IS NULL`) is the table CHECK; here we validate the
-   lineage-level cardinality.
-   ```sql
-   SELECT lineage_id, SUM(current) AS current_heads
-   FROM claim_evidence
-   GROUP BY lineage_id
-   HAVING SUM(current) <> 1;
-   ```
-5. **Active-rendition consistency.** Every blob with a set pointer points at an existing rendition of
+3. **Active-rendition consistency.** Every blob with a set pointer points at an existing rendition of
    itself (belt-and-suspenders over the deferred composite FK).
    ```sql
    SELECT b.raw_content_hash FROM content_blobs b
@@ -981,17 +885,11 @@ INDEX` is asserted.
     AND r.extractor_version = b.active_extractor_version AND r.normalizer_version = b.active_normalizer_version
    WHERE b.active_extractor_version IS NOT NULL AND r.raw_content_hash IS NULL;
    ```
-6. **Effective staleness.** Evidence whose pinned rendition differs from its blob's active rendition is
-   stale for gating regardless of persisted `verification` (design: staleness is computed, not awaited).
-   ```sql
-   SELECT e.evidence_id FROM claim_evidence e
-   JOIN content_blobs b
-     ON b.raw_content_hash = e.raw_content_hash AND b.canonical_media_type = e.canonical_media_type
-   WHERE e.current = 1
-     AND (e.extractor_version <> b.active_extractor_version OR e.normalizer_version <> b.active_normalizer_version)
-     AND e.verification = 'valid';   -- a 'valid' row that is actually stale is a violation
-   ```
-7. **Audit terminal-event cardinality.** Every run that reached a terminal status must record **exactly
+
+   (The v1 `claim_evidence` invariants — no-dangling-evidence-rendition, exactly-one-current-head-per-
+   lineage, effective-staleness — were retired with the claims model (#337); `0014_evidence_v2`
+   forward-drops the table.)
+4. **Audit terminal-event cardinality.** Every run that reached a terminal status must record **exactly
    one** terminal audit event — this query detects **both** a *duplicate* terminal event **and** a
    terminal `agent_runs` row *missing* its required terminal event. (`finalized` maps to `run.integrated`,
    the durable-mutation terminal event; there is no distinct `run.finalized` in the §2.5 closed set.)
@@ -1022,7 +920,8 @@ transaction, and **never** touches ledger tables or `db_schema_migrations`:
 - Always: `notes`, `note_identity_keys`, `note_links`, `vault_schema_migrations`.
 - Once `0003_provenance` (PR-A) has landed: `content_blobs`, `source_captures`, `source_renditions`,
   `note_sources` (via `foldProvenanceManifests`).
-- Once `0004_claims` (PR-A) has landed: `claims`, `claim_evidence` (via the claims fold).
+- Once `0014_evidence_v2` has landed: `evidence` (via the v2 evidence fold). (The v1 `claims`/
+  `claim_evidence` model + its claims fold were retired — #337 — and `0014` forward-drops the tables.)
 
 Because ledger tables reference projections only by scalar identifier (no cross-class FK), the
 delete-and-reinsert of the projection set inside the rebuild transaction can never violate a restrictive

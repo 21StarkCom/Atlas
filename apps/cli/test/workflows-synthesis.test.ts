@@ -64,8 +64,7 @@ function updateGoalsPlan(newContent = "- goal one\n- goal two\n", over: Partial<
 
 function vault(over: Partial<ValidationVault> = {}): ValidationVault {
   return {
-    hasNoteId: () => true, identityOwners: () => [], hasSourceRef: () => true, hasClaimKey: () => true,
-    hasEvidenceLineage: () => true, hasEvidenceId: () => true, attachWouldDuplicate: () => false, ...over,
+    hasNoteId: () => true, identityOwners: () => [], hasSourceRef: () => true, ...over,
   };
 }
 

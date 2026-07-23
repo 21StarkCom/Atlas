@@ -95,9 +95,6 @@ the link op is `SetLink` (not `Add/RemoveLink`), and the structural-proposal ops
 | `AddAlias` | auto | auto | auto | auto | auto | immutable | reserved |
 | `SetLink` | auto | auto | auto | auto | append-only | immutable | reserved |
 | `CreateRelationship` | auto | auto | auto | auto | append-only | immutable | reserved |
-| `CreateClaim` | auto | auto | auto | auto | append-only | immutable | reserved |
-| `AttachEvidence` | auto | auto | auto | auto | append-only | immutable | reserved |
-| `UpdateEvidenceVerification` | auto | auto | auto | auto | auto | immutable | reserved |
 | `ProposeMerge` | review | review | review | review | immutable | immutable | reserved |
 | `ProposeRename` | review | review | review | review | immutable | immutable | reserved |
 | `ProposeArchive` | review | review | review | review | immutable | immutable | reserved |
@@ -120,9 +117,6 @@ The same table, machine-readable — the bijection test parses this block and as
     { "op": "AddAlias", "policy": { "concept": "auto", "person": "auto", "project": "auto", "research": "auto", "decision": "auto", "source": "immutable", "task": "reserved" } },
     { "op": "SetLink", "policy": { "concept": "auto", "person": "auto", "project": "auto", "research": "auto", "decision": "append-only", "source": "immutable", "task": "reserved" } },
     { "op": "CreateRelationship", "policy": { "concept": "auto", "person": "auto", "project": "auto", "research": "auto", "decision": "append-only", "source": "immutable", "task": "reserved" } },
-    { "op": "CreateClaim", "policy": { "concept": "auto", "person": "auto", "project": "auto", "research": "auto", "decision": "append-only", "source": "immutable", "task": "reserved" } },
-    { "op": "AttachEvidence", "policy": { "concept": "auto", "person": "auto", "project": "auto", "research": "auto", "decision": "append-only", "source": "immutable", "task": "reserved" } },
-    { "op": "UpdateEvidenceVerification", "policy": { "concept": "auto", "person": "auto", "project": "auto", "research": "auto", "decision": "auto", "source": "immutable", "task": "reserved" } },
     { "op": "ProposeMerge", "policy": { "concept": "review", "person": "review", "project": "review", "research": "review", "decision": "immutable", "source": "immutable", "task": "reserved" } },
     { "op": "ProposeRename", "policy": { "concept": "review", "person": "review", "project": "review", "research": "review", "decision": "immutable", "source": "immutable", "task": "reserved" } },
     { "op": "ProposeArchive", "policy": { "concept": "review", "person": "review", "project": "review", "research": "review", "decision": "immutable", "source": "immutable", "task": "reserved" } },

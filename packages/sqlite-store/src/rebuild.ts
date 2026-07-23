@@ -185,15 +185,13 @@ export function rebuildProjections(
   const schemaVersionCounts = new Map<number, number>();
 
   const run = db.transaction(() => {
-    // Pre-clear steps run BEFORE the core projection clear. A retained-PR fold
-    // whose projection cascades from `notes` must drop its rows here: the claims
-    // fold (0004) owns `claim_evidence`, which carries a self-`ON DELETE RESTRICT`
-    // supersession FK (`supersedes_evidence_id`) AND a `RESTRICT` FK onto
-    // `source_renditions`. If those rows survived, `repo.clearAll()` deleting
-    // `notes` (cascade → `claims` → `claim_evidence`) or the provenance fold
-    // deleting `source_renditions` would trip a RESTRICT and abort a valid
-    // rebuild of a claim carrying a supersession chain. Clearing successors before
-    // predecessors here makes the subsequent core/provenance cleanup FK-safe.
+    // Pre-clear steps run BEFORE the core projection clear. A projection fold whose
+    // table is emptied here (rather than inside the fold) registers a pre-clear so
+    // its rows are gone before `repo.clearAll()` deletes `notes` and before any fold
+    // rewrites its own table (the v2 `evidence` fold registers `clearEvidenceProjection`
+    // here). This ordering also kept the retired v1 claims fold FK-safe — its
+    // `claim_evidence` table carried self-`RESTRICT` + `source_renditions` `RESTRICT`
+    // FKs — but that fold is gone (0014 forward-DROPs the v1 claims tables).
     for (const step of preClearSteps) step(db);
 
     // The generation fence columns (`active_generation`, `active_generation_id`)
@@ -313,11 +311,11 @@ export function rebuildProjections(
 
     // Run every registered projection fold INSIDE the same transaction, after
     // the core `notes` projection exists (folds resolve their citations against
-    // `notes`). `foldProvenanceManifests` (0003 PR-A) registers here; the claims
-    // fold (0004 PR-A) will too. A fold whose tables are absent (migration not
-    // yet applied) is a self-guarded no-op, so a Phase-1 DB still rebuilds. A
-    // fold that throws rolls the whole rebuild back — the old projection stays
-    // readable (dictionary §8).
+    // `notes`). `foldProvenanceManifests` (0003 PR-A) and `foldEvidenceManifests`
+    // (0014, the v2 vault-derived evidence projection) register here. A fold whose
+    // tables are absent (migration not yet applied) is a self-guarded no-op, so a
+    // Phase-1 DB still rebuilds. A fold that throws rolls the whole rebuild back —
+    // the old projection stays readable (dictionary §8).
     for (const fold of projectionFolds) fold(snapshot, db);
 
     // Restore the generation fences for surviving note_ids (see the snapshot above).
@@ -336,7 +334,8 @@ export function rebuildProjections(
 }
 
 // ---------------------------------------------------------------------------
-// Projection fold registry (§2.7 / §8): retained-PR provenance & claims folds.
+// Projection fold registry (§2.7 / §8): the provenance (0003) & v2 evidence
+// (0014) folds.
 // ---------------------------------------------------------------------------
 
 /**
@@ -375,12 +374,11 @@ export function _resetProjectionFolds(): void {
 // ---------------------------------------------------------------------------
 
 /**
- * A pre-clear step drops a retained-PR projection's rows at the very start of the
- * rebuild transaction, before `ProjectionRepo.clearAll()` deletes `notes` and
- * before any projection fold clears its own tables. The claims fold registers one
- * here because `claim_evidence` cascades from `notes` and would otherwise trip a
- * self-`RESTRICT` supersession FK (or the `RESTRICT` FK onto `source_renditions`)
- * mid-rebuild. `db` is the transaction-scoped connection.
+ * A pre-clear step drops a projection's rows at the very start of the rebuild
+ * transaction, before `ProjectionRepo.clearAll()` deletes `notes` and before any
+ * projection fold clears its own tables. The v2 `evidence` fold registers one here
+ * (`clearEvidenceProjection`) so the flat table is emptied up front. `db` is the
+ * transaction-scoped connection.
  */
 export type PreClearStep = (db: SqliteDatabase) => void;
 

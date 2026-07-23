@@ -12,8 +12,6 @@ export * from "./frontmatter.js";
 export * from "./add-alias.js";
 export * from "./links.js";
 export * from "./relationship.js";
-export * from "./claim.js";
-export * from "./evidence.js";
 export * from "./merge.js";
 export * from "./rename.js";
 export * from "./archive.js";
