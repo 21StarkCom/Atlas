@@ -916,7 +916,7 @@ describe("Phase-4 cli-contract schema presence (Task 4.0)", () => {
   // schema presence, not a temporal implementation-status assertion (which the first
   // Phase-4 handler would necessarily break). Matches the Phase-3 gate policy.
 
-  it("the Phase-4 command set matches the plan Task 4.0 inventory", () => {
+  it("the Phase-4 command set matches the plan Task 4.0 inventory (+ the v2 `link`, #331)", () => {
     expect(phase4.map((c) => c.name).sort()).toEqual(
       [
         "enrich",
@@ -929,6 +929,7 @@ describe("Phase-4 cli-contract schema presence (Task 4.0)", () => {
         "git review",
         "git rollback",
         "git verify",
+        "link",
         "maintain",
         "purge",
         "reconcile",

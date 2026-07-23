@@ -40,7 +40,9 @@ export function splitFrontmatter(raw: string): SplitDocument {
 
 // A `[[target]]` or `[[target|alias]]` occurrence. Targets/aliases cannot span
 // lines or contain `]` / `[`; that keeps the scan robust against malformed text.
-const WIKILINK_RE = /\[\[([^\][\n|]+)(?:\|([^\][\n]+))?\]\]/g;
+// Exported so `link`'s body surgery matches occurrences with the EXACT syntax the
+// extractor recognizes — never a second, drifting regex.
+export const WIKILINK_RE = /\[\[([^\][\n|]+)(?:\|([^\][\n]+))?\]\]/g;
 
 /**
  * Extract every `[[wiki-link]]` from the body in document order. Inline code

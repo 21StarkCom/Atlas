@@ -4,7 +4,7 @@
 
 # Atlas — CLI command surface (generated overview)
 
-Registry version: **1** · Commands: **52**
+Registry version: **1** · Commands: **53**
 
 | Phase | Command | Idempotency | Privilege | Implemented | Schema |
 |---|---|---|---|---|---|
@@ -46,6 +46,7 @@ Registry version: **1** · Commands: **52**
 | 4 | `git review` | none | shared | yes | `docs/specs/cli-contract/git-review.schema.json` |
 | 4 | `git rollback` | key-accepting | privileged | yes | `docs/specs/cli-contract/git-rollback.schema.json` |
 | 4 | `git verify` | intrinsic | shared | yes | `docs/specs/cli-contract/git-verify.schema.json` |
+| 4 | `link` | intrinsic | shared | yes | `docs/specs/cli-contract/link.schema.json` |
 | 4 | `maintain` | key-accepting | shared | yes | `docs/specs/cli-contract/maintain.schema.json` |
 | 4 | `purge` | key-accepting | privileged | yes | `docs/specs/cli-contract/purge.schema.json` |
 | 4 | `reconcile` | key-accepting | shared | yes | `docs/specs/cli-contract/reconcile.schema.json` |

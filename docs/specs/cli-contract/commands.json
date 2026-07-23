@@ -267,6 +267,14 @@
       "implemented": true
     },
     {
+      "name": "link",
+      "schemaRef": "docs/specs/cli-contract/link.schema.json",
+      "phase": 4,
+      "idempotency": "intrinsic",
+      "privilege": "shared",
+      "implemented": true
+    },
+    {
       "name": "maintain",
       "schemaRef": "docs/specs/cli-contract/maintain.schema.json",
       "phase": 4,

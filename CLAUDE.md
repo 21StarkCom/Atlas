@@ -74,7 +74,7 @@ The privilege boundary is the reason this repo exists. Full contract: [`docs/spe
 
 ## CLI-contract workflow
 
-The command surface is **data-driven and drift-proof**. `docs/specs/cli-contract/commands.json` (version 1, **55 commands, all `implemented:true`**) is the sole owner of command membership / phase / privilege / idempotency. Handlers register at import time; the broker *reads* `privilege`, never re-classifies. See [`tools/CLAUDE.md`](tools/CLAUDE.md) for the full harness.
+The command surface is **data-driven and drift-proof**. `docs/specs/cli-contract/commands.json` (version 1, **53 commands, all `implemented:true`** — 52 after the #326 trust retirement, +1 for the v2 `link`, #331; the #333 survivor-set shrink comes next) is the sole owner of command membership / phase / privilege / idempotency. Handlers register at import time; the broker *reads* `privilege`, never re-classifies. See [`tools/CLAUDE.md`](tools/CLAUDE.md) for the full harness.
 
 - **Add a command:** insert one name-sorted row in `commands.json`, add the matching `` `name` — desc `` line in `cli-surface.fixture.txt` under its phase heading, create `docs/specs/cli-contract/<name-with-spaces→hyphens>.schema.json`, set `implemented`, then `pnpm contract:write`. The registry↔fixture↔schema bijection gates enforce the rest.
 - **Rename:** a one-row diff — change the row `name`, rename the fixture line, rename the schema file to the derived path, regenerate.

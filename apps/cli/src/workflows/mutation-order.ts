@@ -101,6 +101,18 @@ function absOf(vaultPath: string, rel: string): string {
   return isAbsolute(rel) ? rel : join(vaultPath, rel);
 }
 
+/** What the dirty-vault gate needs to inspect a set of note paths (a structural
+ * subset of {@link MutationOrder}, so the wrapper passes its order straight in;
+ * a handler needing the SAME gate before its own noop classification — `link`'s
+ * "noop only for grounded, clean notes" rule — builds one directly). */
+export interface DirtyCheckDeps {
+  readonly repo: Repo;
+  /** Absolute vault working-tree path (the git repo root). */
+  readonly vaultPath: string;
+  /** The projection store, for the `content_hash` comparison. Omit to skip it. */
+  readonly store?: Store;
+}
+
 /**
  * The dirty-vault grounding gate. For each note path the mutation edits/names,
  * refuse (exit 1) when the on-disk state diverges from the committed projection —
@@ -108,7 +120,7 @@ function absOf(vaultPath: string, rel: string): string {
  * matches the note's projected `content_hash`. Unrelated dirt elsewhere in the
  * vault is untouched (only these paths are inspected).
  */
-async function assertNotDirty(order: MutationOrder<unknown>, paths: readonly string[]): Promise<void> {
+export async function assertNotDirty(order: DirtyCheckDeps, paths: readonly string[]): Promise<void> {
   if (paths.length === 0) return;
   // (1) Uncommitted working-tree diff vs HEAD for any of the paths.
   const status = await order.repo.worktreeStatus(paths);
@@ -214,7 +226,7 @@ export async function runMutation<T>(order: MutationOrder<T>): Promise<T> {
       const grounded = await order.ground(preApply);
 
       // Dirty-vault grounding: refuse to build on a dirty target/source note.
-      await assertNotDirty(order as MutationOrder<unknown>, grounded.dirtyCheckPaths ?? []);
+      await assertNotDirty(order, grounded.dirtyCheckPaths ?? []);
 
       if (grounded.touchedPaths.length === 0) {
         throw new CliError({

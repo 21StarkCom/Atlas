@@ -527,4 +527,8 @@ registerCommand("note show", noteShow);
 registerCommand("note related", noteRelated);
 registerCommand("note history", noteHistory);
 
-export { noteShow, noteRelated, noteHistory };
+// `resolveNoteId` + `loadVaultSnapshot` are the SHARED seed-resolution surface:
+// `link` grounds its <source>/<target> through the same tiered id → slug →
+// declared-alias precedence these commands use, so a seed can never resolve
+// differently across the note read surface and the link mutation.
+export { noteShow, noteRelated, noteHistory, resolveNoteId, loadVaultSnapshot };

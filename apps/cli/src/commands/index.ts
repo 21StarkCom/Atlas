@@ -38,6 +38,7 @@ import "./git-refresh.js";
 import "./validate.js";
 import "./query.js";
 import "./enrich.js";
+import "./link.js";
 import "./maintain.js";
 import "./reconcile.js";
 import "./index-ops.js";

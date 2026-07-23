@@ -55,6 +55,7 @@ contains backticked words. The text after the em dash is descriptive only.
 
 # Workflows — mutation loop (Phase 4)
 `enrich` — enrich a note; preview by default, `--apply` mutates per risk tier.
+`link` — add, re-alias, or remove a plain wiki-link or typed relationship between two notes; noop-idempotent, one commit per applied change.
 `reconcile` — alias/duplicate resolution; preview by default, `--apply` mutates.
 `maintain` — orphans/broken-links/stale maintenance; preview by default, `--apply` mutates.
 `validate` — deterministic vault validation checks.
