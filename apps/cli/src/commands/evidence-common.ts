@@ -20,8 +20,8 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseDocument } from "yaml";
 import { openRepo } from "@atlas/git";
-import { foldNotesV2, EvidenceRepo, noteEvidenceInputs } from "@atlas/sqlite-store";
-import type { ParsedNote, VaultSnapshot } from "@atlas/contracts";
+import { foldNotesV2, EvidenceRepo, noteEvidenceInputs, type EvidenceRow } from "@atlas/sqlite-store";
+import type { ParsedNote, SectionTree, VaultSnapshot } from "@atlas/contracts";
 import { CliError, EXIT } from "../errors/envelope.js";
 import type { RunContext } from "../handlers.js";
 import { openWorkflowStore } from "../workflows/index.js";
@@ -30,6 +30,52 @@ import { resolveAtRef } from "../sync/resolve-at-ref.js";
 import { splitFrontmatter } from "../markdown/parse.js";
 import { readVault } from "../vault/reader.js";
 import { ledgerDbPath, resolvePath } from "./paths.js";
+
+/**
+ * The read-time EFFECTIVE state of an evidence row against the CURRENT working-tree
+ * vault (`evidence review`, task 4-4 / #337-F1). The stored `status` is only the
+ * last-folded value; the effective state also accounts for the two ways the soft
+ * target can drift SINCE that fold — which is what makes `sourceNoteHash` load-bearing
+ * rather than write-only:
+ *   - the note (soft `noteId`) no longer resolves ⇒ `target: missing` ⇒ needs-review;
+ *   - a set `sectionPath` no longer resolves in the note ⇒ `target: missing`;
+ *   - the note's on-disk `contentHash` != the fold-stamped `sourceNoteHash` (edited
+ *     on disk without a `sync`) ⇒ stale ⇒ needs-review (`target: present`);
+ *   - otherwise the row's own status (NULL ⇒ pending).
+ */
+export interface EffectiveEvidence {
+  readonly state: "pending" | "failed" | "needs-review" | "resolved";
+  readonly target: "present" | "missing";
+  readonly detail: string | null;
+}
+
+/** Collect every descendant section path of a note's section tree (the root "" excluded). */
+function sectionPathsOf(root: SectionTree): Set<string> {
+  const acc = new Set<string>();
+  const walk = (node: SectionTree): void => {
+    for (const c of node.children) {
+      if (c.path !== "") acc.add(c.path);
+      walk(c);
+    }
+  };
+  walk(root);
+  return acc;
+}
+
+/** Compute an evidence row's effective read-time state against the vault snapshot. */
+export function effectiveEvidenceState(row: EvidenceRow, noteById: Map<string, ParsedNote>): EffectiveEvidence {
+  const note = row.noteId !== null ? noteById.get(row.noteId) : undefined;
+  if (note === undefined) {
+    return { state: "needs-review", target: "missing", detail: "target note no longer resolves" };
+  }
+  if (row.sectionPath !== null && row.sectionPath !== "" && !sectionPathsOf(note.sections).has(row.sectionPath)) {
+    return { state: "needs-review", target: "missing", detail: `section "${row.sectionPath}" no longer resolves` };
+  }
+  if (row.sourceNoteHash !== null && note.contentHash !== row.sourceNoteHash) {
+    return { state: "needs-review", target: "present", detail: "source note edited since last fold (stale)" };
+  }
+  return { state: row.status ?? "pending", target: "present", detail: null };
+}
 
 /** The outcome of an `evidence resolve`/`retry` reverification. */
 export interface EvidenceMutateResult {
