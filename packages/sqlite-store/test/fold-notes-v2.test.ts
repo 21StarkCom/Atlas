@@ -7,9 +7,9 @@
  * 1. A pure namespace TRANSFER (swap two filenames) must converge — the identity-key
  *    reconciliation deletes every affected owner's keys BEFORE inserting any, so the
  *    new owner's key never collides with the old owner's still-present PK row.
- * 2. A typed relationship (non-null `predicate`, owned by the `link` command, absent
- *    from the note's markdown) must SURVIVE a fold of its source note — the fold
- *    replaces only the plain (NULL-predicate) wikilinks.
+ * 2. A typed relationship (non-null `predicate`) is DERIVED from the note's frontmatter
+ *    `related` list (v2 model A, #331) — the fold re-derives it on every fold and
+ *    re-derives it AWAY when the frontmatter drops it (markdown is the system of record).
  *
  * Leaf-package discipline (D14): a plain in-memory resolver, no git, no parser.
  */
@@ -17,7 +17,6 @@ import { describe, it, expect, afterEach } from "vitest";
 import type { ParsedNote } from "@atlas/contracts";
 import { openStore, type Store } from "../src/store.js";
 import { foldNotesV2 } from "../src/fold-notes-v2.js";
-import { ProjectionRepo } from "../src/repos/projections.js";
 import { makeNote } from "./helpers.js";
 
 let open: Store | undefined;
@@ -69,29 +68,41 @@ describe("foldNotesV2 — convergence", () => {
     expect(slugKey(store, "b")).toBe("alpha");
   });
 
-  it("preserves a typed relationship (non-null predicate) when folding its source note", () => {
+  it("DERIVES a typed relationship from the note's frontmatter `related` (v2 model A, #331)", () => {
     const store = migratedStore();
-    const seed = new Map<string, ParsedNote | null>([
+    // src declares a typed `supports` relationship to dst in its frontmatter
+    // `related` list (ParsedNote.relationships) — the markdown home of a
+    // CreateRelationship edge. The fold derives the typed note_links row from it.
+    const withRel = new Map<string, ParsedNote | null>([
+      [
+        "src",
+        makeNote({
+          id: "src",
+          path: "src.md",
+          title: "src",
+          relationships: [{ target: "dst", predicate: "supports" }],
+        }),
+      ],
+      ["dst", makeNote({ id: "dst", path: "dst.md", title: "dst" })],
+    ]);
+    foldNotesV2(store, ["src", "dst"], resolverFrom(withRel));
+    expect(
+      store.db
+        .prepare(`SELECT predicate FROM note_links WHERE source_note_id = 'src' AND target_note_id = 'dst'`)
+        .all(),
+    ).toEqual([{ predicate: "supports" }]);
+
+    // Remove the relationship from src's frontmatter and re-fold: the typed row is
+    // re-derived away (NOT preserved) — markdown is the system of record.
+    const withoutRel = new Map<string, ParsedNote | null>([
       ["src", makeNote({ id: "src", path: "src.md", title: "src" })],
       ["dst", makeNote({ id: "dst", path: "dst.md", title: "dst" })],
     ]);
-    foldNotesV2(store, ["src", "dst"], resolverFrom(seed));
-
-    // A typed relationship src→dst, as the `link` command would create it (a
-    // non-null predicate; it lives in the projection, NOT in src's markdown).
-    new ProjectionRepo(store.db).insertLink({
-      source_note_id: "src",
-      target_note_id: "dst",
-      predicate: "supports",
-      alias: null,
-    });
-
-    // Re-fold src (its markdown changed — e.g. a title edit adds no wikilinks).
-    foldNotesV2(store, ["src"], resolverFrom(seed));
-
-    const typed = store.db
-      .prepare(`SELECT predicate FROM note_links WHERE source_note_id = 'src' AND target_note_id = 'dst'`)
-      .all() as { predicate: string | null }[];
-    expect(typed).toEqual([{ predicate: "supports" }]); // survived — not clobbered
+    foldNotesV2(store, ["src"], resolverFrom(withoutRel));
+    expect(
+      store.db
+        .prepare(`SELECT * FROM note_links WHERE source_note_id = 'src' AND target_note_id = 'dst'`)
+        .all(),
+    ).toEqual([]);
   });
 });

@@ -145,6 +145,7 @@ export type {
   NoteType,
   LocatorScheme,
   WikiLink,
+  Relationship,
   SectionTree,
   ParsedNote,
   VaultError,

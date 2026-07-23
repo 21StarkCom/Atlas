@@ -272,14 +272,29 @@ export function rebuildProjections(
         }
         // A parsed `[[wiki-link]]` is a PLAIN link in the v2 shape (0013): no
         // relationship type, so `predicate` is NULL and the optional
-        // `[[target|display]]` text lands in `alias`. Typed relationship edges
-        // (`predicate` set) are authored by the `link` command (task 3-6), not
-        // projected from wiki-links here.
+        // `[[target|display]]` text lands in `alias`.
         repo.insertLink({
           source_note_id: note.id,
           target_note_id: target,
           predicate: null,
           alias: link.alias ?? null,
+        });
+        report.links++;
+      }
+      // Typed relationship edges (v2, #331) — DERIVED from the note's frontmatter
+      // `related` list (`ParsedNote.relationships`), NOT projection-authored. Each
+      // carries a non-null `predicate` and lands as a distinct `note_links` row
+      // (the ux_note_links_pred partial index dedupes per (source,target,predicate)).
+      for (const rel of note.relationships ?? []) {
+        const target = resolveTarget(rel.target);
+        if (target === undefined) {
+          throw new DanglingLinkError(note.id, rel.target, `related:${rel.predicate}:${rel.target}`);
+        }
+        repo.insertLink({
+          source_note_id: note.id,
+          target_note_id: target,
+          predicate: rel.predicate,
+          alias: rel.alias ?? null,
         });
         report.links++;
       }

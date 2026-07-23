@@ -12,13 +12,14 @@
  *
  * {@link foldNotesV2} closes that: for each folded id it reconciles the `notes` row
  * (shared {@link deriveAndPersistNote} rule), REPLACES the note's `note_identity_keys`
- * (slug + deduped aliases, slug wins), and REPLACES its OUTGOING PLAIN `note_links`
- * (`source_note_id = id AND predicate IS NULL`) — all in ONE transaction, so the cursor
- * advances only against a fully-reconciled projection. Deletes-then-inserts the whole
- * affected namespace in TWO sub-passes (all deletes, then all inserts) so a pure namespace
- * transfer — e.g. swapping two filenames — cannot collide on a still-present PK row.
- * Typed relationships (non-null `predicate`, owned by the `link` command, absent from the
- * note's markdown) SURVIVE; incoming links (other notes → this note) are untouched; the
+ * (slug + deduped aliases, slug wins), and REPLACES ALL its OUTGOING `note_links`
+ * (`source_note_id = id`) — both plain links (body `[[wiki-link]]`s, `predicate` NULL) and
+ * typed relationships (frontmatter `related`, `predicate` set) — all in ONE transaction, so
+ * the cursor advances only against a fully-reconciled projection. Both link kinds are
+ * markdown-DERIVED and rebuildable (v2 model A, #331) — nothing is projection-authored.
+ * Deletes-then-inserts the whole affected namespace in TWO sub-passes (all deletes, then all
+ * inserts) so a pure namespace transfer — e.g. swapping two filenames — cannot collide on a
+ * still-present PK row. Incoming links (other notes → this note) are untouched; the
  * dropped-note purge owns full removal (both link directions).
  *
  * ## Link-target resolution + broken-link tolerance
@@ -72,11 +73,13 @@ export function foldNotesV2(
   if (ids.length === 0) return;
   const repo = new ProjectionRepo(store.db);
   const delKeys = store.db.prepare(`DELETE FROM note_identity_keys WHERE note_id = ?`);
-  // Replace ONLY the plain-wikilink (NULL-predicate) outgoing links. A non-null
-  // predicate is a typed relationship (the `link` command's edge), which does not
-  // live in the note's markdown and must SURVIVE a sync fold of the note — deleting
-  // every `source_note_id = id` row would silently drop it (round-3 finding 3).
-  const delOutLinks = store.db.prepare(`DELETE FROM note_links WHERE source_note_id = ? AND predicate IS NULL`);
+  // Replace ALL outgoing links (plain AND typed). v2 model A (#331): a typed
+  // relationship (non-null predicate) is DERIVED from the note's frontmatter
+  // `related` list (ParsedNote.relationships), exactly as a plain link is derived
+  // from a body `[[wiki-link]]` — both are markdown-authored and rebuildable, so
+  // both are re-derived here from the (re-)parsed note. Incoming links (other
+  // notes → this note) are untouched; the dropped-note purge owns full removal.
+  const delOutLinks = store.db.prepare(`DELETE FROM note_links WHERE source_note_id = ?`);
 
   // Resolve each id ONCE (resolve() shells git per call — avoid re-reading it per pass).
   const parsedById = new Map<string, ParsedNote | null>();
@@ -119,9 +122,11 @@ export function foldNotesV2(
       });
     }
 
-    // Pass 2: outgoing plain links, resolved against the now-current identity namespace so a
+    // Pass 2: outgoing links, resolved against the now-current identity namespace so a
     // link to another note in this same batch resolves. A dangling target is a tolerated
-    // advisory (see module header) — skip it rather than throwing.
+    // advisory (see module header) — skip it rather than throwing. Plain links (predicate
+    // NULL) come from the body `[[wiki-link]]`s; typed relationships (predicate set) come
+    // from the frontmatter `related` list — both markdown-derived (v2 model A, #331).
     for (const id of ids) {
       const parsed = parsedById.get(id) ?? null;
       if (parsed === null) continue;
@@ -133,6 +138,16 @@ export function foldNotesV2(
           target_note_id: target,
           predicate: null,
           alias: link.alias ?? null,
+        });
+      }
+      for (const rel of parsed.relationships ?? []) {
+        const target = resolveLinkTarget(store.db, rel.target);
+        if (target === undefined) continue;
+        repo.insertLink({
+          source_note_id: id,
+          target_note_id: target,
+          predicate: rel.predicate,
+          alias: rel.alias ?? null,
         });
       }
     }

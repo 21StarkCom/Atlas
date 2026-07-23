@@ -90,6 +90,7 @@ export function parseNote(
       sources: fm.frontmatter.sources,
       declaredSensitivity: fm.frontmatter.declaredSensitivity,
       links,
+      relationships: fm.frontmatter.relationships,
       sections: buildSectionTree(body),
       contentHash: `sha256:${createHash("sha256").update(raw, "utf8").digest("hex")}`,
       raw,

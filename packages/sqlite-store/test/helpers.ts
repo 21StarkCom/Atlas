@@ -25,6 +25,7 @@ export function makeNote(overrides: Partial<ParsedNote> & { id: string; path: st
     sources: [],
     declaredSensitivity: "internal",
     links: [],
+    relationships: [],
     sections: { heading: "", level: 0, path: "", children: [] },
     contentHash: "0".repeat(64),
     raw: "",

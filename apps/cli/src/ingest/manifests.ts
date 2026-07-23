@@ -284,6 +284,7 @@ export async function foldProvenanceFromCanonical(store: Store, repo: Repo, ref:
       sources: fm.sources,
       declaredSensitivity: "internal",
       links: [],
+      relationships: [],
       sections: { headings: [] } as unknown as ParsedNote["sections"],
       contentHash: "",
       raw,

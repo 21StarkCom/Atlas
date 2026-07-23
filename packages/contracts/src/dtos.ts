@@ -27,6 +27,21 @@ export interface WikiLink {
   readonly raw: string;
 }
 
+/**
+ * A typed, directed relationship from the note's frontmatter `related` list
+ * (v2, #331) — the markdown representation of a `CreateRelationship` edge. Unlike
+ * a {@link WikiLink} (plain, `predicate` NULL), a relationship carries a non-null
+ * `predicate` and is projected into a distinct `note_links` row.
+ */
+export interface Relationship {
+  /** The related note's natural identifier (raw; resolved to a note id at fold time). */
+  readonly target: string;
+  /** The relationship predicate (non-empty — this is what makes the edge "typed"). */
+  readonly predicate: string;
+  /** Optional display alias for the edge. */
+  readonly alias?: string;
+}
+
 /** A recursive tree of a note's sections (headings). */
 export interface SectionTree {
   /** Heading text (empty for the note root/preamble). */
@@ -65,6 +80,15 @@ export interface ParsedNote {
   readonly sources: readonly string[];
   readonly declaredSensitivity: Sensitivity;
   readonly links: readonly WikiLink[];
+  /**
+   * Typed, directed relationships declared in the note's frontmatter `related`
+   * list — the markdown home of a `CreateRelationship` edge (v2, #331). Distinct
+   * from {@link links} (plain `[[wiki-link]]` body occurrences, `predicate` NULL):
+   * a relationship carries a non-null `predicate`, so it is markdown-DERIVED and
+   * rebuildable (`db rebuild` + the v2 sync fold both re-derive it from here — it
+   * is NOT projection-authored state). Absent ⇒ `[]`.
+   */
+  readonly relationships: readonly Relationship[];
   readonly sections: SectionTree;
   readonly contentHash: string;
   readonly raw: string;

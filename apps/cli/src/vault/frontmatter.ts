@@ -8,7 +8,7 @@
  */
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
-import { SCHEMA_VERSION, type Sensitivity } from "@atlas/contracts";
+import { SCHEMA_VERSION, type Relationship, type Sensitivity } from "@atlas/contracts";
 
 /** Sensitivity classes (plan §2.5; unlabeled content defaults to `internal`). */
 const SENSITIVITY = ["public", "internal", "confidential", "restricted"] as const;
@@ -52,6 +52,20 @@ const FrontmatterSchema = z
     updated: TimestampField,
     aliases: z.array(z.string()).default([]),
     sources: z.array(z.string()).default([]),
+    // Typed, directed relationships (v2, #331) — the markdown home of a
+    // `CreateRelationship` edge, so a typed edge is markdown-DERIVED + rebuildable
+    // (never projection-only). A plain `[[wiki-link]]` stays in the body, not here.
+    related: z
+      .array(
+        z
+          .object({
+            target: z.string().min(1),
+            predicate: z.string().min(1),
+            alias: z.string().min(1).optional(),
+          })
+          .strict(),
+      )
+      .default([]),
     declaredSensitivity: z.enum(SENSITIVITY).default("internal"),
     data_categories: z.array(z.string()).default([]),
   })
@@ -68,6 +82,8 @@ export interface Frontmatter {
   readonly updated: string;
   readonly aliases: readonly string[];
   readonly sources: readonly string[];
+  /** Typed relationships from the `related` frontmatter list (v2, #331). */
+  readonly relationships: readonly Relationship[];
   readonly declaredSensitivity: Sensitivity;
 }
 
@@ -133,6 +149,11 @@ export function parseFrontmatter(frontmatter: string | null): FrontmatterResult 
       updated: parsed.data.updated,
       aliases: parsed.data.aliases,
       sources: parsed.data.sources,
+      relationships: parsed.data.related.map((r) => ({
+        target: r.target,
+        predicate: r.predicate,
+        ...(r.alias !== undefined ? { alias: r.alias } : {}),
+      })),
       declaredSensitivity: parsed.data.declaredSensitivity,
     },
   };
