@@ -57,7 +57,7 @@ Migration ownership (verbatim from §2.7):
 
 | Migration | Owner package | Phase / PR | Tables |
 |---|---|---|---|
-| `0001_core` | `sqlite-store` | 1 | `notes`, `note_identity_keys`, `note_links`, `vault_schema_migrations`, `agent_runs`, `model_calls`, `retrieval_runs`, `retrieval_results`, `change_plans`, `patches`, `patch_operations`, `validation_results`, `git_operations`, `audit_events`, `audit_intents`, `backup_watermark`, `raw_payloads` |
+| `0001_core` | `sqlite-store` | 1 | `notes`, `note_identity_keys`, `note_links`, `vault_schema_migrations`, `agent_runs`, `model_calls`, `retrieval_runs`, `retrieval_results`, `change_plans`, `patches`, `patch_operations`, `validation_results`, `git_operations` ~~`audit_events`, `audit_intents`, `backup_watermark`, `raw_payloads`~~ *(created by `0001`, forward-dropped by `0014_evidence_v2` — #338; absent from a fresh DB)* |
 | `0002_jobs` | `jobs` | 2 PR-B | `jobs`, `job_attempts` |
 | `0003_provenance` | `sqlite-store` | 2 PR-A (retained) | `content_blobs`, `source_captures`, `source_renditions`, `note_sources` |
 | `0004_claims` | `sqlite-store` | 4 PR-A (retained) | ~~`claims`, `claim_evidence`~~ *(created by `0004`, forward-dropped by `0014_evidence_v2` — #337; absent from a fresh DB)* |
@@ -400,102 +400,13 @@ CREATE TABLE git_operations (
 - **FK:** `run_id → agent_runs(run_id)` **`ON DELETE RESTRICT`**.
 - **Upsert:** conflict target **`git_op_id`** — `ON CONFLICT(git_op_id) DO NOTHING`.
 
-### `audit_events` — `0001_core` (ledger, security-authoritative)
-
-The committed audit record (§2.8 step 3). `seq` is the global monotonic allocation (the serialization
-point is the intent txn, §3 `audit_intents`); `(run_id, seq)` is the end-to-end idempotency key.
-`event_type` is the §2.5 closed set plus the D6 ledger-internal kinds
-(`db.backup`/`db.restore`/`db.force_unblock`), which carry **no `run.*` git-ref event of their own**.
-
-```sql
-CREATE TABLE audit_events (
-  seq           INTEGER NOT NULL PRIMARY KEY,             -- global monotonic allocation
-  run_id        TEXT    NOT NULL,                         -- scalar run id; NO FK (survives rebuild)
-  event_type    TEXT    NOT NULL CHECK (event_type IN (
-                  'run.started', 'run.planned', 'run.integrated', 'run.rejected',
-                  'run.rolled_back', 'run.failed', 'run.cancelled', 'run.readonly', 'run.projection',
-                  'db.backup', 'db.restore', 'db.force_unblock')),
-  payload_hash  TEXT    NOT NULL,                         -- hash of the canonical allowlisted-metadata payload
-  git_head      TEXT,                                     -- refs/audit/runs head returned by the broker append
-  created_at    TEXT    NOT NULL,
-  UNIQUE (run_id, seq)
-) STRICT;
-
-CREATE INDEX idx_audit_events_run ON audit_events(run_id);
-```
-
-- **FK:** none — `run_id` is a scalar historical identifier (ledger row must survive a projection
-  rebuild; the design forbids a cross-class FK and this table has no ledger parent).
-- **Upsert:** conflict target **`seq`** — `ON CONFLICT(seq) DO NOTHING`, idempotent on `(run_id, seq)`
-  (§2.8: the broker append is idempotent on `(runId, seq)`; the ledger commit re-drives idempotently).
-- **Cardinality invariant:** each terminal `event_type` occurs **exactly once per `run_id`** (§7).
-
-### `audit_intents` — `0001_core` (ledger)
-
-§2.8 step 1: the intent txn allocates `seq` monotonically inside one transaction — the
-**serialization point** so concurrent writers cannot collide. Flipped to `done` in step 3.
-
-```sql
-CREATE TABLE audit_intents (
-  run_id        TEXT    NOT NULL,
-  seq           INTEGER NOT NULL,
-  payload_hash  TEXT    NOT NULL,                         -- canonical event payload hash (matches audit_events)
-  event_json    TEXT    NOT NULL,                         -- canonical unsigned event (§2.8): lets the reconciler re-drive step 2 idempotently
-  state         TEXT    NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'done')),
-  created_at    TEXT    NOT NULL,
-  updated_at    TEXT    NOT NULL,
-  PRIMARY KEY (run_id, seq),
-  UNIQUE (seq)                                            -- enforces the global monotonic allocation
-) STRICT;
-```
-
-- **FK:** none (scalar `run_id`; no ledger parent, no cross-class FK).
-- **`event_json`:** the canonical unsigned audit event (allowlisted metadata only, `prevAuditHead`
-  excluded — the broker fills + signs it, F4). Persisting it in the intent txn (step 1) is what lets
-  `reconcileInterruptedRuns` re-drive step 2 for a `pending` intent that has no git event yet: the
-  broker append is idempotent on `(runId, seq)`, so replaying the exact event converges with no gap in
-  the git-anchored seq chain.
-- **Upsert:** conflict target **`(run_id, seq)`** — `ON CONFLICT(run_id, seq) DO UPDATE SET state='done'`
-  (the reconciler completes a `pending` intent idempotently on crash recovery).
-
-### `backup_watermark` — `0001_core` (ledger, single-row)
-
-§2.8 step 4: the fail-closed backup watermark. Single row (`id = 1`); coalesces backups so cheap Tier-0
-reads can't amplify into storage DoS.
-
-```sql
-CREATE TABLE backup_watermark (
-  id              INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
-  seq             INTEGER NOT NULL DEFAULT 0,             -- highest audit seq durably backed up
-  healthy         INTEGER NOT NULL DEFAULT 1 CHECK (healthy IN (0, 1)),  -- 0 => 'backup-unhealthy', blocks writes
-  last_backup_at  TEXT,
-  updated_at      TEXT    NOT NULL
-) STRICT;
-```
-
-- **FK:** none.
-- **Upsert:** conflict target **`id`** — `ON CONFLICT(id) DO UPDATE` (single-row upsert with `id = 1`).
-
-### `raw_payloads` — `0001_core` (ledger, opt-in AEAD store)
-
-The **opt-in** encrypted raw-payload store (`sqlite.raw_payload_store`, default **off**; §2.5). Only
-this table holds raw payloads — every other ledger/audit row carries **allowlisted metadata only**.
-
-```sql
-CREATE TABLE raw_payloads (
-  payload_id  TEXT    NOT NULL PRIMARY KEY,
-  run_id      TEXT    NOT NULL,                           -- scalar run id
-  ciphertext  BLOB    NOT NULL,                           -- AEAD ciphertext
-  nonce       BLOB    NOT NULL,
-  aead_tag    BLOB    NOT NULL,
-  created_at  TEXT    NOT NULL,
-  FOREIGN KEY (run_id) REFERENCES agent_runs(run_id) ON DELETE RESTRICT
-) STRICT;
-```
-
-- **FK:** `run_id → agent_runs(run_id)` **`ON DELETE RESTRICT`** (retained with its run for the run's
-  retention window).
-- **Upsert:** conflict target **`payload_id`** — `ON CONFLICT(payload_id) DO NOTHING`.
+> **v2 (#338): the audit/backup ledger is retired.** The `audit_events`,
+> `audit_intents`, `backup_watermark`, and `raw_payloads` tables — the §2.8
+> audit-ledger write protocol + AEAD backup/watermark — are DROPPED by
+> `0014_evidence_v2`. git (one commit per ChangePlan on `refs/heads/main`) is v2's
+> only safety mechanism; `agent_runs` / `model_calls` remain as plain operational
+> tables. Their `CREATE TABLE`s stay only in the immutable `0001_core` DDL as
+> historical record.
 
 ---
 
@@ -839,7 +750,8 @@ construction (config `indexing.dimensions` / `indexing.chunker_version`); this c
 | 4 | Run lookup by status | `idx_agent_runs_status(status)` | `… FROM agent_runs WHERE status = ?` → `SEARCH agent_runs USING INDEX idx_agent_runs_status (status=?)`. |
 | 5 | Identity resolution | PK `note_identity_keys(normalized_key)` | `… WHERE normalized_key = ?` → `SEARCH note_identity_keys USING … (normalized_key=?)` (PK). |
 | 6 | Notes-needing-index scan | `idx_notes_needs_index(active_generation, content_hash)` | `… FROM notes WHERE active_generation < ?` → `SEARCH notes USING INDEX idx_notes_needs_index (active_generation<?)` — **no full `SCAN`**. |
-| 7 | Audit lookup by run | `idx_audit_events_run(run_id)` | `… FROM audit_events WHERE run_id = ?` → `SEARCH audit_events USING INDEX idx_audit_events_run (run_id=?)`. |
+
+*(v2 #338: the audit-lookup-by-run EQP assertion is retired with the `audit_events` table.)*
 
 The one index not co-located with its table above (a `notes` index dedicated to the needs-index scan):
 
@@ -849,7 +761,7 @@ CREATE INDEX idx_notes_needs_index ON notes(active_generation, content_hash);
 
 All other required indexes are declared inline with their tables (§2–§5): `idx_jobs_eligibility`,
 `idx_note_links_forward`, `idx_note_links_reverse`, `ux_note_links_plain`, `ux_note_links_pred`,
-`idx_agent_runs_status`, `idx_audit_events_run`,
+`idx_agent_runs_status`,
 `idx_note_identity_keys_note`, `idx_model_calls_run`. `db verify`'s
 query-plan assertion suite (Task 1.4) runs each EQP above and fails on any `SCAN` where a `SEARCH … USING
 INDEX` is asserted.
@@ -889,26 +801,10 @@ INDEX` is asserted.
    (The v1 `claim_evidence` invariants — no-dangling-evidence-rendition, exactly-one-current-head-per-
    lineage, effective-staleness — were retired with the claims model (#337); `0014_evidence_v2`
    forward-drops the table.)
-4. **Audit terminal-event cardinality.** Every run that reached a terminal status must record **exactly
-   one** terminal audit event — this query detects **both** a *duplicate* terminal event **and** a
-   terminal `agent_runs` row *missing* its required terminal event. (`finalized` maps to `run.integrated`,
-   the durable-mutation terminal event; there is no distinct `run.finalized` in the §2.5 closed set.)
-   ```sql
-   -- (a) a terminal event recorded more than once for the same run
-   SELECT run_id, 'duplicate:' || event_type AS issue
-   FROM audit_events
-   WHERE event_type IN ('run.integrated','run.rejected','run.rolled_back','run.failed','run.cancelled')
-   GROUP BY run_id, event_type HAVING COUNT(*) > 1
-   UNION ALL
-   -- (b) a run in a terminal status with no terminal audit event at all
-   SELECT r.run_id, 'missing-terminal-event' AS issue
-   FROM agent_runs r
-   WHERE r.status IN ('finalized','rejected','rolled-back','failed','cancelled')
-     AND NOT EXISTS (
-       SELECT 1 FROM audit_events e
-       WHERE e.run_id = r.run_id
-         AND e.event_type IN ('run.integrated','run.rejected','run.rolled_back','run.failed','run.cancelled'));
-   ```
+
+   (v2 #338: the **audit terminal-event cardinality** invariant was retired with the `audit_events`
+   table — the §2.8 audit ledger is gone; `agent_runs` is now a plain operational table whose terminal
+   status IS the record, so there is no separate terminal-event to reconcile against.)
 
 ---
 

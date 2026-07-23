@@ -20,7 +20,7 @@
 import { openStore, MigrationChecksumError, type MigrationReport } from "@atlas/sqlite-store";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
-import { ledgerDbPath } from "./backup-config.js";
+import { ledgerDbPath } from "./paths.js";
 import { registerFeatureMigrations } from "./store-open.js";
 
 function parseArgs(argv: string[]): void {

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "atlas://cli-contract/query.schema.json",
   "title": "brain query <text> \u2014 --json success output",
-  "description": "Tier-0 hybrid retrieval, optionally + grounded answer. Resolves the query through the layer precedence in retrieval-index-contract.md \u00a75 (exact id \u2192 slug \u2192 unique alias \u2192 fts/vector RRF fusion), packs a section-aware context, and \u2014 unless --no-answer \u2014 returns a generated answer citing note ids. Retrieval runs only over the SQLite-active generation, filtered by notes.active_generation_id (\u00a72). The response is a discriminated union on `mode`: `answered` (default) generates an answer and records a model_calls row; `retrieval-only` (--no-answer) returns ranked items only and records NO model_calls. Either mode records retrieval_runs/retrieval_results via finalizeLedgerWrite and emits exactly one run.readonly git-ref audit event; neither makes any canonical/worktree/projection mutation. A post-run backup applies (it wrote ledger rows). Exit 0 on success.",
+  "description": "Tier-0 hybrid retrieval, optionally + grounded answer. Resolves the query through the layer precedence in retrieval-index-contract.md \u00a75 (exact id \u2192 slug \u2192 unique alias \u2192 fts/vector RRF fusion), packs a section-aware context, and \u2014 unless --no-answer \u2014 returns a generated answer citing note ids. Retrieval runs only over the SQLite-active generation, filtered by notes.active_generation_id (\u00a72). The response is a discriminated union on `mode`: `answered` (default) generates an answer and records a model_calls row; `retrieval-only` (--no-answer) returns ranked items only and records NO model_calls. Either mode records retrieval_runs/retrieval_results as plain operational rows (v2 #338: the audit ledger + backup are retired — no run.readonly audit event, no watermark gate); neither makes any canonical/worktree/projection mutation. Exit 0 on success.",
   "type": "object",
   "unevaluatedProperties": false,
   "required": [
@@ -318,16 +318,13 @@
       "--vault <path>"
     ],
     "sideEffects": [
-      "records retrieval_runs/retrieval_results via finalizeLedgerWrite (both modes)",
-      "records a model_calls row ONLY in mode=answered; --no-answer (mode=retrieval-only) skips generation and writes no model_calls row",
-      "emits exactly one run.readonly git-ref audit event (executed Tier-0 read)",
-      "a post-run backup applies (this run wrote ledger rows)"
+      "records retrieval_runs/retrieval_results as plain operational rows (both modes)",
+      "records a model_calls row ONLY in mode=answered; --no-answer (mode=retrieval-only) skips generation and writes no model_calls row"
     ],
     "prohibitedEffects": [
       "no vault/projection mutation",
       "no canonical branch/worktree change",
-      "no retrieval over a non-active index generation",
-      "no more than one terminal run.readonly event per run"
+      "no retrieval over a non-active index generation"
     ],
     "locks": [
       {
@@ -366,12 +363,6 @@
         "exit": 2,
         "when": "the LanceDB index is not configured/present so no statistical layer can run",
         "retryable": false
-      },
-      {
-        "code": "backup-unhealthy",
-        "exit": 2,
-        "when": "the fail-closed backup watermark is blocked (ledger-backup-contract.md \u00a75): query writes retrieval_runs/retrieval_results via finalizeLedgerWrite, so BOTH modes (answered and retrieval-only) are refused when the watermark is blocked \u2014 a ledger-writing run is fail-closed until a verified backup catches up",
-        "retryable": true
       },
       {
         "code": "ambiguous-note",

@@ -20,7 +20,7 @@ import { makeStoreValidationVault } from "../validation/store-vault.js";
 import { detectMaintenanceIssues, type MaintenanceIssue } from "../workflows/maintain.js";
 import { applySynthesis, type SynthesisApplyDeps } from "../workflows/synthesis.js";
 import { readVault } from "../vault/reader.js";
-import { ledgerDbPath, resolvePath } from "./backup-config.js";
+import { ledgerDbPath, resolvePath } from "./paths.js";
 import { openMigratedStore, PREVIEW_PROJECTION_TABLES } from "./store-open.js";
 
 const PACK_BUDGET = 6000;

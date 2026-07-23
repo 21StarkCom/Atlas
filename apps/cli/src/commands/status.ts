@@ -38,7 +38,7 @@ import { hasGeminiApiKey } from "@atlas/models";
 import { computeStaleness, type NoteFenceInput } from "@atlas/lancedb-index";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
-import { ledgerDbPath, resolvePath } from "./backup-config.js";
+import { ledgerDbPath, resolvePath } from "./paths.js";
 import { indexingConfig, noteFences, openTableOrNull } from "./index-ops.js";
 import { registerFeatureMigrations } from "./store-open.js";
 import { classifySnapshot, readVaultForReconcile, structuralVaultErrors, type ReconcileRead } from "./sync.js";

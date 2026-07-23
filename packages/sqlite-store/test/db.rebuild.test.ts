@@ -217,9 +217,11 @@ describe("db.rebuild", () => {
     }
   });
 
-  it("leaves ledger rows untouched across a rebuild", () => {
+  it("leaves the agent_runs operational table untouched across a rebuild", () => {
     const store = migrated();
     try {
+      // v2 (#338): the audit ledger is retired; `agent_runs` is a plain operational
+      // table `db rebuild` still never touches (it's not a projection).
       store.ledger.upsertAgentRun({
         run_id: "run-1",
         operation: "ingest",
@@ -227,19 +229,11 @@ describe("db.rebuild", () => {
         started_at: "2026-07-13T00:00:00Z",
         updated_at: "2026-07-13T00:00:00Z",
       });
-      store.ledger.insertAuditEvent({
-        seq: 1,
-        run_id: "run-1",
-        event_type: "run.started",
-        payload_hash: "h".repeat(64),
-        created_at: "2026-07-13T00:00:00Z",
-      });
       const runBefore = store.ledger.getAgentRun("run-1");
 
       store.rebuildProjections(snapshot([makeNote({ id: "n", path: "n.md" })]));
 
       expect(store.ledger.countAgentRuns()).toBe(1);
-      expect(store.ledger.countAuditEvents()).toBe(1);
       expect(store.ledger.getAgentRun("run-1")).toEqual(runBefore);
     } finally {
       store.close();

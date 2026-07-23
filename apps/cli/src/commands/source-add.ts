@@ -10,7 +10,7 @@ import { registerCommand, type RunContext } from "../handlers.js";
 import { serializeContentId, serializeRenditionId } from "@atlas/contracts";
 import { captureSource, CaptureRejectedError } from "../ingest/capture.js";
 import { buildCaptureDeps } from "../ingest/wiring.js";
-import { resolvePath } from "./backup-config.js";
+import { resolvePath } from "./paths.js";
 import { withVaultMutation } from "../locks/mutation-guard.js";
 
 interface ParsedArgs {

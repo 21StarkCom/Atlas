@@ -156,6 +156,12 @@ export type ExitCode = (typeof EXIT_CODES)[number];
  * that creates `db_schema_migrations` itself, not a numbered migration).
  */
 export const MIGRATION_OWNERSHIP: Readonly<Record<string, readonly string[]>> = {
+  // `0001_core` created the audit/backup ledger tables (`audit_events`,
+  // `audit_intents`, `backup_watermark`, `raw_payloads`), but `0014_evidence_v2`
+  // forward-DROPs them (#338 — the §2.8 audit ledger + AEAD backup are retired; git
+  // is the only safety mechanism). None survives a fresh migrate, so the dictionary
+  // no longer defines them and they are absent here — the `checkTableInventory`
+  // bijection stays intact (flattened == dictionary CREATE TABLEs).
   "0001_core": [
     "notes",
     "note_identity_keys",
@@ -170,10 +176,6 @@ export const MIGRATION_OWNERSHIP: Readonly<Record<string, readonly string[]>> = 
     "patch_operations",
     "validation_results",
     "git_operations",
-    "audit_events",
-    "audit_intents",
-    "backup_watermark",
-    "raw_payloads",
   ],
   "0002_jobs": ["jobs", "job_attempts"],
   "0003_provenance": ["content_blobs", "source_captures", "source_renditions", "note_sources"],

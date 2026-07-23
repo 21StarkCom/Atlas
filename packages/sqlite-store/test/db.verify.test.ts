@@ -3,7 +3,8 @@
  *
  * Query-plan assertions must use the contract's indexes (a `SEARCH … USING
  * INDEX`, never a `SCAN`). Invariants must catch a violation (a note with two
- * slug keys; a terminal run with no terminal audit event) and pass a clean DB.
+ * slug keys) and pass a clean DB. v2 (#338): the audit-terminal invariant + the
+ * audit-by-run EQP are retired with the `audit_events` table.
  */
 import { describe, expect, it } from "vitest";
 import {
@@ -146,24 +147,7 @@ describe("db.verify — invariants", () => {
     }
   });
 
-  it("catches a terminal run with no terminal audit event", () => {
-    const store = migrated();
-    try {
-      store.ledger.upsertAgentRun({
-        run_id: "run-x",
-        operation: "ingest",
-        status: "failed",
-        failed_checkpoint: "planned",
-        started_at: "2026-07-13T00:00:00Z",
-        updated_at: "2026-07-13T00:00:00Z",
-      });
-      const report = store.verify();
-      expect(report.ok).toBe(false);
-      expect(
-        report.invariantViolations.some((v) => v.invariant === "audit-terminal-event-cardinality"),
-      ).toBe(true);
-    } finally {
-      store.close();
-    }
-  });
+  // v2 (#338): the audit-terminal-event-cardinality invariant is retired with the
+  // `audit_events` table (the §2.8 audit ledger is gone; `agent_runs`'s terminal
+  // status IS the record, with no separate terminal event to reconcile against).
 });

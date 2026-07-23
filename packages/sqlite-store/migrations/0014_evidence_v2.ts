@@ -14,19 +14,19 @@
  * stale (`needs-review`), never trusted.
  *
  * EXPAND-AND-CONTRACT — this forward migration is authored across the phase-4
- * commits. Task 4-2 landed the ADDITIVE half (`CREATE TABLE evidence`). THIS commit
- * (task 4-4) appends the DROP of the v1 evidence model (`claim_evidence` then
- * `claims`, children-first) now that the flat vault-derived `evidence` projection +
- * `EvidenceRepo` + fold + the rewritten evidence commands have fully replaced the
- * rendition-pinned `claims`/`claim_evidence` model and its last consumer is gone. The
- * remaining DROPs — the ledger/backup tables (`audit_events`/`audit_intents`/
- * `backup_watermark`/`raw_payloads`) and the dead `sync_cursors` table (`0012`) —
- * still ride this SAME forward migration but are appended in the later commit that
- * removes their last consumer (task 4-1) — so no intermediate commit migrates against
- * a still-live consumer. This is the newest migration on an unreleased branch and is
- * never applied to a real DB before the Phase-5 verified pre-migration snapshot
- * exists, so growing its DDL here is not editing a *released* migration (migrations
- * stay append-only: `0004`/`0012` are forward-dropped, never edited).
+ * commits. Task 4-2 landed the ADDITIVE half (`CREATE TABLE evidence`); task 4-4
+ * appended the DROP of the v1 evidence model (`claim_evidence` then `claims`,
+ * children-first). THIS commit (task 4-1) appends the DROP of the retired
+ * ledger/backup tables (`audit_events`/`audit_intents`/`backup_watermark`/
+ * `raw_payloads`) now that the §2.8 audit-ledger write protocol + AEAD backup/
+ * watermark are stripped from `@atlas/sqlite-store` and de-ledgered from the
+ * workflow engine — their last consumer is gone. git (one commit per ChangePlan on
+ * `refs/heads/main`) is v2's only safety mechanism; `agent_runs` / `model_calls`
+ * stay as plain operational tables (retained, not dropped). No intermediate commit
+ * migrates against a still-live consumer. This is the newest migration on an
+ * unreleased branch and is never applied to a real DB before the Phase-5 verified
+ * pre-migration snapshot exists, so growing its DDL here is not editing a *released*
+ * migration (migrations stay append-only: `0004` is forward-dropped, never edited).
  *
  * FK-free by construction: `evidence` has no foreign keys (`noteId` is soft), so a
  * projection rebuild can never trip a restrictive FK or orphan a row. The whole
@@ -48,8 +48,11 @@ import { migrationChecksum } from "../src/migrate.js";
  * (`claim_evidence` carries a `CASCADE` FK onto `claims`, a `RESTRICT` FK onto
  * `source_renditions`, and a self-`RESTRICT` supersession FK — so it must be dropped
  * before `claims`; a whole-table DROP is not blocked by the row-level RESTRICT FKs).
- * The ledger/backup and `sync_cursors` DROPs still ride this migration in the task-4-1
- * commit (their consumers are not yet removed).
+ * Then the ledger/backup DROPs (task 4-1): `audit_events`, `audit_intents`,
+ * `backup_watermark`, `raw_payloads`. These have no INBOUND FK from any surviving
+ * table (`audit_events`/`agent_runs` reference each other by scalar id only, no FK;
+ * `raw_payloads`'s only FK is OUTBOUND to `agent_runs`), so drop order is
+ * unconstrained.
  */
 export const EVIDENCE_V2_DDL = `CREATE TABLE evidence (
   id             TEXT    NOT NULL PRIMARY KEY,
@@ -65,7 +68,11 @@ export const EVIDENCE_V2_DDL = `CREATE TABLE evidence (
   createdAt      TEXT
 ) STRICT;
 DROP TABLE claim_evidence;
-DROP TABLE claims;`;
+DROP TABLE claims;
+DROP TABLE audit_events;
+DROP TABLE audit_intents;
+DROP TABLE backup_watermark;
+DROP TABLE raw_payloads;`;
 
 /** The `0014_evidence_v2` migration (registered in `openStore`'s default set). */
 export const migration0014EvidenceV2: Migration = {

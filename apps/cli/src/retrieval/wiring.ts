@@ -12,7 +12,7 @@ import { ModelsClient } from "@atlas/models";
 import { newRunId } from "@atlas/contracts";
 import type { Store } from "@atlas/sqlite-store";
 import { CliError, EXIT } from "../errors/envelope.js";
-import { resolvePath } from "../commands/backup-config.js";
+import { resolvePath } from "../commands/paths.js";
 import type { RunContext } from "../handlers.js";
 import { retrieve, type IdentityResolver, type NoteMeta, type RetrievalDeps, type RetrievalResult } from "./layers.js";
 

@@ -25,8 +25,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { newRunId, canonicalSerialize, type AuditEvent, type RunManifest } from "@atlas/contracts";
-import { openStore, latestRunSeq, reconcileInterruptedRuns, applyLedgerWrite, payloadHashOf, IntentsRepo, decryptBackup, listBackups, type Store, type LedgerBackupConfig, type UnsignedAuditEvent } from "@atlas/sqlite-store";
+import { newRunId, canonicalSerialize, type RunManifest } from "@atlas/contracts";
+import { openStore, applyLedgerWrite, type Store } from "@atlas/sqlite-store";
 import { advanceCanonicalRef, openRepo, type Repo, type Worktree } from "@atlas/git";
 import {
   startRun,
@@ -39,8 +39,8 @@ import {
   reconcileIdempotency,
   openWorkflowStore,
   sha256Canonical,
-  buildTerminalDetail,
   parseTerminalAuditDetail,
+  buildTerminalDetail,
   IllegalTransitionError,
   CheckpointCasError,
   IdempotencyKeyConflictError,
@@ -51,10 +51,7 @@ import {
   type IntegrationContext,
   type BrokerIntegration,
   type PlannedArtifacts,
-  type TerminalExtras,
-  type TerminalAuditDetail,
   makeCanonicalIntegrator,
-  inProcessAuditBroker,
 } from "../src/workflows/index.js";
 import { runCli } from "../src/main.js";
 
@@ -64,7 +61,6 @@ interface Harness {
   readonly root: string;
   readonly repoDir: string;
   readonly dbPath: string;
-  readonly backup: LedgerBackupConfig;
   /** A fresh migrated store over the SAME db file (a "restart"). */
   openStore(): Store;
   /** The seed commit sha on `refs/heads/main`. */
@@ -86,8 +82,6 @@ function makeHarness(): Harness {
   const repoDir = join(root, "repo");
   mkdirSync(repoDir, { recursive: true });
   const dbPath = join(root, "ledger.db");
-  const backupDir = join(root, "backups");
-  const anchorPath = join(root, "anchor", "audit-anchor");
 
   const git = (args: string[]): string =>
     execFileSync("git", args, {
@@ -107,13 +101,10 @@ function makeHarness(): Harness {
   git(["add", "-A"]);
   git(["commit", "-q", "-m", "seed"]);
 
-  const backup: LedgerBackupConfig = { dir: backupDir, key: randomBytes(32), keyId: "test-key-v1", keep: 10 };
-
   return {
     root,
     repoDir,
     dbPath,
-    backup,
     openStore(): Store {
       // The PRODUCTION store-open lifecycle (round-2 finding W7): open + register the
       // workflows-owned migration(s) + migrate through the normal checksum-guarded
@@ -166,8 +157,6 @@ function gitIn(dir: string, args: string[]): string {
 }
 
 let h: Harness;
-// v2 (#334): the audit seam is the stateless in-process shim — no daemon to start.
-const service = inProcessAuditBroker();
 beforeEach(() => {
   h = makeHarness();
 });
@@ -176,7 +165,7 @@ afterEach(() => {
 });
 
 function depsWith(store: Store, repo?: Repo): WorkflowDeps {
-  return { store, broker: service, backup: h.backup, now: tick, ...(repo ? { repo } : {}) };
+  return { store, now: tick, ...(repo ? { repo } : {}) };
 }
 
 // ── 1. legal transitions persist exactly their contract artifacts ────────────
@@ -192,7 +181,6 @@ describe("workflows-core: legal transitions persist their contract artifacts", (
       // run.started emitted, no agent_runs row yet (recovery table: planned is
       // "from null/run.started").
       expect(store.ledger.getAgentRun(runId)).toBeUndefined();
-      expect(auditKinds(store, runId)).toEqual(["run.started"]);
 
       const planned = plannedArtifacts(runId, base);
       await handle.checkpoint("planned", planned);
@@ -203,7 +191,6 @@ describe("workflows-core: legal transitions persist their contract artifacts", (
         // change_plans row carries the planHash; git_operations 'base' the baseRef.
         expect(planHashOf(store, runId)).toBe(planned.planHash);
         expect(gitOp(store, runId, "base")).toEqual({ ref_name: "refs/heads/main", commit_sha: base });
-        expect(auditKinds(store, runId)).toEqual(["run.started", "run.planned"]);
       }
 
       const patchHash = sha256Canonical({ p: "patch" });
@@ -219,7 +206,6 @@ describe("workflows-core: legal transitions persist their contract artifacts", (
       expect(store.ledger.getAgentRun(runId)!.status).toBe("patched");
       expect(patchHashOf(store, runId)).toBe(patchHash);
       // no new audit event for patched
-      expect(auditKinds(store, runId)).toEqual(["run.started", "run.planned"]);
 
       const treeHash = "1".repeat(40);
       const agentRef = `refs/agent/${runId}`;
@@ -234,7 +220,7 @@ describe("workflows-core: legal transitions persist their contract artifacts", (
       expect(gitOp(store, runId, "agent-committed")).toEqual({ ref_name: agentRef, commit_sha: commitSha });
 
       // REAL integration: sign + broker ref-advance installs the agent commit.
-      const result = await handle.integrate(performIntegration(h, service));
+      const result = await handle.integrate(performIntegration(h));
       const canonicalSha = result.canonicalSha;
       expect(canonicalSha).toBe(commitSha); // ff installs the agent commit
       expect(h.mainSha()).toBe(canonicalSha); // canonical really advanced
@@ -243,7 +229,6 @@ describe("workflows-core: legal transitions persist their contract artifacts", (
         expect(run.status).toBe("integrated");
         expect(gitOp(store, runId, "integrated")).toEqual({ ref_name: "refs/heads/main", commit_sha: canonicalSha });
         // run.integrated recorded in the ledger at the broker-allocated seq.
-        expect(auditKinds(store, runId)).toEqual(["run.started", "run.planned", "run.integrated"]);
       }
 
       await handle.checkpoint("reindexed", { indexGeneration: 7, canonicalSha });
@@ -255,15 +240,11 @@ describe("workflows-core: legal transitions persist their contract artifacts", (
       // reindexed→finalized once the §2.8 step-4 backup covers the run's seq. Drive
       // it to the SUCCESS terminal and assert full coverage (round-3 finding #7:
       // the happy path must reach finalized + a covering watermark, not stop early).
-      const rep = await reconcileRunsOnStartup({ store, broker: service, repo: openRepo(h.repoDir), backup: h.backup, now: tick });
+      const rep = await reconcileRunsOnStartup({ store, repo: openRepo(h.repoDir), now: tick });
       expect(rep.runs.find((r) => r.runId === runId)).toMatchObject({ action: "finalized", to: "finalized" });
       const finalRun = store.ledger.getAgentRun(runId)!;
       expect(finalRun.status).toBe("finalized");
       expect(finalRun.finished_at).not.toBeNull();
-      // Backup watermark covers the run's committed seq (the finalized gate): a
-      // verified backup advanced coverage up to the latest run seq.
-      expect(latestRunSeq(store.db)).toBeGreaterThanOrEqual(0);
-      expect(watermarkSeq(store)).toBeGreaterThanOrEqual(latestRunSeq(store.db));
 
       const finalReport = assembleRunReport(store, runId)!;
       expect(finalReport.artifacts).toMatchObject({
@@ -276,7 +257,6 @@ describe("workflows-core: legal transitions persist their contract artifacts", (
       });
       expect(finalReport.checkpointSeq).toBeGreaterThan(0);
       // run.integrated remains the single success event (not re-emitted at finalized).
-      expect(auditKinds(store, runId).filter((k) => k === "run.integrated")).toHaveLength(1);
     } finally {
       store.close();
     }
@@ -294,7 +274,6 @@ describe("workflows-core: legal transitions persist their contract artifacts", (
         const run = store.ledger.getAgentRun(handle.runId)!;
         expect(run.status).toBe("failed");
         expect(run.failed_checkpoint).toBe("planned");
-        expect(auditKinds(store, handle.runId)).toContain("run.failed");
       } finally {
         store.close();
       }
@@ -311,7 +290,6 @@ describe("workflows-core: legal transitions persist their contract artifacts", (
         const run = store.ledger.getAgentRun(handle.runId)!;
         expect(run.status).toBe("cancelled");
         expect(run.failed_checkpoint).toBe("patched");
-        expect(auditKinds(store, handle.runId)).toContain("run.cancelled");
       } finally {
         store.close();
       }
@@ -328,7 +306,7 @@ describe("workflows-core: legal transitions persist their contract artifacts", (
       await handle.checkpoint("worktree-applied", { worktreePath: join(h.root, "wt3"), treeHash: "a".repeat(40), agentRef: `refs/agent/${handle.runId}` });
       const commitSha = agentCommit(h, base, handle.runId);
       await handle.checkpoint("agent-committed", { commitSha, treeHash: "a".repeat(40), agentRef: `refs/agent/${handle.runId}`, tier: 2 });
-      const r = await handle.integrate(performIntegration(h, service));
+      const r = await handle.integrate(performIntegration(h));
       expect(store.ledger.getAgentRun(handle.runId)!.status).toBe("integrated");
       expect(r.canonicalSha).toBe(commitSha);
     } finally {
@@ -376,7 +354,7 @@ describe("workflows-core: illegal transitions throw", () => {
       // synthetic canonical SHA) so the run genuinely reaches `integrated`.
       const commitSha = agentCommit(h, base, handle.runId);
       await handle.checkpoint("agent-committed", { commitSha, treeHash: "e".repeat(40), agentRef: `refs/agent/${handle.runId}`, tier: 2 });
-      await handle.integrate(performIntegration(h, service));
+      await handle.integrate(performIntegration(h));
       await expect(handle.fail("integrated", "nope")).rejects.toBeInstanceOf(IllegalTransitionError);
     } finally {
       store.close();
@@ -454,7 +432,7 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
             agentSha = agentCommit(h, base, runId);
           }
           await handle.checkpoint("agent-committed", { commitSha: agentSha, treeHash, agentRef, tier });
-        } else if (step === "integrated") { const r = await handle.integrate(performIntegration(h, service)); canonicalSha = r.canonicalSha; }
+        } else if (step === "integrated") { const r = await handle.integrate(performIntegration(h)); canonicalSha = r.canonicalSha; }
         else if (step === "reindexed") await handle.checkpoint("reindexed", { indexGeneration: 1, canonicalSha });
         if (step === stopAfter) break;
       }
@@ -467,9 +445,8 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
   it("crash at planned, no hook → left for producer re-drive (never fabricated)", async () => {
     const { runId } = await driveTo("planned");
     const store = h.openStore();
-    const svc = inProcessAuditBroker(); // v2: stateless, "restart" is trivial
     try {
-      const rep = await reconcileRunsOnStartup({ store, broker: svc, repo: openRepo(h.repoDir), backup: h.backup, now: tick });
+      const rep = await reconcileRunsOnStartup({ store, repo: openRepo(h.repoDir), now: tick });
       expect(rep.runs.find((r) => r.runId === runId)).toMatchObject({ action: "left" });
       expect(store.ledger.getAgentRun(runId)!.status).toBe("planned");
     } finally {
@@ -480,13 +457,10 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
   it("crash at planned, deterministic recompute → advanced to patched per the table", async () => {
     const { runId } = await driveTo("planned");
     const store = h.openStore();
-    const svc = inProcessAuditBroker(); // v2: stateless, "restart" is trivial
     try {
       const rep = await reconcileRunsOnStartup({
         store,
-        broker: svc,
         repo: openRepo(h.repoDir),
-        backup: h.backup,
         now: tick,
         hooks: { recomputePlan: async () => ({ deterministic: true, patched: patched(runId) }) },
       });
@@ -501,13 +475,10 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
   it("crash at planned, NONdeterministic recompute → failed@planned (plan-stale)", async () => {
     const { runId } = await driveTo("planned");
     const store = h.openStore();
-    const svc = inProcessAuditBroker(); // v2: stateless, "restart" is trivial
     try {
       const rep = await reconcileRunsOnStartup({
         store,
-        broker: svc,
         repo: openRepo(h.repoDir),
-        backup: h.backup,
         now: tick,
         hooks: { recomputePlan: async () => ({ deterministic: false }) },
       });
@@ -515,7 +486,6 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
       const run = store.ledger.getAgentRun(runId)!;
       expect(run.status).toBe("failed");
       expect(run.failed_checkpoint).toBe("planned");
-      expect(auditKinds(store, runId)).toContain("run.failed");
     } finally {
       store.close();
     }
@@ -524,14 +494,11 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
   it("crash at patched, deterministic recompute → advanced to worktree-applied per the table", async () => {
     const { runId, base } = await driveTo("patched");
     const store = h.openStore();
-    const svc = inProcessAuditBroker(); // v2: stateless, "restart" is trivial
     try {
       const worktreePath = join(h.root, "wtp", runId);
       const rep = await reconcileRunsOnStartup({
         store,
-        broker: svc,
         repo: openRepo(h.repoDir),
-        backup: h.backup,
         now: tick,
         hooks: {
           // The recomputed patchHash MUST equal the run's stored one (round finding
@@ -555,13 +522,10 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
   it("crash at patched, NONdeterministic recompute → failed@patched (patch-nondeterministic)", async () => {
     const { runId } = await driveTo("patched");
     const store = h.openStore();
-    const svc = inProcessAuditBroker(); // v2: stateless, "restart" is trivial
     try {
       const rep = await reconcileRunsOnStartup({
         store,
-        broker: svc,
         repo: openRepo(h.repoDir),
-        backup: h.backup,
         now: tick,
         hooks: { recomputePatch: async () => ({ deterministic: false }) },
       });
@@ -581,14 +545,11 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
     // nondeterminism/tamper and fails the run rather than advancing it.
     const { runId } = await driveTo("patched");
     const store = h.openStore();
-    const svc = inProcessAuditBroker(); // v2: stateless, "restart" is trivial
     try {
       const worktreePath = join(h.root, "wtpm", runId);
       const rep = await reconcileRunsOnStartup({
         store,
-        broker: svc,
         repo: openRepo(h.repoDir),
-        backup: h.backup,
         now: tick,
         hooks: {
           recomputePatch: async () => ({
@@ -615,7 +576,7 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
     try {
       // No integrate hook supplied ⇒ the reconciler leaves the committed run for the
       // producer (v2: there is no Tier-3 review park; a hook-bearing pass integrates it).
-      const rep = await reconcileRunsOnStartup({ store, broker: service, repo: openRepo(h.repoDir), backup: h.backup, now: tick });
+      const rep = await reconcileRunsOnStartup({ store, repo: openRepo(h.repoDir), now: tick });
       expect(rep.runs.find((r) => r.runId === runId)).toMatchObject({ action: "left" });
       expect(store.ledger.getAgentRun(runId)!.status).toBe("agent-committed");
     } finally {
@@ -629,16 +590,13 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
     try {
       const rep = await reconcileRunsOnStartup({
         store,
-        broker: service,
         repo: openRepo(h.repoDir),
-        backup: h.backup,
         now: tick,
-        hooks: { integrate: reconcileIntegrateHook(store, h, service) },
+        hooks: { integrate: reconcileIntegrateHook(store, h) },
       });
       expect(rep.runs.find((r) => r.runId === runId)).toMatchObject({ action: "integrated", to: "integrated" });
       expect(store.ledger.getAgentRun(runId)!.status).toBe("integrated");
       expect(h.mainSha()).toBe(gitOp(store, runId, "integrated")!.commit_sha);
-      expect(auditKinds(store, runId).filter((k) => k === "run.integrated")).toHaveLength(1);
     } finally {
       store.close();
     }
@@ -653,16 +611,13 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
     try {
       const rep = await reconcileRunsOnStartup({
         store,
-        broker: service,
         repo: openRepo(h.repoDir),
-        backup: h.backup,
         now: tick,
-        hooks: { integrate: reconcileIntegrateHook(store, h, service) },
+        hooks: { integrate: reconcileIntegrateHook(store, h) },
       });
       expect(rep.runs.find((r) => r.runId === runId)).toMatchObject({ action: "integrated", to: "integrated" });
       expect(store.ledger.getAgentRun(runId)!.status).toBe("integrated");
       expect(h.mainSha()).toBe(gitOp(store, runId, "integrated")!.commit_sha);
-      expect(auditKinds(store, runId).filter((k) => k === "run.integrated")).toHaveLength(1);
     } finally {
       store.close();
     }
@@ -689,14 +644,11 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
       store.close();
     }
     const store2 = h.openStore();
-    const svc = inProcessAuditBroker(); // v2: stateless, "restart" is trivial
     let integrateCalled = false;
     try {
       const rep = await reconcileRunsOnStartup({
         store: store2,
-        broker: svc,
         repo: openRepo(h.repoDir),
-        backup: h.backup,
         now: tick,
         hooks: {
           integrate: async () => {
@@ -727,9 +679,7 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
     try {
       const rep = await reconcileRunsOnStartup({
         store,
-        broker: service,
         repo: openRepo(h.repoDir),
-        backup: h.backup,
         now: tick,
         hooks: {
           integrate: async () => {
@@ -756,9 +706,7 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
       const repo = openRepo(h.repoDir);
       const rep = await reconcileRunsOnStartup({
         store,
-        broker: service,
         repo,
-        backup: h.backup,
         now: tick,
         hooks: {
           // Reopen + hash the RECORDED worktree (round-3 #4): the reconciler requires
@@ -796,13 +744,10 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
     // recorded treeHash. Recovery must refuse to commit a divergent tree.
     writeFileSync(join(worktreePath, "applied.md"), "TAMPERED\n");
     const store = h.openStore();
-    const svc = inProcessAuditBroker(); // v2: stateless, "restart" is trivial
     try {
       const rep = await reconcileRunsOnStartup({
         store,
-        broker: svc,
         repo: openRepo(h.repoDir),
-        backup: h.backup,
         now: tick,
         hooks: {
           hashWorktree: async (ctx) => {
@@ -833,15 +778,13 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
     h.git(["commit", "-q", "-m", "advance main"]);
 
     const store = h.openStore();
-    const svc = inProcessAuditBroker(); // v2: stateless, "restart" is trivial
     try {
-      const rep = await reconcileRunsOnStartup({ store, broker: svc, repo: openRepo(h.repoDir), backup: h.backup, now: tick });
+      const rep = await reconcileRunsOnStartup({ store, repo: openRepo(h.repoDir), now: tick });
       expect(rep.runs.find((r) => r.runId === runId)).toMatchObject({ action: "failed", reason: "base-moved" });
       const run = store.ledger.getAgentRun(runId)!;
       expect(run.status).toBe("failed");
       expect(run.failed_checkpoint).toBe("worktree-applied");
       // run.failed audit event emitted.
-      expect(auditKinds(store, runId)).toContain("run.failed");
       // the orphaned worktree is gone.
       expect(existsSync(worktreePath)).toBe(false);
     } finally {
@@ -861,9 +804,7 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
       let reprojected = 0;
       const rep = await reconcileRunsOnStartup({
         store,
-        broker: service,
         repo: openRepo(h.repoDir),
-        backup: h.backup,
         now: tick,
         hooks: {
           reindex: async () => {
@@ -878,11 +819,6 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
       expect(run.status).toBe("finalized");
       // reindexed generation recorded from the hook (not fabricated).
       expect(assembleRunReport(store, runId)!.artifacts.indexGeneration).toBe(9);
-      // §2.8 step-4 backup watermark covers the run's seq (finalized gate): the
-      // run.integrated event was appended, so the ledger carries a committed seq.
-      expect(latestRunSeq(store.db)).toBeGreaterThan(0);
-      // run.integrated stays the single success event (not re-emitted at finalized).
-      expect(auditKinds(store, runId).filter((k) => k === "run.integrated")).toHaveLength(1);
     } finally {
       store.close();
     }
@@ -892,7 +828,7 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
     const { runId } = await driveTo("integrated");
     const store = h.openStore();
     try {
-      const rep = await reconcileRunsOnStartup({ store, broker: service, repo: openRepo(h.repoDir), backup: h.backup, now: tick });
+      const rep = await reconcileRunsOnStartup({ store, repo: openRepo(h.repoDir), now: tick });
       // Without a producer reprojection the reconciler never fabricates a
       // generation — the run is LEFT integrated for the producer's re-drive.
       expect(rep.runs.find((r) => r.runId === runId)).toMatchObject({ action: "left" });
@@ -906,7 +842,7 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
     const { runId } = await driveTo("reindexed");
     const store = h.openStore();
     try {
-      const rep = await reconcileRunsOnStartup({ store, broker: service, repo: openRepo(h.repoDir), backup: h.backup, now: tick });
+      const rep = await reconcileRunsOnStartup({ store, repo: openRepo(h.repoDir), now: tick });
       expect(rep.runs.find((r) => r.runId === runId)).toMatchObject({ action: "finalized" });
       expect(store.ledger.getAgentRun(runId)!.status).toBe("finalized");
     } finally {
@@ -914,84 +850,6 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
     }
   });
 
-  it("mid-§2.8-step crash (pending intent, no row) → reconcile lands the planned checkpoint", async () => {
-    // A broker whose append throws once simulates a crash after the intent txn
-    // (step 1) but before the ledger commit (step 3): a `pending` audit_intents
-    // row with NO agent_runs row.
-    const store = h.openStore();
-    const base = h.mainSha();
-    let runId = "";
-    try {
-      let thrown = false;
-      const flaky = {
-        signAndAppendAuditEvent: async (unsigned: Parameters<typeof service.signAndAppendAuditEvent>[0]) => {
-          if (!thrown && unsigned.kind === "run.planned") {
-            thrown = true;
-            throw new Error("simulated crash after intent, before append");
-          }
-          return service.signAndAppendAuditEvent(unsigned);
-        },
-      };
-      const handle = await startRun({ store, broker: flaky, backup: h.backup, now: tick }, { operation: "ingest" });
-      runId = handle.runId;
-      await expect(handle.checkpoint("planned", plannedArtifacts(runId, base))).rejects.toThrow(/simulated crash/);
-      // The checkpoint did not commit: no agent_runs row, a pending intent exists.
-      expect(store.ledger.getAgentRun(runId)).toBeUndefined();
-      expect(pendingIntentCount(store, runId)).toBe(1);
-    } finally {
-      store.close();
-    }
-
-    // Restart: reconcile drains the pending intent, replaying the persisted
-    // ledgerWrite so the planned checkpoint lands (agent_runs row appears).
-    const store2 = h.openStore();
-    const svc = inProcessAuditBroker(); // v2: stateless, "restart" is trivial
-    try {
-      const rep = await reconcileRunsOnStartup({ store: store2, broker: svc, repo: openRepo(h.repoDir), backup: h.backup, now: tick });
-      expect(rep.ledger.reconciled).toBeGreaterThanOrEqual(1);
-      const run = store2.ledger.getAgentRun(runId)!;
-      expect(run.status).toBe("planned");
-      expect(pendingIntentCount(store2, runId)).toBe(0);
-    } finally {
-      store2.close();
-    }
-  });
-
-  it("integration seam: broker ref-advance fails → un-anchored intent dropped, run re-drivable", async () => {
-    const store = h.openStore();
-    const base = h.mainSha();
-    const handle = await startRun(depsWith(store, openRepo(h.repoDir)), { operation: "ingest" });
-    const runId = handle.runId;
-    try {
-      await handle.checkpoint("planned", plannedArtifacts(runId, base));
-      await handle.checkpoint("patched", patched(runId));
-      await handle.checkpoint("worktree-applied", { worktreePath: join(h.root, "wtseam", runId), treeHash: "a".repeat(40), agentRef: `refs/agent/${runId}` });
-      const commitSha = agentCommit(h, base, runId);
-      await handle.checkpoint("agent-committed", { commitSha, treeHash: "a".repeat(40), agentRef: `refs/agent/${runId}`, tier: 2 });
-
-      // §2.8 step 1 wrote a durable pending intent; the broker ref-advance (step 2)
-      // then throws (a crash before canonical installs). The un-anchored intent MUST
-      // be dropped so integration can re-drive cleanly, and canonical must NOT have
-      // moved (round-2 finding #1: persist + validate the integration intent).
-      await expect(
-        handle.integrate(async () => {
-          throw new Error("ref-advance failed");
-        }),
-      ).rejects.toThrow(/ref-advance failed/);
-      expect(pendingIntentCount(store, runId)).toBe(0);
-      expect(store.ledger.getAgentRun(runId)!.status).toBe("agent-committed");
-      expect(h.mainSha()).toBe(base); // canonical unmoved — nothing installed
-
-      // Re-drive integration for real: it now installs the agent commit + finalizes
-      // the §2.8 step-3 CAS at a fresh seq.
-      const r = await handle.integrate(performIntegration(h, service));
-      expect(store.ledger.getAgentRun(runId)!.status).toBe("integrated");
-      expect(h.mainSha()).toBe(r.canonicalSha);
-      expect(auditKinds(store, runId).filter((k) => k === "run.integrated")).toHaveLength(1);
-    } finally {
-      store.close();
-    }
-  });
 
   it("integration seam: broker advance SUCCEEDS but the response is LOST → integrate completes forward (round-3 #1)", async () => {
     const store = h.openStore();
@@ -1005,119 +863,23 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
       const commitSha = agentCommit(h, base, runId);
       await handle.checkpoint("agent-committed", { commitSha, treeHash: "a".repeat(40), agentRef: `refs/agent/${runId}`, tier: 2 });
 
-      // `perform` does the REAL broker advance (canonical advances + event anchored)
-      // then the response is LOST (throws AFTER success). integrate() must inspect
-      // the authoritative broker/ref state, see the mutation is durable, and complete
-      // integration forward — NOT drop the intent or orphan the canonical mutation.
-      const realPerform = performIntegration(h, service);
+      // `perform` does the REAL FF advance (canonical advances) then the response is
+      // LOST (throws AFTER success). integrate() must inspect the authoritative ref
+      // state, see the mutation is durable (canonical contains the commit), and
+      // complete integration forward — NOT re-drive or orphan the canonical mutation.
+      const realPerform = performIntegration(h);
       const r = await handle.integrate(async (ctx) => {
         await realPerform(ctx);
         throw new Error("response lost after a successful advance");
       });
       expect(store.ledger.getAgentRun(runId)!.status).toBe("integrated");
       expect(h.mainSha()).toBe(r.canonicalSha); // canonical really advanced
-      expect(pendingIntentCount(store, runId)).toBe(0); // intent completed, not orphaned
       expect(gitOp(store, runId, "integrated")!.commit_sha).toBe(r.canonicalSha);
-      expect(auditKinds(store, runId).filter((k) => k === "run.integrated")).toHaveLength(1);
     } finally {
       store.close();
     }
   });
 
-  it("integration seam: transient broker failure on an ambiguous crash → intent PRESERVED, never dropped (round-3 #1)", async () => {
-    const store = h.openStore();
-    const base = h.mainSha();
-    // A broker that services planned/etc via the real broker but is transiently DOWN
-    // for run.integrated (its probe cannot prove the event un-anchored).
-    const flaky = {
-      signAndAppendAuditEvent: async (u: Parameters<typeof service.signAndAppendAuditEvent>[0]) => {
-        if (u.kind === "run.integrated") throw new Error("broker transiently down");
-        return service.signAndAppendAuditEvent(u);
-      },
-    };
-    const handle = await startRun({ store, broker: flaky, backup: h.backup, now: tick, repo: openRepo(h.repoDir) }, { operation: "ingest" });
-    const runId = handle.runId;
-    try {
-      await handle.checkpoint("planned", plannedArtifacts(runId, base));
-      await handle.checkpoint("patched", patched(runId));
-      await handle.checkpoint("worktree-applied", { worktreePath: join(h.root, "wttx", runId), treeHash: "a".repeat(40), agentRef: `refs/agent/${runId}` });
-      const commitSha = agentCommit(h, base, runId);
-      await handle.checkpoint("agent-committed", { commitSha, treeHash: "a".repeat(40), agentRef: `refs/agent/${runId}`, tier: 2 });
-
-      // perform throws; the crash-resolution probe hits the transient broker error,
-      // which is NOT proof of un-anchoring — the intent must be PRESERVED (not
-      // dropped) and the failure surfaced for the reconciler to resolve later.
-      await expect(handle.integrate(async () => { throw new Error("ref-advance failed"); })).rejects.toThrow(/transiently down/);
-      expect(pendingIntentCount(store, runId)).toBe(1); // preserved
-      expect(store.ledger.getAgentRun(runId)!.status).toBe("agent-committed");
-      expect(h.mainSha()).toBe(base); // nothing installed
-    } finally {
-      store.close();
-    }
-  });
-
-  // v2 (#334): the "append SUCCEEDS but canonical CAS FAILS" split row is
-  // RETIRED — there is no separate audit-append step, so the scenario cannot
-  // occur; the un-anchored-drop and transient-preserve rows above cover both
-  // surviving outcomes of a failed integration seam.
-
-  it("crash-plus-concurrent-advance: a pending terminal intent's serialized CAS blocks replay (round finding #2)", async () => {
-    // Round finding #2: the audit-transition affected-row CAS is SERIALIZED into
-    // audit_intents.write_json, so a startup REPLAY enforces the same CAS the live
-    // step-3 did. Here a run.failed intent is left pending by a crash after step 1,
-    // then the run is concurrently advanced; the replay's guarded upsert cannot
-    // advance the moved row, its serialized assert fails, and the audit event is
-    // NEVER falsely completed against the non-advanced row.
-    const store = h.openStore();
-    const base = h.mainSha();
-    // A broker that appends normally but throws once on the run.failed append,
-    // simulating a crash after the durable intent (step 1) but before append/commit.
-    let failedOnce = false;
-    const flaky = {
-      signAndAppendAuditEvent: async (u: Parameters<typeof service.signAndAppendAuditEvent>[0]) => {
-        if (u.kind === "run.failed" && !failedOnce) {
-          failedOnce = true;
-          throw new Error("simulated crash after run.failed intent, before append");
-        }
-        return service.signAndAppendAuditEvent(u);
-      },
-    };
-    const handle = await startRun({ store, broker: flaky, backup: h.backup, now: tick, repo: openRepo(h.repoDir) }, { operation: "ingest" });
-    const runId = handle.runId;
-    try {
-      await handle.checkpoint("planned", plannedArtifacts(runId, base));
-      await handle.checkpoint("patched", patched(runId));
-      await handle.checkpoint("worktree-applied", { worktreePath: join(h.root, "wtcca", runId), treeHash: "a".repeat(40), agentRef: `refs/agent/${runId}` });
-      const commitSha = agentCommit(h, base, runId);
-      await handle.checkpoint("agent-committed", { commitSha, treeHash: "a".repeat(40), agentRef: `refs/agent/${runId}`, tier: 2 });
-
-      await expect(handle.fail("agent-committed", "boom")).rejects.toThrow(/simulated crash/);
-      expect(pendingIntentCount(store, runId)).toBe(1); // pending run.failed intent
-      // A concurrent actor advances the SAME run past agent-committed (an auto-integrate
-      // that raced the abandoned fail): the durable row is now `integrated`.
-      store.db.prepare(`UPDATE agent_runs SET status='integrated' WHERE run_id=?`).run(runId);
-    } finally {
-      store.close();
-    }
-
-    // Restart: draining the pending run.failed intent replays its write_json. The
-    // guarded upsert (expectedFrom agent-committed) cannot advance the now-integrated
-    // row, and the SERIALIZED affected-row assert fails → the intent is LEFT pending
-    // (conflicted), the run.failed audit event is NEVER completed, the row is not
-    // regressed. Without the serialization the replay would have completed the audit
-    // event against a non-advanced row (the finding #2 gap).
-    const store2 = h.openStore();
-    const svc = inProcessAuditBroker(); // v2: stateless, "restart" is trivial
-    try {
-      const rep = await reconcileInterruptedRuns(store2, svc, { backup: h.backup, now: tick });
-      expect(rep.conflicted).toBeGreaterThanOrEqual(1);
-      expect(store2.ledger.getAgentRun(runId)!.status).toBe("integrated"); // never regressed
-      expect(auditKinds(store2, runId)).not.toContain("run.failed"); // no false completion
-      expect(pendingIntentCount(store2, runId)).toBe(1); // intent left pending, not falsely done
-    } finally {
-      store2.close();
-    }
-  });
 
   it("agent ref advanced BEYOND the recorded commit → still integrated by ANCESTRY, not tip-equality (round-2 finding W4)", async () => {
     // Round-2 finding W4: containment was tested by ref-tip EQUALITY, so a valid
@@ -1138,15 +900,12 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
     expect(await repo.isAncestor(recorded, advancedTip)).toBe(true); // …but still contains it
 
     const store = h.openStore();
-    const svc = inProcessAuditBroker(); // v2: stateless, "restart" is trivial
     try {
       const rep = await reconcileRunsOnStartup({
         store,
-        broker: svc,
         repo,
-        backup: h.backup,
         now: tick,
-        hooks: { integrate: reconcileIntegrateHook(store, h, svc) },
+        hooks: { integrate: reconcileIntegrateHook(store, h) },
       });
       // Equality would have LEFT this run (agent-ref-missing-commit); ancestry integrates it.
       expect(rep.runs.find((r) => r.runId === runId)).toMatchObject({ action: "integrated", to: "integrated" });
@@ -1167,9 +926,7 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
     try {
       const rep = await reconcileRunsOnStartup({
         store,
-        broker: service,
         repo: openRepo(h.repoDir),
-        backup: h.backup,
         now: tick,
         hooks: {
           integrate: async () => {
@@ -1215,7 +972,6 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
       expect(retry.kind).toBe("replay");
       if (retry.kind === "replay") expect(JSON.parse(retry.resultJson)).toEqual(exact);
       // run.integrated remains the single success audit event (finalize emits none).
-      expect(auditKinds(store, runId).filter((k) => k === "run.integrated")).toHaveLength(1);
     } finally {
       store.close();
     }
@@ -1237,7 +993,7 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
       await handle.checkpoint("agent-committed", { commitSha, treeHash: "a".repeat(40), agentRef: `refs/agent/${runId}`, tier: 2 });
       // A performer that reports the UNCHANGED base as canonicalSha (nothing installed).
       await expect(
-        handle.integrate(async (ctx) => ({ canonicalRef: ctx.canonicalRef, canonicalSha: ctx.baseRef, seq: ctx.event.seq, auditHead: "0".repeat(40) })),
+        handle.integrate(async (ctx) => ({ canonicalRef: ctx.canonicalRef, canonicalSha: ctx.baseRef })),
       ).rejects.toThrow(/≠ the agent commit|unchanged-base/);
       expect(store.ledger.getAgentRun(runId)!.status).toBe("agent-committed"); // never integrated
       expect(h.mainSha()).toBe(base);
@@ -1259,7 +1015,7 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
       await handle.checkpoint("agent-committed", { commitSha, treeHash: "a".repeat(40), agentRef: `refs/agent/${runId}`, tier: 2 });
       // A performer that reports a DIFFERENT canonical ref than the one recorded at planned.
       await expect(
-        handle.integrate(async (ctx) => ({ canonicalRef: "refs/heads/decoy", canonicalSha: ctx.commitSha, seq: ctx.event.seq, auditHead: "0".repeat(40) })),
+        handle.integrate(async (ctx) => ({ canonicalRef: "refs/heads/decoy", canonicalSha: ctx.commitSha })),
       ).rejects.toThrow(/≠ the run's recorded ref/);
       expect(store.ledger.getAgentRun(runId)!.status).toBe("agent-committed");
       expect(h.mainSha()).toBe(base);
@@ -1298,40 +1054,6 @@ describe("workflows-core: kill -9 survival + reconcile per the table", () => {
       expect(checkpointSeqOf(store, runId)).toBe(seqAfterFirst);
     } finally {
       store.close();
-    }
-  });
-
-  it("finalize() takes its covering backup AFTER the terminal commit — a restore recovers finalized + the exact result (round-3 #3)", async () => {
-    // Round-3 finding on engine.ts:637-667: the backup must be taken AFTER the
-    // finalized + result transaction commits, so a restore recovers the terminal
-    // outcome — not a reindexed run missing its result.
-    const { runId } = await driveTo("reindexed", { tier: 2 });
-    const store = h.openStore();
-    const exact = { ok: true, token: "opaque-restore", nested: { count: 7 } };
-    try {
-      const req = { command: "reconcile", key: "krestore", requestHash: sha256Canonical({ r: 1 }), runId };
-      expect(beginIdempotent(store.db, req, tick()).kind).toBe("started");
-      const resumed = await startRun(depsWith(store, openRepo(h.repoDir)), { operation: "ingest", runId, resume: true });
-      await resumed.finalize(completeIdempotentStatement(req, JSON.stringify(exact), tick()));
-    } finally {
-      store.close();
-    }
-    // Restore the MOST RECENT verified backup (post-finalize snapshot) into a fresh DB.
-    const latest = listBackups(h.backup)[0]!;
-    const { bytes } = decryptBackup(h.backup, latest.backupRef);
-    const restoredPath = join(h.root, "restored.db");
-    writeFileSync(restoredPath, Buffer.from(bytes));
-    const restored = openStore({ path: restoredPath });
-    try {
-      // The restored DB carries the finalized terminal AND the exact published result.
-      expect((restored.db.prepare(`SELECT status FROM agent_runs WHERE run_id=?`).get(runId) as { status: string }).status).toBe("finalized");
-      const slot = restored.db.prepare(`SELECT state, result_json FROM workflow_idempotency WHERE command=? AND idempotency_key=?`).get("reconcile", "krestore") as
-        | { state: string; result_json: string | null }
-        | undefined;
-      expect(slot?.state).toBe("done");
-      expect(JSON.parse(slot!.result_json!)).toEqual(exact);
-    } finally {
-      restored.close();
     }
   });
 
@@ -1424,44 +1146,6 @@ describe("workflows-core: AbortSignal plumbing", () => {
 
 // ── 3b2. terminal audit payload field (finding #8) ───────────────────────────
 
-describe("workflows-core: terminal audit payload field", () => {
-  it("run.cancelled emits detail.cancelledAt (NOT failedAt); run.failed emits detail.failedAt", async () => {
-    // Round finding #8: the contract requires `run.cancelled` → `cancelledAt` and
-    // `run.failed` → `failedAt`. Assert the DURABLE stored audit payloads carry the
-    // terminal-specific field (and not the wrong one).
-    // cancel from patched.
-    {
-      const store = h.openStore();
-      try {
-        const handle = await startRun(depsWith(store), { operation: "ingest" });
-        await handle.checkpoint("planned", plannedArtifacts(handle.runId, h.mainSha()));
-        await handle.checkpoint("patched", patched(handle.runId));
-        await handle.cancel("patched");
-        const detail = storedEventDetail(store, handle.runId, "run.cancelled")!;
-        expect(detail.cancelledAt).toBe("patched");
-        expect(detail.failedAt).toBeUndefined();
-      } finally {
-        store.close();
-      }
-    }
-    // fail from planned.
-    {
-      const store = h.openStore();
-      try {
-        const handle = await startRun(depsWith(store), { operation: "ingest" });
-        await handle.checkpoint("planned", plannedArtifacts(handle.runId, h.mainSha()));
-        await handle.fail("planned", "plan-stale");
-        const detail = storedEventDetail(store, handle.runId, "run.failed")!;
-        expect(detail.failedAt).toBe("planned");
-        expect(detail.reason).toBe("plan-stale");
-        expect(detail.cancelledAt).toBeUndefined();
-      } finally {
-        store.close();
-      }
-    }
-  });
-});
-
 // ── 3b2. terminal audit detail is a narrow, validated allowlist (findings #3/#4) ─
 
 describe("workflows-core: terminal audit detail is allowlisted + terminal-owned fields win", () => {
@@ -1486,58 +1170,6 @@ describe("workflows-core: terminal audit detail is allowlisted + terminal-owned 
     retries: 0,
     outcome: "success" as const,
   };
-
-  it("REJECTS arbitrary/raw fields (no prompts/responses/secrets reach the signed audit)", async () => {
-    const store = h.openStore();
-    try {
-      const handle = await startRun(depsWith(store), { operation: "ingest" });
-      await handle.checkpoint("planned", plannedArtifacts(handle.runId, h.mainSha()));
-      // A caller tries to smuggle raw payload into the signed audit + WORM anchor.
-      const rawExtras = { detail: { prompt: "leak me", response: "and me", apiKey: "sk-secret" } } as unknown as TerminalExtras;
-      await expect(handle.fail("planned", "boom", undefined, rawExtras)).rejects.toThrow(/terminal audit detail rejected/);
-      // Fail-closed BEFORE any write: no run.failed terminal, run still at planned.
-      expect(storedEventDetail(store, handle.runId, "run.failed")).toBeUndefined();
-      const status = (store.db.prepare(`SELECT status FROM agent_runs WHERE run_id = ?`).get(handle.runId) as { status: string }).status;
-      expect(status).toBe("planned");
-    } finally {
-      store.close();
-    }
-  });
-
-  it("REJECTS a caller trying to set terminal-owned fields via detail (no falsification)", async () => {
-    const store = h.openStore();
-    try {
-      const handle = await startRun(depsWith(store), { operation: "ingest" });
-      await handle.checkpoint("planned", plannedArtifacts(handle.runId, h.mainSha()));
-      // The COLLISION attempt: a caller tries to falsify the terminal-owned fields
-      // (failedAt/reason) through detail — they are NOT in the allowlist, so it is
-      // rejected outright (belt) and, even if it weren't, terminal fields win (braces).
-      const collide = { detail: { modelCalls: [validRecord], failedAt: "integrated", reason: "FALSIFIED" } } as unknown as TerminalExtras;
-      await expect(handle.fail("planned", "real reason", undefined, collide)).rejects.toThrow(/terminal audit detail rejected/);
-      expect(storedEventDetail(store, handle.runId, "run.failed")).toBeUndefined();
-    } finally {
-      store.close();
-    }
-  });
-
-  it("ACCEPTS the allowlisted modelCalls detail; terminal-owned fields stay authoritative", async () => {
-    const store = h.openStore();
-    try {
-      const handle = await startRun(depsWith(store), { operation: "ingest" });
-      await handle.checkpoint("planned", plannedArtifacts(handle.runId, h.mainSha()));
-      const extras: TerminalExtras = { detail: { modelCalls: [validRecord] } };
-      await handle.fail("planned", "plan-stale", undefined, extras);
-      const detail = storedEventDetail(store, handle.runId, "run.failed")!;
-      // The terminal-owned fields the ENGINE writes are authoritative + present…
-      expect(detail.failedAt).toBe("planned");
-      expect(detail.reason).toBe("plan-stale");
-      // …alongside the allowlisted extras (the merge preserves both).
-      expect(Array.isArray(detail.modelCalls)).toBe(true);
-      expect((detail.modelCalls as unknown[]).length).toBe(1);
-    } finally {
-      store.close();
-    }
-  });
 
   it("parseTerminalAuditDetail is strict (unknown key rejected; valid allowlist passes)", () => {
     expect(() => parseTerminalAuditDetail({ modelCalls: [validRecord] })).not.toThrow();
@@ -1609,8 +1241,6 @@ describe("workflows-core: resume hydrates durable state", () => {
 
     const store = h.openStore();
     try {
-      const startedBefore = auditKinds(store, runId).filter((k) => k === "run.started").length;
-      expect(startedBefore).toBe(1);
       const seqBefore = checkpointSeqOf(store, runId);
 
       // Resume the interrupted run. Round finding #7: this hydrates #state from the
@@ -1618,15 +1248,12 @@ describe("workflows-core: resume hydrates durable state", () => {
       // run.started (the run already started).
       const resumed = await startRun(depsWith(store), { operation: "ingest", runId, resume: true });
       expect(resumed.state).toBe("patched"); // hydrated, not null
-      expect(auditKinds(store, runId).filter((k) => k === "run.started").length).toBe(1); // no duplicate
 
       // Same-checkpoint replay is immutable: re-driving the checkpoint the run is
       // ALREADY durably at is a no-op — no checkpoint_seq bump, no new audit event,
       // no gating overwrite.
-      const auditBefore = auditKinds(store, runId).length;
       await resumed.checkpoint("patched", patched(runId));
       expect(checkpointSeqOf(store, runId)).toBe(seqBefore);
-      expect(auditKinds(store, runId).length).toBe(auditBefore);
 
       // It then advances forward normally from the hydrated position.
       await resumed.checkpoint("worktree-applied", { worktreePath: join(h.root, "wtres", runId), treeHash: "a".repeat(40), agentRef: `refs/agent/${runId}` });
@@ -1701,35 +1328,34 @@ describe("workflows-core: resume hydrates durable state", () => {
     }
   });
 
-  it("pre-planned crash: fresh restart refused, resume drives planned without a duplicate run.started (round-2 finding W3)", async () => {
-    // Round-2 finding W3: a run that emitted run.started then crashed BEFORE `planned`
-    // has run.started evidence but no agent_runs row. A fresh start on that id would
-    // emit a SECOND run.started — refuse it; resume must re-drive from planned with no
-    // duplicate opening event.
+  it("pre-planned startRun leaves NO durable footprint — a fresh start on the id succeeds; resume is refused (v2 #338)", async () => {
+    // v2 (#338): the `run.started` audit event is retired, so a `startRun` that never
+    // reached `planned` leaves NO durable state at all (a run's first durable artifact
+    // IS its `planned` agent_runs row). So there is nothing to collide with — a fresh
+    // start on the id succeeds and drives `planned`; a resume of that id is refused
+    // (nothing to resume).
     let runId = "";
     {
       const store = h.openStore();
       try {
         const handle = await startRun(depsWith(store), { operation: "ingest" });
-        runId = handle.runId; // run.started emitted; no planned checkpoint → no agent_runs row
+        runId = handle.runId; // no planned checkpoint → no agent_runs row, no durable footprint
         expect(store.ledger.getAgentRun(runId)).toBeUndefined();
-        expect(auditKinds(store, runId)).toEqual(["run.started"]);
       } finally {
         store.close();
       }
     }
     const store = h.openStore();
     try {
-      // A fresh start on the already-started id is refused.
+      // Resume of an id with no durable row is refused — nothing to resume.
       await expect(
-        startRun(depsWith(store), { operation: "ingest", runId }),
-      ).rejects.toMatchObject({ code: "run-id-in-use" });
-      // Resume drives `planned` and emits NO second run.started.
-      const resumed = await startRun(depsWith(store), { operation: "ingest", runId, resume: true });
-      expect(resumed.state).toBeNull(); // no agent_runs row yet
-      await resumed.checkpoint("planned", plannedArtifacts(runId, h.mainSha()));
+        startRun(depsWith(store), { operation: "ingest", runId, resume: true }),
+      ).rejects.toMatchObject({ code: "run-not-resumable" });
+      // A FRESH start on the same id succeeds (no phantom collision) and drives planned.
+      const fresh = await startRun(depsWith(store), { operation: "ingest", runId });
+      expect(fresh.state).toBeNull(); // no agent_runs row yet
+      await fresh.checkpoint("planned", plannedArtifacts(runId, h.mainSha()));
       expect(store.ledger.getAgentRun(runId)!.status).toBe("planned");
-      expect(auditKinds(store, runId).filter((k) => k === "run.started")).toHaveLength(1); // no duplicate
     } finally {
       store.close();
     }
@@ -1749,12 +1375,10 @@ describe("workflows-core: stale-handle persisted-state CAS", () => {
       await handle.checkpoint("patched", patched(runId));
       // Another actor advances the run under a different handle (concurrency/restart).
       store.db.prepare(`UPDATE agent_runs SET status='worktree-applied' WHERE run_id=?`).run(runId);
-      const before = auditKinds(store, runId).length;
       // The stale handle still believes it is at `patched` and tries to fail there.
       await expect(handle.fail("patched", "stale")).rejects.toBeInstanceOf(CheckpointCasError);
       // The pre-flight CAS rejected it BEFORE any broker append — no terminal audit
       // event, and the advanced row is never regressed.
-      expect(auditKinds(store, runId).length).toBe(before);
       expect(store.ledger.getAgentRun(runId)!.status).toBe("worktree-applied");
       expect(store.ledger.getAgentRun(runId)!.failed_checkpoint).toBeNull();
     } finally {
@@ -1806,9 +1430,8 @@ describe("workflows-core: reconciler orphan sweep", () => {
     store.close();
 
     const store2 = h.openStore();
-    const svc = inProcessAuditBroker(); // v2: stateless, "restart" is trivial
     try {
-      const rep = await reconcileRunsOnStartup({ store: store2, broker: svc, repo, backup: h.backup, now: tick });
+      const rep = await reconcileRunsOnStartup({ store: store2, repo, now: tick });
       expect(rep.worktreesCleaned).toBeGreaterThanOrEqual(1);
       expect(existsSync(worktreePath)).toBe(false);
     } finally {
@@ -2100,250 +1723,6 @@ describe("workflows-core: idempotency migration ownership", () => {
   });
 });
 
-// ── 6b. ledger-drain HALTS on a deterministic conflict (finding W8) ──────────
-
-describe("workflows-core: ledger drain halts on an irreconcilable earlier seq", () => {
-  it("a deterministic step-3 conflict HALTS the drain — later pending intents are not completed past it (round-2 finding W8)", async () => {
-    // Round-2 finding W8: a pending intent whose anchored event cannot land its
-    // step-3 (the run advanced past it) is DETERMINISTICALLY irreconcilable. The
-    // gapless chain is driven oldest-first, so the drain must STOP there rather than
-    // completing LATER intents past an unresolved earlier sequence.
-    // A broker that appends normally but throws on the FIRST run.failed append of
-    // each run (crash after the durable intent, before append) — leaving a pending
-    // run.failed intent per run.
-    let failedOnce = false;
-    const flaky = {
-      signAndAppendAuditEvent: async (u: Parameters<typeof service.signAndAppendAuditEvent>[0]) => {
-        if (u.kind === "run.failed" && !failedOnce) {
-          failedOnce = true;
-          throw new Error("simulated crash after run.failed intent, before append");
-        }
-        return service.signAndAppendAuditEvent(u);
-      },
-    };
-    const base = h.mainSha();
-    const store = h.openStore();
-    let runId = "";
-    let conflictSeq = -1;
-    const LATER_SEQ = 100; // a synthetic LATER pending intent that must never be reached
-    try {
-      const handle = await startRun({ store, broker: flaky, backup: h.backup, now: tick, repo: openRepo(h.repoDir) }, { operation: "ingest" });
-      runId = handle.runId;
-      await handle.checkpoint("planned", plannedArtifacts(runId, base));
-      await handle.fail("planned", "boom").catch(() => {}); // crash → pending run.failed intent
-      // Concurrently advance the row so the pending run.failed intent's step-3 replay
-      // is DETERMINISTICALLY irreconcilable (the guarded upsert can't advance).
-      store.db.prepare(`UPDATE agent_runs SET status='integrated' WHERE run_id=?`).run(runId);
-      conflictSeq = (store.db.prepare(`SELECT seq FROM audit_intents WHERE run_id=? AND state='pending'`).get(runId) as { seq: number }).seq;
-      expect(conflictSeq).toBeLessThan(LATER_SEQ);
-      // A LATER pending intent (higher seq). If the drain continued past the earlier
-      // conflict it would (wrongly) reach + touch this; the halt must leave it pending.
-      store.db
-        .prepare(
-          `INSERT INTO audit_intents (run_id, seq, payload_hash, event_json, write_json, state, created_at, updated_at)
-           VALUES (?, ?, 'deadbeef', '{"kind":"run.planned"}', '[]', 'pending', ?, ?)`,
-        )
-        .run(runId, LATER_SEQ, tick(), tick());
-    } finally {
-      store.close();
-    }
-
-    const store2 = h.openStore();
-    const svc = inProcessAuditBroker(); // v2: stateless, "restart" is trivial
-    try {
-      const rep = await reconcileInterruptedRuns(store2, svc, { backup: h.backup, now: tick });
-      // Halted at the EARLIER conflicting seq; the later intent was never reached.
-      expect(rep.haltedAtSeq).toBe(conflictSeq);
-      expect(rep.conflicted).toBe(1);
-      expect(pendingIntentCount(store2, runId)).toBe(2); // BOTH still pending (nothing past the halt)
-      expect(store2.db.prepare(`SELECT state FROM audit_intents WHERE run_id=? AND seq=?`).get(runId, LATER_SEQ)).toMatchObject({ state: "pending" });
-      expect(auditKinds(store2, runId)).not.toContain("run.failed");
-      // A REPEATED startup converges identically — never reporting progress past the
-      // irreconcilable earlier sequence.
-      const rep2 = await reconcileInterruptedRuns(store2, svc, { backup: h.backup, now: tick });
-      expect(rep2.haltedAtSeq).toBe(conflictSeq);
-      expect(store2.db.prepare(`SELECT state FROM audit_intents WHERE run_id=? AND seq=?`).get(runId, LATER_SEQ)).toMatchObject({ state: "pending" });
-    } finally {
-      store2.close();
-    }
-  });
-});
-
-// ── 6c. duplicate-terminal no-op UPDATE is rejected (finding W1) ─────────────
-
-describe("workflows-core: affected-row CAS rejects a duplicate terminal", () => {
-  it("a replay whose row is ALREADY at the target terminal (another handle) affects 0 rows → no duplicate terminal (round-2 finding W1)", async () => {
-    // Round-2 finding W1: the serialized CAS checked only the resulting STATUS, so a
-    // no-op UPDATE passed when another handle had already written the same terminal
-    // status — falsely completing a DUPLICATE terminal audit event. The affected-row
-    // assertion (exactly one changed row) rejects the no-op.
-    let failedOnce = false;
-    const flaky = {
-      signAndAppendAuditEvent: async (u: Parameters<typeof service.signAndAppendAuditEvent>[0]) => {
-        if (u.kind === "run.failed" && !failedOnce) {
-          failedOnce = true;
-          throw new Error("simulated crash after run.failed intent, before append");
-        }
-        return service.signAndAppendAuditEvent(u);
-      },
-    };
-    const base = h.mainSha();
-    const store = h.openStore();
-    let runId = "";
-    try {
-      const handle = await startRun({ store, broker: flaky, backup: h.backup, now: tick, repo: openRepo(h.repoDir) }, { operation: "ingest" });
-      runId = handle.runId;
-      await handle.checkpoint("planned", plannedArtifacts(runId, base));
-      await handle.fail("planned", "boom").catch(() => {}); // crash → pending run.failed intent
-      expect(pendingIntentCount(store, runId)).toBe(1);
-      // Another handle already wrote the SAME terminal status.
-      store.db.prepare(`UPDATE agent_runs SET status='failed', failed_checkpoint='planned' WHERE run_id=?`).run(runId);
-    } finally {
-      store.close();
-    }
-
-    const store2 = h.openStore();
-    const svc = inProcessAuditBroker(); // v2: stateless, "restart" is trivial
-    try {
-      const rep = await reconcileInterruptedRuns(store2, svc, { backup: h.backup, now: tick });
-      expect(rep.conflicted).toBeGreaterThanOrEqual(1); // the no-op UPDATE was rejected, not accepted
-      expect(pendingIntentCount(store2, runId)).toBe(1); // intent left pending, not falsely done
-      expect(auditKinds(store2, runId)).not.toContain("run.failed"); // NO duplicate terminal audit event
-    } finally {
-      store2.close();
-    }
-  });
-});
-
-// ── 7. reconcile command lifecycle + integration-intent ordering ─────────────
-
-const REPO_ROOT = join(import.meta.dirname, "..", "..", "..");
-
-function insertIntent(store: Store, args: { runId: string; seq: number; kind: string; event?: object; write?: string; payloadHash?: string }): void {
-  const event = args.event ?? { kind: args.kind };
-  store.db
-    .prepare(
-      `INSERT INTO audit_intents (run_id, seq, payload_hash, event_json, write_json, state, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)`,
-    )
-    .run(args.runId, args.seq, args.payloadHash ?? `h${args.seq}`, JSON.stringify(event), args.write ?? "[]", tick(), tick());
-}
-
-describe("workflows-core: integration-intent ordered barrier + hole-safety (findings #8/#9)", () => {
-  it("layer 1 HALTS at a pending run.integrated — a LATER intent is never completed past it (round-3 #8, reconcile.ts:94-102)", async () => {
-    const store = h.openStore();
-    const svc = inProcessAuditBroker(); // v2: stateless, "restart" is trivial
-    try {
-      insertIntent(store, { runId: "rI", seq: 0, kind: "run.integrated", event: { kind: "run.integrated", canonicalCommit: "0".repeat(40) } });
-      insertIntent(store, { runId: "rP", seq: 1, kind: "run.planned", event: { kind: "run.planned" } });
-      const rep = await reconcileInterruptedRuns(store, svc, { backup: h.backup, now: tick });
-      expect(rep.haltedAtSeq).toBe(0); // halted at the pending run.integrated
-      expect(pendingIntentCount(store, "rI")).toBe(1); // never completed
-      expect(pendingIntentCount(store, "rP")).toBe(1); // the LATER intent never reached
-    } finally {
-      store.close();
-    }
-  });
-
-  it("layer 0 HALTS at the FIRST unresolved run.integrated — a later contained one is NOT landed past it (round-3 #8, reconciler.ts:700-756)", async () => {
-    const store = h.openStore();
-    // A broker that refuses to sign run.integrated (⇒ un-anchored) — both intents are
-    // un-anchored, so the FIRST (lower seq) is the barrier; the second must NOT be
-    // processed past it.
-    const refusing = {
-      signAndAppendAuditEvent: async (u: Parameters<typeof service.signAndAppendAuditEvent>[0]) => {
-        if (u.kind === "run.integrated") throw { code: "broker.audit_kind_not_signable" };
-        return service.signAndAppendAuditEvent(u);
-      },
-    };
-    try {
-      insertIntent(store, { runId: "r0", seq: 0, kind: "run.integrated", event: { kind: "run.integrated", canonicalCommit: "0".repeat(40) } });
-      insertIntent(store, { runId: "r1", seq: 1, kind: "run.integrated", event: { kind: "run.integrated", canonicalCommit: "0".repeat(40) } });
-      const rep = await reconcileRunsOnStartup({ store, broker: refusing, repo: openRepo(h.repoDir), backup: h.backup, now: tick });
-      // Both preserved (seq 0 has a higher allocation → preserved as barrier, not
-      // deleted; seq 1 never reached). Both surfaced or at least seq 0 surfaced.
-      expect(rep.integrationActionRequired).toContain("r0");
-      expect(pendingIntentCount(store, "r0")).toBe(1); // NOT deleted (round-3 #9: no permanent hole)
-      expect(pendingIntentCount(store, "r1")).toBe(1); // never processed past the barrier
-    } finally {
-      store.close();
-    }
-  });
-
-  it("an un-anchored run.integrated at the TIP (no higher allocation) is dropped for a clean re-drive (round-3 #9 contrast)", async () => {
-    const store = h.openStore();
-    const refusing = {
-      signAndAppendAuditEvent: async (u: Parameters<typeof service.signAndAppendAuditEvent>[0]) => {
-        if (u.kind === "run.integrated") throw { code: "broker.audit_kind_not_signable" };
-        return service.signAndAppendAuditEvent(u);
-      },
-    };
-    try {
-      insertIntent(store, { runId: "rT", seq: 0, kind: "run.integrated", event: { kind: "run.integrated", canonicalCommit: "0".repeat(40) } });
-      const rep = await reconcileRunsOnStartup({ store, broker: refusing, repo: openRepo(h.repoDir), backup: h.backup, now: tick });
-      expect(rep.integrationActionRequired).not.toContain("rT");
-      expect(pendingIntentCount(store, "rT")).toBe(0); // dropped (tip, no hole risk)
-    } finally {
-      store.close();
-    }
-  });
-});
-
-describe("workflows-core: anchored integration recovery replays the persisted write (finding #10)", () => {
-  it("recovery applies the intent's EXACT write_json, not a write rebuilt from diverged mutable rows (round-3 #10)", async () => {
-    const store = h.openStore();
-    const base = h.mainSha();
-    const runId = "rW";
-    // Current (mutable) metadata: agent-committed with a DIVERGED operation. A rebuilt
-    // step-3 would read THIS operation; the persisted write_json must be applied instead.
-    store.db
-      .prepare(`INSERT INTO agent_runs (run_id, operation, status, checkpoint_seq, tier, started_at, updated_at) VALUES (?, 'DIVERGED-OP', 'agent-committed', 0, 2, ?, ?)`)
-      .run(runId, tick(), tick());
-    store.db
-      .prepare(`INSERT INTO git_operations (git_op_id, run_id, op_type, ref_name, commit_sha, created_at) VALUES (?, ?, 'base', 'refs/heads/main', ?, ?)`)
-      .run(`${runId}:base`, runId, base, tick());
-    // The event was anchored (broker replay returns a head) and canonical (main=base)
-    // CONTAINS the installed commit (base) → the contained branch lands step-3.
-    const event = { schemaVersion: 1, eventId: newRunId(), kind: "run.integrated", occurredAt: tick(), runId, subjects: [], canonicalCommit: base, detail: {}, seq: 0 } as unknown as UnsignedAuditEvent;
-    const payloadHash = payloadHashOf(event);
-    // The PERSISTED write records the integrated git op with a UNIQUE marker ref, and
-    // advances agent_runs to integrated. A reconstruction would use the base git op's
-    // ref ("refs/heads/main"), never this marker.
-    const write = JSON.stringify([
-      {
-        sql: `INSERT INTO agent_runs (run_id, operation, status, failed_checkpoint, checkpoint_seq, target_note_id, tier, started_at, updated_at, finished_at)
-              VALUES (@run_id, 'PERSISTED-OP', 'integrated', NULL, 0, NULL, 2, @now, @now, NULL)
-              ON CONFLICT(run_id) DO UPDATE SET status='integrated', updated_at=@now`,
-        params: { run_id: runId, now: tick() },
-      },
-      {
-        sql: `INSERT INTO git_operations (git_op_id, run_id, op_type, ref_name, commit_sha, created_at)
-              VALUES (@id, @run_id, 'integrated', 'PERSISTED-WRITE-MARKER', @sha, @now)
-              ON CONFLICT(git_op_id) DO UPDATE SET ref_name=excluded.ref_name, commit_sha=excluded.commit_sha`,
-        params: { id: `${runId}:integrated`, run_id: runId, sha: base, now: tick() },
-      },
-    ]);
-    insertIntent(store, { runId, seq: 0, kind: "run.integrated", event: event as unknown as object, write, payloadHash });
-
-    const anchoring = {
-      signAndAppendAuditEvent: async (u: Parameters<typeof service.signAndAppendAuditEvent>[0]) => {
-        if (u.kind === "run.integrated") return { seq: 0, head: "anchoredhead" };
-        return service.signAndAppendAuditEvent(u);
-      },
-    };
-    try {
-      await reconcileRunsOnStartup({ store, broker: anchoring, repo: openRepo(h.repoDir), backup: h.backup, now: tick });
-      // The EXACT persisted write landed: the integrated git op carries the marker ref,
-      // NOT the base ref a reconstruction would have used.
-      expect(gitOp(store, runId, "integrated")).toEqual({ ref_name: "PERSISTED-WRITE-MARKER", commit_sha: base });
-      expect(store.ledger.getAgentRun(runId)!.status).toBe("integrated");
-      expect(pendingIntentCount(store, runId)).toBe(0); // intent completed
-    } finally {
-      store.close();
-    }
-  });
-});
-
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 function patched(runId: string) {
@@ -2387,10 +1766,15 @@ function manifestFor(runId: string, state: RunManifest["state"], base: string): 
   return { schemaVersion: 1, runId, state, createdAt: "2026-07-12T00:00:00.000Z", canonicalBaseCommit: base, targets: ["n1"] };
 }
 
-function auditKinds(store: Store, runId: string): string[] {
-  return (store.db.prepare(`SELECT event_type FROM audit_events WHERE run_id = ? ORDER BY seq`).all(runId) as { event_type: string }[]).map(
-    (r) => r.event_type,
-  );
+/**
+ * v2 (#338): the audit event stream is retired. There is no longer any per-run
+ * `run.*` event sequence to read — a run's history IS its `agent_runs.status`
+ * progression. This helper survives only as a no-op so the remaining callers (which
+ * assert the audit stream is EMPTY) stay meaningful; the state-machine assertions in
+ * those tests rest on `agent_runs` directly.
+ */
+function auditKinds(_store: Store, _runId: string): string[] {
+  return [];
 }
 
 function planHashOf(store: Store, runId: string): string | undefined {
@@ -2411,36 +1795,11 @@ function gitOp(store: Store, runId: string, opType: string): { ref_name: string;
     | undefined;
 }
 
-function pendingIntentCount(store: Store, runId: string): number {
-  return (store.db.prepare(`SELECT COUNT(*) AS c FROM audit_intents WHERE run_id = ? AND state = 'pending'`).get(runId) as { c: number }).c;
-}
-
-/** The current §2.8 backup watermark seq (coverage the fail-closed gate advances). */
-function watermarkSeq(store: Store): number {
-  return (store.db.prepare(`SELECT seq FROM backup_watermark WHERE id = 1`).get() as { seq: number } | undefined)?.seq ?? -1;
-}
-
 /** The stored idempotency slot state + result for a `(command, key)`, or undefined. */
 function idempotencySlot(store: Store, command: string, key: string): { state: string; result_json: string | null } | undefined {
   return store.db.prepare(`SELECT state, result_json FROM workflow_idempotency WHERE command = ? AND idempotency_key = ?`).get(command, key) as
     | { state: string; result_json: string | null }
     | undefined;
-}
-
-/**
- * The `detail` object of the DURABLE audit event of `kind` for `runId` — read from
- * `audit_intents.event_json` (the byte-stable event persisted at §2.8 step 1). Used
- * to assert the terminal-specific field the contract requires (round finding #8:
- * `run.cancelled` → `cancelledAt`, `run.failed` → `failedAt`).
- */
-function storedEventDetail(store: Store, runId: string, kind: string): Record<string, unknown> | undefined {
-  const rows = store.db.prepare(`SELECT event_json FROM audit_intents WHERE run_id = ? ORDER BY seq`).all(runId) as { event_json: string }[];
-  for (const r of rows) {
-    if (!r.event_json) continue;
-    const ev = JSON.parse(r.event_json) as { kind: string; detail?: Record<string, unknown> };
-    if (ev.kind === kind) return ev.detail ?? {};
-  }
-  return undefined;
 }
 
 /** A run's `agent_runs.checkpoint_seq` (the same-checkpoint-replay immutability probe). */
@@ -2449,28 +1808,16 @@ function checkpointSeqOf(store: Store, runId: string): number | undefined {
 }
 
 /**
- * A reconciler `integrate` hook that performs the REAL §2.8 dance for a Tier-2
- * auto-integrate recovery: allocate the run.integrated seq+intent (step 1), sign +
- * broker-advance the canonical ref (step 2), and return the artifacts the
- * reconciler's step-3 CAS records. Mirrors the engine's own integration seam.
+ * A reconciler `integrate` hook for a Tier-2 auto-integrate recovery: the FF-only
+ * in-process CAS advance of the canonical ref, returning the {@link IntegratedArtifacts}
+ * the reconciler's step records. v2 (#338): no audit `seq`/append — just the git FF.
  */
-function reconcileIntegrateHook(store: Store, hh: Harness, _svc?: unknown) {
+function reconcileIntegrateHook(store: Store, hh: Harness) {
+  void store;
   return async (ctx: { runId: string; commitSha: string | null; canonicalRef: string | null; baseRef: string | null }) => {
     const canonicalRef = ctx.canonicalRef ?? "refs/heads/main";
-    const draft = {
-      schemaVersion: 1 as const,
-      eventId: newRunId(),
-      kind: "run.integrated" as const,
-      occurredAt: tick(),
-      runId: ctx.runId,
-      subjects: [],
-      canonicalCommit: ctx.commitSha ?? "0".repeat(40),
-      detail: { baseRef: ctx.baseRef ?? "0".repeat(40) },
-    };
-    const allocated = new IntentsRepo(store.db).allocate(ctx.runId, draft, [], tick());
     const base = await openRepo(hh.repoDir).readRef(canonicalRef);
-    // v2 (#334): the FF-only in-process CAS — no broker, no audit ref, no signature.
     const newCommit = await advanceCanonicalRef(hh.repoDir, canonicalRef, ctx.commitSha!, base ?? "0".repeat(40));
-    return { canonicalRef, canonicalSha: newCommit, seq: allocated.seq, payloadHash: allocated.payloadHash, auditHead: "" };
+    return { canonicalRef, canonicalSha: newCommit };
   };
 }

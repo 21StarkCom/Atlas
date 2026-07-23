@@ -17,7 +17,7 @@ import { newRunId, normalizeIdentityKey } from "@atlas/contracts";
 import { ProjectionRepo, deriveSlug, IDENTITY_NORMALIZER_VERSION, type Store } from "@atlas/sqlite-store";
 import { openRepo } from "@atlas/git";
 import type { RunContext } from "../handlers.js";
-import { resolvePath } from "../commands/backup-config.js";
+import { resolvePath } from "../commands/paths.js";
 import { runMutation, type Grounded } from "../workflows/mutation-order.js";
 import { splitFrontmatter } from "../markdown/parse.js";
 import { parseFrontmatter } from "../vault/frontmatter.js";

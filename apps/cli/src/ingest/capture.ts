@@ -36,13 +36,11 @@ import {
   newRunId,
   serializeContentId,
   serializeRenditionId,
-  type AuditEvent,
   type ContentId,
   type RenditionId,
   type RunManifest,
 } from "@atlas/contracts";
-import { captureId as deriveCaptureId, type Store, type LedgerBackupConfig } from "@atlas/sqlite-store";
-import type { AuditBroker } from "@atlas/sqlite-store";
+import { captureId as deriveCaptureId, type Store } from "@atlas/sqlite-store";
 import type { BrokerIntegration, IntegrationContext, RunIntegrator } from "../workflows/index.js";
 import { normalize, type NormalizeResult } from "@atlas/sources";
 import type { Repo } from "@atlas/git";
@@ -83,14 +81,11 @@ export interface CaptureResult {
 }
 
 /**
- * The broker-side integration seam (DEFECT #2). `integrate` signs the `run.integrated`
- * event with the broker's attestation key and advances canonical under Tier-1 CAS;
- * the unprivileged CLI never holds that key — it only invokes this injected seam.
- * `broker` is the `finalizeLedgerWrite` append surface for the run's non-installing
- * events (`run.started`, terminal `run.failed`/`run.cancelled`).
+ * The canonical-install seam (v2 #338: a plain git FF-CAS). `integrate` advances
+ * `refs/heads/main` to the capture commit under Tier-1 CAS after re-enforcing the
+ * capture scope policy — no attestation key, no audit append.
  */
 export interface CaptureIntegration {
-  readonly broker: AuditBroker;
   readonly integrate: RunIntegrator;
   close(): void;
 }
@@ -101,9 +96,8 @@ export interface CaptureDeps {
   readonly openStore: () => Store;
   /** The vault git repo handle (filesystem-free to construct). */
   readonly repo: Repo;
-  /** Connect the broker-side integration seam (lazy — never before scan). */
+  /** Connect the canonical-install seam (lazy — never before scan). */
   readonly connectIntegration: () => Promise<CaptureIntegration>;
-  readonly backup: LedgerBackupConfig;
   /** `git.worktrees_path` — where the ephemeral agent worktree is created. */
   readonly worktreesPath: string;
   /** The canonical protected ref (config `git.canonical_ref`, threaded by the caller). */
@@ -304,27 +298,21 @@ function requestHash(command: string, path: string, contentId: ContentId): strin
 }
 
 /**
- * A stable capture-run integrator for the BROKER-SIGNED `run.integrated` path. The
- * `run.integrated` event is a canonical-installing kind ONLY the broker's
- * protected-ref path may attest, so the CLI submits the UNSIGNED event and the broker
- * fills `prevAuditHead` + signs it internally (DEFECT #2 — the CLI never holds the
- * attestation key). The unsigned event is threaded through with its NATURAL type —
- * {@link IntegrationContext.event} is already `Omit<AuditEvent, "prevAuditHead">`, the
- * exact type the capture RPC expects — so there is NO `SignedAuditEvent` masquerade
- * (round-3 finding #6: no `as unknown as SignedAuditEvent`/back cast around the RPC).
+ * A stable capture-run integrator for the canonical FF-CAS path (v2 #338). The CLI
+ * hands the capture commit + expected base to the injected `integrateSourceCapture`
+ * seam, which scope-checks the range and fast-forwards `refs/heads/main`. There is no
+ * audit append and no attestation key — git is the only safety mechanism.
  */
 export function makeBrokerSignedCaptureIntegrator(opts: {
   /**
-   * The broker RPC that fills `prevAuditHead`, signs the unsigned event with the
-   * attestation key, scope-checks the capture, and fast-forwards canonical — all in
-   * one lock-held step. It carries the UNSIGNED event directly.
+   * The seam that scope-checks the capture and fast-forwards canonical to the
+   * capture commit under CAS — one lock-held step.
    */
   integrateSourceCapture: (r: {
     captureCommit: string;
     expectedBase: string;
     manifest: RunManifest;
-    event: Omit<AuditEvent, "prevAuditHead">;
-  }) => Promise<{ newCommit: string; seq: number; auditHead: string; ref: string }>;
+  }) => Promise<{ newCommit: string; ref: string }>;
   now?: () => string;
 }): RunIntegrator {
   return async (ctx: IntegrationContext): Promise<BrokerIntegration> => {
@@ -340,11 +328,8 @@ export function makeBrokerSignedCaptureIntegrator(opts: {
       captureCommit: ctx.commitSha,
       expectedBase: ctx.baseRef,
       manifest,
-      // `ctx.event` is `UnsignedAuditEvent` === `Omit<AuditEvent, "prevAuditHead">` —
-      // passed through with its real type; the broker signs it internally.
-      event: ctx.event,
     });
-    return { canonicalRef: res.ref, canonicalSha: res.newCommit, seq: res.seq, auditHead: res.auditHead };
+    return { canonicalRef: res.ref, canonicalSha: res.newCommit };
   };
 }
 
@@ -389,17 +374,16 @@ export async function captureSource(req: {
   const integration = await deps.connectIntegration();
   let worktreeDir: string | null = null;
   try {
-    // Reconcile any interrupted run first so the audit chain is contiguous and any
-    // prior crashed capture is driven forward (DEFECT #3 recovery, capture re-projection hook).
+    // Reconcile any interrupted run first so a prior crashed capture is driven
+    // forward from its durable `agent_runs` state (the run-sweep; v2 #338 has no
+    // audit-drain), including the capture re-projection hook.
     const reindexHook: ReconcileHooks["reindex"] = async () => {
       const head = await foldProvenanceFromCanonical(store, deps.repo, canonicalRef);
       return { indexGeneration: 1, canonicalSha: head };
     };
     await reconcileRunsOnStartup({
       store,
-      broker: integration.broker,
       repo: deps.repo,
-      backup: deps.backup,
       hooks: { reindex: reindexHook },
       now,
     });
@@ -422,7 +406,7 @@ export async function captureSource(req: {
       // Build the manifest by merging this observation into the projection state.
       const { manifest, reused } = buildManifest(store, contentId, rendition, origin, raw, now());
 
-      const wdeps: WorkflowDeps = { store, broker: integration.broker, backup: deps.backup, repo: deps.repo, now };
+      const wdeps: WorkflowDeps = { store, repo: deps.repo, now };
       const handle = await startRun(wdeps, { operation: deps.command === "ingest" ? "ingest" : "source-add", runId, targetNoteId: manifest.noteId, canonicalCommit: base });
 
       const planHash = sha256Canonical({ contentId: serializeContentId(contentId), origin, manifest: manifest.noteId });

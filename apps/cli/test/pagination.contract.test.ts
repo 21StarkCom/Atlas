@@ -346,10 +346,10 @@ describe("command-level pagination bounds (all four commands, via the CLI)", () 
       const mk = (id: string) => store.projections.insertNote({ note_id: id, slug: id, title: id, type: "concept", schema_version: 1, status: "active", file_path: `${id}.md`, content_hash: `sha256:${hash(1)}`, created: iso(0), updated: iso(0) });
       ["rseed", "r1", "r2", "r3"].forEach(mk);
       ["r1", "r2", "r3"].forEach((t, i) => store.projections.insertLink({ source_note_id: "rseed", target_note_id: t, predicate: "references", ordinal: i }));
-      // note history: a note with 3 audit events (history total=3).
+      // note history: a note with 3 runs targeting it (history total=3). v2 (#338):
+      // note history projects one entry per `agent_runs` row (audit ledger retired).
       mk("hseed");
-      store.ledger.upsertAgentRun({ run_id: ulid(9), operation: "ingest", status: "integrated", tier: 1, target_note_id: "hseed", started_at: iso(0), updated_at: iso(0), finished_at: iso(0) });
-      for (const s of [1, 2, 3]) store.ledger.insertAuditEvent({ seq: s, run_id: ulid(9), event_type: "run.integrated", payload_hash: hash(s), git_head: hash(100 + s), created_at: iso(s) });
+      for (const n of [1, 2, 3]) store.ledger.upsertAgentRun({ run_id: ulid(n), operation: "ingest", status: "integrated", tier: 1, target_note_id: "hseed", started_at: iso(0), updated_at: iso(0), finished_at: iso(0) });
     } finally {
       store.close();
     }
@@ -393,9 +393,9 @@ describe("note history: seq-DESC ordering is stable across page boundaries", () 
     const store = openStore({ path: dbPath });
     try {
       store.projections.insertNote({ note_id: "hist", slug: "hist", title: "H", type: "concept", schema_version: 1, status: "active", file_path: "hist.md", content_hash: `sha256:${hash(1)}`, created: iso(0), updated: iso(0) });
-      store.ledger.upsertAgentRun({ run_id: ulid(9), operation: "ingest", status: "integrated", tier: 1, target_note_id: "hist", started_at: iso(0), updated_at: iso(0), finished_at: iso(0) });
-      // 5 events; created_at DELIBERATELY constant so ordering rests on the unique seq tie-breaker.
-      for (const s of [3, 1, 5, 2, 4]) store.ledger.insertAuditEvent({ seq: s, run_id: ulid(9), event_type: "run.integrated", payload_hash: hash(s), git_head: hash(100 + s), created_at: iso(0) });
+      // v2 (#338): 5 runs target the note; created_at DELIBERATELY constant so ordering
+      // rests on the unique monotonic seq (agent_runs.rowid) tie-breaker.
+      for (const n of [1, 2, 3, 4, 5]) store.ledger.upsertAgentRun({ run_id: ulid(n), operation: "ingest", status: "integrated", tier: 1, target_note_id: "hist", started_at: iso(0), updated_at: iso(0), finished_at: iso(0) });
     } finally {
       store.close();
     }
@@ -408,7 +408,10 @@ describe("note history: seq-DESC ordering is stable across page boundaries", () 
       return JSON.parse(r.out).events.map((e: { seq: number }) => e.seq);
     };
     const full = await seqs(["--limit", "50"]);
-    expect(full).toEqual([5, 4, 3, 2, 1]); // seq DESC
+    expect(full.length).toBe(5);
+    // Strictly descending by the unique seq — its own tie-breaker, so pagination is stable.
+    expect([...full].sort((a, b) => b - a)).toEqual(full);
+    expect(new Set(full).size).toBe(5);
     const p1 = await seqs(["--limit", "2", "--offset", "0"]);
     const p2 = await seqs(["--limit", "2", "--offset", "2"]);
     const p3 = await seqs(["--limit", "2", "--offset", "4"]);
@@ -424,10 +427,9 @@ describe("stable JSON schemas (every paginated success validates)", () => {
     try {
       for (const n of [1, 2, 3] as const) seedBlob(store, n, iso(n));
       seedOpenRun(store, 1, iso(1));
-      // A note with audit history.
+      // A note with run history (one integrated run).
       store.projections.insertNote({ note_id: "concept-atlas", slug: "atlas", title: "Atlas", type: "concept", schema_version: 1, status: "active", file_path: "atlas.md", content_hash: `sha256:${hash(9)}`, created: iso(0), updated: iso(0) });
       store.ledger.upsertAgentRun({ run_id: ulid(9), operation: "ingest", status: "integrated", tier: 1, target_note_id: "concept-atlas", started_at: iso(0), updated_at: iso(0), finished_at: iso(0) });
-      store.ledger.insertAuditEvent({ seq: 1, run_id: ulid(9), event_type: "run.integrated", payload_hash: hash(7), git_head: hash(8), created_at: iso(0) });
     } finally {
       store.close();
     }
@@ -443,7 +445,9 @@ describe("stable JSON schemas (every paginated success validates)", () => {
     expect(r.code, r.out).toBe(0);
     validateSchema("note-history", JSON.parse(r.out));
     const events = JSON.parse(r.out).events;
-    expect(events[0].seq).toBe(1);
+    // v2 (#338): seq is the run's monotonic agent_runs.rowid (its own tie-breaker),
+    // not a hardcoded value — assert it is a non-negative integer per the schema.
+    expect(Number.isInteger(events[0].seq) && events[0].seq >= 0).toBe(true);
     expect(events[0].kind).toBe("run.integrated");
   });
 });

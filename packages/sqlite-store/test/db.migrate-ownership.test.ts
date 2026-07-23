@@ -44,7 +44,12 @@ describe("db.migrate-ownership", () => {
       expected.add("db_schema_migrations"); // runner bootstrap
       // Sanity: the dictionary really did attribute the core tables to 0001_core…
       expect(expected.has("notes")).toBe(true);
-      expect(expected.has("audit_events")).toBe(true);
+      // v2 (#338): the ledger/backup tables are forward-dropped by 0014 — absent
+      // from the fresh DB and no longer defined in the dictionary.
+      expect(expected.has("audit_events")).toBe(false);
+      expect(expected.has("audit_intents")).toBe(false);
+      expect(expected.has("backup_watermark")).toBe(false);
+      expect(expected.has("raw_payloads")).toBe(false);
       // …the provenance tables to 0003_provenance…
       expect(expected.has("content_blobs")).toBe(true);
       expect(expected.has("note_sources")).toBe(true);
@@ -91,11 +96,12 @@ describe("db.migrate-ownership", () => {
         "idx_note_links_reverse",
         "idx_agent_runs_status",
         "idx_model_calls_run",
-        "idx_audit_events_run",
         "idx_notes_needs_index",
       ]) {
         expect(idx.has(name), `missing index ${name}`).toBe(true);
       }
+      // v2 (#338): idx_audit_events_run is gone with the dropped audit_events table.
+      expect(idx.has("idx_audit_events_run")).toBe(false);
     } finally {
       store.close();
     }

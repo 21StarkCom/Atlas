@@ -126,14 +126,14 @@ function tableExists(db: SqliteDatabase, name: string): boolean {
 
 /**
  * `"ready"` iff the ledger has completed migrations — both the runner-owned
- * `db_schema_migrations` (with at least one applied row) AND the `audit_events`
- * table exist. `"absent"` for a created-but-unmigrated file (the poll race
- * `watch`'s attach must treat as detached, never a fatal mid-snapshot
- * missing-table throw).
+ * `db_schema_migrations` (with at least one applied row) AND the core `agent_runs`
+ * table exist. `"absent"` for a created-but-unmigrated file. v2 (#338): the ready
+ * sentinel is `agent_runs` (a retained `0001_core` operational table) — it was
+ * `audit_events` before the audit ledger was retired.
  */
 export function ledgerSchemaState(db: SqliteDatabase): "ready" | "absent" {
   if (!tableExists(db, "db_schema_migrations")) return "absent";
-  if (!tableExists(db, "audit_events")) return "absent";
+  if (!tableExists(db, "agent_runs")) return "absent";
   const row = db.prepare(`SELECT COUNT(*) AS n FROM db_schema_migrations`).get() as { n: number };
   return row.n > 0 ? "ready" : "absent";
 }

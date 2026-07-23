@@ -14,9 +14,9 @@
  *    `note_links` graph (forward links, backlinks, typed relationships), ordered
  *    `(distance ASC, noteId ASC)`. `noteId` is unique, so the total order is fully
  *    resolved and offset pagination is deterministic.
- *  - `note history <id-or-slug>` — paginated change history from `audit_events`
- *    (allowlisted metadata only — identifiers/hashes; never raw content), ordered
- *    by the monotonic unique `seq DESC` (its own tie-breaker).
+ *  - `note history <id-or-slug>` — paginated run history from `agent_runs` (v2
+ *    #338: the audit ledger is retired; one entry per run that targeted the note),
+ *    ordered by the monotonic unique `seq DESC` (its own tie-breaker).
  *
  * `related`/`history` resolve the seed against the DB projection (`notes` +
  * `note_identity_keys`); `show` resolves against the freshly-parsed vault. Both
@@ -447,15 +447,40 @@ function parseHistoryArgs(argv: string[]): { seed: string; req: PageRequest } {
 }
 
 /**
- * A page of audit events for a note. Exported for the pagination contract test.
+ * Map an `agent_runs.status` to the note-history event `kind`. v2 (#338): the audit
+ * ledger is retired, so a note's history is projected from the `agent_runs`
+ * operational table — one entry per run that targeted the note, its kind derived
+ * from the run's terminal/current status.
+ */
+function historyKind(status: string): string {
+  switch (status) {
+    case "integrated":
+    case "reindexed":
+    case "finalized":
+      return "run.integrated";
+    case "failed":
+      return "run.failed";
+    case "cancelled":
+      return "run.cancelled";
+    case "rejected":
+      return "run.rejected";
+    case "rolled-back":
+      return "run.rolled_back";
+    default:
+      return "run.planned"; // planned / patched / worktree-applied / agent-committed
+  }
+}
+
+/**
+ * A page of a note's run history. Exported for the pagination contract test.
  *
- * `canonical_commit` is the run's CANONICAL commit hash, read from the integrated
- * `git_operations` artifact (`op_type = 'integrated'`, whose `commit_sha` is the
- * canonical-ref advance the broker recorded at integration). It is DELIBERATELY NOT
- * `audit_events.git_head` — that column is the `refs/audit/runs` audit-chain head,
- * a different hash space from the canonical commit the schema's `commit` field means.
- * A LEFT JOIN yields `null` for runs that never integrated, and each `(run_id,
- * 'integrated')` is a natural key so the join never multiplies rows.
+ * v2 (#338): sourced from `agent_runs` (the audit ledger is retired) — one entry per
+ * run whose `target_note_id` is the note, ordered by the run's monotonic `rowid`
+ * (its own unique tie-breaker, so offset pagination is stable). `canonical_commit`
+ * is the run's CANONICAL commit hash, read from the integrated `git_operations`
+ * artifact (`op_type = 'integrated'`); a LEFT JOIN yields `null` for runs that never
+ * integrated, and each `(run_id, 'integrated')` is a natural key so the join never
+ * multiplies rows.
  */
 export function queryNoteHistory(
   db: SqliteDatabase,
@@ -463,30 +488,33 @@ export function queryNoteHistory(
   req: PageRequest,
 ): { rows: { seq: number; created_at: string; event_type: string; run_id: string; canonical_commit: string | null }[]; total: number } {
   const total = (db
-    .prepare(
-      `SELECT COUNT(*) AS c FROM audit_events ae
-         JOIN agent_runs ar ON ar.run_id = ae.run_id
-        WHERE ar.target_note_id = ?`,
-    )
+    .prepare(`SELECT COUNT(*) AS c FROM agent_runs WHERE target_note_id = ?`)
     .get(noteId) as { c: number }).c;
-  const rows = db
+  const raw = db
     .prepare(
-      `SELECT ae.seq, ae.created_at, ae.event_type, ae.run_id, gi.commit_sha AS canonical_commit
-         FROM audit_events ae
-         JOIN agent_runs ar ON ar.run_id = ae.run_id
+      `SELECT ar.rowid AS seq, ar.updated_at AS created_at, ar.status AS status, ar.run_id AS run_id,
+              gi.commit_sha AS canonical_commit
+         FROM agent_runs ar
          LEFT JOIN git_operations gi
-           ON gi.run_id = ae.run_id AND gi.op_type = 'integrated'
+           ON gi.run_id = ar.run_id AND gi.op_type = 'integrated'
         WHERE ar.target_note_id = ?
-        ORDER BY ae.seq DESC
+        ORDER BY ar.rowid DESC
         LIMIT ? OFFSET ?`,
     )
     .all(noteId, req.limit, req.offset) as {
     seq: number;
     created_at: string;
-    event_type: string;
+    status: string;
     run_id: string;
     canonical_commit: string | null;
   }[];
+  const rows = raw.map((r) => ({
+    seq: r.seq,
+    created_at: r.created_at,
+    event_type: historyKind(r.status),
+    run_id: r.run_id,
+    canonical_commit: r.canonical_commit,
+  }));
   return { rows, total };
 }
 
@@ -507,9 +535,9 @@ async function noteHistory(ctx: RunContext): Promise<number> {
       noteId,
       events: rows.map((r) => {
         const e: Record<string, unknown> = { seq: r.seq, at: r.created_at, kind: r.event_type, runId: r.run_id };
-        // `commit` is the CANONICAL commit hash (schema field), applicable only to the
-        // integration event and only when the run recorded an integrated artifact —
-        // omitted otherwise. Sourced from git_operations, never audit_events.git_head.
+        // `commit` is the CANONICAL commit hash (schema field), applicable only to an
+        // integrated run and only when it recorded an integrated git_operations
+        // artifact — omitted otherwise.
         if (r.event_type === "run.integrated" && r.canonical_commit !== null) e.commit = r.canonical_commit;
         return e;
       }),

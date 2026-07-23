@@ -18,7 +18,7 @@ import { CANONICAL_BRANCH } from "../workflows/mutation-order.js";
 import { makeStoreValidationVault } from "../validation/store-vault.js";
 import { applySynthesis, previewSynthesis, type SynthesisApplyDeps, type SynthesisPlanDeps } from "../workflows/synthesis.js";
 import { readVault } from "../vault/reader.js";
-import { ledgerDbPath, resolvePath } from "./backup-config.js";
+import { ledgerDbPath, resolvePath } from "./paths.js";
 import { openMigratedStore, PREVIEW_PROJECTION_TABLES } from "./store-open.js";
 
 const PACK_BUDGET = 6000;

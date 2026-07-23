@@ -664,16 +664,18 @@ describe("Phase-3 schema discriminants + audit/error catalog (Task 3.0 revision 
   const ajv = new Ajv2020({ strict: false, allErrors: true });
   const compile = (name: string) => ajv.compile(load(name));
 
-  it("query: error catalog includes the fail-closed backup-unhealthy exit-2 outcome (both modes write ledger rows)", () => {
+  it("query: writes retrieval rows as PLAIN operational rows — no retired audit/backup outcome (v2 #338)", () => {
     const q = load("query.schema.json");
     const codes = q["x-atlas-contract"].errorCodes as { code: string; exit: number; retryable?: boolean }[];
-    const bu = codes.find((c) => c.code === "backup-unhealthy");
-    expect(bu, "backup-unhealthy error").toBeTruthy();
-    expect(bu!.exit).toBe(2);
-    expect(bu!.retryable).toBe(true);
-    // both query modes finalize ledger writes, so the fail-closed watermark applies to each
+    // v2 (#338): the §2.8 audit ledger + AEAD backup are retired — query no longer
+    // has a fail-closed backup-unhealthy outcome, and its side effects are plain
+    // operational rows (no finalizeLedgerWrite, no run.readonly audit event).
+    expect(codes.find((c) => c.code === "backup-unhealthy")).toBeUndefined();
     const se = (q["x-atlas-contract"].sideEffects as string[]).join(" ");
-    expect(se).toMatch(/finalizeLedgerWrite/);
+    expect(se).not.toMatch(/finalizeLedgerWrite/);
+    expect(se).not.toMatch(/run\.readonly/);
+    expect(se).toMatch(/retrieval_runs\/retrieval_results/);
+    // exit 2 stays (config-invalid / db-unavailable / index-unavailable), just not backup-unhealthy.
     expect(q["x-atlas-contract"].exitCodes).toContain(2);
   });
 

@@ -29,7 +29,7 @@ import { runMutation, CANONICAL_BRANCH, type Grounded } from "../workflows/mutat
 import { resolveAtRef } from "../sync/resolve-at-ref.js";
 import { splitFrontmatter } from "../markdown/parse.js";
 import { readVault } from "../vault/reader.js";
-import { ledgerDbPath, resolvePath } from "./backup-config.js";
+import { ledgerDbPath, resolvePath } from "./paths.js";
 
 /** The outcome of an `evidence resolve`/`retry` reverification. */
 export interface EvidenceMutateResult {

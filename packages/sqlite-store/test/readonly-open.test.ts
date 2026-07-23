@@ -30,7 +30,7 @@ beforeEach(() => {
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-/** Create a fully-migrated, file-backed ledger with one seeded audit event. */
+/** Create a fully-migrated, file-backed ledger with one seeded `agent_runs` row. */
 function seedMigratedLedger(path: string): void {
   const store = openStore({ path });
   store.migrate();
@@ -40,14 +40,6 @@ function seedMigratedLedger(path: string): void {
     status: "planned",
     started_at: "2026-07-13T00:00:00Z",
     updated_at: "2026-07-13T00:00:00Z",
-  });
-  store.ledger.insertAuditEvent({
-    seq: 1,
-    run_id: "run-1",
-    event_type: "run.started",
-    payload_hash: "h".repeat(64),
-    git_head: "a".repeat(40),
-    created_at: "2026-07-13T00:00:00Z",
   });
   store.close();
 }
@@ -64,7 +56,7 @@ describe("openReadonlyLedger", () => {
     seedMigratedLedger(path);
     const led = openReadonlyLedger(path);
     try {
-      const row = led.db.prepare(`SELECT COUNT(*) AS n FROM audit_events`).get() as { n: number };
+      const row = led.db.prepare(`SELECT COUNT(*) AS n FROM agent_runs`).get() as { n: number };
       expect(row.n).toBe(1);
     } finally {
       led.close();
@@ -78,11 +70,8 @@ describe("openReadonlyLedger", () => {
     try {
       let code: string | undefined;
       try {
-        led.db.prepare(`INSERT INTO audit_events (seq, run_id, event_type, payload_hash, git_head, created_at)
-                        VALUES (99, 'run-1', 'run.started', ?, ?, '2026-07-13T00:00:00Z')`).run(
-          "h".repeat(64),
-          "a".repeat(40),
-        );
+        led.db.prepare(`INSERT INTO agent_runs (run_id, operation, status, started_at, updated_at)
+                        VALUES ('run-99', 'ingest', 'planned', '2026-07-13T00:00:00Z', '2026-07-13T00:00:00Z')`).run();
       } catch (e) {
         code = (e as { code?: string }).code;
       }
@@ -198,32 +187,17 @@ describe("captureLedgerIdentity + fd restore-safety", () => {
   });
 });
 
-describe("DB_EVENT_SEQ_BASE re-export", () => {
-  it("is importable from the package root", async () => {
-    const mod = await import("../src/index.js");
-    expect(mod.DB_EVENT_SEQ_BASE).toBe(1_000_000_000_000);
-  });
-});
-
-/** Seed a migrated ledger with a caller-chosen number of audit events (a content marker). */
+/** Seed a migrated ledger with a caller-chosen number of `agent_runs` rows (a content marker). */
 function seedLedgerWithCount(path: string, count: number): void {
   const store = openStore({ path });
   store.migrate();
-  store.ledger.upsertAgentRun({
-    run_id: "run-1",
-    operation: "ingest",
-    status: "planned",
-    started_at: "2026-07-13T00:00:00Z",
-    updated_at: "2026-07-13T00:00:00Z",
-  });
-  for (let seq = 1; seq <= count; seq++) {
-    store.ledger.insertAuditEvent({
-      seq,
-      run_id: "run-1",
-      event_type: "run.started",
-      payload_hash: "h".repeat(64),
-      git_head: "a".repeat(40),
-      created_at: "2026-07-13T00:00:00Z",
+  for (let n = 1; n <= count; n++) {
+    store.ledger.upsertAgentRun({
+      run_id: `run-${n}`,
+      operation: "ingest",
+      status: "planned",
+      started_at: "2026-07-13T00:00:00Z",
+      updated_at: "2026-07-13T00:00:00Z",
     });
   }
   store.close();
@@ -235,30 +209,23 @@ const SMALL = 1;
 const LARGE = 600;
 
 /**
- * Seed a migrated ledger whose audit events are filled with a caller-chosen char
- * (payload_hash + git_head). Row SIZES are fixed (64/40-char strings), so two
- * ledgers seeded with the SAME count but DIFFERENT fill share an identical page
- * layout — hence an identical coarse pragma tuple — while their bytes differ. This
- * is the collision the ABA hybrid test relies on.
+ * Seed a migrated ledger whose `agent_runs` rows carry a caller-chosen fill char in
+ * a fixed-size `target_note_id`. Row SIZES are fixed (a 64-char string over stable
+ * run ids), so two ledgers seeded with the SAME count but DIFFERENT fill share an
+ * identical page layout — hence an identical coarse pragma tuple — while their bytes
+ * differ. This is the collision the ABA hybrid test relies on.
  */
 function seedLedgerWithFill(path: string, count: number, fill: string): void {
   const store = openStore({ path });
   store.migrate();
-  store.ledger.upsertAgentRun({
-    run_id: "run-1",
-    operation: "ingest",
-    status: "planned",
-    started_at: "2026-07-13T00:00:00Z",
-    updated_at: "2026-07-13T00:00:00Z",
-  });
-  for (let seq = 1; seq <= count; seq++) {
-    store.ledger.insertAuditEvent({
-      seq,
-      run_id: "run-1",
-      event_type: "run.started",
-      payload_hash: fill.repeat(64),
-      git_head: fill.repeat(40),
-      created_at: "2026-07-13T00:00:00Z",
+  for (let n = 1; n <= count; n++) {
+    store.ledger.upsertAgentRun({
+      run_id: `run-${n}`,
+      operation: "ingest",
+      status: "planned",
+      target_note_id: fill.repeat(64),
+      started_at: "2026-07-13T00:00:00Z",
+      updated_at: "2026-07-13T00:00:00Z",
     });
   }
   store.close();
@@ -302,7 +269,7 @@ describe("openReadonlyLedger — inter-open race (deterministic injection)", () 
 
       // The returned handle reads the REPLACEMENT's content — not the original,
       // not a hybrid — proving the retry rebound the db to the file it verified.
-      const row = led.db.prepare(`SELECT COUNT(*) AS n FROM audit_events`).get() as { n: number };
+      const row = led.db.prepare(`SELECT COUNT(*) AS n FROM agent_runs`).get() as { n: number };
       expect(row.n).toBe(LARGE);
 
       // Identity is pinned to the file the connection actually opened (the
@@ -355,7 +322,7 @@ describe("openReadonlyLedger — inter-open race (deterministic injection)", () 
       // After the bracket rejects the hybrid and retries, the path is stable on A
       // (SMALL, aInode). The handle is CONSISTENT: connection, retained fd, and
       // identity all describe A — never the B the first attempt briefly read.
-      const row = led.db.prepare(`SELECT COUNT(*) AS n FROM audit_events`).get() as { n: number };
+      const row = led.db.prepare(`SELECT COUNT(*) AS n FROM agent_runs`).get() as { n: number };
       expect(row.n).toBe(SMALL);
       expect(led.identity.inode).toBe(aInode);
       expect(statSync(path).ino).toBe(aInode);
@@ -421,7 +388,7 @@ describe("openReadonlyLedger — inter-open race (deterministic injection)", () 
       // The hybrid was rejected and the retry rebound to A: the connection reads A's
       // content ('a'-filled payloads), NOT the B the first attempt briefly opened.
       const row = led.db
-        .prepare(`SELECT payload_hash FROM audit_events WHERE seq = 1`)
+        .prepare(`SELECT target_note_id AS payload_hash FROM agent_runs WHERE run_id = 'run-1'`)
         .get() as { payload_hash: string };
       expect(row.payload_hash).toBe("a".repeat(64));
       expect(led.identity.inode).toBe(aInode);
@@ -477,7 +444,7 @@ describe("openReadonlyLedger — inter-open race (deterministic injection)", () 
       // though stat(path) agreed with the connection. The retry bound consistently
       // to the file the path stabilized on (B): connection, fd, and identity agree.
       const row = led.db
-        .prepare(`SELECT payload_hash FROM audit_events WHERE seq = 1`)
+        .prepare(`SELECT target_note_id AS payload_hash FROM agent_runs WHERE run_id = 'run-1'`)
         .get() as { payload_hash: string };
       expect(row.payload_hash).toBe("b".repeat(64));
       const finalInode = statSync(path).ino;
@@ -542,7 +509,7 @@ describe("openReadonlyLedger — inter-open race (deterministic injection)", () 
         // the pinned identity, and the current path file must all describe the SAME
         // incarnation (here: A, since the hooks stopped firing after attempt 1).
         const row = led.db
-          .prepare(`SELECT payload_hash FROM audit_events WHERE seq = 1`)
+          .prepare(`SELECT target_note_id AS payload_hash FROM agent_runs WHERE run_id = 'run-1'`)
           .get() as { payload_hash: string };
         expect(row.payload_hash).toBe("a".repeat(64));
         expect(led.identity.inode).toBe(aInode);

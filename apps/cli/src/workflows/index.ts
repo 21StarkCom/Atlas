@@ -45,7 +45,6 @@ export {
   assembleRunReport,
   type RunReport,
   type RunArtifacts,
-  type RunAuditEvent,
 } from "./run-report.js";
 
 export {
@@ -65,7 +64,6 @@ export {
   TERMINAL_STATES,
   CHECKPOINT_NEXT,
   TERMINABLE_FROM,
-  CHECKPOINT_AUDIT,
   type CheckpointState,
   type PlannedArtifacts,
   type PatchedArtifacts,
@@ -84,7 +82,6 @@ export {
 export {
   makeCanonicalIntegrator,
   makeDirectCaptureIntegration,
-  inProcessAuditBroker,
   CANONICAL_BRANCH,
 } from "./direct-integrator.js";
 

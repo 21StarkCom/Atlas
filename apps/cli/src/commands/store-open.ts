@@ -15,7 +15,7 @@ import { existsSync } from "node:fs";
 import { openStore, registerGenerationMigration, registerSyncCursorsMigration, type Store } from "@atlas/sqlite-store";
 import { registerJobsMigration } from "@atlas/jobs";
 import { CliError, EXIT } from "../errors/envelope.js";
-import { ledgerDbPath } from "./backup-config.js";
+import { ledgerDbPath } from "./paths.js";
 import { openWorkflowStore, registerWorkflowMigrations } from "../workflows/index.js";
 import type { RunContext } from "../handlers.js";
 

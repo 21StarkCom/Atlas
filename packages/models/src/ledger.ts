@@ -1,29 +1,20 @@
 /**
- * CLI-side `model_calls` persistence (D6/D18/§2.8). The egress broker has NO
- * SQLite (D18) — it returns a {@link ModelCallReceipt} with allowlisted audit
- * fields, and the CLI (this module) writes the `model_calls` ledger row via
- * `finalizeLedgerWrite`, for BOTH successful AND refused transmissions.
+ * CLI-side `model_calls` persistence (D6/D18). The provider path returns a
+ * {@link ModelCallReceipt} with allowlisted audit fields, and the CLI writes the
+ * `model_calls` operational row via {@link buildModelCallStatement} +
+ * `applyLedgerWrite`, for BOTH successful AND refused transmissions.
  *
- * AUDIT CARDINALITY (D6): a `model_calls` row is a step-3 BUSINESS ROW, expressed
- * as a `LedgerStatement`. Many transmissions attach to a run's SINGLE terminal
- * audit event — the run's workflow owns that one `run.*` event; a transmission
- * does NOT emit a `run.*` event of its own. {@link persistModelCalls} therefore
- * takes the run's terminal event and folds ALL of a run's receipts into ONE
- * `finalizeLedgerWrite` call (one audit event, N `model_calls` rows). The row is
- * idempotent per `(runId, requestHash)`: the `call_id` primary key is derived
- * deterministically from that pair and the insert is `ON CONFLICT DO NOTHING`, so
- * a re-drive writes it exactly once.
+ * v2 (#338): the §2.8 audit-ledger write protocol is retired — there is no
+ * `finalizeLedgerWrite`, no audit event, no per-run fold. A `model_calls` row is
+ * now a plain operational row: the caller (`query.ts`) folds the run's receipts
+ * into ONE plain `applyLedgerWrite` transaction alongside the `agent_runs` +
+ * `retrieval_*` rows. The row stays idempotent per `(runId, requestHash)`: the
+ * `call_id` primary key is derived deterministically from that pair and the insert
+ * is `ON CONFLICT DO NOTHING`, so a re-drive writes it exactly once.
  */
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import {
-  finalizeLedgerWrite,
-  type Store,
-  type AuditBroker,
-  type LedgerStatement,
-  type RunContext,
-  type FinalizeResult,
-} from "@atlas/sqlite-store";
+import type { LedgerStatement } from "@atlas/sqlite-store";
 import { ModelCallReceiptSchema, type ModelCallReceipt } from "./types.js";
 
 /**
@@ -74,56 +65,6 @@ export function buildModelCallStatement(
   };
 }
 
-/** Everything {@link persistModelCalls} needs to fold receipts into one finalize. */
-export interface PersistModelCallsOptions {
-  /** The receipts to persist (one row each). Empty is a no-op finalize with the event only. */
-  readonly receipts: readonly ModelCallReceipt[];
-  /** The run's terminal audit event (D6: one per run — NOT one per transmission). */
-  readonly event: RunContext["event"];
-  /** The run id (defaults to the event's `runId`). */
-  readonly runId?: string;
-  /** The AEAD ledger-backup config (§2.8 step 4). */
-  readonly backup: RunContext["backup"];
-  /** Per-receipt semantic operation override (e.g. `extract`/`synthesize`). */
-  readonly operationFor?: (receipt: ModelCallReceipt) => string;
-  readonly now?: () => string;
-  readonly coalesceReadonly?: boolean;
-}
-
-/**
- * Persist a run's model-call receipts through `finalizeLedgerWrite` (§2.8): ONE
- * audit event, N idempotent `model_calls` rows. Returns the finalize result
- * (allocated seq + audit head).
- */
-export async function persistModelCalls(
-  store: Store,
-  broker: AuditBroker,
-  opts: PersistModelCallsOptions,
-): Promise<FinalizeResult> {
-  const now = opts.now ?? (() => new Date().toISOString());
-  const ledgerWrite = opts.receipts.map((r) =>
-    buildModelCallStatement(r, {
-      now,
-      ...(opts.operationFor !== undefined ? { operation: opts.operationFor(r) } : {}),
-    }),
-  );
-  const run: RunContext = {
-    runId: opts.runId ?? opts.event.runId,
-    // The `model_calls` ledger row is intentionally cost/usage-only (its DDL is owned
-    // by `0001_core`, §2.7). The FULL allowlisted audit fields the receipt
-    // carries — request/response hashes, destination, latency, retries, outcome,
-    // reasonCode — are retained on the run's SINGLE terminal audit event's `detail`
-    // (D6: one audit event per run, NOT one per call), so no audit field is dropped
-    // and no per-call `run.*` event is emitted.
-    event: withModelCallAudit(opts.event, opts.receipts),
-    ledgerWrite,
-    backup: opts.backup,
-    now,
-    ...(opts.coalesceReadonly !== undefined ? { coalesceReadonly: opts.coalesceReadonly } : {}),
-  };
-  return finalizeLedgerWrite(store, broker, run);
-}
-
 /**
  * The allowlisted per-call audit record schema — DERIVED from the SSOT
  * {@link ModelCallReceiptSchema} (`./types.js`) so it can never drift from the
@@ -162,15 +103,4 @@ export function modelCallAuditRecord(receipt: ModelCallReceipt): ModelCallAuditR
     ...(receipt.reasonCode !== undefined ? { reasonCode: receipt.reasonCode } : {}),
     ...(receipt.effectiveSensitivity !== undefined ? { effectiveSensitivity: receipt.effectiveSensitivity } : {}),
   };
-}
-
-/** Fold the receipts' full audit fields into the terminal event's `detail.modelCalls`. */
-function withModelCallAudit(
-  event: RunContext["event"],
-  receipts: readonly ModelCallReceipt[],
-): RunContext["event"] {
-  if (receipts.length === 0) return event;
-  const detail = { ...(event.detail ?? {}) } as Record<string, unknown>;
-  detail.modelCalls = receipts.map(modelCallAuditRecord);
-  return { ...event, detail };
 }

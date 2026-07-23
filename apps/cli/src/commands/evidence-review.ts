@@ -12,7 +12,7 @@ import { EvidenceRepo, type EvidenceRow } from "@atlas/sqlite-store";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { openWorkflowStore } from "../workflows/index.js";
-import { ledgerDbPath } from "./backup-config.js";
+import { ledgerDbPath } from "./paths.js";
 import { parseLimit, parseOffset, assertOffsetInRange, buildPagination, DEFAULT_LIMIT } from "./pagination.js";
 
 interface Parsed { note?: string; limit: number; offset: number }

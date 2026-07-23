@@ -91,8 +91,6 @@ import {
   type ModelCallReceipt,
 } from "@atlas/models";
 import {
-  assertBackupHealthy,
-  BackupUnhealthyError,
   applyLedgerWrite,
   type LedgerStatement,
   type Store,
@@ -100,7 +98,7 @@ import {
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { openMigratedStore } from "./store-open.js";
-import { resolvePath, backupConfig } from "./backup-config.js";
+import { resolvePath } from "./paths.js";
 import { agentRunUpsert } from "../workflows/checkpoints.js";
 import {
   retrieve,
@@ -603,25 +601,9 @@ async function query(ctx: RunContext): Promise<number> {
   const now = (): string => new Date().toISOString();
 
   try {
-    // FAIL-CLOSED gate (contract): a query WRITES ledger rows via finalizeLedgerWrite,
-    // so a blocked backup watermark refuses BOTH modes UP FRONT — before spending any
-    // model call — with `backup-unhealthy` (exit 2).
-    try {
-      assertBackupHealthy(store.db);
-    } catch (e) {
-      if (e instanceof BackupUnhealthyError) {
-        throw new CliError({
-          code: e.code,
-          message: e.message,
-          hint: "Run `db backup` (or `db backup --force-unblock` / `db restore`) to clear the block, then retry.",
-          exitCode: EXIT.CONFIG,
-          retryable: true,
-          cause: e,
-        });
-      }
-      throw e;
-    }
-
+    // v2 (#338): the §2.8 fail-closed backup-watermark gate is retired with the audit
+    // ledger + AEAD backup. `query` writes only plain operational rows (retrieval +
+    // model_calls); there is no watermark to block on.
     const table = await openTable(ctx, indexingCfg);
 
     // The in-process model boundary: one client, one receipt sink collecting EVERY

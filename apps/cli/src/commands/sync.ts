@@ -42,7 +42,7 @@ import {
 } from "@atlas/lancedb-index";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
-import { resolvePath } from "./backup-config.js";
+import { resolvePath } from "./paths.js";
 import { openMigratedStore } from "./store-open.js";
 import { readVault } from "../vault/reader.js";
 import { buildEmbedder, indexingConfig } from "./index-ops.js";

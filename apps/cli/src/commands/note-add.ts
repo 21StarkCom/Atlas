@@ -12,7 +12,7 @@ import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { addNote, NoteAddRejectedError } from "../ingest/note-add.js";
 import { openWorkflowStore } from "../workflows/index.js";
-import { ledgerDbPath } from "./backup-config.js";
+import { ledgerDbPath } from "./paths.js";
 
 interface ParsedArgs {
   readonly path: string;

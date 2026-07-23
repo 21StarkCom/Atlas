@@ -1,12 +1,10 @@
 /**
  * `ingest/wiring` — assemble the capture dependencies from a {@link RunContext}.
  *
- * The guard is built up front (its only side effect is quarantining a detected
- * secret, to a dir OUTSIDE the vault/repo). The MUTATING deps (store open+migrate,
- * broker connection, worktree) are handed to `captureSource` as LAZY factories so
- * they are assembled ONLY after the scan-before-persist preflight succeeds
- * (DEFECT #1). The broker-side integration seam signs the `run.integrated` event —
- * the CLI never holds the audit-attestation key (DEFECT #2).
+ * The MUTATING deps (store open+migrate, canonical-install seam, worktree) are handed
+ * to `captureSource` as LAZY factories so they are assembled ONLY after the
+ * scan-before-persist preflight succeeds. v2 (#338): the canonical install is a plain
+ * git FF-CAS onto `refs/heads/main` — no audit ledger, no attestation key, no backup.
  */
 import { openRepo } from "@atlas/git";
 import type { RunContext } from "../handlers.js";
@@ -14,7 +12,7 @@ import type { CaptureScope } from "../workflows/capture-scope.js";
 import { openWorkflowStore } from "../workflows/index.js";
 import { makeDirectCaptureIntegration, CANONICAL_BRANCH } from "../workflows/direct-integrator.js";
 import { openMigratedStore } from "../commands/store-open.js";
-import { backupConfig, ledgerDbPath, resolvePath } from "../commands/backup-config.js";
+import { ledgerDbPath, resolvePath } from "../commands/paths.js";
 import { type CaptureDeps, type CaptureIntegration } from "./capture.js";
 
 /** A read-only projection probe for `ingest` preview (never creates/migrates a store). */
@@ -55,7 +53,6 @@ export function buildCaptureDeps(ctx: RunContext, command: string, idempotencyKe
     openStore: () => openWorkflowStore({ path: ledgerDbPath(ctx) }),
     repo,
     connectIntegration: () => Promise.resolve(makeDirectCaptureIntegration(repo, scope)),
-    backup: backupConfig(ctx),
     worktreesPath: resolvePath(ctx, ctx.config.config.git.worktrees_path),
     canonicalRef: CANONICAL_BRANCH,
     command,

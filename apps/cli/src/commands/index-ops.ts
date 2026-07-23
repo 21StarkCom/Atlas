@@ -49,7 +49,7 @@ import { readVault } from "../vault/reader.js";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { openMigratedStore } from "./store-open.js";
-import { resolvePath } from "./backup-config.js";
+import { resolvePath } from "./paths.js";
 
 // Per-run egress ceilings for the index-embedding capability (D19) — generous; the
 // payload scan + capability enforce the real limits.

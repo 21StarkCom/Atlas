@@ -51,7 +51,7 @@ import { assertNotDirty, runMutation, CANONICAL_BRANCH, type Grounded } from "..
 import { resolveAtRef } from "../sync/resolve-at-ref.js";
 import { splitFrontmatter, WIKILINK_RE } from "../markdown/parse.js";
 import { openingFence, isClosingFence, type OpenFence } from "../markdown/fence.js";
-import { resolvePath } from "./backup-config.js";
+import { resolvePath } from "./paths.js";
 import { openMigratedStore } from "./store-open.js";
 import { resolveNoteId, loadVaultSnapshot } from "./note.js";
 

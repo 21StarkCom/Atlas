@@ -33,7 +33,7 @@
  * module").
  */
 import { createHash } from "node:crypto";
-import { canonicalSerialize, WORKFLOW_STATES, type AuditEventKind, type WorkflowState } from "@atlas/contracts";
+import { canonicalSerialize, WORKFLOW_STATES, type WorkflowState } from "@atlas/contracts";
 import type { SqliteDatabase } from "@atlas/sqlite-store";
 import type { LedgerStatement } from "@atlas/sqlite-store";
 import { CliError, EXIT } from "../errors/envelope.js";
@@ -93,13 +93,6 @@ export const TERMINABLE_FROM = [
   "worktree-applied",
   "agent-committed",
 ] as const satisfies readonly CheckpointState[];
-
-/** The audit event a transition INTO each state emits, if any (§2.5 closed set). */
-export const CHECKPOINT_AUDIT: Partial<Record<WorkflowState, AuditEventKind>> = {
-  planned: "run.planned",
-  integrated: "run.integrated",
-  // finalized re-emits nothing — run.integrated is the exactly-once success event.
-};
 
 /** `true` iff a `fail`/`cancel` FROM `state` is legal per the recovery contract. */
 export function canTerminateFrom(state: WorkflowState): state is CheckpointState {
@@ -249,22 +242,14 @@ export interface AgentCommittedArtifacts {
 }
 
 /**
- * The `integrated` gating artifacts. The broker fast-forward/merge (canonical
- * ref advance) + the run.integrated audit append are performed by the CALLER
- * (capture / synthesis, which hold the authorization); this checkpoint records
- * the step-3 CAS from the broker's result. `run.integrated` is a
- * canonical-INSTALLING kind, so it never rides `finalizeLedgerWrite`'s
- * (non-installing) signing path — see {@link recordIntegration} in engine.ts.
+ * The `integrated` gating artifacts. The canonical fast-forward (ref advance) is
+ * performed by the CALLER (capture / synthesis); this checkpoint records the
+ * resulting `agent_runs='integrated'` + git-op state. v2 (#338): a plain git FF-CAS,
+ * no audit `seq`/append — see {@link recordIntegration} in engine.ts.
  */
 export interface IntegratedArtifacts {
   readonly canonicalRef: string;
   readonly canonicalSha: string;
-  /** The audit `seq` the broker allocated for the run.integrated event. */
-  readonly seq: number;
-  /** `sha256(canonical(run.integrated event))`. */
-  readonly payloadHash: string;
-  /** `refs/audit/runs` head returned by the broker append. */
-  readonly auditHead: string;
 }
 
 /** The `reindexed` gating artifacts (gated on `canonicalSha`). */

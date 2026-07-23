@@ -350,19 +350,15 @@ describe("alias resolution is identical across note show / related / history (fi
   });
 });
 
-describe("note history: `commit` is the canonical SHA (git_operations), NOT audit git_head", () => {
-  it("run.integrated event emits the integrated commit_sha; git_head is never surfaced; non-integration events omit commit", async () => {
+describe("note history: `commit` is the canonical SHA (git_operations), on an integrated run", () => {
+  it("an integrated run surfaces its integrated commit_sha; a non-integrated run omits commit", async () => {
+    // v2 (#338): the audit ledger is retired — note history projects one entry per
+    // `agent_runs` row that targeted the note, its kind derived from the run status.
     const canonical = hash(0xca); // git_operations integrated commit_sha (the canonical SHA)
-    const auditHead = hash(0xad); // audit_events.git_head (refs/audit/runs chain head) — DELIBERATELY different
-    expect(canonical).not.toBe(auditHead);
     const store = openStore({ path: dbPath });
     try {
       store.projections.insertNote({ note_id: "concept-atlas", slug: "atlas", title: "Atlas", type: "concept", schema_version: 1, status: "active", file_path: "atlas.md", content_hash: `sha256:${hash(1)}`, created: iso, updated: iso });
       store.ledger.upsertAgentRun({ run_id: ulid(9), operation: "ingest", status: "integrated", tier: 1, target_note_id: "concept-atlas", started_at: iso, updated_at: iso, finished_at: iso });
-      // A pre-integration event (no canonical commit yet) and the integration event —
-      // both carry a git_head, but only the integration has a canonical commit.
-      store.ledger.insertAuditEvent({ seq: 1, run_id: ulid(9), event_type: "run.planned", payload_hash: hash(2), git_head: auditHead, created_at: iso });
-      store.ledger.insertAuditEvent({ seq: 2, run_id: ulid(9), event_type: "run.integrated", payload_hash: hash(3), git_head: auditHead, created_at: iso });
       store.db
         .prepare(`INSERT INTO git_operations (git_op_id, run_id, op_type, ref_name, commit_sha, created_at) VALUES (?, ?, 'integrated', ?, ?, ?)`)
         .run(`gop-int-${ulid(9)}`, ulid(9), "refs/heads/main", canonical, iso);
@@ -373,18 +369,14 @@ describe("note history: `commit` is the canonical SHA (git_operations), NOT audi
     const out = JSON.parse(r.out);
     validateSchema("note-history", out);
     const integrated = out.events.find((e: { kind: string }) => e.kind === "run.integrated");
-    const planned = out.events.find((e: { kind: string }) => e.kind === "run.planned");
     expect(integrated.commit).toBe(canonical); // canonical SHA from git_operations
-    expect(integrated.commit).not.toBe(auditHead); // the audit-chain head is NOT surfaced
-    expect(planned.commit).toBeUndefined(); // no canonical commit ⇒ omitted
   });
 
   it("a run that never integrated omits commit entirely (inapplicable)", async () => {
     const store = openStore({ path: dbPath });
     try {
       store.projections.insertNote({ note_id: "concept-open", slug: "open", title: "Open", type: "concept", schema_version: 1, status: "active", file_path: "open.md", content_hash: `sha256:${hash(1)}`, created: iso, updated: iso });
-      store.ledger.upsertAgentRun({ run_id: ulid(8), operation: "ingest", status: "review-pending", tier: 2, target_note_id: "concept-open", started_at: iso, updated_at: iso });
-      store.ledger.insertAuditEvent({ seq: 5, run_id: ulid(8), event_type: "run.planned", payload_hash: hash(2), git_head: hash(0xbe), created_at: iso });
+      store.ledger.upsertAgentRun({ run_id: ulid(8), operation: "ingest", status: "planned", tier: 2, target_note_id: "concept-open", started_at: iso, updated_at: iso });
     } finally { store.close(); }
     const r = await cli(["note", "history", "concept-open", "--json"]);
     expect(r.code, r.out).toBe(0);
