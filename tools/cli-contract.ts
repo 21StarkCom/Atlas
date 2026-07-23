@@ -181,6 +181,11 @@ export const MIGRATION_OWNERSHIP: Readonly<Record<string, readonly string[]>> = 
   // Feature migration (Task 3.2), registered via registerGenerationMigration — the
   // durable indexing-config adoption log the generation/config fence rests on.
   "0008_index_config_revision": ["index_config_revisions"],
+  // v2 vault-derived evidence projection (task 4-2, in `openStore`'s DEFAULT set) —
+  // the flat `evidence` table folded from note frontmatter, replacing the v1
+  // claims/claim_evidence model (the DROP of those rides this same migration in the
+  // task-4-4 commit that removes their last consumer).
+  "0014_evidence_v2": ["evidence"],
   "(runner bootstrap)": ["db_schema_migrations"],
 } as const;
 

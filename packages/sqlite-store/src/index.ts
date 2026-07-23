@@ -164,6 +164,7 @@ export { migration0010TrustState, TRUST_STATE_DDL } from "../migrations/0010_tru
 export { migration0011RunInputs, RUN_INPUTS_DDL } from "../migrations/0011_run_inputs.js";
 export { migration0012SyncCursors, SYNC_CURSORS_DDL } from "../migrations/0012_sync_cursors.js";
 export { migration0013LinksV2, LINKS_V2_DDL } from "../migrations/0013_links_v2.js";
+export { migration0014EvidenceV2, EVIDENCE_V2_DDL } from "../migrations/0014_evidence_v2.js";
 
 export { ProvenanceRepo, captureId } from "./repos/provenance.js";
 export type {

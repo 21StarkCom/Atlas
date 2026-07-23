@@ -15,17 +15,26 @@ describe("db.migrate-ownership", () => {
     const store = openStore({ path: ":memory:" });
     try {
       const report = store.migrate();
-      // `0013_links_v2` is in `openStore`'s default set (it reshapes the
-      // `0001_core` `note_links` projection), so a fresh `migrate` applies it too.
-      // It creates NO new table (it rebuilds `note_links` in place), so the
-      // fresh-DB table diff below is unchanged from the §2.7 core set.
+      // `0013_links_v2` and `0014_evidence_v2` are in `openStore`'s default set, so
+      // a fresh `migrate` applies them too. `0013` creates NO new table (it rebuilds
+      // `note_links` in place); `0014` creates the v2 `evidence` projection table
+      // (additive here — its v1-table DROPs ride later phase-4 commits), so the
+      // fresh-DB table diff below is the §2.7 core set plus `evidence`.
       expect(new Set(report.newlyApplied)).toEqual(
-        new Set(["0001_core", "0003_provenance", "0004_claims", "0005_ledger_finalize", "0013_links_v2"]),
+        new Set([
+          "0001_core",
+          "0003_provenance",
+          "0004_claims",
+          "0005_ledger_finalize",
+          "0013_links_v2",
+          "0014_evidence_v2",
+        ]),
       );
 
       const expected = dictionaryTablesFor("0001_core");
       for (const t of dictionaryTablesFor("0003_provenance")) expected.add(t);
       for (const t of dictionaryTablesFor("0004_claims")) expected.add(t);
+      for (const t of dictionaryTablesFor("0014_evidence_v2")) expected.add(t);
       expected.add("db_schema_migrations"); // runner bootstrap
       // Sanity: the dictionary really did attribute the core tables to 0001_core…
       expect(expected.has("notes")).toBe(true);
@@ -36,6 +45,8 @@ describe("db.migrate-ownership", () => {
       // …and the claims tables to 0004_claims.
       expect(expected.has("claims")).toBe(true);
       expect(expected.has("claim_evidence")).toBe(true);
+      // …and the v2 evidence projection to 0014_evidence_v2.
+      expect(expected.has("evidence")).toBe(true);
       // And it must NOT include tables owned by later migrations.
       expect(expected.has("jobs")).toBe(false);
 

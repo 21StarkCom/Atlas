@@ -4,7 +4,8 @@
  * `Store` bundles the connection with the migration runner, the projection
  * rebuild pipeline, `verify`, and the repositories. The `0001_core`, the
  * retained-PR-A `0003_provenance` + `0004_claims`, the `0005_ledger_finalize`,
- * and the core `0013_links_v2` (v2 `note_links` reshape) migrations are
+ * the core `0013_links_v2` (v2 `note_links` reshape), and the core
+ * `0014_evidence_v2` (v2 vault-derived `evidence` projection) migrations are
  * registered on open (so the public `migrate()`/`rebuildProjections()` path
  * creates the provenance + claims tables and neither fold is ever a silent no-op, §2.7 /
  * §4.1); `@atlas/jobs` registers `0002` via {@link Store.registerMigration}
@@ -29,6 +30,7 @@ import { migration0005LedgerFinalize } from "../migrations/0005_ledger_finalize.
 import { migration0008IndexConfigRevision } from "../migrations/0008_index_config_revision.js";
 import { migration0012SyncCursors } from "../migrations/0012_sync_cursors.js";
 import { migration0013LinksV2 } from "../migrations/0013_links_v2.js";
+import { migration0014EvidenceV2 } from "../migrations/0014_evidence_v2.js";
 // Side-effect imports: register the retained-PR-A projection folds into the
 // rebuild pipeline (§2.7 / §4.1) so `rebuildProjections`/`db rebuild` reproduce
 // the provenance + claims projections from canonical Markdown. Provenance is
@@ -122,6 +124,12 @@ export function openStore(cfg: SqliteConfig, clock: Clock = rfc3339Now): Store {
   // `note_links` projection into the v2 link shape), NOT a feature migration —
   // so it belongs in the default retained set, applied by every `db migrate`.
   migrations.set(migration0013LinksV2.id, migration0013LinksV2);
+  // `0014_evidence_v2` is a CORE projection migration (it replaces the v1
+  // `claims`/`claim_evidence` evidence model with the flat vault-derived
+  // `evidence` table); like `0013` it belongs in the default retained set,
+  // applied by every `db migrate`. Store-open only REGISTERS it — the explicit
+  // `db migrate` under the vault lock is the sole apply path (no reader auto-migrates).
+  migrations.set(migration0014EvidenceV2.id, migration0014EvidenceV2);
 
   const generation = new GenerationRepo(db, clock);
 

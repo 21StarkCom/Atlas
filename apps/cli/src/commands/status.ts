@@ -102,7 +102,7 @@ function appliedMigrationIds(store: Store | null): string[] {
   return (store.db.prepare(`SELECT id FROM db_schema_migrations ORDER BY id`).all() as { id: string }[]).map((r) => r.id);
 }
 
-/** The numeric prefix of the LATEST applied migration id (`"0013_links_v2"` → 13), or 0. */
+/** The numeric prefix of the LATEST applied migration id (`"0014_evidence_v2"` → 14), or 0. */
 function schemaVersionOf(applied: readonly string[]): number {
   const last = applied[applied.length - 1];
   if (last === undefined) return 0;

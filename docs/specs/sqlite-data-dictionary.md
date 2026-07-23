@@ -859,6 +859,47 @@ CREATE INDEX idx_index_config_revisions_key ON index_config_revisions(config_key
 
 ---
 
+## 5.6 Evidence — `0014_evidence_v2`
+
+### `evidence` — `0014_evidence_v2` (vault projection)
+
+The v2 **flat, vault-derived** evidence projection (Phase-4 persistence strip). It replaces the v1
+rendition-pinned model (`claims` + `claim_evidence`, `0004`, with its lineage/payload_hash/supersession
+machinery coupled to the run ledger) with ONE row per evidence entry folded from note frontmatter.
+
+**SSOT resolution — the vault is the single authority.** The note frontmatter owns all evidence state
+(`claim` / `citation` / `status` / `verdict` / `attempts`); the evidence commands mutate it via
+ChangePlans through the canonical mutation order, and the row is **folded from the committed note on
+`sync` / `db rebuild`**. So `git revert <sha>` + `brain sync` re-folds the row and no stale evidence
+survives. `noteId` is a **soft reference** to `notes(note_id)` — deliberately **not** a rebuild-enforced
+FK (a `db rebuild` regenerates evidence from note frontmatter, so a transiently-dangling reference must
+never abort the rebuild). `sourceNoteHash` is the **between-fold staleness guard**: a row whose recorded
+hash no longer equals its note's on-disk content hash is treated as stale (`needs-review`), never trusted.
+
+```sql
+CREATE TABLE evidence (
+  id             TEXT    NOT NULL PRIMARY KEY,
+  noteId         TEXT,                                    -- soft reference to notes(note_id); NOT a rebuild-enforced FK
+  sectionPath    TEXT,
+  claim          TEXT,
+  citation       TEXT,
+  status         TEXT    CHECK (status IN ('pending', 'resolved', 'failed', 'needs-review')),
+  verdict        TEXT,
+  attempts       INTEGER NOT NULL DEFAULT 0,
+  lastCheckedAt  TEXT,
+  sourceNoteHash TEXT,                                    -- content-hash staleness guard (row is stale when != note's on-disk hash)
+  createdAt      TEXT
+) STRICT;
+```
+
+- **FK:** none by construction (`noteId` is soft; a rebuild regenerates every row from note frontmatter,
+  so a restrictive FK could never fire).
+- **Class:** vault projection — `db rebuild` regenerates it from the working tree (unlike the retained
+  operational tables). Column names are the v2 camelCase form (the subsystem is authored fresh, no v1
+  legacy to match).
+
+---
+
 ## 6. Versioned index contract
 
 **Version: 1.** These indexes map the design's *access patterns* to composite indexes, verified with

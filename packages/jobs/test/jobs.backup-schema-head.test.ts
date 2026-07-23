@@ -11,13 +11,14 @@
  * package now declares its heads via `registerKnownSchemaHead` alongside its migrations
  * (the same composition-root seam as `registerMigration`).
  *
- * Since task 3-4 the core `0013_links_v2` (in `openStore`'s default set) is the
+ * Since task 4-2 the core `0014_evidence_v2` (in `openStore`'s default set) is the
  * lexicographically-highest applied migration, so IT — not a jobs head — is the schema
- * HEAD of a freshly-migrated store, and every new backup stamps `0013_links_v2`. The
+ * HEAD of a freshly-migrated store, and every new backup stamps `0014_evidence_v2`. The
  * jobs-head `registerKnownSchemaHead` calls still matter for backward-compatibility with
- * backups taken BEFORE `0013` existed (stamped `0007_job_cancellations`) — that seam is
- * still exercised on every `openJobsStore`. This test asserts the core §8.3 guarantee:
- * the binary VERIFIES its own freshly-taken backup (head recognized, not future/unknown).
+ * backups taken BEFORE the core v2 migrations existed (stamped `0007_job_cancellations`) —
+ * that seam is still exercised on every `openJobsStore`. This test asserts the core §8.3
+ * guarantee: the binary VERIFIES its own freshly-taken backup (head recognized, not
+ * future/unknown).
  */
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -34,10 +35,10 @@ beforeEach(() => {
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 describe("a backup stamped at a jobs-owned schema head verifies with the same binary", () => {
-  it("current head: migrate → backup → verify round-trips (schema head 0013_links_v2 is KNOWN)", async () => {
+  it("current head: migrate → backup → verify round-trips (schema head 0014_evidence_v2 is KNOWN)", async () => {
     const dbPath = join(dir, "atlas.db");
     // openJobsStore registers 0002_jobs + 0007_job_cancellations (+ their known-schema-heads)
-    // and migrates the full store. The core 0013_links_v2 (openStore's default set) is the
+    // and migrates the full store. The core 0014_evidence_v2 (openStore's default set) is the
     // lexicographically-highest applied migration, so the backup below is stamped with it.
     const store = openJobsStore({ path: dbPath });
     try {
@@ -46,7 +47,7 @@ describe("a backup stamped at a jobs-owned schema head verifies with the same bi
 
       // The bundle is stamped at the current schema head …
       const header = readBundleHeader(cfg, result.backupRef);
-      expect(header.schemaHead).toBe("0013_links_v2");
+      expect(header.schemaHead).toBe("0014_evidence_v2");
 
       // … and THIS binary must understand it. Before the fix this threw
       // BackupIntegrityError("…which this binary does not understand … incompatible").
@@ -64,13 +65,16 @@ describe("a backup stamped at a jobs-owned schema head verifies with the same bi
     // 0013 existed was stamped 0007 — that historical bundle MUST still verify, so
     // this case must survive even though the current head is now 0013.
     //
-    // We simulate a pre-0013 store by dropping the 0013 row from the runner's
-    // `db_schema_migrations` table AFTER the full migrate, so `schemaHead` (the
-    // lexicographically-highest applied id) resolves to `0007_job_cancellations`.
+    // We simulate a pre-v2-core store by dropping the core `0013_links_v2` +
+    // `0014_evidence_v2` rows from the runner's `db_schema_migrations` table AFTER the
+    // full migrate, so `schemaHead` (the lexicographically-highest applied id) resolves
+    // to `0007_job_cancellations` (openJobsStore applies no 0008–0012 feature migration).
     const dbPath = join(dir, "atlas.db");
     const store = openJobsStore({ path: dbPath });
     try {
-      store.db.prepare(`DELETE FROM db_schema_migrations WHERE id = '0013_links_v2'`).run();
+      store.db
+        .prepare(`DELETE FROM db_schema_migrations WHERE id IN ('0013_links_v2', '0014_evidence_v2')`)
+        .run();
       const cfg: LedgerBackupConfig = { dir: join(dir, "backups-hist"), key: randomBytes(32) };
       const result = await takeBackup(store, cfg);
 
