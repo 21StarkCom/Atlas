@@ -198,23 +198,31 @@ export interface ReconcileRead {
  * classifies against the projection via the pure {@link reconcile} routine.
  */
 export async function readReconcile(ctx: RunContext, store: Store): Promise<ReconcileRead> {
-  let snapshot;
-  try {
-    snapshot = await readVault(ctx.config.config);
-  } catch (e) {
-    throw new CliError({
-      code: "vault-error",
-      message: `cannot read vault: ${e instanceof Error ? e.message : String(e)}`,
-      hint: "Check that vault.path in brain.config.yaml exists and is readable.",
-      exitCode: EXIT.CONFIG,
-      cause: e,
-    });
-  }
+  const projRows = store.projections
+    .allNotes()
+    .map((r) => ({ noteId: r.note_id, path: r.file_path, contentHash: r.content_hash }));
+  return reconcileAgainstRows(ctx, projRows);
+}
+
+/**
+ * The projection-row-parameterized half of {@link readReconcile}: the SAME vault
+ * read + fail-closed structural gate + pure {@link classifySnapshot}, for a
+ * caller that sources its projection rows itself. Composed from the exported
+ * pieces below so the v2 merged `status` (#332) can consume the identical read +
+ * classification while applying its OWN structural-error POLICY (degrade-and-
+ * report instead of sync's writer-grade fail-closed halt) — the routine is
+ * shared; only the fail policy differs.
+ */
+export async function reconcileAgainstRows(
+  ctx: RunContext,
+  projRows: readonly { noteId: string; path: string; contentHash: string }[],
+): Promise<ReconcileRead> {
+  const snapshot = await readVaultForReconcile(ctx);
   // Fail closed on any STRUCTURAL note error: a parse/read failure hides the note
   // from the vault set (reconcile would purge it as a DROP), and a duplicate-id /
   // identity-collision makes the id→note map ambiguous (reconcile matches by the
   // unique stable id). Only genuinely non-structural link advisories are tolerated.
-  const fatal = snapshot.errors.filter((e) => !NON_STRUCTURAL_ERROR_KINDS.has(e.kind));
+  const fatal = structuralVaultErrors(snapshot);
   if (fatal.length > 0) {
     const first = fatal[0]!;
     throw new CliError({
@@ -227,12 +235,45 @@ export async function readReconcile(ctx: RunContext, store: Store): Promise<Reco
       exitCode: EXIT.CONFIG,
     });
   }
+  return classifySnapshot(snapshot, projRows);
+}
 
+/** Read the vault working tree, mapping an unreadable vault (missing path,
+ * permission failure) to the exit-2 `vault-error` — the "vault unresolvable, no
+ * payload possible" boundary both `sync` and `status` share. */
+export async function readVaultForReconcile(ctx: RunContext): Promise<Awaited<ReturnType<typeof readVault>>> {
+  try {
+    return await readVault(ctx.config.config);
+  } catch (e) {
+    throw new CliError({
+      code: "vault-error",
+      message: `cannot read vault: ${e instanceof Error ? e.message : String(e)}`,
+      hint: "Check that vault.path in brain.config.yaml exists and is readable.",
+      exitCode: EXIT.CONFIG,
+      cause: e,
+    });
+  }
+}
+
+/** The snapshot's STRUCTURAL errors — everything except the tolerated
+ * non-structural link advisories. Non-empty ⇒ the id→note map is unreliable and
+ * any reconcile classification over it is too. */
+export function structuralVaultErrors(
+  snapshot: Awaited<ReturnType<typeof readVault>>,
+): typeof snapshot.errors {
+  return snapshot.errors.filter((e) => !NON_STRUCTURAL_ERROR_KINDS.has(e.kind));
+}
+
+/** The PURE classification half of the one reconciliation routine: parsed vault
+ * snapshot vs projection rows → the {@link ReconcileRead}. Every consumer
+ * (`sync`, `sync status`, the merged `status`) classifies through THIS function
+ * — there is no second derivation. */
+export function classifySnapshot(
+  snapshot: Awaited<ReturnType<typeof readVault>>,
+  projRows: readonly { noteId: string; path: string; contentHash: string }[],
+): ReconcileRead {
   const vaultNotes = snapshot.notes.map((n) => ({ noteId: n.id, path: n.path, contentHash: n.contentHash }));
-  const projRows = store.projections
-    .allNotes()
-    .map((r) => ({ noteId: r.note_id, path: r.file_path, contentHash: r.content_hash }));
-  return { notes: snapshot.notes, rec: reconcile(vaultNotes, projRows), scannedCount: vaultNotes.length };
+  return { notes: snapshot.notes, rec: reconcile(vaultNotes, [...projRows]), scannedCount: vaultNotes.length };
 }
 
 /** The six flat counts + noop derived from a {@link ReconcileRead}. */

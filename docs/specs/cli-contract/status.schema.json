@@ -1,66 +1,102 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "atlas://cli-contract/status.schema.json",
-  "title": "brain status — --json success output",
-  "description": "Read-only summary of the system's live state (design D12): open runs by state, queued/failed job counts, quarantine count, backup watermark health, and audit head + anchor check. Tier-0 read; an executed run emits exactly one `run.readonly` git-ref event. Stays available in the backup-unhealthy blocked mode only in its non-persisting form — the audited variant (which writes a ledger row) is blocked; the pure summary is not.",
+  "title": "brain status — --json success output (v2 merged read surface)",
+  "description": "The ONE merged read surface (v2, #332) — absorbs the retired `doctor`, `db status`, `index status`, and `sync status` (ADR-0003). Four named sub-objects (vault / db / index / sync) + the retained health probes in checks[]. status.sync carries the four pending reconciliation counts from the SAME readReconcile routine `sync` acts on, so the two surfaces can never disagree about the pending set; the counts are informational (pending sync work is the normal state of a dirty tree) and never drive checks[]. checks[] is exactly: vault-reachable, git-healthy, provider-key-present (the NON-throwing hasGeminiApiKey probe — a missing key is ok:false at exit 0, never a crash), index-not-stale, migrations-current (a read-only schema-version read — status NEVER auto-applies a migration; a pending migration fails the check at exit 0, never the fail-closed exit 2 that mutations/sync/db rebuild use). The v1 doctor backup-health and signer-registry checks are retired with their machinery and do not appear. Contract deltas from v1 sync status: drops lastIndexedHead, adds the four pending counts. EXIT CONTRACT (binding): 0 whenever the payload was produced — INCLUDING ok:false; 2 only when the vault/config is unresolvable and no payload is possible. status opens the ledger store read-only from the existing schema (absent store/tables read as zero + a failed migrations-current check) and never creates or migrates it.",
   "type": "object",
-  "unevaluatedProperties": false,
-  "required": ["command", "openRuns", "jobs", "quarantineCount", "backup", "audit"],
+  "additionalProperties": false,
+  "required": ["command", "ok", "vault", "db", "index", "sync", "checks"],
   "properties": {
     "command": { "const": "status" },
-    "openRuns": {
+    "ok": { "type": "boolean", "description": "true iff every checks[] probe passed. Health only — the sync pending counts never affect it." },
+    "vault": {
       "type": "object",
-      "description": "Count of non-terminal runs keyed by workflow state (§2.5 state set).",
-      "additionalProperties": { "type": "integer", "minimum": 0 }
-    },
-    "jobs": {
-      "type": "object",
-      "unevaluatedProperties": false,
-      "required": ["queued", "failed"],
+      "additionalProperties": false,
+      "required": ["path", "headSha", "dirty", "noteCount"],
       "properties": {
-        "queued": { "type": "integer", "minimum": 0 },
-        "failed": { "type": "integer", "minimum": 0 }
+        "path": { "type": "string", "minLength": 1, "description": "The resolved absolute vault working-tree path." },
+        "headSha": { "type": "string", "description": "The vault HEAD commit sha; \"\" when the vault is not a git repository or HEAD is unborn (git-healthy fails)." },
+        "dirty": { "type": "boolean", "description": "true iff `git status --porcelain` reports any entry. Informational — dirt is normal input for sync." },
+        "noteCount": { "type": "integer", "minimum": 0, "description": "Parsed note files in the working tree (the reconcile input size)." }
       }
     },
-    "quarantineCount": { "type": "integer", "minimum": 0 },
-    "backup": {
+    "db": {
       "type": "object",
-      "unevaluatedProperties": false,
-      "required": ["watermarkSeq", "coveredSeq", "healthy"],
+      "additionalProperties": false,
+      "required": ["schemaVersion", "noteCount", "sectionCount", "linkCount"],
       "properties": {
-        "watermarkSeq": { "type": "integer", "minimum": 0 },
-        "coveredSeq": { "type": "integer", "minimum": 0 },
-        "healthy": { "type": "boolean" }
+        "schemaVersion": { "type": "integer", "minimum": 0, "description": "Numeric prefix of the LATEST applied migration id (0013_links_v2 → 13); 0 when the store is absent/unmigrated." },
+        "noteCount": { "type": "integer", "minimum": 0, "description": "Projected `notes` rows (0 when the store/table is absent — never migrates to find out)." },
+        "sectionCount": { "type": "integer", "minimum": 0, "description": "Sections across the parsed vault. The projection carries no section table (sections live only in canonical Markdown), so the vault snapshot is this count's source of truth." },
+        "linkCount": { "type": "integer", "minimum": 0, "description": "Projected `note_links` rows — plain AND typed edges (0 when absent)." }
       }
     },
-    "audit": {
+    "index": {
       "type": "object",
-      "unevaluatedProperties": false,
-      "required": ["headSeq", "head", "anchorOk", "anchorSource"],
+      "additionalProperties": false,
+      "required": ["chunkCount", "staleCount", "embeddingModel"],
       "properties": {
-        "headSeq": { "type": "integer", "minimum": 0 },
-        "head": { "type": "string", "description": "The refs/audit/runs head commit, or empty when no events exist." },
-        "anchorOk": { "type": "boolean", "description": "True when the head + event count reconcile with the WORM anchor. Interpret together with anchorSource: an anchorOk:true under anchorSource:\"sqlite-only\" is a DEGRADED verdict — the authoritative protected ref could not be verified (broker unavailable), only the SQLite projection was structurally checked." },
-        "anchorSource": { "type": "string", "enum": ["git", "sqlite-only"], "description": "\"git\" when the authoritative refs/audit/runs chain + WORM anchor were verified via the broker; \"sqlite-only\" when the broker/ref was unreachable and only the SQLite projection could be structurally checked (the protected ref itself is UNVERIFIED)." }
+        "chunkCount": { "type": "integer", "minimum": 0, "description": "LanceDB chunk rows in the search table (0 when the table/directory is absent — not-configured is not a failure)." },
+        "staleCount": { "type": "integer", "minimum": 0, "description": "Notes whose content hash changed since their chunks were embedded (drives index-not-stale)." },
+        "embeddingModel": { "type": "string", "minLength": 1, "description": "The configured embedding model id." }
       }
+    },
+    "sync": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pendingChangedCount", "pendingNewCount", "pendingDroppedCount", "pendingMovedCount"],
+      "properties": {
+        "pendingChangedCount": { "type": "integer", "minimum": 0, "description": "Notes whose on-disk hash ≠ projection content_hash (would reindex on the next sync)." },
+        "pendingNewCount": { "type": "integer", "minimum": 0, "description": "Working-tree notes with no projection row (would index fresh)." },
+        "pendingDroppedCount": { "type": "integer", "minimum": 0, "description": "Projection rows with no backing file (would purge cross-store)." },
+        "pendingMovedCount": { "type": "integer", "minimum": 0, "description": "Pure moves — same id + hash, new path (would update file_path in place, no re-embed)." }
+      }
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "ok", "detail"],
+        "properties": {
+          "name": { "enum": ["vault-reachable", "git-healthy", "provider-key-present", "index-not-stale", "migrations-current"] },
+          "ok": { "type": "boolean" },
+          "detail": { "type": ["string", "null"], "description": "Human remediation hint on failure; null when ok." }
+        }
+      },
+      "description": "The retained doctor probes — exactly the five names above, each exactly once. vault-reachable fails (with the structural reason) when the vault holds a structurally unreconcilable note — invalid frontmatter, unreadable file, duplicate stable id — in which case the sync pending counts read zero (the id→note map is unreliable); the diagnostic surface degrades at exit 0 rather than dying where sync (a writer) fail-closes."
     }
   },
   "examples": [
     {
       "command": "status",
-      "openRuns": {},
-      "jobs": { "queued": 0, "failed": 0 },
-      "quarantineCount": 0,
-      "backup": { "watermarkSeq": 907, "coveredSeq": 907, "healthy": true },
-      "audit": { "headSeq": 907, "head": "a1b2c3d4", "anchorOk": true, "anchorSource": "git" }
+      "ok": true,
+      "vault": { "path": "/Users/aryeh/Code/Vaults/main-vault", "headSha": "5f3a581aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "dirty": true, "noteCount": 210 },
+      "db": { "schemaVersion": 13, "noteCount": 210, "sectionCount": 1647, "linkCount": 402 },
+      "index": { "chunkCount": 1647, "staleCount": 0, "embeddingModel": "gemini-embedding-001" },
+      "sync": { "pendingChangedCount": 2, "pendingNewCount": 0, "pendingDroppedCount": 0, "pendingMovedCount": 1 },
+      "checks": [
+        { "name": "vault-reachable", "ok": true, "detail": null },
+        { "name": "git-healthy", "ok": true, "detail": null },
+        { "name": "provider-key-present", "ok": true, "detail": null },
+        { "name": "index-not-stale", "ok": true, "detail": null },
+        { "name": "migrations-current", "ok": true, "detail": null }
+      ]
     },
     {
       "command": "status",
-      "openRuns": { "review-pending": 1 },
-      "jobs": { "queued": 3, "failed": 1 },
-      "quarantineCount": 2,
-      "backup": { "watermarkSeq": 811, "coveredSeq": 907, "healthy": false },
-      "audit": { "headSeq": 907, "head": "a1b2c3d4", "anchorOk": true, "anchorSource": "git" }
+      "ok": false,
+      "vault": { "path": "/tmp/vault", "headSha": "", "dirty": false, "noteCount": 0 },
+      "db": { "schemaVersion": 0, "noteCount": 0, "sectionCount": 0, "linkCount": 0 },
+      "index": { "chunkCount": 0, "staleCount": 0, "embeddingModel": "gemini-embedding-001" },
+      "sync": { "pendingChangedCount": 0, "pendingNewCount": 0, "pendingDroppedCount": 0, "pendingMovedCount": 0 },
+      "checks": [
+        { "name": "vault-reachable", "ok": true, "detail": null },
+        { "name": "git-healthy", "ok": false, "detail": "the vault is not a git repository (or HEAD is unborn)" },
+        { "name": "provider-key-present", "ok": false, "detail": "no ATLAS_GEMINI_API_KEY env var and no Keychain item `atlas-gemini-api-key`" },
+        { "name": "index-not-stale", "ok": true, "detail": null },
+        { "name": "migrations-current", "ok": false, "detail": "pending migration(s): 0001_core, 0003_provenance, 0004_claims, 0005_ledger_finalize, 0013_links_v2 — run `brain db migrate` (status never auto-applies)" }
+      ]
     }
   ],
   "x-atlas-contract": {
@@ -68,26 +104,25 @@
     "phase": 1,
     "privilege": "shared",
     "idempotency": "none",
-    "executionClass": "audited-read",
-    "summary": "Live-state summary: open runs, jobs, quarantine, backup + audit health.",
+    "executionClass": "read",
+    "summary": "The v2 merged read surface: vault/db/index/sync sub-objects + the five retained health probes; exit 0 whenever a payload is produced (including ok:false), exit 2 only on an unresolvable vault/config.",
     "args": [],
     "flags": [],
     "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
-    "sideEffects": [
-      "an executed run emits exactly one run.readonly git-ref audit event (Tier-0 read)"
-    ],
+    "locks": [],
+    "sideEffects": [],
     "prohibitedEffects": [
-      "no vault, projection, or ledger-mutation write",
-      "no git branch/worktree/canonical change",
-      "no more than one terminal run.readonly event per run"
+      "creating the ledger DB file or applying any migration (a pending migration is a failed migrations-current check at exit 0, never an auto-apply)",
+      "taking the vault lock (read-only; never blocks or is blocked by a writer)",
+      "any git, projection, or index write",
+      "resolving the provider key (the presence probe never reads the key material)"
     ],
-    "locks": [{ "scope": "shared", "mode": "shared" }],
     "exitCodes": [0, 2, 4, 5],
     "errorCodes": [
-      { "code": "usage", "exit": 5, "when": "unknown flag/argument or malformed invocation" },
+      { "code": "usage", "exit": 5, "when": "any flag or argument is supplied" },
+      { "code": "vault-error", "exit": 2, "when": "the vault path does not exist or the working tree cannot be read at all — no payload is possible. (A structurally-broken NOTE inside a readable vault is NOT this: it degrades to a failed vault-reachable check at exit 0.)" },
       { "code": "config-invalid", "exit": 2, "when": "brain.config.yaml fails schema validation" },
-      { "code": "vault-error", "exit": 2, "when": "the configured vault/repo is missing or unreadable" },
-      { "code": "internal", "exit": 4, "when": "unexpected internal failure while gathering state" }
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure" }
     ],
     "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
   }

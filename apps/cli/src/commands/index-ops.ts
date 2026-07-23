@@ -105,8 +105,9 @@ export function noteFencesForNotes(store: Store, noteIds: string[]): NoteFenceIn
 }
 
 /** Open the LanceDB search table, or `null` when the directory/table is absent — the
- * contract's `not-configured` (never a failure) for the read-only status path. */
-async function openTableOrNull(ctx: RunContext, cfg: IndexingConfig): Promise<SearchTable | null> {
+ * contract's `not-configured` (never a failure) for the read-only status path.
+ * Exported for the v2 merged `status` (#332), which folds the `index status` read. */
+export async function openTableOrNull(ctx: RunContext, cfg: IndexingConfig): Promise<SearchTable | null> {
   const dir = resolvePath(ctx, ctx.config.config.lancedb.dir);
   try {
     const conn = await lancedb.connect(dir);

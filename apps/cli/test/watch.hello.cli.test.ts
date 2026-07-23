@@ -84,8 +84,10 @@ describe.skipIf(!existsSync(BIN))("brain watch --once (real child)", () => {
   const run = (args: string[], cwd: string) =>
     spawnSync(process.execPath, [BIN, ...args], { cwd, encoding: "utf8", env: { ...process.env, NO_COLOR: "1" } });
 
-  it("emits exactly one schema-conformant watch.hello and exits 0; snapshot agrees with status --json", () => {
-    // Run `watch --once` BEFORE `status` — status's Tier-0 audit append moves the head.
+  it("emits exactly one schema-conformant watch.hello and exits 0", () => {
+    // NB: the v1 "snapshot agrees with status --json" parity half was RETIRED with
+    // the v1 status surface (#332) — the v2 merged `status` no longer carries the
+    // openRuns/jobs/backup/audit snapshot (`watch` itself retires in #333).
     const w = run(["watch", "--json", "--once"], h.root);
     expect(w.status, w.stdout + w.stderr).toBe(0);
     const lines = w.stdout.trim().split("\n");
@@ -97,17 +99,6 @@ describe.skipIf(!existsSync(BIN))("brain watch --once (real child)", () => {
     expect(hello.resume).toEqual({ auditHeadSeq: -1 }); // empty ledger — the −1 seed convention
     expect(hello.replay).toBeUndefined();
     expect(hello.config).toEqual({ pollMs: 500, heartbeatSeconds: 30 });
-
-    const s = run(["status", "--json"], h.root);
-    expect(s.status, s.stdout + s.stderr).toBe(0);
-    const status = JSON.parse(s.stdout.trim().split("\n")[0]!);
-    // Shared keys agree (exclude audit.headSeq/head — the audited read moves them).
-    expect(hello.snapshot.openRuns).toEqual(status.openRuns);
-    expect(hello.snapshot.jobs).toEqual(status.jobs);
-    expect(hello.snapshot.quarantineCount).toEqual(status.quarantineCount);
-    expect(hello.snapshot.backup).toEqual(status.backup);
-    expect(hello.snapshot.audit.anchorOk).toEqual(status.audit.anchorOk);
-    expect(hello.snapshot.audit.anchorSource).toEqual(status.audit.anchorSource);
     expect(hello.snapshot.daemons.broker.reachable).toBe(true); // harness broker is live
   }, 30_000);
 

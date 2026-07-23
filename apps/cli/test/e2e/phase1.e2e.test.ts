@@ -414,19 +414,21 @@ describe("phase-1 exit surface (inspect / doctor / status + audit wiring)", () =
     expect(auditCount(c, "db.backup")).toBe(0);
   });
 
-  it("status --json exits 0, is schema-valid, shows the watermark, and emits one run.readonly", async () => {
+  it("status --json exits 0, is schema-valid (v2 merged surface), and emits NO run event", async () => {
+    // v2 (#332): `status` is the merged read surface — vault/db/index/sync
+    // sub-objects + the retained probes. It is daemon-free and appends NO audit
+    // event (the v1 Tier-0 run.readonly is retired with the audit machinery).
     const before = auditCount(c, "run.readonly");
     const r = await cli(c, ["status", "--json"]);
     expect(r.code).toBe(0);
     const out = JSON.parse(r.out);
     assertSchema("status", out);
     expect(out.command).toBe("status");
-    // D12: the watermark is shown.
-    expect(out.backup).toBeDefined();
-    expect(typeof out.backup.watermarkSeq).toBe("number");
-    expect(typeof out.backup.coveredSeq).toBe("number");
-    expect(typeof out.backup.healthy).toBe("boolean");
-    expect(auditCount(c, "run.readonly")).toBe(before + 1);
+    expect(out.vault).toBeDefined();
+    expect(out.db).toBeDefined();
+    expect(out.index).toBeDefined();
+    expect(out.sync).toBeDefined();
+    expect(auditCount(c, "run.readonly")).toBe(before);
   });
 
   it("db rebuild emits EXACTLY one run.projection (cardinality)", async () => {
@@ -512,75 +514,11 @@ describe("phase-1 status/doctor byte-identity regression goldens (anchor-probe r
   const auditAnchorCheck = (out: { checks: { id: string }[] }): unknown =>
     out.checks.find((x) => x.id === "audit-anchor");
 
-  // ---- status --json — full-envelope goldens -----------------------------
-
-  const STATUS_HEALTHY = {
-    command: "status",
-    openRuns: {},
-    jobs: { queued: 0, failed: 0 },
-    quarantineCount: 0,
-    backup: { watermarkSeq: 0, coveredSeq: 0, healthy: true },
-    audit: { headSeq: 0, head: "", anchorOk: true, anchorSource: "git" },
-  };
-  // The three degraded broker states collapse to ONE identical sqlite-only summary
-  // (status carries no verdict detail, so transport-fail == bad_request == down).
-  const STATUS_DEGRADED = {
-    ...STATUS_HEALTHY,
-    audit: { headSeq: 0, head: "", anchorOk: true, anchorSource: "sqlite-only" },
-  };
-  // COMPLETE raw stdout goldens — `emitJson` is `JSON.stringify(obj) + "\n"`, so
-  // asserting the raw string (not a parsed-object toEqual) also pins KEY ORDER and
-  // catches any unrelated-envelope drift a structural compare would miss.
-  const STATUS_HEALTHY_RAW = `${JSON.stringify(STATUS_HEALTHY)}\n`;
-  const STATUS_DEGRADED_RAW = `${JSON.stringify(STATUS_DEGRADED)}\n`;
-
-  it("status --json is byte-identical to the git-verified golden when the broker answers", async () => {
-    const r = await cli(c, ["status", "--json"]);
-    expect(r.code).toBe(0);
-    assertSchema("status", JSON.parse(r.out));
-    expect(r.out).toBe(STATUS_HEALTHY_RAW);
-  });
-
-  it("status --json degrades to the SAME sqlite-only golden when the broker is unreachable", async () => {
-    await c.server.close();
-    const r = await cli(c, ["status", "--json"]);
-    expect(r.code).toBe(0);
-    expect(r.out).toBe(STATUS_DEGRADED_RAW);
-    // Restart so afterEach's close() has a live server to tear down cleanly.
-    c.server = await startBrokerServer(c.service, c.server.socketPath);
-  });
-
-  // A failed RPC and a broker.bad_request refusal both degrade `status` to the SAME
-  // sqlite-only golden (status carries no verdict detail). Each runs on its OWN fresh
-  // 0-event ledger — a single prior status would commit a `run.readonly` and move the
-  // sqlite head — so byte-identity across the two is asserted transitively via the
-  // shared STATUS_DEGRADED golden.
-  it("status --json degrades to the sqlite-only golden on a failed RPC (transport, connected-but-errors)", async () => {
-    const restore = patchChainStatus(transportError);
-    try {
-      const r = await cli(c, ["status", "--json"]);
-      expect(r.code).toBe(0);
-      expect(r.out).toBe(STATUS_DEGRADED_RAW);
-    } finally {
-      restore();
-    }
-  });
-
-  it("status --json degrades to the SAME sqlite-only golden on a broker.bad_request refusal (protocol-error, not fatal here)", async () => {
-    // The broker-owned `broker.bad_request` (protocol-error) — which ONLY `watch`
-    // treats as fatal — degrades `status` exactly like a failed RPC. Pinned to a
-    // refusal `@atlas/broker` itself mints (the drift guard), not a hand-built literal.
-    const restore = patchChainStatus(() => {
-      throw badRequestRefusal("injected malformed success");
-    });
-    try {
-      const r = await cli(c, ["status", "--json"]);
-      expect(r.code).toBe(0);
-      expect(r.out).toBe(STATUS_DEGRADED_RAW);
-    } finally {
-      restore();
-    }
-  });
+  // NB: the v1 `status --json` full-envelope goldens (broker-state degradation:
+  // git-verified / unreachable / failed-RPC / bad_request) were RETIRED with the
+  // v1 status surface (#332) — the v2 merged `status` is daemon-free and carries
+  // no broker-derived audit verdict, so there is no broker state to golden. The
+  // doctor half below still exercises the #176 anchor-probe refactor.
 
   // ---- doctor --json — determinism + audit-anchor check goldens ----------
 

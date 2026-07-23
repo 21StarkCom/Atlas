@@ -14,7 +14,7 @@ contains backticked words. The text after the em dash is descriptive only.
 # Health & diagnostics (Phase 1)
 `inspect` — read-only structural summary of the vault + store.
 `doctor` — environment/permission/lock/backup health checks; `--reclaim-locks` for dead-pid locks.
-`status` — read-only run/job/quarantine/backup/audit summary (Tier-0; emits run.readonly).
+`status` — the v2 merged read surface: vault/db/index/sync sub-objects + the retained health probes (absorbs doctor, db status, index status, sync status).
 
 # Database / ledger (Phase 1)
 `db status` — projection + ledger + migration status.
