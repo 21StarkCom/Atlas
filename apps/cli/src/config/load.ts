@@ -3,8 +3,9 @@
  * env overrides, and return a typed `AtlasConfig` (Task 1.2 / #18). Any failure throws
  * `ConfigError` (exit code 2) naming the offending file + key.
  */
-import { readFileSync } from "node:fs";
-import { join, isAbsolute } from "node:path";
+import { readFileSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, isAbsolute, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { canonicalSerialize } from "@atlas/contracts";
 import {
@@ -16,6 +17,38 @@ import {
 } from "./schema.js";
 
 const CONFIG_BASENAME = "brain.config.yaml";
+
+/**
+ * Env var (Phase-5 task 5-1) naming the intended vault target. When present,
+ * {@link loadConfig} rejects a config whose resolved `vault.path` canonicalizes to a
+ * DIFFERENT path — so the live drive can NEVER silently run against a stale v1 target.
+ * INERT when unset (every fixture/test that does not set it is unaffected). It is NOT a
+ * config-override key: `ATLAS_EXPECT_VAULT` → `expect_vault` matches no config section,
+ * so `applyEnvOverrides` skips it.
+ */
+export const EXPECT_VAULT_ENV = "ATLAS_EXPECT_VAULT";
+
+/** Expand a leading `~`/`~/` against the operator home (env `HOME` wins, else `os.homedir()`). */
+function expandHome(p: string, env: NodeJS.ProcessEnv): string {
+  const home = env.HOME ?? homedir();
+  if (p === "~") return home;
+  if (p.startsWith("~/")) return join(home, p.slice(2));
+  return p;
+}
+
+/**
+ * Canonicalize a vault path for comparison: expand `~`, resolve to an absolute path
+ * (relative paths against `cwd`), and `realpath` it when it exists on disk (collapsing
+ * symlinks). A path not yet on disk falls back to its normalized absolute form.
+ */
+function canonicalVaultPath(p: string, cwd: string, env: NodeJS.ProcessEnv): string {
+  const abs = resolve(cwd, expandHome(p, env));
+  try {
+    return realpathSync(abs);
+  } catch {
+    return abs;
+  }
+}
 
 export interface LoadedConfig {
   config: AtlasConfig;
@@ -148,6 +181,22 @@ export function loadConfig(
       `config validation failed${key ? ` at \`${key}\`` : ""}: ${issue?.message ?? "unknown"}`,
       location,
     );
+  }
+
+  // Phase-5 stale-target guard: when the operator PINS the intended vault via
+  // ATLAS_EXPECT_VAULT, reject a config whose vault.path resolves elsewhere — the live
+  // drive must not silently run against a stale v1 target (plan Phase-5 task 1). Inert
+  // when the env is unset, so every fixture/test resolves its own path unaffected.
+  const expected = env[EXPECT_VAULT_ENV];
+  if (expected !== undefined && expected.length > 0) {
+    const want = canonicalVaultPath(expected, cwd, env);
+    const got = canonicalVaultPath(parsed.data.vault.path, cwd, env);
+    if (want !== got) {
+      throw new ConfigError(
+        `vault.path resolves to ${got} but ${EXPECT_VAULT_ENV} pins ${want} — refusing to run against a stale target (point vault.path at the intended vault or clear ${EXPECT_VAULT_ENV})`,
+        { file: path, key: "vault.path" },
+      );
+    }
   }
 
   const hash = `sha256:${sha256Hex(canonicalSerialize(parsed.data))}`;

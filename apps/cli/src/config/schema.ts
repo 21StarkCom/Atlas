@@ -6,7 +6,19 @@
  * Modules consume `AtlasConfig`, never literals. Validation is strict: unknown keys
  * and malformed values fail startup with a `ConfigError` (plan §2.5 exit code 2).
  */
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { z } from "zod";
+
+/**
+ * The default vault path (Phase-5 task 5-1) — the real working tree the v2 live drive
+ * targets: `~/Code/Vaults/main-vault`, already graduated (210 notes, 2026-07-17). A
+ * `brain.config.yaml` that omits `vault.path` resolves here, so config points at the real
+ * vault by default rather than a stale v1 target. The live drive additionally PINS the
+ * intended target with `ATLAS_EXPECT_VAULT` (see `config/load.ts` `EXPECT_VAULT_ENV`),
+ * which fail-closed-rejects a config whose `vault.path` canonicalizes elsewhere.
+ */
+export const DEFAULT_VAULT_PATH = join(homedir(), "Code", "Vaults", "main-vault");
 
 /** Content sensitivity classes (plan §2.5; default `internal` for unlabeled content). */
 export const Sensitivity = z.enum(["public", "internal", "confidential", "restricted"]);
@@ -25,7 +37,9 @@ const NoteGlobs = z.array(z.string().min(1)).min(1, "vault.note_globs needs at l
 
 const VaultConfig = z
   .object({
-    path: z.string().min(1),
+    // Defaults to the real working tree (DEFAULT_VAULT_PATH) — a config omitting the path
+    // points at the graduated vault, not a stale v1 target (Phase-5 task 5-1).
+    path: z.string().min(1).default(DEFAULT_VAULT_PATH),
     note_globs: NoteGlobs.default(["**/*.md"]),
   })
   .strict();
