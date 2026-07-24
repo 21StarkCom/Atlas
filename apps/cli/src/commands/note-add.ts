@@ -11,7 +11,8 @@
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { addNote, NoteAddRejectedError } from "../ingest/note-add.js";
-import { buildCaptureDeps, buildGuard } from "../ingest/wiring.js";
+import { openWorkflowStore } from "../workflows/index.js";
+import { ledgerDbPath } from "./paths.js";
 
 interface ParsedArgs {
   readonly path: string;
@@ -52,14 +53,13 @@ function parseArgs(argv: string[]): ParsedArgs {
 
 async function noteAdd(ctx: RunContext): Promise<number> {
   const args = parseArgs(ctx.argv);
-  // PREFLIGHT guard is built here; addNote runs the scan-before-persist BEFORE
-  // assembling any mutating dep (DEFECT #1 ordering, same as source add).
-  const guard = buildGuard(ctx);
-  const deps = buildCaptureDeps(ctx, "note add", args.idempotencyKey, "note");
-
+  // The mutation order (runMutation, inside addNote) owns the vault lock across
+  // grounding → apply → commit → refresh — the handler must NOT pre-acquire it.
+  // The secret-scan gate is retired (v2, ADR-0003); the note body is persisted as authored.
+  const store = openWorkflowStore({ path: ledgerDbPath(ctx) });
   let result;
   try {
-    result = await addNote({ path: args.path, dest: args.dest, guard, deps });
+    result = await addNote(ctx, { path: args.path, dest: args.dest, deps: { store } });
   } catch (e) {
     if (e instanceof NoteAddRejectedError) {
       throw new CliError({
@@ -71,6 +71,8 @@ async function noteAdd(ctx: RunContext): Promise<number> {
       });
     }
     throw e;
+  } finally {
+    store.close();
   }
 
   const out = {

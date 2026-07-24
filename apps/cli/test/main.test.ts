@@ -8,7 +8,6 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCli, type CommandHandler, type RunContext } from "../src/main.js";
-import { SecretDetectedError } from "@atlas/scan";
 import { CliError, EXIT } from "../src/errors/envelope.js";
 import { parseArgv, loadRegistry } from "../src/router.js";
 
@@ -48,17 +47,15 @@ function run(
 
 describe("parseArgv", () => {
   it("matches multi-word commands longest-first", () => {
-    expect(parseArgv(["source", "trust", "promote", "x"], registry).command).toBe(
-      "source trust promote",
-    );
-    expect(parseArgv(["db", "status"], registry).command).toBe("db status");
+    expect(parseArgv(["evidence", "resolve", "x"], registry).command).toBe("evidence resolve");
+    expect(parseArgv(["db", "migrate"], registry).command).toBe("db migrate");
     expect(parseArgv(["status"], registry).command).toBe("status");
   });
 
   it("strips global flags anywhere and forwards the rest in ORIGINAL order", () => {
-    const p = parseArgv(["--json", "db", "status", "--foo", "bar"], registry);
+    const p = parseArgv(["--json", "db", "migrate", "--foo", "bar"], registry);
     expect(p.flags.json).toBe(true);
-    expect(p.command).toBe("db status");
+    expect(p.command).toBe("db migrate");
     // Order-sensitive: `--foo bar` must not be reordered to `bar --foo`.
     expect(p.rest).toEqual(["--foo", "bar"]);
   });
@@ -101,7 +98,7 @@ describe("runCli", () => {
     const { code, out } = await run(["--help"]);
     expect(code).toBe(EXIT.OK);
     expect(out).toContain("brain — Atlas CLI");
-    expect(out).toContain("db status");
+    expect(out).toContain("db migrate");
   });
 
   it("dispatches a registered handler and returns its exit code", async () => {
@@ -143,32 +140,14 @@ describe("runCli", () => {
           code: "backup-unhealthy",
           message: "blocked",
           hint: "run backup",
-          exitCode: EXIT.ACTION_REQUIRED,
+          exitCode: EXIT.CONFIG,
           retryable: true,
         });
       },
     });
-    expect(code).toBe(EXIT.ACTION_REQUIRED);
+    expect(code).toBe(EXIT.CONFIG);
     const env = JSON.parse(out);
     expect(env).toMatchObject({ code: "backup-unhealthy", retryable: true });
-  });
-
-  it("maps a scan guard's SecretDetectedError to the secret-scan exit code (3)", async () => {
-    const { code, out } = await run(["status", "--json"], {}, {
-      status: () => {
-        throw new SecretDetectedError(
-          "note.md",
-          [{ ruleId: "aws-access-key-id", title: "AWS access key id", severity: "high", startOffset: 0, endOffset: 20, redactedPreview: "‹redacted:20 chars›" }],
-          "pre-persistence",
-        );
-      },
-    });
-    expect(code).toBe(EXIT.SECRET_SCAN);
-    const env = JSON.parse(out);
-    expect(env.code).toBe("secret-scan");
-    expect(env.message).toContain("note.md");
-    // The redacted preview must not leak the raw secret through the envelope.
-    expect(out).not.toContain("AKIA");
   });
 
   it("honours --json for an argument-PARSE failure (JSON envelope, not human text)", async () => {

@@ -1,8 +1,12 @@
 # CLAUDE.md — Atlas
 
-Atlas is an **LLM-native second-brain wiki engine**: a pnpm/TypeScript monorepo whose CLI binary is **`brain`**. Markdown is the memory; SQLite is the operational projection; LanceDB is the retrieval projection; Git is the safety/audit mechanism; the LLM is a reasoning component, never the database. It was built in **six PR-gated phases** (~96 commits, issues/PRs #1–#161) against one design SSOT, each phase opening with a *contracts gate* that lands the normative spec/schema before any feature code. The defining trait is **security-first, contract-first, fail-closed** construction — privilege-separated brokers, scan-before-persist, a WORM audit anchor, and machine-checked SSOT registries.
+Atlas is an **LLM-native second-brain wiki engine**: a pnpm/TypeScript monorepo whose CLI binary is **`brain`**. Markdown is the memory; SQLite is the operational + derived projection; LanceDB is the retrieval projection; **git is the only safety mechanism**; the LLM is a reasoning component, never the database.
 
-This file is the constitution — read it, then reach for the directory's own `CLAUDE.md` (every package has one) before guessing.
+**Atlas v2 is a single process.** `brain <cmd>` opens the vault working tree, the SQLite projection, and the LanceDB index; mutates notes; commits to git; exits. **One commit per applied ChangePlan on `refs/heads/main` is the audit trail *and* the undo** (`git revert <sha>` + `brain sync`). No brokers, no daemons, no OS identities, no privilege boundary except git itself.
+
+v2 is a **deliberate in-place demolition** of the v1 security architecture — the pivot is **[ADR-0003](docs/adr/0003-retire-security-architecture.md)**. V1 was built security-first, contract-first, fail-closed over six PR-gated phases (privilege-separated brokers, scan-before-persist, a signed audit ledger, trust tiers, graduation); that fortress guarded a single-operator, single-machine playground against a threat model that does not exist here, and it blocked the agentic layer it was meant to protect. Every retired subsystem is revivable **only** from the **`v1-fortress`** annotated tag (which peels to `main` just before the first demolition PR) — code + provisioning, **not** migrated data.
+
+This file is the constitution — read it, then reach for the directory's own `CLAUDE.md` (every surviving package has one) before guessing.
 
 ## Monorepo map
 
@@ -10,71 +14,71 @@ This file is the constitution — read it, then reach for the directory's own `C
 
 | Path | What it is / reach for it when… |
 |------|--------------------------------|
-| [`apps/cli/CLAUDE.md`](apps/cli/CLAUDE.md) | `@atlas/cli` — the single app, the `brain` binary. Router, config, render, errors, diag, and every command handler + the workflow/graduation/quarantine/trust/retrieval engine. |
-| [`packages/contracts/CLAUDE.md`](packages/contracts/CLAUDE.md) | `@atlas/contracts` — zero-dep-besides-zod **leaf**. Stable IDs, `atlas-jcs-v1` canonical serialization, identity-key algorithm, the 17-op ChangePlan, audit/authorization Zod mirrors, shared DTOs. Byte-identity across the CLI↔broker seam. |
-| [`packages/scan/CLAUDE.md`](packages/scan/CLAUDE.md) | `@atlas/scan` — the fail-closed secret detector (leaf). One versioned engine, two guards (`PrePersistenceGuard`, `GeneratedArtifactGuard`), quarantine-before-throw. |
-| [`packages/sources/CLAUDE.md`](packages/sources/CLAUDE.md) | `@atlas/sources` — the sandboxed parser worker (macOS Seatbelt / Linux userns+seccomp+cgroup) + md/txt/pdf/html normalizers. Scan-before-persist inside the jail (D15). |
-| [`packages/sqlite-store/CLAUDE.md`](packages/sqlite-store/CLAUDE.md) | `@atlas/sqlite-store` — persistence core. Migration runner, projection rebuild, the §2.8 ledger write protocol, AEAD backup/restore, `db verify`. |
-| [`packages/lancedb-index/CLAUDE.md`](packages/lancedb-index/CLAUDE.md) | `@atlas/lancedb-index` — chunk → embed → fenced write; FTS + vector retrieval layers; staleness/verify/repair/rebuild; the recall@10 + MRR eval harness. |
-| [`packages/models/CLAUDE.md`](packages/models/CLAUDE.md) | `@atlas/models` — the CLI-side typed IPC client for the egress broker. Capability minting + `model_calls` ledger persistence. Holds **no** credential or network. |
-| [`packages/broker/CLAUDE.md`](packages/broker/CLAUDE.md) | `@atlas/broker` — the security kernel. Integration broker (`atlas-broker`) + egress broker (`atlas-egress`), two OS identities, two socket daemons. Sole protected-ref mutator + sole credential/network holder. |
-| [`packages/git/CLAUDE.md`](packages/git/CLAUDE.md) | `@atlas/git` — typed git plumbing for the **agent side only**; protected-ref writes are structurally impossible (`runGit` unexported). |
-| [`packages/jobs/CLAUDE.md`](packages/jobs/CLAUDE.md) | `@atlas/jobs` — the SQLite-backed durable queue; sole owner of `jobs`/`job_attempts` + their migrations. |
-| [`packages/testing/CLAUDE.md`](packages/testing/CLAUDE.md) | `@atlas/testing` — the `withFixtureVault` harness (copy a fixture into a throwaway git repo, tear down on exit). |
-| [`tools/CLAUDE.md`](tools/CLAUDE.md) | The retained **CLI-contract harness** — registry SSOT, drift generators, the mega-gate `contract-lint.test.ts`, the fixture authorization signer. Never reverted. |
-| [`provisioning/CLAUDE.md`](provisioning/CLAUDE.md) | The one human-led, `sudo`-requiring step: OS identities, groups, key custody, WORM anchor, sockets, sandbox prerequisites. |
+| [`apps/cli/CLAUDE.md`](apps/cli/CLAUDE.md) | `@atlas/cli` — the single app, the `brain` binary. Router, config, render, errors, diag, and every command handler + the synthesis / evidence / retrieval / sync engine. |
+| [`packages/contracts/CLAUDE.md`](packages/contracts/CLAUDE.md) | `@atlas/contracts` — zero-dep-besides-zod **leaf**. Stable IDs, `atlas-jcs-v1` canonical serialization, the identity-key algorithm, the **12-op ChangePlan** (`CHANGE_PLAN_OPS` SSOT, incl. `CreateRelationship`/`SetLink`), shared DTOs. |
+| [`packages/sources/CLAUDE.md`](packages/sources/CLAUDE.md) | `@atlas/sources` — the md/txt/pdf/html normalizers. v2 (#334): the sandbox jail + scan guard are retired; `normalize()` parses **in-process**. |
+| [`packages/sqlite-store/CLAUDE.md`](packages/sqlite-store/CLAUDE.md) | `@atlas/sqlite-store` — persistence core. Migration runner (through **0015**), projection rebuild from the vault, `db migrate`/`db rebuild`. Plain SQLite — no ledger, no backup/restore. |
+| [`packages/lancedb-index/CLAUDE.md`](packages/lancedb-index/CLAUDE.md) | `@atlas/lancedb-index` — chunk → embed → write; FTS + vector retrieval layers; staleness/rebuild; the recall@10 + MRR eval harness. |
+| [`packages/models/CLAUDE.md`](packages/models/CLAUDE.md) | `@atlas/models` — the **direct in-process Gemini client** (v2): lazy env→Keychain key resolution (`ATLAS_GEMINI_API_KEY` else the `atlas-gemini-api-key` Keychain item), `model_calls` persistence, the prompt registry. No egress broker, no capability. |
+| [`packages/git/CLAUDE.md`](packages/git/CLAUDE.md) | `@atlas/git` — plain typed git plumbing. `commitPaths` writes one ChangePlan per commit **directly onto `refs/heads/main`** (v2 has no privilege boundary — the v1 unexported-`runGit` impossibility property is moot). |
+| [`packages/jobs/CLAUDE.md`](packages/jobs/CLAUDE.md) | `@atlas/jobs` — the minimal SQLite-backed queue; sole owner of `jobs`/`job_attempts` + their migrations. The `jobs run` aggregate is the only path to exit `7`. |
+| [`packages/testing/CLAUDE.md`](packages/testing/CLAUDE.md) | `@atlas/testing` — the `withFixtureVault` harness (copy a fixture into a throwaway git repo, tear down on exit). The fixture-vault-in-a-git-repo *is* the v2 shape. |
+| [`tools/CLAUDE.md`](tools/CLAUDE.md) | The retained **CLI-contract harness** — registry SSOT, drift generators, the mega-gate `contract-lint.test.ts`, plus the v2 `no-retired-reference.test.ts` + `deprovision-allowlist.test.ts` gates. |
+| [`provisioning/CLAUDE.md`](provisioning/CLAUDE.md) | The one human-run, `sudo`-requiring step that survives: **`deprovision-macos.sh` + `deprovision-allowlist.txt`** — deletes retired v1 host state (`atlas-*` users/groups, sockets, launchd services, the anchor dir, retired Keychain items) and **preserves `atlas-gemini-api-key`**. |
 | [`docs/CLAUDE.md`](docs/CLAUDE.md) | The doc map + conventions — where each spec/plan/ADR/retro lives and which are generated. |
 | [`fixtures/CLAUDE.md`](fixtures/CLAUDE.md) | The committed test corpus — which fixture exercises what, which tests consume it. |
-| [`console/CLAUDE.md`](console/CLAUDE.md) | Atlas Console (SP-2) — a SwiftUI macOS app, **outside the pnpm workspace** (its own `swift build`/`swift test`). Pure read-face over `brain watch --json` + privileged-flow driver; opens no broker socket, imports no atlas internal package. |
-| [`console/signer/CLAUDE.md`](console/signer/CLAUDE.md) | `atlas-signer` (SP-3) — the standalone Secure-Enclave P-256 authorization signer. Separate SwiftPM package, ad-hoc-built, **outside the pnpm workspace + not built in CI**. The one component that touches the SE approver key; re-derives + refuses on payload mismatch; its own exit table. |
 
-Public face + runbook: [`README.md`](README.md) and [`docs/install.md`](docs/install.md) (provision → verify).
+Public face: [`README.md`](README.md).
 
 ## Build & test
 
 ```bash
-pnpm install                              # Node ≥ 24, pnpm ≥ 11
+pnpm install                              # Node ≥ 24, pnpm 11.15.0
 pnpm -r build                             # tsc per package (strict / ESM / NodeNext)
 pnpm -r test                              # vitest per package
 node tools/gen-cli-contract.ts --check    # CLI-contract determinism gate (also `pnpm contract:check`)
 ```
 
 - Deps are pinned **once** in the `catalog:` of `pnpm-workspace.yaml`; packages reference them as `"zod": "catalog:"`. Never add a floating version in a package.
-- **CI** (`.github/workflows/ci.yml`): `ubuntu-latest` + `macos-15` matrix, Node 26 → `sudo -E provisioning/ci/setup.sh` → `pnpm install --frozen-lockfile` → `pnpm -r build` → `pnpm -r test` (with `ATLAS_PROVISIONED=1`, so provisioning-gated suites never skip) → `node tools/gen-cli-contract.ts --check`.
-- **`ATLAS_PROVISIONED=1`** unlocks the real two-UID / key-custody / WORM suites. Without it (local), tests run an in-process subset (in-process `BrokerService` + local fixture vault). `pnpm failpoints:check` gates the crash-recovery matrix (rides `pnpm -r test`, not a separate CI step).
-- The `brain` binary is `apps/cli` `bin.brain → dist/bin.js`. Root resolution walks up for `docs/specs/cli-contract/commands.json`; a packaged install off the repo layout needs `ATLAS_ROOT` set. Full runbook (provision, keys, live drive) in [`docs/install.md`](docs/install.md).
+- **CI** (`.github/workflows/ci.yml`): **zero-provisioning, daemon-free**. `ubuntu-latest` + `macos-15` matrix, Node 26 → `pnpm install --frozen-lockfile` → `pnpm -r build` → `pnpm -r test` → `node tools/gen-cli-contract.ts --check`. **macOS is the only supported target** (the Gemini key is read from the Keychain; env-var override elsewhere); the ubuntu leg is a portability canary for the platform-neutral suite. No two-UID / daemon / key-custody setup exists — the v1 provisioned-only suites are **deleted, not skipped**.
+- `pnpm failpoints:check` gates the mutation-order crash-recovery matrix (rides `pnpm -r test`, not a separate CI step).
+- **Key resolution (no launcher):** at process start `brain` reads `ATLAS_GEMINI_API_KEY` if set (the CI/test override), **else** reads the Keychain item `atlas-gemini-api-key` directly (`security find-generic-password -s atlas-gemini-api-key -w`). Held in-process only — never on disk, in logs, or in git.
+- The `brain` binary is `apps/cli` `bin.brain → dist/bin.js`. Root resolution walks up for `docs/specs/cli-contract/commands.json`; a packaged install off the repo layout needs `ATLAS_ROOT` set.
 
 ## Conventions
 
 - **TypeScript strict / ESM / NodeNext** (`tsconfig.base.json`: `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `verbatimModuleSyntax`, `isolatedModules`). Compile with `tsc` — no runtime type-stripping in prod. Narrow types over `any`. Bash: `set -euo pipefail`, lowercase-with-dashes filenames.
-- **Exit codes** — the binary's `EXIT` set caps at **6**:
+- **Exit codes** — the binary's `EXIT` set (`apps/cli/src/errors/envelope.ts`) is:
 
-  | code | meaning | | code | meaning |
-  |---|---|---|---|---|
-  | `0` | ok | | `4` | internal |
-  | `1` | validation | | `5` | usage |
-  | `2` | config / vault / lock | | `6` | action-required |
-  | `3` | secret-scan | | | |
+  | code | meaning |
+  |---|---|
+  | `0` | ok |
+  | `1` | validation (incl. grounding failure — a dirty edited note) |
+  | `2` | config / vault / lock |
+  | `4` | internal |
+  | `5` | usage |
 
-  The design SSOT names a nominal **`7` (provider-retryable)**; no single-error-envelope command emits it — retryability rides `retryable: true` + `retryAfterMs` on the error envelope at exit 4 or 6. The **one** process path that returns 7 is the `jobs run` batch aggregate (`runner.ts` `aggregateExit` maps a transient-but-exhausted item to 7; the jobs-run schema's `exitCode` enumerates it). Batch commands (`jobs run|retry|cancel`) are also the sole exception to the single error envelope — they emit `{items[], aggregate}`.
+  **`3` (secret-scan) and `6` (action-required) are retired** — no command emits them. The **only** path to `7` (provider-retryable) is the `jobs run` batch aggregate (`runner.ts` `aggregateExit` maps a transient-but-exhausted item to `7`); batch commands (`jobs run`) are also the sole exception to the single error envelope — they emit `{items[], aggregate}`. Otherwise retryability rides `retryable: true` + `retryAfterMs` on the error envelope at exit `4`.
 - **Commits authored `Aryeh Stark <aryeh@21stark.com>`** (set per-repo; never let an `evinced.com` identity land here). **Branch + PR for everything — no direct-to-main, ever.** Every review finding gets posted on the PR (inline or summary) — nothing silently dropped.
 - **Playground, not product.** No semver (`version 0.0.0`, `private: true` everywhere), no rollout ceremony — merge to main when the PR is green. Docs are honest about that posture; that is not licence to be sloppy.
 - **Docs live with the code** under `docs/`, folder-per-type: `adr/` (`NNNN-<topic>.md`, immutable — supersede, don't edit), `specs/` (contracts flat; dated design specs `YYYY-MM-DD-<topic>-…`), `plans/`, `retros/`. **Update docs in the same change** as behavior/structure/command/env-var/ops changes.
 
-## Security model (in brief)
+## Safety model (git is the only boundary)
 
-The privilege boundary is the reason this repo exists. Full contract: [`docs/specs/security-broker-contract.md`](docs/specs/security-broker-contract.md).
+v2 has **no security boundary beyond git history — by design** (single operator, single machine, personal vault). `brain` runs as the invoking user with that user's full filesystem privileges. Full rationale + accepted residual risks: **[ADR-0003](docs/adr/0003-retire-security-architecture.md)**.
 
-- **Two brokers, two OS identities** (plan decision D13). `atlas-broker` is the **sole** protected-ref mutator (canonical `refs/heads/main`, `refs/audit/runs`, trust ledger), the sole audit-append signer, and the WORM-anchor holder. `atlas-egress` is the **sole** provider-credential holder + sole outbound-network process, with **no vault/DB access** (excluded from the `atlas-git` group, D18). The CLI runs as unprivileged `atlas-agent` — network-denied at the UID (D17), never holds the attestation key, never writes a protected ref (`@atlas/git`'s `runGit` is unexported).
-- **Egress quarantine + fail-closed scan.** Every boundary runs the *same* `@atlas/scan` engine; a dirty verdict quarantines the bytes (ciphertext-only, sealed to the CLI) **before** it throws (exit 3). Egress verifies a run-bound capability + per-run byte/token/cost budget, scans request bytes raw and the released response bytes (ADR-0001 — Gemini's `thoughtSignature` made the raw envelope unscanable). Nothing reaches a durable sink before the scan clears it.
-- **Trust tiers + taint.** Trust resolution is fail-closed (default untrusted); taint takes the **floor**, never the average; empty inputs ⇒ untrusted. Risk is **deterministic + monotonic-up** (Tier-3 = review-required); the proposer's advisory tier is never read.
-- **Privileged mutations are broker-authorized, never `--yes`.** `db restore`, `purge`, `graduation migrate --apply/--rollback`, `git approve/rollback`, `source trust promote/revoke`, `quarantine resolve` follow `--export-challenge` → sign → `--authorization <path>`; no authorization ⇒ exit 6. `--yes` explicitly never authorizes.
-- **Graduation** is the fail-closed pipeline that brings a **real** vault onto Atlas: scan (working-tree + full git-history blob scan) → audit → deterministic, byte-exact, resumable migrate/rollback. A history-only credential hard-fails migrate even with a clean working-tree handshake.
-- **Ledger integrity.** `refs/audit/runs` is signed-only, gapless-seq, chained, WORM-anchored; the §2.8 four-step cross-store write (intent → git append → ledger commit → backup+watermark) is crash-safe both directions; a degraded backup **blocks** all ledger-writing runs (`backup-unhealthy`, exit 2) until the watermark catches up (`db restore` stays available).
+- **git is the audit trail *and* the undo.** Every applied ChangePlan is exactly one commit on `refs/heads/main`, touching only that plan's paths. `git log`/`git blame` is the audit; **`git revert <sha>` + `brain sync`** is the remediation (the revert restores the tree; the sync refolds the projection + index — a git-only revert leaves the derived stores stale by design).
+- **The canonical mutation order** (`apps/cli/src/workflows/mutation-order.ts` `runMutation` — every mutating handler wraps it): take the vault lock (advisory `flock`) → assert `HEAD == refs/heads/main` → validate the ChangePlan (`@atlas/contracts`) → ground against the projection → dirty-vault check → capture the touched-path preimage → apply to the working tree → `commitPaths` (pathspec-scoped, touched paths only) → refresh **LanceDB then the SQLite projection** (`content_hash` IS the sync cursor) → release. A thrown apply/commit restores the preimage. Canonical ref **is** `refs/heads/main` — no indirection.
+- **Dirty-vault doctrine.** Reads + `sync` treat a dirty tree as normal input. A mutating command tolerates **unrelated** dirt but fails grounding (exit `1`) if any note it edits/names is dirty — dirty being (on-disk hash ≠ projection `content_hash`) OR (an uncommitted git diff vs HEAD). A pre-existing external git `index.lock` ⇒ exit `2`.
+- **Accepted residual risks** (ADR-0003, both owner-chosen — **do not re-add the retired machinery to "close" them**): (1) agents write **directly** into the real brain; git history is the only undo (one-commit-per-ChangePlan keeps reverts surgical). (2) Ingest is **unsandboxed + unscanned** — externally-sourced PDF/HTML bytes are parsed in-process with the operator's privileges and the in-process Gemini key reachable; the only control is the operator choosing what to `ingest`.
+
+**Retired entirely — do NOT describe any of these as live** (revive only from the `v1-fortress` tag): the integration + egress brokers; all three OS identities + their provisioning daemons; `@atlas/scan` + scan-before-persist + quarantine; trust tiers + taint; the signed audit ledger + the four-step cross-store write protocol + AEAD backup/restore/watermark; the graduation pipeline; authorization challenges + capabilities + per-run budgets; the absorb-cycle sync + canonical-ref indirection; the Atlas Console + `atlas-signer` + `brain watch`. Packages `@atlas/broker` + `@atlas/scan` are deleted.
 
 ## CLI-contract workflow
 
-The command surface is **data-driven and drift-proof**. `docs/specs/cli-contract/commands.json` (version 1, **55 commands, all `implemented:true`**) is the sole owner of command membership / phase / privilege / idempotency. Handlers register at import time; the broker *reads* `privilege`, never re-classifies. See [`tools/CLAUDE.md`](tools/CLAUDE.md) for the full harness.
+The command surface is **data-driven and drift-proof**. `docs/specs/cli-contract/commands.json` (**version 2, 24 commands, all `implemented:true`** — the v2 survivor set, **55 → 24**) is the sole owner of command membership / phase / privilege / idempotency. Handlers register at import time. See [`tools/CLAUDE.md`](tools/CLAUDE.md) for the full harness.
+
+**Folds:** `status` absorbs `doctor` + `db status` + `index status` + `sync status` (a `checks[]` of `vault-reachable`, `git-healthy`, `provider-key-present`, `index-not-stale`); `sync` = `reconcile()` (working tree vs projection, `content_hash` the cursor, no HEAD marker); `index rebuild` absorbs `index repair|status|verify`. **`link` is the one new command** — typed relationships live in the source note's frontmatter `related:` list (`CreateRelationship`, `--predicate`), plain links are body `[[wikilinks]]` (`SetLink`).
 
 - **Add a command:** insert one name-sorted row in `commands.json`, add the matching `` `name` — desc `` line in `cli-surface.fixture.txt` under its phase heading, create `docs/specs/cli-contract/<name-with-spaces→hyphens>.schema.json`, set `implemented`, then `pnpm contract:write`. The registry↔fixture↔schema bijection gates enforce the rest.
 - **Rename:** a one-row diff — change the row `name`, rename the fixture line, rename the schema file to the derived path, regenerate.
@@ -82,23 +86,32 @@ The command surface is **data-driven and drift-proof**. `docs/specs/cli-contract
 
 ## Current state & open work
 
-Six phases done; the full-corpus live drive is done (2026-07-17: 210 notes graduated, 0 refused; `index eval` passed the gate at **recall@10 0.878 / MRR 0.784** on the vector-only fallback — post-#159 the default hybrid config scores **0.911 / 0.830**; thresholds ≥ 0.85 / ≥ 0.70). **SP-2 Atlas Console shipped** (2026-07-20, PR #273 — all 6 console phases + the #257 live drive; the SP-3-gated Touch-ID round trip + manual GUI/VoiceOver passes are the human-led remainder, #286). **SP-3 `atlas-signer` shipped + driven live** (2026-07-20, PR #292 merged `adc7c85`, epic #290 — alg-agile P-256/Secure-Enclave authorization: broker p256 verify + D20-set + presence gate, the `atlas-signer` Swift CLI, `enroll-signer.sh` + R2 doctor check, the `security-broker-contract.md` amendment; #272 re-anchored). **P6 signer half done; #286 stays OPEN for the Console/a11y half** — the prod broker was upgraded to SP-3 and a real Secure-Enclave key (`approver-se-<host>-v1`, `alg p256` + `presence`) authorized a live `source trust promote`→`revoke` round trip via Touch ID (the broker verified a genuine SE p256 signature and applied the effect; vault restored) ([`docs/retros/2026-07-20-atlas-signer-live-drive-retro.md`](docs/retros/2026-07-20-atlas-signer-live-drive-retro.md) — **read it before any signer/Console drive**). The SP-3 signer/broker mechanism needs nothing further; **#286's remainder is the Console GUI round trip (now UNBLOCKED — see #298 below) + the #254 VoiceOver/Full-Keyboard-Access checklist**, both human-led. Every code-level finding from the drive is closed: **#297** (signer/doctor polish) fixed in PR #302; **#298** (Console↔broker reachability) fixed in PR #303 (`998db7b`) via a brain privilege-drop launcher; **#296** (trust read surface) **retracted** — already fixed on main by #218, a stale feature-branch drive binary caused the false symptom. The drive left two human-gated remainders: the `--presence` quarantine grant enrolled but never exercised live, and (post-#303) installing the Console launcher (`provisioning/install-console-launcher.sh`, docs/install.md §5.7) + driving the Console GUI round trip. Open issues:
+Six v1 phases shipped; then the v2 pivot (**ADR-0003**) demolished the security architecture in place across phased PRs: the canonical mutation order + dirty-vault doctrine + canonical-ref removal (#325), the trust-tier / scan-gate / artifact-guard retirement (#326), the v2 reconcile `sync` engine (#329), markdown-derived typed relationships (#331), the shrunk 24-command surface (#333), the in-process source normalizers (#334), the flat vault-derived evidence model (#336/#337), the ledger + AEAD-backup strip (#338), the v2 `source` registry (#339/#340), and Phase-5 config-at-real-vault (#343) + `deprovision-macos.sh` + the allowlist gate (#344). Full-corpus retrieval still clears the normative gate (recall@10 ≥ 0.85 / MRR ≥ 0.70; default hybrid **0.911 / 0.830**).
 
-- **#60** — the live-vault-adoption-sync arc (60-A/60-B, plan `docs/plans/2026-07-19-live-vault-adoption-sync-plan.md`): Phases 1–3 merged (#274/#277/#278 — config-driven canonical ref, `sync_cursors`, scoped reconcile + incremental fold, `index:reconcile` job kind); Phase 4 (#266, merged) adds `sync` + `sync status` + the absorb-cycle engine; Phase 5 (#267, merged) adds `sync reset` — the privileged, broker-authorized tree-reconcile recovery from a divergence/exit-3 halt (accepts an audited history gap; reuses git approve's authorized FF advance, one-line broker change); Phase 6 (#268) closes the ingest→index auto-hook — `com.atlas.sync` (300 s launchd timer, `atlas-agent`) runs `atlas-sync-wrapper.sh` = `brain sync --json` then `brain jobs run --all --json`, with the capability secret fetched from the Keychain and handed to the drain on **fd 3** (never on disk, never in an environment) and the timer installed **disabled** behind a five-gate `services.sh enable-sync` probe. Still owed: the Phase-6 live drive on the real vault, then the deferred slices (60-C purge E2E, 60-D `tools/scale-bench.ts`, 60-E workflow runs on the migrated copy — the real-copy apply stays **human-gated**, D20).
-- **#65** — Ledger/backup DR hardening residuals from the #23 review (seq-allocator rewind on older-cut restore, universal-startup interrupted-restore recovery, deleted/corrupt-live-DB restore, `markCovered` clearing a block early, unhonored retry backoff, `--force-unblock` wrongly needing the AEAD key). Real, not phase-blocking.
+**Persistence shape (v2):** migrations through **0015**. `evidence` = a flat **vault-derived** projection folded from note frontmatter `evidence:` (0014); `source` = an operational registry (0015); `note_links` v2 with a nullable predicate (0013). `db rebuild` regenerates the vault-derived projections (`notes`/`note_identity_keys`/`note_links`/`evidence`) and **never** touches the operational tables (`agent_runs`, `model_calls`, `jobs`, `source`, `retrieval_*`, `change_plans`, `patches`, `git_operations`). `agent_runs`/`model_calls` are plain operational tables — no ledger, no backup, no cross-store write protocol.
 
-**Live-drive gotchas** (from [`docs/retros/2026-07-18-search-index-live-drive-retro.md`](docs/retros/2026-07-18-search-index-live-drive-retro.md), the authoritative source): a drive broker needs its **own** fresh clone of the graduation copy + fresh anchor (grad-copy carries graduation's `refs/audit/runs`, so a fresh ledger's seq 0 collides); commit the migration before cloning and `git rm -r .bootstrap-backup`; a fresh ledger needs `db migrate` before `db rebuild`; export `ATLAS_EGRESS_CAPABILITY_KEY` for every mint-bearing command (`index rebuild`/`index eval`/`query`); the apply challenge nonce has a short TTL — sign + apply promptly.
+**Human-led remainder** (the "test live" rule; both owner-run on the live Mac):
+- **#345** — the v2 live drive on the real `main-vault` (go/no-go for deprovision).
+- **#346** — the live-Mac deprovision run (`deprovision-macos.sh --confirm`, `sudo`, never CI): removes retired v1 host state, preserves `atlas-gemini-api-key`.
 
-**Process gotchas (from the 2026-07-18 SP-1 step-1 run — 12h for one step; don't repeat):**
-- **pnpm pin:** `packageManager` was pinned to **11.12.0, a broken release** — every `pnpm -r test` exited 127/1. Now pinned **11.15.0**. If pnpm misbehaves, check the pin *first*; the global shim at `~/Library/pnpm/.pnpm/**/@pnpm/exe/pnpm` has also been observed literally blank.
-- **Reviewer must prove it can run the suite before round 1.** A review harness that can't execute `pnpm -r test` reviews blind and never converges (5 rounds → `max_rounds_unresolved`, ~2h lost). Broken harness ⇒ abort and fix, never "review on `tsc --noEmit` only".
-- **Hard cap: 2 review rounds per step.** Round 3 = escalate to Aryeh with the open findings, not another pass.
-- **Ceremony tier:** this repo is a real product Aryeh wants (decided 2026-07-18), but process stays lean — spec *or* plan review, not spec→spec-review→plan→plan-review chains; decompose to phases (~6 issues), not tasks (26).
+**Closed as retired** (ADR-0003 + the `v1-fortress` tag are the sole revival path):
+- **#60** — the live-vault-adoption-sync arc. The absorb-cycle + canonical-ref indirection are gone; `sync` is now a plain working-tree↔projection reconcile.
+- **#65** — the ledger/backup DR hardening residuals. There is no ledger and no backup to harden.
+- **#297** — SP-3 signer/doctor polish. The signer is gone; `doctor` folded into `status`.
+- **#298** — the Console-cannot-reach-broker decision. The Console and the broker are both gone.
+
+**Process gotchas (still load-bearing):**
+- **pnpm pin: 11.15.0.** 11.12.0 was a broken release (`pnpm -r test` exited 127/1). If pnpm misbehaves, check the pin *first*; the global shim at `~/Library/pnpm/.pnpm/**/@pnpm/exe/pnpm` has also been observed literally blank.
+- **Reviewer must prove it can run the suite before round 1** — a harness that can't execute `pnpm -r test` reviews blind and never converges.
+- **Hard cap: 2 review rounds per step.** Round 3 = escalate with the open findings, not another pass.
+- **Ceremony tier:** Atlas is a real product the owner wants, but process stays lean — spec *or* plan review (not spec→review→plan→review chains); decompose to phases (~6 issues), not tasks.
 - **Lead-agent 900s timeout with zero files ⇒ kill and relaunch immediately**, don't wait it out.
 
 ## Pointers (SSOT)
 
-- **Design SSOT:** [`docs/specs/2026-07-11-atlas-v1-design.md`](docs/specs/2026-07-11-atlas-v1-design.md) (V1 capability + architecture; the "In V1 / Out of V1" list is normative).
-- **Implementation plan:** [`docs/plans/atlas-v1-implementation-2026-07-12.md`](docs/plans/atlas-v1-implementation-2026-07-12.md) (§2.5 global constants, §2.6 decisions D1–D20, §2.7 migration ownership, §2.8 write protocol).
-- **The one ADR:** [`docs/adr/0001-egress-response-scan-released-bytes.md`](docs/adr/0001-egress-response-scan-released-bytes.md).
-- **Contract specs** (each gates a phase, machine-checked against code) live flat in `docs/specs/` — see [`docs/CLAUDE.md`](docs/CLAUDE.md) for the map. Don't hand-edit the generated `commands-overview.md` / `failpoints.generated.md`.
+- **Pivot decision:** [`docs/adr/0003-retire-security-architecture.md`](docs/adr/0003-retire-security-architecture.md) (accepted; supersedes ADR-0001 egress-scan + ADR-0002 P-256 signer).
+- **v2 spec:** [`docs/specs/2026-07-21-atlas-v2-single-process-simplification-spec.md`](docs/specs/2026-07-21-atlas-v2-single-process-simplification-spec.md) — the finalized demolition + kept-core contract (`link`/`sync`/`status` schemas, exit-code set, mutation order).
+- **v2 plan:** [`docs/plans/2026-07-21-atlas-v2-single-process-simplification-plan.md`](docs/plans/2026-07-21-atlas-v2-single-process-simplification-plan.md) — the 6-phase delivery.
+- **Canonical mutation order:** `apps/cli/src/workflows/mutation-order.ts` (`runMutation`).
+- **Command surface:** `docs/specs/cli-contract/commands.json` + [`tools/CLAUDE.md`](tools/CLAUDE.md); don't hand-edit the generated `commands-overview.md` / `failpoints.generated.md`.
+- **v1 design + plan (superseded by ADR-0003 — revival reference only):** [`docs/specs/2026-07-11-atlas-v1-design.md`](docs/specs/2026-07-11-atlas-v1-design.md), [`docs/plans/atlas-v1-implementation-2026-07-12.md`](docs/plans/atlas-v1-implementation-2026-07-12.md).

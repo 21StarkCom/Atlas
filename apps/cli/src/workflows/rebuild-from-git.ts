@@ -76,19 +76,20 @@ function dropIdentityCollisions(notes: readonly ParsedNote[]): {
   return { survivors, collisionGaps };
 }
 
-/** The ledger/audit classes that are never derivable from canonical Markdown (always reported). */
+/** The operational classes that are never derivable from canonical Markdown (always reported).
+ * v2 (#338): the audit ledger is retired — `agent_runs` is a plain operational table (run
+ * history, still not in Markdown) and `workflow_idempotency` is caller-idempotency state. */
 const LEDGER_GAPS: readonly FromGitGap[] = [
-  { storageClass: "agent_runs", reason: "run history is ledger/audit-ref state, not derivable from canonical Markdown — recover best-effort from refs/audit/runs" },
-  { storageClass: "audit_events", reason: "the signed audit chain lives on refs/audit/runs, not canonical Markdown" },
-  { storageClass: "workflow_idempotency", reason: "caller-idempotency is ledger-only, not reconstructible from git" },
+  { storageClass: "agent_runs", reason: "run history is operational state, not derivable from canonical Markdown" },
+  { storageClass: "workflow_idempotency", reason: "caller-idempotency is operational-only, not reconstructible from git" },
 ];
 
 /**
  * Rebuild the projection from the canonical vault `snapshot` (the committed git state), surfacing
  * every gap. Vault read errors and dangling links become named gaps; the clean note subset is
- * still rebuilt (best-effort). The three ledger/audit classes are always reported as gaps (they
- * require the audit ref / a backup). `clean` is true only when the sole gaps are those ledger
- * classes (no data-loss gap from the vault itself).
+ * still rebuilt (best-effort). The operational classes ({@link LEDGER_GAPS}) are always reported
+ * as gaps (they are not derivable from Markdown). `clean` is true only when the sole gaps are
+ * those operational classes (no data-loss gap from the vault itself).
  */
 export function rebuildFromGit(db: SqliteDatabase, snapshot: VaultSnapshot): FromGitReport {
   const gaps: FromGitGap[] = [];

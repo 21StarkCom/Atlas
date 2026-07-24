@@ -43,7 +43,7 @@ export interface Registry {
  * contract's `stateTable` is checked for completeness against — it must not be
  * silently widened (that would mask a missing state in the contract).
  *
- *   planned → patched → worktree-applied → agent-committed → [review-pending] →
+ *   planned → patched → worktree-applied → agent-committed →
  *   integrated → reindexed → finalized;
  *   terminals rejected, rolled-back, failed, cancelled
  *   (recorded failed@<checkpoint> / cancelled@<checkpoint>).
@@ -53,7 +53,6 @@ export const RECOVERY_CHECKPOINTS = [
   "patched",
   "worktree-applied",
   "agent-committed",
-  "review-pending",
   "integrated",
   "reindexed",
 ] as const;
@@ -74,7 +73,6 @@ export const FAILABLE_CHECKPOINTS = [
   "patched",
   "worktree-applied",
   "agent-committed",
-  "review-pending",
 ] as const;
 export type FailableCheckpoint = (typeof FAILABLE_CHECKPOINTS)[number];
 
@@ -138,7 +136,12 @@ export const DATA_DICTIONARY_PATH = "docs/specs/sqlite-data-dictionary.md";
 export const SECURITY_BROKER_CONTRACT_PATH = "docs/specs/security-broker-contract.md";
 
 /** The plan §2.5 exit-code set. Every drift-rejection error code maps to one of these. */
-export const EXIT_CODES = [0, 1, 2, 3, 4, 5, 6] as const;
+// v2 (#335, ADR-0003): the envelope EXIT set is {0,1,2,4,5} — secret-scan (3) and
+// action-required (6) are retired with the scan/review architecture. Exit 7 is the
+// jobs-run batch aggregate's sole use (a transient-but-exhausted item), so it is
+// permitted in the per-command exitCodes lint too; exit-codes.test.ts enforces the
+// stronger runtime property (no command emits 3/6; 7 only from jobs run).
+export const EXIT_CODES = [0, 1, 2, 4, 5, 7] as const;
 export type ExitCode = (typeof EXIT_CODES)[number];
 
 /**
@@ -153,6 +156,12 @@ export type ExitCode = (typeof EXIT_CODES)[number];
  * that creates `db_schema_migrations` itself, not a numbered migration).
  */
 export const MIGRATION_OWNERSHIP: Readonly<Record<string, readonly string[]>> = {
+  // `0001_core` created the audit/backup ledger tables (`audit_events`,
+  // `audit_intents`, `backup_watermark`, `raw_payloads`), but `0014_evidence_v2`
+  // forward-DROPs them (#338 — the §2.8 audit ledger + AEAD backup are retired; git
+  // is the only safety mechanism). None survives a fresh migrate, so the dictionary
+  // no longer defines them and they are absent here — the `checkTableInventory`
+  // bijection stays intact (flattened == dictionary CREATE TABLEs).
   "0001_core": [
     "notes",
     "note_identity_keys",
@@ -167,17 +176,33 @@ export const MIGRATION_OWNERSHIP: Readonly<Record<string, readonly string[]>> = 
     "patch_operations",
     "validation_results",
     "git_operations",
-    "audit_events",
-    "audit_intents",
-    "backup_watermark",
-    "raw_payloads",
   ],
   "0002_jobs": ["jobs", "job_attempts"],
-  "0003_provenance": ["content_blobs", "source_captures", "source_renditions", "note_sources"],
-  "0004_claims": ["claims", "claim_evidence"],
+  // `0003_provenance` created the v1 content-addressed provenance tables
+  // (`content_blobs`/`source_captures`/`source_renditions`/`note_sources`), but
+  // `0015_source_registry` forward-DROPs all four (#340 — the v1 provenance model is
+  // retired; `ingest` is rebased onto the flat `source` registry + the canonical
+  // mutation order). None survives a fresh migrate, so the dictionary no longer defines
+  // them and they are absent here — the `checkTableInventory` bijection stays intact
+  // (flattened == dictionary CREATE TABLEs).
+  // `0004_claims` created `claims`/`claim_evidence`, but `0014_evidence_v2`
+  // forward-DROPs them (#337). Neither table survives a fresh migrate, so the
+  // dictionary no longer defines them and they are absent from the ownership map —
+  // the `checkTableInventory` bijection stays intact (flattened == dictionary CREATE TABLEs).
   // Feature migration (Task 3.2), registered via registerGenerationMigration — the
   // durable indexing-config adoption log the generation/config fence rests on.
   "0008_index_config_revision": ["index_config_revisions"],
+  // v2 vault-derived evidence projection (task 4-2, in `openStore`'s DEFAULT set) —
+  // the flat `evidence` table folded from note frontmatter, replacing the v1
+  // claims/claim_evidence model (the DROP of those rides this same migration in the
+  // task-4-4 commit that removes their last consumer).
+  "0014_evidence_v2": ["evidence"],
+  // v2 operational source registry (task 4-3a, in `openStore`'s DEFAULT set) — the
+  // flat `source` table `source add`/`list`/`show`/`ingest` read/write. This migration
+  // also forward-DROPs the four v1 provenance tables (task 4-3b/#340) once `ingest` +
+  // provenance validation are rebased off them (expand-and-contract), so `source` is
+  // the ONLY table it leaves standing.
+  "0015_source_registry": ["source"],
   "(runner bootstrap)": ["db_schema_migrations"],
 } as const;
 
@@ -384,14 +409,17 @@ export function checkImplementedSchemas(root: string, reg: Registry): string[] {
   return errors;
 }
 
-/** Full consistency pass used by both `--check` and the lint test. */
+/** Full consistency pass used by both `--check` and the lint test.
+ * v2 (#333, ADR-0003): the authzContract cross-check is retired with the
+ * privilege boundary — the registry holds no privileged rows (asserted by
+ * contract-lint's all-shared gate), so the security-broker-contract's
+ * privileged-op map is a historical V1 artifact, not a live SSOT. */
 export function lintAll(root: string, reg: Registry, fixtureNames: string[]): string[] {
   return [
     ...validateRegistry(reg),
     ...checkFixtureConsistency(reg, fixtureNames),
     ...checkImplementedSchemas(root, reg),
     ...checkTableInventory(loadDataDictionaryTables(root)),
-    ...checkAuthzContractCompleteness(loadAuthzContract(root), reg),
   ];
 }
 

@@ -40,14 +40,12 @@ function capture(): NodeJS.WritableStream & { text: string } {
 
 describe("error envelope", () => {
   it("maps the plan §2.5 exit categories", () => {
-    expect(EXIT).toMatchObject({
+    expect(EXIT).toEqual({
       OK: 0,
       VALIDATION: 1,
       CONFIG: 2,
-      SECRET_SCAN: 3,
       INTERNAL: 4,
       USAGE: 5,
-      ACTION_REQUIRED: 6,
     });
   });
 
@@ -76,7 +74,7 @@ describe("error envelope", () => {
     const e = new CliError({
       code: "locked:vault-maintenance",
       message: "The vault-maintenance lock is held by another process.",
-      hint: "Wait for the holder to finish, or run `brain doctor --reclaim-locks` if its pid is dead.",
+      hint: "Wait for the holder to finish — a dead holder's lock is reclaimed automatically on the next acquire.",
       exitCode: EXIT.CONFIG,
       retryable: true,
       details: { scope: "vault-maintenance", holderPid: 44122, startedAt: "2026-07-12T09:31:04.512Z" },

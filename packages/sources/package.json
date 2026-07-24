@@ -17,7 +17,6 @@
   },
   "dependencies": {
     "@atlas/contracts": "workspace:*",
-    "@atlas/scan": "workspace:*",
     "parse5": "catalog:"
   },
   "devDependencies": {

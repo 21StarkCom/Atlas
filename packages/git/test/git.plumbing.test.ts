@@ -91,6 +91,45 @@ describe("git plumbing round-trip", () => {
     expect(parseManifestTrailer(msg)).toEqual(manifest);
   });
 
+  it("pins deterministic authorship even under a poisoned ambient environment", async () => {
+    // `-c user.name/email` is OVERRIDDEN by ambient GIT_AUTHOR_*/GIT_COMMITTER_*.
+    // The v2 agent commit is FF-installed directly onto canonical, so a poisoned
+    // environment must not be able to rewrite its authorship (finding: authorship
+    // overridable by ambient Git identity variables). worktree.commit pins all four.
+    const repo = openRepo(repoDir);
+    const runId = newRunId();
+    const ref = await repo.createAgentBranch(runId, "main");
+    const wtDir = join(repoDir, "..", `wt-poison-${runId}`);
+    worktreeDirs.push(wtDir);
+    const wt = await repo.addWorktree(ref, wtDir);
+    await writeFile(join(wt.dir, "notes.md"), "poisoned-env commit\n");
+
+    const POISON = {
+      GIT_AUTHOR_NAME: "Mallory",
+      GIT_AUTHOR_EMAIL: "mallory@evil.example",
+      GIT_COMMITTER_NAME: "Mallory",
+      GIT_COMMITTER_EMAIL: "mallory@evil.example",
+    };
+    const saved = Object.fromEntries(
+      Object.keys(POISON).map((k) => [k, process.env[k]]),
+    );
+    let sha: string;
+    try {
+      Object.assign(process.env, POISON);
+      sha = await wt.commit("agent: poisoned env", sampleManifest(runId, (await repo.readRef("main"))!));
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+
+    const identity = (fmt: string) =>
+      execFileSync("git", ["show", "-s", `--format=${fmt}`, sha], { cwd: repoDir, encoding: "utf8" }).trim();
+    expect(identity("%an <%ae>")).toBe("Aryeh Stark <aryeh@21stark.com>");
+    expect(identity("%cn <%ce>")).toBe("Aryeh Stark <aryeh@21stark.com>");
+  });
+
   it("round-trips a minimal manifest that omits optional fields", async () => {
     const repo = openRepo(repoDir);
     const base = await repo.readRef("main");

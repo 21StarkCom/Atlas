@@ -5,14 +5,12 @@
  * determinism. Part of the Phase-0 bootstrap; never reverted.
  */
 import { readFileSync, existsSync } from "node:fs";
-import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { describe, expect, it } from "vitest";
-import { ProviderErrorSchema, CHANGE_PLAN_OPS, SCHEMA_VERSION } from "@atlas/contracts";
+import { ProviderErrorSchema, CHANGE_PLAN_OPS } from "@atlas/contracts";
 import {
-  checkAuthzContractCompleteness,
   checkFixtureConsistency,
   checkImplementedSchemas,
   checkStateTableCompleteness,
@@ -21,13 +19,11 @@ import {
   EXIT_CODES,
   extractJsonBlocks,
   findRepoRoot,
-  loadAuthzContract,
   loadDataDictionaryTables,
   loadFixtureNames,
   loadRegistry,
   loadStateTable,
   normativeStateSet,
-  parseAuthzContract,
   parseDataDictionaryTables,
   parseFixture,
   parseStateTable,
@@ -36,7 +32,6 @@ import {
   SECURITY_BROKER_CONTRACT_PATH,
   sqlite27Tables,
   validateRegistry,
-  type AuthzContract,
   type Registry,
 } from "./cli-contract.ts";
 
@@ -45,7 +40,6 @@ const registry = loadRegistry(root);
 const fixtureNames = loadFixtureNames(root);
 const stateTable = loadStateTable(root);
 const dictionaryTables = loadDataDictionaryTables(root);
-const authzContract = loadAuthzContract(root);
 
 describe("registry integrity", () => {
   it("has rows and a version", () => {
@@ -148,7 +142,9 @@ describe("recovery-state-machine stateTable", () => {
 
   it("covers both failed@ and cancelled@ checkpoint-suffixed terminals", () => {
     const present = new Set(stateTable.states.map((s) => s.state));
-    for (const cp of ["planned", "patched", "worktree-applied", "agent-committed", "review-pending"]) {
+    // v2 (#335): the review-pending checkpoint (and its failed@/cancelled@ suffixed
+    // terminals) are retired — a run advances agent-committed → integrated directly.
+    for (const cp of ["planned", "patched", "worktree-applied", "agent-committed"]) {
       expect(present.has(`failed@${cp}`), `missing failed@${cp}`).toBe(true);
       expect(present.has(`cancelled@${cp}`), `missing cancelled@${cp}`).toBe(true);
     }
@@ -254,103 +250,10 @@ describe("table-inventory gate (the load-bearing guarantee)", () => {
   });
 });
 
-describe("security/broker contract authzContract", () => {
-  it("the fenced `json authzContract` block parses to an object with ops + catalog", () => {
-    expect(authzContract.version).toBeGreaterThanOrEqual(1);
-    expect(Array.isArray(authzContract.privilegedOps)).toBe(true);
-    expect(authzContract.privilegedOps.length).toBeGreaterThan(0);
-    expect(Array.isArray(authzContract.errorCatalog)).toBe(true);
-    expect(authzContract.errorCatalog.length).toBeGreaterThan(0);
-  });
-
-  it("covers exactly the registry-privileged set, every op fully mapped, every driftCode cataloged", () => {
-    expect(checkAuthzContractCompleteness(authzContract, registry)).toEqual([]);
-  });
-
-  it("every commands.json privileged command has a non-variant authz op", () => {
-    const nonVariant = new Set(
-      authzContract.privilegedOps.filter((o) => o.variant !== true).map((o) => o.command),
-    );
-    for (const cmd of privilegedCommandSet(registry)) {
-      expect(nonVariant.has(cmd), `missing authz mapping for privileged command "${cmd}"`).toBe(true);
-    }
-  });
-
-  it("every op names a mechanism and non-empty challenge/verification/drift arrays", () => {
-    for (const op of authzContract.privilegedOps) {
-      expect(op.mechanism, `op "${op.op}" mechanism`).toBeTruthy();
-      expect(op.challengeFields.length, `op "${op.op}" challengeFields`).toBeGreaterThan(0);
-      expect(op.verificationSteps.length, `op "${op.op}" verificationSteps`).toBeGreaterThan(0);
-      expect(op.driftCodes.length, `op "${op.op}" driftCodes`).toBeGreaterThan(0);
-    }
-  });
-});
-
-describe("authzContract completeness gate (the load-bearing guarantee)", () => {
-  it("dropping the authz op for a privileged command fails the completeness check", () => {
-    const dropped = privilegedCommandSet(registry)[0]!;
-    const mutated: AuthzContract = {
-      ...authzContract,
-      privilegedOps: authzContract.privilegedOps.filter((o) => o.command !== dropped),
-    };
-    const errors = checkAuthzContractCompleteness(mutated, registry);
-    expect(errors.some((e) => e.includes(dropped) && e.includes("no authz mapping"))).toBe(true);
-  });
-
-  it("authorizing a non-privileged command (without variant:true) fails the check", () => {
-    const shared = registry.commands.find((c) => c.privilege === "shared")!.name;
-    const mutated: AuthzContract = {
-      ...authzContract,
-      privilegedOps: [
-        ...authzContract.privilegedOps,
-        {
-          op: shared,
-          command: shared,
-          mechanism: "broker-signature",
-          challengeFields: ["op"],
-          verificationSteps: ["x"],
-          driftCodes: ["authz.ok"],
-        },
-      ],
-    };
-    const errors = checkAuthzContractCompleteness(mutated, registry);
-    expect(errors.some((e) => e.includes(shared) && e.includes("not classified privileged"))).toBe(true);
-  });
-
-  it("a driftCode outside the errorCatalog fails the check", () => {
-    const mutated: AuthzContract = {
-      ...authzContract,
-      privilegedOps: authzContract.privilegedOps.map((o, i) =>
-        i === 0 ? { ...o, driftCodes: [...o.driftCodes, "authz.not_a_real_code"] } : o,
-      ),
-    };
-    const errors = checkAuthzContractCompleteness(mutated, registry);
-    expect(errors.some((e) => e.includes("authz.not_a_real_code") && e.includes("not in the errorCatalog"))).toBe(true);
-  });
-
-  it("an op missing its verificationSteps fails the check", () => {
-    const mutated: AuthzContract = {
-      ...authzContract,
-      privilegedOps: authzContract.privilegedOps.map((o, i) =>
-        i === 0 ? { ...o, verificationSteps: [] } : o,
-      ),
-    };
-    const errors = checkAuthzContractCompleteness(mutated, registry);
-    expect(errors.some((e) => e.includes("verificationSteps") && e.includes("non-empty array"))).toBe(true);
-  });
-
-  it("an errorCatalog exitCode outside the §2.5 set fails the check", () => {
-    const mutated: AuthzContract = {
-      ...authzContract,
-      errorCatalog: authzContract.errorCatalog.map((e, i) => (i === 0 ? { ...e, exitCode: 7 } : e)),
-    };
-    const errors = checkAuthzContractCompleteness(mutated, registry);
-    expect(errors.some((e) => e.includes("exitCode") && e.includes("0..6"))).toBe(true);
-  });
-
-  it("a malformed / absent authzContract block throws on parse", () => {
-    expect(() => parseAuthzContract("# no fenced block here")).toThrow(/authzContract/);
-    expect(() => parseAuthzContract("```json authzContract\n{ not json }\n```")).toThrow();
+describe("v2 privilege collapse (ADR-0003, #333)", () => {
+  it("the registry holds ZERO privileged rows — every command is shared (the broker + challenge/authorization flow are retired)", () => {
+    expect(privilegedCommandSet(registry)).toEqual([]);
+    for (const c of registry.commands) expect(c.privilege, c.name).toBe("shared");
   });
 });
 
@@ -479,22 +382,19 @@ describe("Phase-2 cli-contract schema presence (Task 2.0)", () => {
   // breaks). Matches the Phase-3/Phase-4 gate policy below.
   it("the delivered `jobs *` commands are implemented:true with their schemas present", () => {
     const jobs = phase2.filter((r) => r.name.startsWith("jobs "));
-    expect(jobs.map((r) => r.name).sort()).toEqual(["jobs cancel", "jobs list", "jobs retry", "jobs run"]);
+    // v2 (#333): `jobs retry|cancel` are killed — the queue surface is list + run.
+    expect(jobs.map((r) => r.name).sort()).toEqual(["jobs list", "jobs run"]);
     for (const r of jobs) {
       expect(r.implemented, `${r.name} implemented`).toBe(true);
       expect(existsSync(join(root, r.schemaRef)), `${r.name} schema ${r.schemaRef}`).toBe(true);
     }
   });
 
-  it("the Phase-2 command set matches the plan Task 2.0 inventory", () => {
+  it("the Phase-2 command set matches the v2 survivor inventory (#333)", () => {
     expect(phase2.map((c) => c.name).sort()).toEqual(
       [
-        "git cleanup",
-        "git status",
         "ingest",
-        "jobs cancel",
         "jobs list",
-        "jobs retry",
         "jobs run",
         "note add",
         "note history",
@@ -503,7 +403,6 @@ describe("Phase-2 cli-contract schema presence (Task 2.0)", () => {
         "source add",
         "source list",
         "source show",
-        "source trust show",
       ].sort(),
     );
   });
@@ -648,10 +547,9 @@ describe("Phase-3 cli-contract schema presence (Task 3.0)", () => {
   // flip rows to implemented:true as handlers land, and the contract-only gate must not
   // block that (Task 3.0 acceptance: "Registry rows flip to implemented as tasks land").
 
-  it("the Phase-3 command set matches the plan Task 3.0 inventory", () => {
-    expect(phase3.map((c) => c.name).sort()).toEqual(
-      ["index rebuild", "index repair", "index status", "index verify", "query"].sort(),
-    );
+  it("the Phase-3 command set matches the v2 survivor inventory (#333)", () => {
+    // index status folded into `status`; repair/verify folded into `index rebuild`.
+    expect(phase3.map((c) => c.name).sort()).toEqual(["index rebuild", "query"].sort());
   });
 });
 
@@ -766,16 +664,18 @@ describe("Phase-3 schema discriminants + audit/error catalog (Task 3.0 revision 
   const ajv = new Ajv2020({ strict: false, allErrors: true });
   const compile = (name: string) => ajv.compile(load(name));
 
-  it("query: error catalog includes the fail-closed backup-unhealthy exit-2 outcome (both modes write ledger rows)", () => {
+  it("query: writes retrieval rows as PLAIN operational rows — no retired audit/backup outcome (v2 #338)", () => {
     const q = load("query.schema.json");
     const codes = q["x-atlas-contract"].errorCodes as { code: string; exit: number; retryable?: boolean }[];
-    const bu = codes.find((c) => c.code === "backup-unhealthy");
-    expect(bu, "backup-unhealthy error").toBeTruthy();
-    expect(bu!.exit).toBe(2);
-    expect(bu!.retryable).toBe(true);
-    // both query modes finalize ledger writes, so the fail-closed watermark applies to each
+    // v2 (#338): the §2.8 audit ledger + AEAD backup are retired — query no longer
+    // has a fail-closed backup-unhealthy outcome, and its side effects are plain
+    // operational rows (no finalizeLedgerWrite, no run.readonly audit event).
+    expect(codes.find((c) => c.code === "backup-unhealthy")).toBeUndefined();
     const se = (q["x-atlas-contract"].sideEffects as string[]).join(" ");
-    expect(se).toMatch(/finalizeLedgerWrite/);
+    expect(se).not.toMatch(/finalizeLedgerWrite/);
+    expect(se).not.toMatch(/run\.readonly/);
+    expect(se).toMatch(/retrieval_runs\/retrieval_results/);
+    // exit 2 stays (config-invalid / db-unavailable / index-unavailable), just not backup-unhealthy.
     expect(q["x-atlas-contract"].exitCodes).toContain(2);
   });
 
@@ -807,63 +707,6 @@ describe("Phase-3 schema discriminants + audit/error catalog (Task 3.0 revision 
     expect(validate(noContrib)).toBe(false);
     // and the bundled examples all validate
     for (const ex of load("query.schema.json").examples) {
-      expect(validate(ex), JSON.stringify(validate.errors)).toBe(true);
-    }
-  });
-
-  for (const name of ["index-status.schema.json", "index-verify.schema.json"]) {
-    it(`${name}: declares the required terminal run.projection event and no longer prohibits a git-ref advance`, () => {
-      const c = load(name)["x-atlas-contract"];
-      expect(c.terminalAuditEvent).toBe("run.projection");
-      expect((c.sideEffects as string[]).some((s) => s.includes("run.projection"))).toBe(true);
-      expect((c.prohibitedEffects as string[]).some((s) => /git ref advanced/.test(s))).toBe(false);
-    });
-  }
-
-  it("index verify: consistent MUST agree with divergences (all four combinations)", () => {
-    const validate = compile("index-verify.schema.json");
-    const mk = (consistent: boolean, divs: unknown[]) => ({
-      command: "index verify",
-      consistent,
-      checked: 1,
-      divergences: divs,
-    });
-    const oneDiv = [{ noteId: "n1", kind: "missing-chunks" }];
-    // valid: true+empty, false+nonempty
-    expect(validate(mk(true, [])), JSON.stringify(validate.errors)).toBe(true);
-    expect(validate(mk(false, oneDiv)), JSON.stringify(validate.errors)).toBe(true);
-    // invalid: true+nonempty, false+empty
-    expect(validate(mk(true, oneDiv))).toBe(false);
-    expect(validate(mk(false, []))).toBe(false);
-  });
-
-  it("index repair: unresolved[].retryable MUST match its code (all combinations)", () => {
-    const validate = compile("index-repair.schema.json");
-    const mk = (code: string, retryable: boolean) => ({
-      command: "index repair",
-      outcome: "partial",
-      repaired: [],
-      unresolved: [{ noteId: "n1", code, retryable, message: "m" }],
-    });
-    // valid discriminant pairings
-    expect(validate(mk("embedding-retryable", true)), JSON.stringify(validate.errors)).toBe(true);
-    expect(validate(mk("embedding-failed", false)), JSON.stringify(validate.errors)).toBe(true);
-    // invalid: retryable flag contradicts the code
-    expect(validate(mk("embedding-retryable", false))).toBe(false);
-    expect(validate(mk("embedding-failed", true))).toBe(false);
-    // outcome=partial still requires a non-empty unresolved[]
-    expect(validate({ command: "index repair", outcome: "partial", repaired: [] })).toBe(false);
-    // outcome=converged must NOT carry unresolved[]
-    expect(
-      validate({
-        command: "index repair",
-        outcome: "converged",
-        repaired: [],
-        unresolved: [{ noteId: "n1", code: "embedding-failed", retryable: false, message: "m" }],
-      }),
-    ).toBe(false);
-    // the bundled examples all validate
-    for (const ex of load("index-repair.schema.json").examples) {
       expect(validate(ex), JSON.stringify(validate.errors)).toBe(true);
     }
   });
@@ -917,26 +760,9 @@ describe("Phase-4 cli-contract schema presence (Task 4.0)", () => {
   // schema presence, not a temporal implementation-status assertion (which the first
   // Phase-4 handler would necessarily break). Matches the Phase-3 gate policy.
 
-  it("the Phase-4 command set matches the plan Task 4.0 inventory", () => {
+  it("the Phase-4 command set matches the v2 survivor inventory (#333)", () => {
     expect(phase4.map((c) => c.name).sort()).toEqual(
-      [
-        "enrich",
-        "evidence resolve",
-        "evidence retry",
-        "evidence review",
-        "git approve",
-        "git refresh",
-        "git reject",
-        "git review",
-        "git rollback",
-        "git verify",
-        "maintain",
-        "purge",
-        "reconcile",
-        "source trust promote",
-        "source trust revoke",
-        "validate",
-      ].sort(),
+      ["enrich", "evidence resolve", "evidence retry", "evidence review", "link", "maintain", "validate"].sort(),
     );
   });
 
@@ -968,18 +794,6 @@ describe("Phase-4 cli-contract schema presence (Task 4.0)", () => {
     }
   });
 
-  it("every privileged Phase-4 command exposes the challenge/authorization flow and exit 6", () => {
-    for (const r of phase4.filter((c) => c.privilege === "privileged")) {
-      const c = JSON.parse(readFileSync(join(root, r.schemaRef), "utf8"))["x-atlas-contract"];
-      const flagNames = (c.flags as { flag?: string; name?: string }[]).map((f) => f.flag ?? f.name);
-      expect(flagNames.some((f) => f?.startsWith("--export-challenge")), `${r.name} --export-challenge`).toBe(true);
-      expect(flagNames.some((f) => f?.startsWith("--authorization")), `${r.name} --authorization`).toBe(true);
-      // action-required (exit 6) is reachable when no authorization is supplied
-      expect(c.exitCodes, `${r.name} exit 6`).toContain(6);
-      const codes = (c.errorCodes as { code: string; exit: number }[]);
-      expect(codes.some((e) => e.exit === 6), `${r.name} has an exit-6 error code`).toBe(true);
-    }
-  });
 });
 
 describe("Phase-4 workflow-risk-contract (Task 4.0)", () => {
@@ -1015,8 +829,13 @@ describe("Phase-4 workflow-risk-contract (Task 4.0)", () => {
     const declared = [...mutationPolicy.ops.map((o: { op: string }) => o.op)].sort();
     // no duplicate op rows
     expect(declared.length).toBe(new Set(declared).size);
-    // equals the @atlas/contracts SSOT of op discriminants (15 active + 2 reserved)
+    // equals the @atlas/contracts SSOT of op discriminants (13 active + 2 reserved
+    // task ops = the finalized 15; the trust ops were retired in v2)
     expect(declared).toEqual([...CHANGE_PLAN_OPS].sort());
+    // the retired trust ops must be absent from the policy table
+    for (const retired of ["PromoteTrust", "RevokeTrust"]) {
+      expect(declared).not.toContain(retired);
+    }
     // and the invented ops the round-2 finding flagged are absent
     for (const bogus of ["AddFrontmatterField", "UpdateFrontmatterField", "AddLink", "RemoveLink"]) {
       expect(declared).not.toContain(bogus);
@@ -1035,18 +854,20 @@ describe("Phase-4 workflow-risk-contract (Task 4.0)", () => {
     }
   });
 
-  it("the load-bearing invariants hold: sources immutable (except trust), decisions never in-place-replace, reserved denied", () => {
+  it("the load-bearing invariants hold: sources immutable, decisions never in-place-replace, reserved denied", () => {
     const byOp = new Map(
       (mutationPolicy.ops as { op: string; policy: Record<string, string> }[]).map((o) => [o.op, o.policy]),
     );
     // sources are immutable for every content op
-    for (const op of ["CreateNote", "UpdateSection", "AppendSection", "SetFrontmatterField", "SetLink", "CreateClaim"]) {
+    for (const op of ["CreateNote", "UpdateSection", "AppendSection", "SetFrontmatterField", "SetLink"]) {
       expect(byOp.get(op)!.source, `${op} on source`).toBe("immutable");
     }
-    // trust ops are the sole source-touching ops (review), immutable elsewhere
-    for (const op of ["PromoteTrust", "RevokeTrust"]) {
-      expect(byOp.get(op)!.source, `${op} on source`).toBe("review");
-      expect(byOp.get(op)!.concept, `${op} on concept`).toBe("immutable");
+    // the trust ops were retired in v2 — no policy row touches a source as `review`
+    for (const retired of ["PromoteTrust", "RevokeTrust"]) {
+      expect(byOp.has(retired), `${retired} must be absent`).toBe(false);
+    }
+    for (const [op, policy] of byOp) {
+      expect(policy.source, `${op} on source`).not.toBe("review");
     }
     // reserved task ops are reserved for every target type
     for (const op of ["CreateTask", "UpdateTaskState"]) {
@@ -1154,99 +975,6 @@ describe("Phase-4 acceptance thresholds — literal comparison to the plan §2.5
   });
 });
 
-describe("Phase-4 privileged schemas ⇄ broker authzContract (per-command exits, SSOT)", () => {
-  const schemaDir = "docs/specs/cli-contract";
-  const load = (name: string) => JSON.parse(readFileSync(join(root, schemaDir, name), "utf8"));
-  const catalogExit = new Map(authzContract.errorCatalog.map((e) => [e.code, e.exitCode]));
-  const opByName = new Map(authzContract.privilegedOps.map((o) => [o.op, o]));
-  const privileged = registry.commands.filter((c) => c.phase === 4 && c.privilege === "privileged");
-
-  it("has the five privileged Phase-4 commands", () => {
-    // `git refresh` is SHARED (non-privileged) as of Task 4.11 — it only regenerates a
-    // review-pending proposal's agent branch (no canonical/trust/erase mutation), so it
-    // carries no OS-presence challenge/authorization flow.
-    expect(privileged.map((c) => c.name).sort()).toEqual(
-      ["git approve", "git rollback", "purge", "source trust promote", "source trust revoke"].sort(),
-    );
-  });
-
-  for (const r of registry.commands.filter((c) => c.phase === 4 && c.privilege === "privileged")) {
-    it(`${r.name}: authz.driftCodes match the §7.5 op verbatim, each surfaced with the broker's catalog exit`, () => {
-      const c = load(r.name.replace(/ /g, "-") + ".schema.json")["x-atlas-contract"];
-      const authz = c.authz as {
-        op: string;
-        mechanism: string;
-        challengeFields: string[];
-        driftCodes: string[];
-        universalCodes: string[];
-      };
-      expect(authz, `${r.name} authz block`).toBeTruthy();
-      // canonical op name with SPACES (not dotted) and present in the §7.5 SSOT
-      expect(authz.op).toBe(r.name);
-      expect(authz.op).not.toMatch(/\./);
-      const ssot = opByName.get(authz.op);
-      expect(ssot, `authzContract op ${authz.op}`).toBeTruthy();
-      // challengeFields equal the broker contract's §7.5 challengeFields for this op (verbatim)
-      expect(authz.challengeFields, `${r.name} authz.challengeFields`).toBeTruthy();
-      expect([...authz.challengeFields].sort()).toEqual([...ssot!.challengeFields].sort());
-      // driftCodes equal the broker contract's driftCodes for this op (verbatim, no drift)
-      expect([...authz.driftCodes].sort()).toEqual([...ssot!.driftCodes].sort());
-      // every driftCode is surfaced in the schema errorCodes with the STABLE catalog exit
-      const errByCode = new Map(
-        (c.errorCodes as { code: string; exit: number }[]).map((e) => [e.code, e.exit]),
-      );
-      for (const code of authz.driftCodes) {
-        expect(errByCode.has(code), `${r.name} errorCodes missing ${code}`).toBe(true);
-        expect(errByCode.get(code), `${r.name} ${code} exit`).toBe(catalogExit.get(code));
-      }
-      // the schema never flattens broker auth into a single authorization-invalid exit-2 code
-      expect(errByCode.has("authorization-invalid"), `${r.name} still flattens to authorization-invalid`).toBe(false);
-      // drift/expiry stay exit 6; signature/signer/replay/payload stay exit 1 (spot-check)
-      expect(errByCode.get("authz.signature_invalid")).toBe(1);
-      // PRIOR-ROUND REQUIREMENT: the complete applicable broker error catalog is surfaced,
-      // not only the op-specific driftCodes. The two UNIVERSAL broker validation failures
-      // (schema_invalid, canonicalization_unsupported) apply to every signed op and are
-      // exit 1 per acceptance-thresholds.md / security-broker-contract.md §7.3.
-      const UNIVERSAL = ["authz.canonicalization_unsupported", "authz.schema_invalid"];
-      expect([...authz.universalCodes].sort(), `${r.name} authz.universalCodes`).toEqual(UNIVERSAL);
-      for (const code of authz.universalCodes) {
-        // each universal code is a real catalog member, mapped to its STABLE catalog exit (1)
-        expect(catalogExit.has(code), `${code} in errorCatalog`).toBe(true);
-        expect(catalogExit.get(code), `${code} catalog exit`).toBe(1);
-        expect(errByCode.has(code), `${r.name} errorCodes missing universal ${code}`).toBe(true);
-        expect(errByCode.get(code), `${r.name} ${code} exit`).toBe(catalogExit.get(code));
-      }
-      // driftCodes and universalCodes are disjoint (universal codes are NOT op-specific drift)
-      for (const code of authz.universalCodes) {
-        expect(authz.driftCodes.includes(code), `${r.name} ${code} must not be a driftCode`).toBe(false);
-      }
-    });
-  }
-
-  it("no privileged schema uses a dotted op name (git.approve / source.trust.promote) anywhere", () => {
-    for (const r of privileged) {
-      const raw = readFileSync(join(root, schemaDir, r.name.replace(/ /g, "-") + ".schema.json"), "utf8");
-      expect(raw, `${r.name} dotted op`).not.toMatch(/op (git|source)\.[a-z.]+/);
-    }
-  });
-});
-
-describe("Phase-4 mandatory completion postconditions (const true, not optional)", () => {
-  const load = (name: string) =>
-    JSON.parse(readFileSync(join(root, "docs/specs/cli-contract", name), "utf8"));
-
-  it("git approve.reindexed, git rollback.reconciled, purge.verified(on applied) are const true", () => {
-    expect(load("git-approve.schema.json").properties.reindexed.const).toBe(true);
-    expect(load("git-rollback.schema.json").properties.reconciled.const).toBe(true);
-    // purge verified is const true under the mode=applied conditional
-    const purge = load("purge.schema.json");
-    const appliedBranch = purge.allOf.find(
-      (a: { if: { properties: { mode: { const: string } } } }) => a.if.properties.mode.const === "applied",
-    );
-    expect(appliedBranch.then.properties.verified.const).toBe(true);
-  });
-});
-
 describe("Phase-4 key-accepting commands expose --idempotency-key + request-hash scope", () => {
   const load = (name: string) =>
     JSON.parse(readFileSync(join(root, "docs/specs/cli-contract", name), "utf8"))["x-atlas-contract"];
@@ -1262,71 +990,24 @@ describe("Phase-4 key-accepting commands expose --idempotency-key + request-hash
     });
   }
 
-  it("git refresh's request-hash scope is (runId, superseded commit, current canonical base)", () => {
-    const c = load("git-refresh.schema.json");
-    for (const field of ["runId", "superseded", "baseCommit"]) {
-      expect(c.requestHashScope, `git refresh scope ${field}`).toContain(field);
+  it("covers the v2 survivor key-accepting Phase-4 commands (#333)", () => {
+    expect(keyAccepting.map((c) => c.name).sort()).toEqual(["enrich", "maintain"].sort());
+  });
+});
+
+describe("validate confidence inputs are two independently-typed fields (no single `confidence`)", () => {
+  const load = (name: string) =>
+    JSON.parse(readFileSync(join(root, "docs/specs/cli-contract", name), "utf8"));
+
+  // v2 (#335): the enrich/maintain Tier-2 confidence THRESHOLD is retired with the
+  // review gate (a validated synthesis applies directly), so those schemas no longer
+  // carry modelConfidence/validationConfidence. `validate`'s ValidationReport still
+  // reports both (a deterministic audit surface), which this gate keeps pinned.
+  it("neither enrich nor maintain exposes a collapsed single `confidence` field", () => {
+    for (const file of ["enrich.schema.json", "maintain.schema.json"]) {
+      expect(load(file).properties.confidence, `${file} still exposes a single confidence`).toBeUndefined();
     }
   });
-
-  it("covers the nine registry-classified key-accepting Phase-4 commands", () => {
-    expect(keyAccepting.map((c) => c.name).sort()).toEqual(
-      [
-        "enrich",
-        "git approve",
-        "git refresh",
-        "git rollback",
-        "maintain",
-        "purge",
-        "reconcile",
-        "source trust promote",
-        "source trust revoke",
-      ].sort(),
-    );
-  });
-});
-
-describe("Phase-4 recovery-state-machine alignment (reject retains, rollback is a distinct run)", () => {
-  const load = (name: string) =>
-    JSON.parse(readFileSync(join(root, "docs/specs/cli-contract", name), "utf8"));
-
-  it("git reject RETAINS the agent commit for audit (does not delete the branch)", () => {
-    const s = load("git-reject.schema.json");
-    expect(s.required).toContain("retainedCommit");
-    expect(s.required).not.toContain("cleaned");
-    // prose no longer claims it removes the agent branch
-    const c = s["x-atlas-contract"];
-    expect((c.sideEffects as string[]).some((x) => /removes.*agent branch/i.test(x))).toBe(false);
-    expect((c.prohibitedEffects as string[]).some((x) => /never deletes the agent-branch commit/i.test(x))).toBe(true);
-  });
-
-  it("git rollback carries a distinct rollback-run identity + rollbackOf; original stays finalized", () => {
-    const s = load("git-rollback.schema.json");
-    expect(s.required).toEqual(expect.arrayContaining(["rollbackRunId", "rollbackOf"]));
-    expect(s.description).toMatch(/stays `finalized`/);
-  });
-});
-
-describe("Phase-4 confidence inputs are two independently-typed fields (no single `confidence`)", () => {
-  const load = (name: string) =>
-    JSON.parse(readFileSync(join(root, "docs/specs/cli-contract", name), "utf8"));
-  const mutationSchemas = ["enrich.schema.json", "reconcile.schema.json", "maintain.schema.json"];
-
-  for (const file of mutationSchemas) {
-    it(`${file}: exposes modelConfidence + validationConfidence and no single confidence`, () => {
-      const s = load(file);
-      expect(s.properties.modelConfidence?.type).toBe("number");
-      expect(s.properties.validationConfidence?.type).toBe("number");
-      // the collapsed single-field `confidence` is gone
-      expect(s.properties.confidence, `${file} still exposes a single confidence`).toBeUndefined();
-      // a Tier-2 APPLIED result requires BOTH inputs (neither can be absent)
-      const branch = (s.allOf as any[]).find(
-        (a) => a.if?.properties?.mode?.const === "applied" && a.if?.properties?.risk?.const === "tier-2",
-      );
-      expect(branch, `${file} tier-2 applied conditional`).toBeTruthy();
-      expect(branch.then.required).toEqual(expect.arrayContaining(["modelConfidence", "validationConfidence"]));
-    });
-  }
 
   it("validate.schema.json ValidationReport exposes BOTH typed confidences (not only tier2Eligible)", () => {
     const gates = load("validate.schema.json").properties.gates;
@@ -1338,47 +1019,27 @@ describe("Phase-4 confidence inputs are two independently-typed fields (no singl
   });
 });
 
-describe("Phase-4 discriminated outcomes (evidence resolve, purge)", () => {
+describe("Phase-4 discriminated outcomes (evidence resolve)", () => {
   const load = (name: string) =>
     JSON.parse(readFileSync(join(root, "docs/specs/cli-contract", name), "utf8"));
 
-  it("evidence resolve: integrated requires integratedCommit; pending/failed forbid it and pending exits 6", () => {
+  it("evidence resolve: resolved requires a commit + status=resolved; target-missing forbids a commit (v2 task 4-4)", () => {
     const s = load("evidence-resolve.schema.json");
-    expect(s.properties.outcome.enum.sort()).toEqual(["failed", "integrated", "review_pending"]);
+    // v2 flat vault-derived evidence: the two outcomes are `resolved` (Markdown-committed)
+    // and `target-missing` (the gone-note case) — no renditions, no review_pending, no exit 6.
+    expect(s.properties.outcome.enum.sort()).toEqual(["resolved", "target-missing"]);
     const branchFor = (outcome: string) =>
       (s.allOf as any[]).find((a) => a.if?.properties?.outcome?.const === outcome);
-    // integrated ⇒ requires the canonical commit + full superseding head
-    expect(branchFor("integrated").then.required).toEqual(
-      expect.arrayContaining(["evidenceId", "integratedCommit"]),
-    );
-    // pending/failed ⇒ integratedCommit is forbidden (never auto-integrates)
-    expect(branchFor("review_pending").then.properties.integratedCommit).toBe(false);
-    expect(branchFor("failed").then.properties.integratedCommit).toBe(false);
-    // exit 6 surfaced for the pending escalation
-    const exits = s["x-atlas-contract"].exitCodes as number[];
-    expect(exits).toContain(6);
-    const reviewPending = (s["x-atlas-contract"].errorCodes as any[]).find((e) => e.code === "review-pending");
-    expect(reviewPending?.exit).toBe(6);
+    // resolved ⇒ requires the canonical commit + status=resolved (the Markdown SSOT write)
+    expect(branchFor("resolved").then.required).toEqual(expect.arrayContaining(["commit"]));
+    expect(branchFor("resolved").then.properties.status.const).toBe("resolved");
+    // target-missing ⇒ no commit (nothing was mutated), status=needs-review
+    expect(branchFor("target-missing").then.properties.commit).toBe(false);
+    expect(branchFor("target-missing").then.properties.status.const).toBe("needs-review");
+    // no exit 6 (the review escalation is retired); no ledger coupling
+    expect(s["x-atlas-contract"].exitCodes as number[]).not.toContain(6);
   });
 
-  it("purge: erasureClass discriminates ordinary (no ref rewrite) vs history-rewrite (oldHead+replacementHead)", () => {
-    const s = load("purge.schema.json");
-    expect(s.properties.erasureClass.enum.sort()).toEqual(["history-rewrite", "ordinary"]);
-    const branchFor = (cls: string) =>
-      (s.allOf as any[]).find((a) => a.if?.properties?.erasureClass?.const === cls);
-    // ordinary ⇒ refReplaced false, challengeBinding must NOT carry oldHead/replacementHead
-    expect(branchFor("ordinary").then.properties.refReplaced.const).toBe(false);
-    expect(branchFor("ordinary").then.properties.challengeBinding.not).toBeTruthy();
-    // history-rewrite ⇒ refReplaced true, challengeBinding requires oldHead + replacementHead
-    expect(branchFor("history-rewrite").then.properties.refReplaced.const).toBe(true);
-    expect(branchFor("history-rewrite").then.properties.challengeBinding.required).toEqual(
-      expect.arrayContaining(["oldHead", "replacementHead"]),
-    );
-    // the base challengeBinding no longer unconditionally requires oldHead/replacementHead
-    const cb = s.properties.challengeBinding;
-    expect(cb.required).not.toContain("oldHead");
-    expect(cb.required).not.toContain("replacementHead");
-  });
 });
 
 describe("Phase-5 cli-contract schema presence (Task 5.0)", () => {
@@ -1403,36 +1064,10 @@ describe("Phase-5 cli-contract schema presence (Task 5.0)", () => {
   // flips `index eval` to implemented:true once its handler lands, and the durable
   // gate is schema presence, not a temporal implementation-status assertion (which
   // that handler would necessarily break). Matches the Phase-2/3/4 gate policy above.
-  it("the delivered Task-5.0 graduation/quarantine commands are implemented:true with their schemas present", () => {
-    const delivered = [
-      "graduation audit",
-      "graduation migrate",
-      "graduation scan",
-      "quarantine inspect",
-      "quarantine resolve",
-    ];
-    const rows = phase5.filter((r) => delivered.includes(r.name));
-    expect(rows.map((r) => r.name).sort()).toEqual([...delivered].sort());
-    for (const r of rows) {
-      expect(r.implemented, `${r.name} implemented`).toBe(true);
-      expect(existsSync(join(root, r.schemaRef)), `${r.name} schema ${r.schemaRef}`).toBe(true);
-    }
-  });
 
-  it("the Phase-5 command set matches the delivered inventory (Task 5.0 + index eval + 60-B sync)", () => {
-    expect(phase5.map((c) => c.name).sort()).toEqual(
-      [
-        "graduation audit",
-        "graduation migrate",
-        "graduation scan",
-        "index eval",
-        "quarantine inspect",
-        "quarantine resolve",
-        "sync",
-        "sync reset",
-        "sync status",
-      ].sort(),
-    );
+  it("the Phase-5 command set matches the v2 survivor inventory (#333)", () => {
+    // graduation/quarantine retired with the security arc; sync reset|status folded/killed.
+    expect(phase5.map((c) => c.name).sort()).toEqual(["index eval", "sync"].sort());
   });
 
   it("every Phase-5 schema is well-formed, compiles, and its x-atlas-contract matches the registry row", () => {
@@ -1463,72 +1098,6 @@ describe("Phase-5 cli-contract schema presence (Task 5.0)", () => {
     }
   });
 
-  it("every privileged Phase-5 command exposes the challenge/authorization flow and exit 6", () => {
-    for (const r of phase5.filter((c) => c.privilege === "privileged")) {
-      const c = JSON.parse(readFileSync(join(root, r.schemaRef), "utf8"))["x-atlas-contract"];
-      const flagNames = (c.flags as { flag?: string; name?: string }[]).map((f) => f.flag ?? f.name);
-      expect(flagNames.some((f) => f?.startsWith("--export-challenge")), `${r.name} --export-challenge`).toBe(true);
-      expect(flagNames.some((f) => f?.startsWith("--authorization")), `${r.name} --authorization`).toBe(true);
-      expect(c.exitCodes, `${r.name} exit 6`).toContain(6);
-      const codes = c.errorCodes as { code: string; exit: number }[];
-      expect(codes.some((e) => e.exit === 6), `${r.name} has an exit-6 error code`).toBe(true);
-    }
-  });
-});
-
-describe("Phase-5 privileged schemas ⇄ broker authzContract (per-command exits, SSOT)", () => {
-  const schemaDir = "docs/specs/cli-contract";
-  const load = (name: string) => JSON.parse(readFileSync(join(root, schemaDir, name), "utf8"));
-  const catalogExit = new Map(authzContract.errorCatalog.map((e) => [e.code, e.exitCode]));
-  const opByName = new Map(authzContract.privilegedOps.map((o) => [o.op, o]));
-  const privileged = registry.commands.filter((c) => c.phase === 5 && c.privilege === "privileged");
-
-  it("has the four privileged Phase-5 commands", () => {
-    expect(privileged.map((c) => c.name).sort()).toEqual(
-      ["graduation migrate", "quarantine inspect", "quarantine resolve", "sync reset"].sort(),
-    );
-  });
-
-  for (const r of registry.commands.filter((c) => c.phase === 5 && c.privilege === "privileged")) {
-    it(`${r.name}: authz.driftCodes match the §7.5 op verbatim, each surfaced with the broker's catalog exit`, () => {
-      const c = load(r.name.replace(/ /g, "-") + ".schema.json")["x-atlas-contract"];
-      const authz = c.authz as {
-        op: string;
-        mechanism: string;
-        challengeFields: string[];
-        driftCodes: string[];
-        universalCodes?: string[];
-      };
-      expect(authz, `${r.name} authz block`).toBeTruthy();
-      // canonical op name with SPACES (not dotted) and present in the §7.5 SSOT
-      expect(authz.op).toBe(r.name);
-      expect(authz.op).not.toMatch(/\./);
-      const ssot = opByName.get(authz.op);
-      expect(ssot, `authzContract op ${authz.op}`).toBeTruthy();
-      // mechanism + challengeFields equal the broker contract's §7.5 for this op (verbatim)
-      expect(authz.mechanism, `${r.name} authz.mechanism`).toBe(ssot!.mechanism);
-      expect([...authz.challengeFields].sort()).toEqual([...ssot!.challengeFields].sort());
-      // driftCodes equal the broker contract's driftCodes for this op (verbatim, no drift)
-      expect([...authz.driftCodes].sort()).toEqual([...ssot!.driftCodes].sort());
-      // every driftCode is surfaced in the schema errorCodes with the STABLE catalog exit
-      const errByCode = new Map(
-        (c.errorCodes as { code: string; exit: number }[]).map((e) => [e.code, e.exit]),
-      );
-      for (const code of authz.driftCodes) {
-        expect(errByCode.has(code), `${r.name} errorCodes missing ${code}`).toBe(true);
-        expect(errByCode.get(code), `${r.name} ${code} exit`).toBe(catalogExit.get(code));
-      }
-      // the schema never flattens broker auth into a single authorization-invalid exit-2 code
-      expect(errByCode.has("authorization-invalid"), `${r.name} still flattens to authorization-invalid`).toBe(false);
-      // any declared universalCodes are real catalog members surfaced with their stable exit (1)
-      for (const code of authz.universalCodes ?? []) {
-        expect(catalogExit.has(code), `${code} in errorCatalog`).toBe(true);
-        expect(catalogExit.get(code), `${code} catalog exit`).toBe(1);
-        expect(errByCode.get(code), `${r.name} ${code} exit`).toBe(catalogExit.get(code));
-        expect(authz.driftCodes.includes(code), `${r.name} ${code} must not be a driftCode`).toBe(false);
-      }
-    });
-  }
 });
 
 describe("Phase-5 acceptance thresholds — literal comparison to the plan §2.5 constants (Task 5.0)", () => {
@@ -1583,434 +1152,6 @@ describe("Phase-5 acceptance thresholds — literal comparison to the plan §2.5
     expect(s.resources.peakRssBytes).toBeTruthy();
     expect(s.resources.diskFootprintCorpusMultiple).toBeTruthy();
     expect(s.resources.crashRecoveryMs).toBeTruthy();
-  });
-});
-
-describe("Phase-5 bootstrap-migration executable fixtures (Task 5.0 — the contract for 5.3)", () => {
-  const fixturesRel = "docs/specs/fixtures/bootstrap-migration";
-  const manifest = JSON.parse(readFileSync(join(root, fixturesRel, "manifest.json"), "utf8"));
-
-  // Slug + id derivation mirroring bootstrap-migration.md §2.1/§2 — the fixtures
-  // must be derivable from these rules (so they cannot drift from the contract).
-  const slug = (title: string): string =>
-    title
-      .normalize("NFKD")
-      .replace(/[̀-ͯ]/gu, "")
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "") || "note";
-
-  it("the manifest is versioned, sorted by id, and pins the supported schema_version", () => {
-    expect(manifest.version).toBeGreaterThanOrEqual(1);
-    expect(manifest.supportedSchemaVersion).toBe(1);
-    const ids = (manifest.cases as { id: string }[]).map((c) => c.id);
-    expect(ids).toEqual([...ids].sort());
-    expect(ids.length).toBeGreaterThan(0);
-  });
-
-  for (const c of manifest.cases as { id: string; input: string; expected: string }[]) {
-    describe(c.id, () => {
-      it("input dir and expected.json exist and expected.json parses", () => {
-        expect(existsSync(join(root, fixturesRel, c.input)), `${c.id} input`).toBe(true);
-        expect(existsSync(join(root, fixturesRel, c.expected)), `${c.id} expected`).toBe(true);
-        expect(() => JSON.parse(readFileSync(join(root, fixturesRel, c.expected), "utf8"))).not.toThrow();
-      });
-    });
-  }
-
-  const expectedOf = (id: string) => {
-    const c = (manifest.cases as { id: string; expected: string }[]).find((x) => x.id === id)!;
-    return JSON.parse(readFileSync(join(root, fixturesRel, c.expected), "utf8"));
-  };
-
-  it("basic: every migrated note's id is <type>-<slug(title)> and schema_version is initialized to 1", () => {
-    const exp = expectedOf("basic");
-    // Concepts/Atlas.md → concept-atlas ; People/Koral.md → person-koral (folder-inferred type + slug)
-    expect(exp.migrate.idMap["Concepts/Atlas.md"]).toBe(`concept-${slug("Atlas")}`);
-    expect(exp.migrate.idMap["People/Koral.md"]).toBe(`person-${slug("Koral")}`);
-    for (const n of exp.migrate.notes) {
-      expect(n.schemaVersion, `${n.path} schema_version`).toBe(1);
-      expect(n.newId, `${n.path} id`).toBe(`${n.type.value}-${slug(n.newId.slice(n.type.value.length + 1))}`);
-    }
-    // the unresolved wikilink is FLATTENED to display text (Task 3, #151) — nothing survives as a link
-    const atlas = exp.migrate.notes.find((n: { path: string }) => n.path === "Concepts/Atlas.md");
-    const flattened = atlas.linkRewrites.find((l: { resolution: string }) => l.resolution === "flattened-unresolved");
-    expect(flattened, "the unresolved link is flattened").toBeTruthy();
-    expect(flattened.to.includes("[["), "flattened link left as plain display text").toBe(false);
-    // the ORIGINAL vault's broken link is still inventoried by the audit (audit reads the pre-migration tree)
-    expect(exp.audit.categories["incompatible-link"]).toContain("Concepts/Atlas.md");
-  });
-
-  it("collision: distinct derived-id clash → deterministic numeric suffix; duplicate EXPLICIT id → disambiguated (never quarantined)", () => {
-    const exp = expectedOf("collision");
-    const suffixed = exp.migrate.notes.find((n: { collision?: unknown }) => n.collision);
-    expect(suffixed.collision.rule).toBe("numeric-suffix-by-sorted-path");
-    expect(suffixed.collision.disambiguatedTo).toBe(`${suffixed.collision.derivedId}-2`);
-    expect(suffixed.newId).toBe(suffixed.collision.disambiguatedTo);
-    // duplicate EXPLICIT ids are numeric-suffix-disambiguated (Task 3, #151), never quarantined
-    expect(exp.migrate.quarantined.filter((q: { category: string }) => q.category === "duplicate-identity")).toEqual([]);
-    const explicitIds = exp.migrate.notes
-      .filter((n: { oldId: string | null }) => n.oldId === "shared-x")
-      .map((n: { newId: string }) => n.newId)
-      .sort();
-    expect(explicitIds).toEqual(["shared-x", "shared-x-2"]); // both migrate, distinct ids
-    // the ORIGINAL vault's duplicate ids are still inventoried by the audit (audit reads the pre-migration tree)
-    expect(exp.audit.categories["duplicate-identity"].sort()).toEqual(["ExplicitA.md", "ExplicitB.md"]);
-  });
-
-  it("guards (#151 open type gate): an unsupported schema_version is COERCED (never refused); an unknown/malformed type MIGRATES as-is; unknown frontmatter is preserved", () => {
-    const exp = expectedOf("guards");
-    // The type/schema-version refusal categories no longer occur — planBootstrapMigration is total.
-    expect(exp.migrate.refused ?? []).toEqual([]);
-    const byPath = new Map(exp.migrate.notes.map((n: { path: string }) => [n.path, n]));
-    // FromFuture.md asserted schema_version: 99 — coerced to SCHEMA_VERSION, migrated (not refused).
-    const future = byPath.get("FromFuture.md") as { schemaVersion: number; initializedFrontmatter: { schema_version: number } } | undefined;
-    expect(future, "FromFuture.md migrates").toBeTruthy();
-    expect(future!.schemaVersion).toBe(SCHEMA_VERSION);
-    expect(future!.initializedFrontmatter.schema_version).toBe(SCHEMA_VERSION);
-    // Alien.md (`type: alien`) and MalformedType.md (`type: 42`) are open-registry types — kept as
-    // asserted (resolver-normalized), never refused (bootstrap-migration.md §3, #151).
-    const alien = byPath.get("Alien.md") as { type: { value: string } } | undefined;
-    expect(alien, "Alien.md migrates").toBeTruthy();
-    expect(alien!.type.value).toBe("alien");
-    const malformed = byPath.get("MalformedType.md") as { type: { value: string } } | undefined;
-    expect(malformed, "MalformedType.md migrates").toBeTruthy();
-    expect(malformed!.type.value).toBe("42");
-    // Open registry: neither is unknown-type in the audit inventory either (any non-empty type is known).
-    expect(exp.audit.categories["unknown-type"]).toEqual([]);
-    const preserved = exp.migrate.notes.find((n: { preservedFrontmatter?: string[] }) => n.preservedFrontmatter);
-    expect(preserved.preservedFrontmatter).toEqual(expect.arrayContaining(["custom_field", "source_url", "tags"]));
-  });
-
-  it("graduation-migrate.schema.json's notes[].type.value is OPEN (#151): a fixture note with an unregistered type (e.g. `podcast`) validates", () => {
-    const schema = JSON.parse(readFileSync(join(root, "docs/specs/cli-contract", "graduation-migrate.schema.json"), "utf8"));
-    const ajv = new Ajv2020({ strict: false, allErrors: true });
-    const validate = ajv.compile(schema);
-    const instance = {
-      command: "graduation migrate",
-      mode: "preview",
-      migrationRunId: "01J9ZBOOTSTRAPPODCAST00000",
-      notes: [
-        {
-          path: "x/Podcast.md",
-          oldId: null,
-          newId: "podcast-ep1",
-          type: { value: "podcast", source: "frontmatter" },
-          schemaVersion: 1,
-          status: "migrated",
-          linkRewrites: [],
-        },
-      ],
-      quarantined: [],
-      refused: [],
-      idMap: { "x/Podcast.md": "podcast-ep1" },
-    };
-    const ok = validate(instance);
-    expect(ok, ajv.errorsText(validate.errors)).toBe(true);
-  });
-
-  it("idempotent: a checkpoint resume skips migrated notes, re-applies nothing, and yields the same id map", () => {
-    const exp = expectedOf("idempotent");
-    expect(exp.resume.reapplied).toEqual([]);
-    expect(exp.resume.skipped.length).toBeGreaterThan(0);
-    for (const p of exp.resume.skipped) {
-      expect(exp.resume.finalStatuses[p]).toBe("migrated");
-      expect(exp.resume.idMap[p]).toBeTruthy();
-    }
-    const pre = new Map(exp.resume.preCheckpoint.map((n: { path: string; newId: string }) => [n.path, n.newId]));
-    for (const [p, id] of Object.entries(exp.resume.idMap)) expect(pre.get(p)).toBe(id);
-  });
-
-  it("crash-window: resume skips the verified-migrated note and APPLIES the still-legacy pending note", () => {
-    const exp = expectedOf("crash-window");
-    // the pending note's on-disk bytes still equal its recorded preImage (mutation never applied)
-    expect(exp.resume.rerunMode).toBe("applied");
-    expect(exp.resume.skipped).toEqual(["Done.md"]);
-    expect(exp.resume.applied).toEqual(["Pending.md"]); // never skipped just because the checkpoint names it
-    expect(exp.resume.reapplied).toEqual([]);
-    expect(exp.resume.verifiedPostImage["Done.md"]).toBe(true);
-    expect(exp.resume.verifiedPreImage["Pending.md"]).toBe(true);
-    expect(exp.resume.finalStatuses["Pending.md"]).toBe("migrated");
-    // the recorded pre/post sha256 are present so the verification is real, not asserted
-    const pending = exp.resume.preCheckpoint.find((n: { path: string }) => n.path === "Pending.md");
-    expect(pending.preImageSha256).toMatch(/^[0-9a-f]{64}$/);
-    const done = exp.resume.preCheckpoint.find((n: { path: string }) => n.path === "Done.md");
-    expect(done.postImageSha256).toMatch(/^[0-9a-f]{64}$/);
-  });
-
-  it("crash-window: the fixture bytes actually hash to the checkpoint's pre/post images (real verification)", () => {
-    const dir = join(root, fixturesRel, "crash-window", "input");
-    const cp = JSON.parse(readFileSync(join(dir, ".checkpoint.json"), "utf8"));
-    const sha = (p: string) => createHash("sha256").update(readFileSync(join(dir, p))).digest("hex");
-    const done = cp.notes.find((n: { path: string }) => n.path === "Done.md");
-    const pending = cp.notes.find((n: { path: string }) => n.path === "Pending.md");
-    // Done.md on disk is the MIGRATED bytes (matches postImage); Pending.md is still LEGACY (matches preImage)
-    expect(sha("Done.md")).toBe(done.postImageSha256);
-    expect(sha("Pending.md")).toBe(pending.preImageSha256);
-  });
-
-  it("explicit-collision: explicit ids are reserved before derivation; derived notes sorting before AND after the owner are both suffixed", () => {
-    const exp = expectedOf("explicit-collision");
-    expect(exp.reservedExplicitIds).toContain("note-report");
-    // the explicit owner keeps the bare id; the two derived notes (one sorts before, one after) are suffixed
-    expect(exp.migrate.idMap["MExplicit.md"]).toBe("note-report");
-    expect(exp.migrate.idMap["AReport.md"]).toBe("note-report-2"); // sorts BEFORE the owner
-    expect(exp.migrate.idMap["ZReport.md"]).toBe("note-report-3"); // sorts AFTER the owner
-    // no note ends up sharing the explicit owner's id
-    const ids = Object.values(exp.migrate.idMap);
-    expect(new Set(ids).size).toBe(ids.length);
-    for (const n of exp.migrate.notes) {
-      if (n.collision) expect(n.collision.derivedId).toBe("note-report");
-    }
-  });
-
-  it("rollback: byte-exact reversal via pre-images in reverse sorted-path order, idempotent re-rollback", () => {
-    const exp = expectedOf("rollback");
-    expect(exp.migrate.mode).toBe("rolled-back");
-    expect(exp.migrate.rollbackOrder).toEqual(["Beta.md", "Alpha.md"]); // reverse sorted-path
-    for (const r of exp.migrate.rolledBack) {
-      expect(r.preImageRestored).toBe(true);
-      expect(r.restoredToStatus).toBe("pending");
-      expect(r.restoredToSha256).toMatch(/^[0-9a-f]{64}$/);
-    }
-    // a re-invoked rollback re-reverts nothing already reverted
-    expect(exp.rerunRollback.reReverted).toEqual([]);
-    expect(exp.rerunRollback.rolledBack).toEqual([]);
-  });
-
-  it("rollback: restore targets actually hash to the checkpoint pre-images (byte-exact reversal is real)", () => {
-    const dir = join(root, fixturesRel, "rollback", "input");
-    const cp = JSON.parse(readFileSync(join(dir, ".checkpoint.json"), "utf8"));
-    const exp = expectedOf("rollback");
-    const sha = (p: string) => createHash("sha256").update(readFileSync(join(dir, p))).digest("hex");
-    for (const note of cp.notes as { path: string; preImage: string; preImageSha256: string }[]) {
-      // the retained pre-image backup hashes to the recorded preImageSha256
-      expect(sha(note.preImage), `${note.path} pre-image backup`).toBe(note.preImageSha256);
-      // and the rolledBack record's restoredToSha256 equals that same pre-image hash
-      const r = exp.migrate.rolledBack.find((x: { path: string }) => x.path === note.path);
-      expect(r.restoredToSha256, `${note.path} restore target`).toBe(note.preImageSha256);
-    }
-  });
-
-  it("basic: an unresolved-link note migrates by FLATTENING the link (no operator release needed — migration is total)", () => {
-    const exp = expectedOf("basic");
-    const atlas = exp.migrate.notes.find((n: { path: string }) => n.path === "Concepts/Atlas.md");
-    // migration is total: the note migrates WITHOUT any release record — the link is flattened in place
-    expect(atlas.released, "no release record — flattening is unconditional").toBeUndefined();
-    const flattened = atlas.linkRewrites.find((l: { resolution: string }) => l.resolution === "flattened-unresolved");
-    expect(flattened, "the unresolved link is flattened").toBeTruthy();
-    expect(exp.migrate.releases ?? [], "no incompatible-link releases remain").toEqual([]);
-  });
-
-  it("idempotent + reader-required-field init: every migrated note initializes id/type/schema_version/title/created/updated", () => {
-    for (const id of ["basic", "guards", "crash-window", "explicit-collision"]) {
-      const exp = expectedOf(id);
-      for (const n of exp.migrate.notes) {
-        if (n.status !== "migrated") continue;
-        const f = n.initializedFrontmatter;
-        expect(f, `${id}:${n.path} initializedFrontmatter`).toBeTruthy();
-        for (const k of ["id", "type", "schema_version", "title", "created", "updated"]) {
-          expect(f[k], `${id}:${n.path} required ${k}`).toBeTruthy();
-        }
-        // deterministic timestamps: the no-history fallback is the pinned bootstrapTimestamp
-        expect(f.created).toBe("2026-07-12T00:00:00Z");
-        expect(f.updated).toBe("2026-07-12T00:00:00Z");
-      }
-    }
-  });
-
-  it("audit categories in every fixture are a subset of the bootstrap-migration.md §7 category set", () => {
-    const CATEGORIES = new Set([
-      "missing-id",
-      "missing-type",
-      "missing-schema-version",
-      "ambiguous-alias",
-      "duplicate-identity",
-      "incompatible-link",
-      "detected-credential",
-      "unknown-type",
-      "unsupported-schema-version",
-    ]);
-    for (const c of manifest.cases as { id: string }[]) {
-      const exp = expectedOf(c.id);
-      if (!exp.audit) continue;
-      for (const key of Object.keys(exp.audit.categories)) {
-        expect(CATEGORIES.has(key), `${c.id} category ${key}`).toBe(true);
-      }
-    }
-  });
-});
-
-describe("Phase-5 graduation/quarantine schema contracts (wing findings R2 — named tests)", () => {
-  const schemaDir = "docs/specs/cli-contract";
-  const load = (name: string) => JSON.parse(readFileSync(join(root, schemaDir, name), "utf8"));
-  const flagsOf = (schema: Record<string, unknown>) =>
-    ((schema["x-atlas-contract"] as { flags?: { flag?: string; name?: string; required?: boolean }[] }).flags ?? []);
-  const errorsOf = (schema: Record<string, unknown>) =>
-    ((schema["x-atlas-contract"] as { errorCodes?: { code: string; exit: number; when: string }[] }).errorCodes ?? []);
-
-  // Finding 6 — graduation scan: required --source/--copy path flags; live-source immutability.
-  it("graduation scan requires --source AND --copy path flags (source-to-disposable-copy op)", () => {
-    const flags = flagsOf(load("graduation-scan.schema.json"));
-    const byFlag = new Map(flags.map((f) => [f.flag ?? f.name, f]));
-    for (const name of ["--source <path>", "--copy <path>"]) {
-      const f = byFlag.get(name);
-      expect(f, `scan ${name} flag`).toBeTruthy();
-      expect(f!.required, `scan ${name} required`).toBe(true);
-    }
-  });
-
-  it("graduation scan usage-error covers a MISSING required --source/--copy, and the source is immutable", () => {
-    const schema = load("graduation-scan.schema.json");
-    const usage = errorsOf(schema).find((e) => e.code === "usage");
-    expect(usage, "scan usage error").toBeTruthy();
-    expect(usage!.when.toLowerCase()).toMatch(/missing required --source \/ --copy|missing required --source/);
-    // live-source immutability is a hard prohibited effect (byte/tree-hash identical before/after)
-    const prohibited = (schema["x-atlas-contract"] as { prohibitedEffects: string[] }).prohibitedEffects;
-    expect(prohibited.some((p) => /never (scans or )?mutates the live main-vault/.test(p))).toBe(true);
-    expect(prohibited.some((p) => /never writes to --source/.test(p))).toBe(true);
-  });
-
-  // Finding 7 — quarantine inspect: EVERY invocation is challenge-bound; reveal ADDITIONALLY binds reveal intent.
-  it("quarantine inspect requires --authorization on EVERY invocation (metadata or --reveal)", () => {
-    const schema = load("quarantine-inspect.schema.json");
-    const authRequired = errorsOf(schema).find((e) => e.code === "authorization-required");
-    expect(authRequired, "inspect authorization-required error").toBeTruthy();
-    expect(authRequired!.exit).toBe(6);
-    // the guard must cover ANY invocation — not only --reveal
-    // R3-F1: exit 6 only when interactive presence is unavailable/declined (and no --authorization)
-    // or a challenge is exported — NOT a blanket "every invocation requires --authorization".
-    expect(authRequired!.when.toLowerCase()).toMatch(/interactive os-presence|unavailable or declined|export-challenge/);
-    const prohibited = (schema["x-atlas-contract"] as { prohibitedEffects: string[] }).prohibitedEffects;
-    expect(
-      prohibited.some((p) => /never returns any output.*without a valid.*authorization/i.test(p)),
-      "inspect blocks unauthenticated metadata",
-    ).toBe(true);
-    // --reveal additionally binds reveal intent (a metadata authorization does not authorize a reveal)
-    const revealFlag = flagsOf(schema).find((f) => (f.flag ?? f.name) === "--reveal");
-    expect(revealFlag, "inspect --reveal flag").toBeTruthy();
-    expect(
-      prohibited.some((p) => /never emits plaintext without a reveal-bound authorization/i.test(p)),
-    ).toBe(true);
-  });
-
-  // Finding 8 — graduation migrate --rollback: apply-only authorization contract covers rollback too.
-  it("graduation migrate --rollback is broker-authorized (unauthorized→6, stale→6, replay→1) and binds run+expected generation", () => {
-    const schema = load("graduation-migrate.schema.json");
-    const c = schema["x-atlas-contract"] as {
-      requestHashScope: string[];
-      flags: { flag?: string; description: string }[];
-      errorCodes: { code: string; exit: number; when: string }[];
-    };
-    // R3-F2: rollback is the SAME broker op (graduation migrate) in the reverse direction —
-    // it binds the broker-SSOT GraduateEffect fields (fromGeneration/toGeneration/migrationPlanDigest),
-    // NOT the unsupported migrationRunId+expectedCurrentGeneration authorization fields. The request
-    // hash keeps migrationRunId (checkpoint key) but no longer claims expectedCurrentGeneration.
-    expect(c.requestHashScope).toEqual(
-      expect.arrayContaining(["fromGeneration", "toGeneration", "migrationPlanDigest", "migrationRunId"]),
-    );
-    expect(c.requestHashScope).not.toContain("expectedCurrentGeneration");
-    const rollback = c.flags.find((f) => (f.flag ?? "") === "--rollback");
-    expect(rollback, "--rollback flag").toBeTruthy();
-    expect(rollback!.description).toMatch(/broker-authorized/i);
-    expect(rollback!.description).toMatch(/reverse direction/i);
-    expect(rollback!.description).toMatch(/fromGeneration/);
-    expect(rollback!.description).toMatch(/migrationPlanDigest/);
-    // R3-F5: a conflicting post-migration edit fails closed (never clobbered)
-    expect(rollback!.description).toMatch(/fails closed/i);
-    const byCode = new Map(c.errorCodes.map((e) => [e.code, e]));
-    // R3-F1: unauthorized rollback → exit 6 only when interactive presence is unavailable/declined
-    expect(byCode.get("authorization-required")!.exit).toBe(6);
-    expect(byCode.get("authorization-required")!.when).toMatch(/--rollback/);
-    expect(byCode.get("authorization-required")!.when).toMatch(/interactive OS-presence|unavailable or declined|export-challenge/i);
-    // stale-state rollback → generation_mismatch (6); replayed authorization → nonce_replayed (1)
-    expect(byCode.get("authz.generation_mismatch")!.exit).toBe(6);
-    expect(byCode.get("authz.generation_mismatch")!.when).toMatch(/stale rollback|current \(migrated\) generation|fromGeneration/);
-    expect(byCode.get("authz.nonce_replayed")!.exit).toBe(1);
-  });
-
-  // Finding 9 — reconcile the authoritative category set: audit exposes ALL EIGHT §7 categories,
-  // and quarantine inspect's enum omits the refused/informational ones (only the 4 inspectable).
-  it("the graduation-audit categories reconcile 1:1 with bootstrap-migration.md §7 (all eight)", () => {
-    const EIGHT = [
-      "missing-id",
-      "missing-type",
-      "missing-schema-version",
-      "ambiguous-alias",
-      "duplicate-identity",
-      "incompatible-link",
-      "detected-credential",
-      "unknown-type",
-      "unsupported-schema-version",
-    ];
-    const auditCats = (load("graduation-audit.schema.json").properties.categories.required as string[]).sort();
-    expect(auditCats).toEqual([...EIGHT].sort());
-    // the doc §7 table enumerates the SAME eight rows
-    const doc = readFileSync(join(root, "docs/specs/bootstrap-migration.md"), "utf8");
-    for (const cat of EIGHT) expect(doc, `§7 mentions ${cat}`).toMatch(new RegExp(`\\\`${cat}\\\``));
-  });
-
-  it("quarantine inspect's category enum omits refused/informational categories (only the four inspectable)", () => {
-    const inspectEnum = (load("quarantine-inspect.schema.json").properties.category.enum as string[]).sort();
-    expect(inspectEnum).toEqual(
-      ["ambiguous-alias", "detected-credential", "duplicate-identity", "incompatible-link"].sort(),
-    );
-    // the refusal category is explicitly NOT inspectable
-    expect(inspectEnum).not.toContain("unsupported-schema-version");
-  });
-});
-
-describe("Phase-6 console enablement (SP-1 contracts gate)", () => {
-  const phase6 = registry.commands.filter((c) => c.phase === 6);
-
-  it("the Phase-6 command set is exactly `watch` (shared, none-idempotent), landed with the harness widening", () => {
-    expect(phase6.map((c) => c.name)).toEqual(["watch"]);
-    const r = phase6[0]!;
-    expect(r.privilege).toBe("shared");
-    expect(r.idempotency).toBe("none");
-    expect(existsSync(join(root, r.schemaRef)), `watch schema ${r.schemaRef}`).toBe(true);
-  });
-
-  // NB: no implemented:false assertion — the Phase-5 flip lands in a later SP-1
-  // step; the durable gate is schema presence + row binding (Phase-3/4/5 policy).
-  it("watch.schema.json is a compilable 8-member event-line union whose x-atlas-contract matches the registry row", () => {
-    const r = phase6[0]!;
-    const schema = JSON.parse(readFileSync(join(root, r.schemaRef), "utf8"));
-    const c = schema["x-atlas-contract"];
-    expect(c, "watch x-atlas-contract").toBeTruthy();
-    expect(c.command).toBe(r.name);
-    expect(c.phase).toBe(6);
-    expect(c.privilege).toBe(r.privilege);
-    expect(c.idempotency).toBe(r.idempotency);
-    // read-only-ness rides executionClass (the registry has no "readonly" privilege);
-    // plain read, NOT audited-read (spec §5.1 — watch emits no run.readonly)
-    expect(c.executionClass).toBe("read");
-    // strict exit subset for a long-lived stream (§10.1): no 1/3/6/7 paths exist
-    expect(c.exitCodes).toEqual([0, 2, 4, 5]);
-    for (const code of c.exitCodes as number[]) {
-      expect(EXIT_CODES.includes(code as (typeof EXIT_CODES)[number]), `watch exit ${code}`).toBe(true);
-    }
-    expect(c.errorEnvelopeRef).toBe("docs/specs/cli-contract/error-envelope.schema.json");
-    // read-only enforcement is pinned in prohibitedEffects (§5.2)
-    const pe = (c.prohibitedEffects as string[]).join(" ");
-    for (const needle of [/readonly:true/, /no Atlas lock/i, /no git/i, /no network egress/i]) {
-      expect(pe, `prohibitedEffects pin ${needle}`).toMatch(needle);
-    }
-    expect(c.locks).toEqual([]);
-    expect(c.sideEffects).toEqual([]);
-    // a line-union schema, not a command-output object: 8 members, one per event type
-    expect(Array.isArray(schema.oneOf)).toBe(true);
-    expect(schema.oneOf).toHaveLength(8);
-    // the schema compiles and each bundled example validates against it
-    const ajv = new Ajv2020({ strict: false, allErrors: true });
-    const validate = ajv.compile(schema);
-    for (const ex of schema.examples ?? []) {
-      expect(validate(ex), `watch example: ${JSON.stringify(validate.errors)}`).toBe(true);
-    }
-    // one example per event type, covering the whole taxonomy (§6)
-    const EVENTS = ["watch.hello", "watch.heartbeat", "watch.error", "job", "model_call", "audit", "backup", "daemon"];
-    const seen = new Set((schema.examples as { event: string }[]).map((e) => e.event));
-    expect([...seen].sort()).toEqual([...EVENTS].sort());
   });
 });
 

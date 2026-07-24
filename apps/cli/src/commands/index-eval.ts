@@ -25,14 +25,12 @@ import {
   type EvalQuerySet,
   type RetrievalEvalResult,
 } from "@atlas/lancedb-index";
-import { ModelsClient } from "@atlas/models";
-import { EgressClient, EgressRefusal } from "@atlas/broker";
+import { ModelsClient, createInProcessInvoker, EgressRefusal } from "@atlas/models";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { openMigratedStore } from "./store-open.js";
 import { makeRetrieveSeam } from "../retrieval/wiring.js";
 import { QueryEmbedError } from "../retrieval/layers.js";
-import { runReadAudit } from "../audit/readonly.js";
 
 export interface ParsedIndexEvalArgs {
   readonly queriesPath: string;
@@ -202,20 +200,8 @@ async function indexEvalCmd(ctx: RunContext): Promise<number> {
     throw e;
   }
 
-  let egress: EgressClient;
-  try {
-    egress = await EgressClient.connect(cfg.broker.egress_socket_path);
-  } catch (e) {
-    store.close();
-    throw new CliError({
-      code: "broker-unreachable",
-      message: `the egress broker is unreachable at ${cfg.broker.egress_socket_path}`,
-      hint: "Start the egress broker daemon (provisioning/bin/egress-launcher.sh) before `brain index eval`.",
-      exitCode: EXIT.CONFIG,
-      cause: e,
-    });
-  }
-  const models = new ModelsClient((params, signal) => egress.invoke(params, signal), () => {});
+  // The in-process model boundary (no egress daemon, no capability mint).
+  const models = new ModelsClient(createInProcessInvoker({ env: ctx.env }), () => {});
 
   try {
     const runId = ctx.runId; // ONE id: egress capability + audit event + logs (query.ts pattern)
@@ -277,15 +263,14 @@ async function indexEvalCmd(ctx: RunContext): Promise<number> {
 
     const out = evalOutput(result, { minRecall: p.minRecall, minMrr: p.minMrr }, degradedQueries);
     // Best-effort Tier-0 audit — reuse THIS store (the status/inspect pure-read pattern).
-    const audit = await runReadAudit(ctx, "run.readonly", "index eval", store, { runId });
+    // v2 (#334): the run.readonly audit append is retired (ADR-0003).
     ctx.log.info("index.eval", {
       queries: out.queries,
       recallAt10: out.metrics.recallAt10,
       mrr: out.metrics.mrr,
       pass: out.pass,
       degradedQueries,
-      audited: audit.recorded,
-      runId: audit.runId,
+      runId,
     });
     if (ctx.output.mode === "json") emitJson(out);
     else
@@ -294,7 +279,6 @@ async function indexEvalCmd(ctx: RunContext): Promise<number> {
       );
     return out.pass ? EXIT.OK : EXIT.VALIDATION;
   } finally {
-    egress.close();
     store.close();
   }
 }

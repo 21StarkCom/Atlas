@@ -2,8 +2,10 @@
  * `@atlas/sqlite-store` — the persistence core. Owns `0001_core` (all non-jobs
  * tables) and consumes `VaultSnapshot` from `@atlas/contracts` (never
  * `apps/cli`, D14). Exposes the connection, the gap-tolerant migration runner,
- * transactional projection rebuild, the post-restore rebuild hook registry, and
- * `db verify`.
+ * transactional projection rebuild, the guarded-DML statement runner
+ * (`applyLedgerWrite`), and `db verify`. v2 (#338) retired the §2.8 audit ledger
+ * + AEAD backup/watermark: git is the only safety mechanism, and `agent_runs` /
+ * `model_calls` are plain operational tables.
  */
 export { openConnection, openReadonlyLedger, ledgerSchemaState, captureLedgerIdentity } from "./connection.js";
 // TEST-ONLY: the inter-open race-injection seam + attempt counter (see
@@ -27,10 +29,6 @@ export type { Migration, MigrationReport, AppliedMigration } from "./migrate.js"
 
 export {
   rebuildProjections,
-  registerPostRestoreRebuild,
-  runPostRestoreRebuild,
-  postRestoreRebuildStepCount,
-  _resetPostRestoreRebuild,
   registerProjectionFold,
   projectionFoldCount,
   _resetProjectionFolds,
@@ -48,8 +46,6 @@ export {
 export type {
   RebuildReport,
   RebuildOptions,
-  RebuildCtx,
-  PostRestoreRebuildStep,
   ProjectionFold,
   PreClearStep,
 } from "./rebuild.js";
@@ -58,19 +54,15 @@ export type {
 // note-scoped `notes`-projection fold (O(delta), caller-supplied resolver).
 export { deriveAndPersistNote } from "./note-derivation.js";
 export { foldNotesForPaths } from "./fold-notes-for-paths.js";
+export { foldNotesV2 } from "./fold-notes-v2.js";
 
 export {
-  foldProvenanceManifests,
-  MalformedManifestError,
-  DanglingSourceError,
-} from "./provenance/fold.js";
-
-export {
-  foldClaimManifests,
-  clearClaimsProjection,
-  MalformedClaimError,
-  DanglingEvidenceError,
-} from "./claims/fold.js";
+  foldEvidenceManifests,
+  clearEvidenceProjection,
+  replaceNoteEvidence,
+  noteEvidenceInputs,
+  EvidenceFoldError,
+} from "./evidence/fold.js";
 
 export { verify, checkQueryPlans } from "./verify.js";
 export type { VerifyReport, InvariantViolation, QueryPlanViolation } from "./verify.js";
@@ -85,67 +77,22 @@ export type {
   NoteLinkRow,
   VaultSchemaMigrationRow,
 } from "./repos/projections.js";
-export { LedgerRepo, AuditEventConflictError } from "./repos/ledger.js";
-export type { AgentRunRow, AuditEventRow } from "./repos/ledger.js";
+export { LedgerRepo } from "./repos/ledger.js";
+export type { AgentRunRow } from "./repos/ledger.js";
 export { GenerationRepo } from "./repos/generation.js";
 export type { NoteFenceRow, GenerationClock } from "./repos/generation.js";
 
-// Ledger finalization + §2.8 cross-store orchestration (Task 1.7).
-export { finalizeLedgerWrite, runBackupStep, readCoalesceCovers, READ_COALESCE_THRESHOLD } from "./ledger/finalize.js";
-export type { AuditBroker, FinalizeStep, FinalizeResult, RunContext } from "./ledger/finalize.js";
-export {
-  IntentsRepo,
-  applyLedgerWrite,
-  payloadHashOf,
-  nextDbEventSeq,
-  latestRunSeq,
-  LedgerAssertionError,
-  DB_EVENT_SEQ_BASE,
-} from "./ledger/intents.js";
+// The statement-runner seam (v2 #338): the §2.8 ledger write protocol + AEAD
+// backup/watermark + crash-recovery drain are retired (git is the only safety
+// mechanism), but the general guarded-DML runner every surviving plain-transaction
+// writer uses lives on here.
+export { applyLedgerWrite, payloadHashOf, LedgerAssertionError } from "./statements.js";
 export type {
   AuditEventDraft,
   UnsignedAuditEvent,
-  AuditIntentRow,
-  AllocatedIntent,
   LedgerStatement,
   LedgerAssertion,
-} from "./ledger/intents.js";
-export { reconcileInterruptedRuns } from "./ledger/reconcile.js";
-export type { ReconcileOptions, ReconcileReport } from "./ledger/reconcile.js";
-
-// Encrypted backup / verify / restore (Task 1.7).
-export {
-  takeBackup,
-  verifyBackup,
-  decryptBackup,
-  readBundleHeader,
-  listBackups,
-  pruneRetention,
-  resolveBackupRef,
-  registerKnownSchemaHead,
-} from "./backup/backup.js";
-export type { LedgerBackupConfig, BackupResult, CatalogEntry } from "./backup/backup.js";
-export { restoreBackup, forceUnblock, recoverInterruptedRestore } from "./backup/restore.js";
-export type { RestoreOptions, RestoreResult, RestoreStep, RestoreRecovery } from "./backup/restore.js";
-export {
-  WatermarkRepo,
-  watermarkHealth,
-  assertBackupHealthy,
-  BackupUnhealthyError,
-  BACKUP_UNHEALTHY_CODE,
-  BACKUP_UNHEALTHY_EXIT,
-} from "./backup/watermark.js";
-export type { WatermarkHealth, BackupWatermarkRow } from "./backup/watermark.js";
-export {
-  seal,
-  open as openBackupBundle,
-  contentHashOf,
-  BackupIntegrityError,
-  BUNDLE_MAGIC,
-  BUNDLE_VERSION,
-  AEAD_KEY_BYTES,
-} from "./backup/aead.js";
-export type { Bundle, BundleHeader } from "./backup/aead.js";
+} from "./statements.js";
 
 export { migration0001Core, CORE_DDL } from "../migrations/0001_core.js";
 export { migration0003Provenance, PROVENANCE_DDL } from "../migrations/0003_provenance.js";
@@ -162,20 +109,12 @@ export { migration0009RunSupersessions, RUN_SUPERSESSIONS_DDL } from "../migrati
 export { migration0010TrustState, TRUST_STATE_DDL } from "../migrations/0010_trust_state.js";
 export { migration0011RunInputs, RUN_INPUTS_DDL } from "../migrations/0011_run_inputs.js";
 export { migration0012SyncCursors, SYNC_CURSORS_DDL } from "../migrations/0012_sync_cursors.js";
+export { migration0013LinksV2, LINKS_V2_DDL } from "../migrations/0013_links_v2.js";
+export { migration0014EvidenceV2, EVIDENCE_V2_DDL } from "../migrations/0014_evidence_v2.js";
+export { migration0015SourceRegistry, SOURCE_REGISTRY_DDL } from "../migrations/0015_source_registry.js";
 
-export { ProvenanceRepo, captureId } from "./repos/provenance.js";
-export type {
-  ContentBlobRow,
-  SourceCaptureRow,
-  SourceRenditionRow,
-  NoteSourceRow,
-  RenditionComponents,
-} from "./repos/provenance.js";
+export { EvidenceRepo } from "./repos/evidence.js";
+export type { EvidenceRow, EvidenceInput, EvidenceStatus } from "./repos/evidence.js";
 
-export { ClaimsRepo, payloadHash, evidenceIdFor, SENTINEL_NONE } from "./repos/claims.js";
-export type {
-  ClaimRow,
-  ClaimEvidenceRow,
-  AttachEvidenceInput,
-  EvidenceVerification,
-} from "./repos/claims.js";
+export { SourceRepo } from "./repos/source.js";
+export type { SourceRow, SourceInput, SourceKind } from "./repos/source.js";

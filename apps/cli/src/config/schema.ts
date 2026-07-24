@@ -6,8 +6,19 @@
  * Modules consume `AtlasConfig`, never literals. Validation is strict: unknown keys
  * and malformed values fail startup with a `ConfigError` (plan §2.5 exit code 2).
  */
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { z } from "zod";
-import { DEFAULT_CANONICAL_REF, DEFAULT_PROTECTED_REFS } from "@atlas/broker";
+
+/**
+ * The default vault path (Phase-5 task 5-1) — the real working tree the v2 live drive
+ * targets: `~/Code/Vaults/main-vault`, already graduated (210 notes, 2026-07-17). A
+ * `brain.config.yaml` that omits `vault.path` resolves here, so config points at the real
+ * vault by default rather than a stale v1 target. The live drive additionally PINS the
+ * intended target with `ATLAS_EXPECT_VAULT` (see `config/load.ts` `EXPECT_VAULT_ENV`),
+ * which fail-closed-rejects a config whose `vault.path` canonicalizes elsewhere.
+ */
+export const DEFAULT_VAULT_PATH = join(homedir(), "Code", "Vaults", "main-vault");
 
 /** Content sensitivity classes (plan §2.5; default `internal` for unlabeled content). */
 export const Sensitivity = z.enum(["public", "internal", "confidential", "restricted"]);
@@ -15,26 +26,6 @@ export type Sensitivity = z.infer<typeof Sensitivity>;
 
 /** Risk tiers 0–3 (plan §2.5); `auto_commit_risk_levels` lists the auto-integrated tiers. */
 export const RiskTier = z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(3)]);
-
-/**
- * A canonical-ref value the operator may configure (60-A live-vault adoption). It
- * must be a real `refs/` ref and must NOT collide with the audit or trust anchors —
- * redirecting the canonical ref onto the audit/trust namespace would let ordinary
- * canonical moves land under a ledger/trust ref, breaking the security model. `audit`
- * and `trust` are never config-supplied; only `canonical` is overridable.
- */
-const CanonicalRef = z
-  .string()
-  .min(1, "git.canonical_ref must not be empty")
-  .refine((r) => r.startsWith("refs/"), {
-    message: "git.canonical_ref must be a fully-qualified ref under refs/ (e.g. refs/heads/main)",
-  })
-  .refine((r) => r !== DEFAULT_PROTECTED_REFS.audit && r !== DEFAULT_PROTECTED_REFS.trust, {
-    message: `git.canonical_ref must not collide with the audit (${DEFAULT_PROTECTED_REFS.audit}) or trust (${DEFAULT_PROTECTED_REFS.trust}) ref`,
-  })
-  .refine((r) => !r.startsWith("refs/audit/") && !r.startsWith("refs/trust/"), {
-    message: "git.canonical_ref must not be under the refs/audit/ or refs/trust/ namespaces",
-  });
 
 /**
  * Which vault-relative paths are treated as notes (60-A task 1.1). Defaults to
@@ -46,7 +37,9 @@ const NoteGlobs = z.array(z.string().min(1)).min(1, "vault.note_globs needs at l
 
 const VaultConfig = z
   .object({
-    path: z.string().min(1),
+    // Defaults to the real working tree (DEFAULT_VAULT_PATH) — a config omitting the path
+    // points at the graduated vault, not a stale v1 target (Phase-5 task 5-1).
+    path: z.string().min(1).default(DEFAULT_VAULT_PATH),
     note_globs: NoteGlobs.default(["**/*.md"]),
   })
   .strict();
@@ -126,10 +119,6 @@ const GitConfig = z
     worktrees_path: z.string().min(1),
     auto_commit_risk_levels: z.array(RiskTier).default([1, 2]), // Tier-1/2 auto-integrate; Tier-3 review
     audit_anchor_path: z.string().min(1), // D8 (broker-owned, outside vault+repo)
-    // The canonical protected ref (60-A). Defaults to the single shared fallback;
-    // adoption overrides it (e.g. refs/atlas/main). Threaded to the broker via
-    // `protectedRefsFor` and to every workflow via deps — never re-inlined.
-    canonical_ref: CanonicalRef.default(DEFAULT_CANONICAL_REF),
   })
   .strict();
 

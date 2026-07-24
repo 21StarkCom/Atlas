@@ -21,7 +21,6 @@
     "yaml": "catalog:"
   },
   "devDependencies": {
-    "@atlas/broker": "workspace:*",
     "@types/better-sqlite3": "catalog:",
     "@types/node": "catalog:",
     "typescript": "catalog:",

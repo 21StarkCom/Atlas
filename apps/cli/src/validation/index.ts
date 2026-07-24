@@ -24,7 +24,6 @@ import {
   type ChangePlanOperation,
   type NoteType,
 } from "@atlas/contracts";
-import { mutationPolicyFor } from "../policies/mutation-policy.js";
 import { checkIdentity } from "./identity.js";
 import { checkProvenance } from "./provenance.js";
 import { checkAccessibility } from "./accessibility.js";
@@ -54,14 +53,6 @@ export interface ValidationVault {
   identityOwners(normalizedKey: string): readonly string[];
   /** A pinned `contentId`/`renditionId` provenance ref resolves to a captured source. */
   hasSourceRef(handle: string): boolean;
-  /** A claim natural key resolves to an existing claim. */
-  hasClaimKey(claimKey: string): boolean;
-  /** An evidence lineage id resolves to an existing lineage. */
-  hasEvidenceLineage(lineageId: string): boolean;
-  /** An evidence surrogate id resolves to an existing head. */
-  hasEvidenceId(evidenceId: string): boolean;
-  /** True when an `AttachEvidence` would re-attach a payload already present (idempotent duplicate). */
-  attachWouldDuplicate(op: ChangePlanOperation): boolean;
 }
 
 /** Data + config the validator consults. */
@@ -81,7 +72,6 @@ const REQUIRES_PROVENANCE = new Set(["CreateNote", "UpdateSection", "AppendSecti
 export function validatePlan(plan: ChangePlan, ctx: ValidationContext): ValidationReport {
   const findings: ValidationFinding[] = [
     ...checkReservedAndSchema(plan.operation),
-    ...checkMutationPolicy(plan.operation, ctx.targetType),
     ...checkPathPolicy(plan.operation),
     ...checkProvenanceRequirement(plan, ctx),
     ...checkEvidenceGating(ctx),
@@ -106,40 +96,6 @@ function checkReservedAndSchema(op: ChangePlanOperation): ValidationFinding[] {
     out.push({ code: "schema-invalid", severity: "error", detail: `operation '${op.op}' failed schema validation: ${parsed.error.issues[0]?.message ?? "invalid"}` });
   }
   return out;
-}
-
-/** Mutation-policy cell for op × target type. */
-function checkMutationPolicy(op: ChangePlanOperation, targetType: NoteType): ValidationFinding[] {
-  const cell = mutationPolicyFor(targetType)[op.op];
-  switch (cell) {
-    case "reserved":
-      return [{ code: "reserved-operation", severity: "error", detail: `operation '${op.op}' is reserved for target type '${targetType}'` }];
-    case "immutable":
-      return [{ code: "policy-immutable", severity: "error", detail: `operation '${op.op}' is not permitted on immutable target type '${targetType}'` }];
-    case "append-only":
-      return isReplaceShaped(op)
-        ? [{ code: "append-only-violation", severity: "error", detail: `in-place replacement '${op.op}' is not permitted on append-only target type '${targetType}'` }]
-        : [];
-    case "review":
-      // Permitted, but never auto-commits — clears the Tier-2 gate.
-      return [{ code: "policy-review", severity: "gate", detail: `operation '${op.op}' on '${targetType}' is review-only (always Tier-3)` }];
-    case "auto":
-      return [];
-  }
-}
-
-/** True when the op replaces/removes existing content (forbidden under append-only). */
-function isReplaceShaped(op: ChangePlanOperation): boolean {
-  switch (op.op) {
-    case "UpdateSection":
-      return true;
-    case "SetFrontmatterField":
-      return op.mode === "update";
-    case "SetLink":
-      return op.action === "remove";
-    default:
-      return false;
-  }
 }
 
 /** Path policy: a new note's natural id must be a safe vault identifier. */

@@ -22,7 +22,7 @@ This is a plain directory, not a workspace package (no `package.json`). Its ACL 
 | `lib.sh` | Shared no-side-effect-on-source helpers: per-OS path resolution (`Darwin` vs `Linux`), portable `create_group`/`create_service_user`/`add_to_group`/`ensure_dir`/`gen_ed25519`/`gen_aead`, `require_root` (exits 2), `free_id_at_or_above`, the `run()` dry-run wrapper. |
 | `dev/setup.sh` | Dev host provision — idempotent, 8 numbered steps, sources `lib.sh`. |
 | `dev/teardown.sh` | Reverse of setup — deletes users/group/keys/anchor/sockets/install dir. Idempotent. |
-| `ci/setup.sh` | Runs `dev/setup.sh`, then writes `/etc/sudoers.d/atlas-ci` (0440, `visudo -cf` validated) scoping the runner to `sudo -u atlas-broker`/`atlas-egress` the **two launchers only** (D1). |
+| `ci/setup.sh` | **RETIRED no-op stub** (phase-2-in-process-cutover, #312) — CI is zero-provisioning, so this no longer runs `dev/setup.sh` nor writes the `/etc/sudoers.d/atlas-ci` D1 sudoers. Deleted (not skipped) in Phase 3. For a real host provision run `dev/setup.sh` directly (the D1 CI sudoers it historically layered on top is no longer written anywhere). |
 | `bin/broker-launcher.sh` · `bin/egress-launcher.sh` | Fixed-path root-owned launchers; export the daemon env contracts, `exec` the installed binary. Never set `ATLAS_TEST_MODE` (D20). |
 | `install-artifact.sh` | Hash-verified install of built privileged binaries into the root-owned `installBin`; records `<bin>.installed.sha256` for `provisioning.integrity.test`. The artifacts are produced by `tools/build-artifact.sh` (esbuild CJS single-file bundles of `@atlas/broker`'s two bins + sha256 manifests). |
 | `enroll-signer.sh` + `enroll-signer-merge.mjs` | **SP-3 per-device signer enrollment / revocation.** `--pubkey <pem> --signer-id <id> --alg <ed25519\|p256> [--presence]` installs the exported public key as a `<keysDir>/atlas-broker/signers.json` entry (owner `atlas-broker`, `0600`); `--revoke --signer-id <id>` flips `status`. The bash wrapper owns args/validation/root-gate/ownership/**broker restart** (`launchctl kickstart -k` on macOS); the `.mjs` core owns the JSON merge (materialize-if-derived, **DER-SPKI-fingerprint identity**, aliasing/silent-swap/silent-rights-change refusal, idempotency) via `@atlas/broker`'s own derive + key-parse, so the file is exactly what `loadSignerRegistry` reads. `--presence` (the two `os-presence` quarantine ops) is refused on `--alg ed25519`. Escapes: `ATLAS_DRY_RUN=1`, `ATLAS_ENROLL_TEST_MODE=1` (skip root/chown/restart — the behavioral test seam), `ATLAS_ENROLL_SKIP_RESTART=1`. Behavioral contract: `tools/enroll-signer.test.ts`. The operator-space half (build + keygen + pubkey) is `console/signer/install.sh`. |
@@ -109,7 +109,7 @@ Both points are written *before* the restart, so there is no window where they d
 - **D16 — privileged binaries NEVER run from the agent-writable repo `dist/`.** Built → hashed → installed into the root-owned dir; launchers are fixed-path with fixed exec paths+args (`install-artifact.sh`, `bin/*-launcher.sh`). A compromised agent cannot swap them.
 - **D17 — agent network denial is at the UID, not the launcher.** Two layers required: kernel pf/netns AND the Seatbelt/child-inherited sandbox. A direct `curl` from the agent must have no route even without a launcher.
 - **D20 — `atlas-test-approver` is hard-rejected unless `ATLAS_TEST_MODE=1`.** Production launchers **never** set that var (`bin/broker-launcher.sh:19-20`); flagged `testModeOnly`, asserted (`provisioning-acl.test.ts:55-57`).
-- **D1 — CI sudoers is scoped to the two launchers only** — nothing else (`ci/setup.sh:20-27`).
+- **D1 — CI sudoers is scoped to the two launchers only** — nothing else. **Historical**: `ci/setup.sh` is now a retired no-op (CI is zero-provisioning, #312) and writes no sudoers at all; the invariant survives as the contract any future provisioned-CI sudoers must satisfy.
 - **Single-holder secrets**: `atlas.gemini.key`, `quarantine-aead`, `audit-attestation` each `readableBy.length === 1` (`provisioning-acl.test.ts:65-69`).
 - **Idempotency**: every creation helper guards on existence; safe to re-run.
 
@@ -126,7 +126,11 @@ Both points are written *before* the restart, so there is no window where they d
 
 ## `ATLAS_PROVISIONED` gating
 
-Tests read `process.env.ATLAS_PROVISIONED === "1"` and skip when absent. The **one** suite that actually gates on it is `approval-boundary.adversarial` (`packages/broker/test/approval-boundary.adversarial.test.ts:127`). `provisioning.separation` / `provisioning.integrity` are **planned suite names that exist only in prose** (`keys.acl.json:3`, `dev/teardown.sh:8`, `install-artifact.sh:31`) — no such test files exist yet; `anchor.anti-truncation` runs fully in-process, ungated. The adversarial two-UID `git update-ref` case also needs passwordless `sudo -n` to **both** root and `atlas-agent` (`packages/broker/test/approval-boundary.adversarial.test.ts:127-130`). `doctor` treats custody-key checks as active only under `ATLAS_PROVISIONED=1` (`apps/cli/src/commands/doctor.ts:356`). **CI always provisions** so these never skip there (`ci/setup.sh`, `.github/workflows/ci.yml:32,43`).
+Tests read `process.env.ATLAS_PROVISIONED === "1"` and skip when absent. **Two** OS-boundary cases actually gate on it — both are single `it.skipIf(...)` cases inside files whose surrounding in-process tests still run under CI:
+- `approval-boundary.adversarial` — the two-UID `git update-ref` denial (`packages/broker/test/approval-boundary.adversarial.test.ts:127`); also needs passwordless `sudo -n` to **both** root and `atlas-agent` (`:127-130`).
+- the **OQ#2 adoption boundary** — `atlas-agent` is denied `update-ref` on `refs/atlas/*` (`apps/cli/test/adopt-vault-bootstrap.test.ts:238-243`), gated on `ATLAS_PROVISIONED=1` **and** running as root (the `chown` to `atlas-broker` needs it).
+
+Both files' other cases are ordinary in-process tests that execute normally on the zero-provisioning CI matrix — only these two boundary cases subset out. `provisioning.separation` / `provisioning.integrity` are **planned suite names that exist only in prose** (`keys.acl.json:3`, `dev/teardown.sh:8`, `install-artifact.sh:31`) — no such test files exist yet; `anchor.anti-truncation` runs fully in-process, ungated. `doctor` treats custody-key checks as active only under `ATLAS_PROVISIONED=1` (`apps/cli/src/commands/doctor.ts:356`). **CI is zero-provisioning** (phase-2-in-process-cutover, #312): `.github/workflows/ci.yml` leaves `ATLAS_PROVISIONED` unset and starts no daemons, so these suites cleanly subset (run their daemon-free in-process subset) there. `ci/setup.sh` is a retired no-op stub; the provisioned-only suites are deleted, not skipped, in Phase 3. Set `ATLAS_PROVISIONED=1` only on a local/manual provisioned host (via `dev/setup.sh`) to exercise the real two-UID paths.
 
 ## Operator entry points
 
@@ -134,7 +138,7 @@ Tests read `process.env.ATLAS_PROVISIONED === "1"` and skip when absent. The **o
 sudo ATLAS_DRY_RUN=1 provisioning/dev/setup.sh   # preview every action, no mutation
 sudo provisioning/dev/setup.sh                   # provision (idempotent)
 sudo provisioning/dev/teardown.sh                # reverse
-sudo provisioning/ci/setup.sh                    # CI (dev setup + sudoers, D1)
+# NOTE: provisioning/ci/setup.sh is a RETIRED no-op (CI is zero-provisioning, #312) — use dev/setup.sh above for a real host
 sudo provisioning/install-artifact.sh <dir>      # hash-verified privileged-binary install
 sudo provisioning/enroll-signer.sh --pubkey approver.pem --signer-id approver-se-<host>-v1 --alg p256 --presence  # SP-3 enroll (restarts the broker)
 sudo provisioning/enroll-signer.sh --revoke --signer-id approver-se-<host>-v1   # SP-3 revoke

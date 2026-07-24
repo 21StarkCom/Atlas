@@ -45,7 +45,6 @@ export {
   assembleRunReport,
   type RunReport,
   type RunArtifacts,
-  type RunAuditEvent,
 } from "./run-report.js";
 
 export {
@@ -65,46 +64,14 @@ export {
   TERMINAL_STATES,
   CHECKPOINT_NEXT,
   TERMINABLE_FROM,
-  CHECKPOINT_AUDIT,
   type CheckpointState,
   type PlannedArtifacts,
   type PatchedArtifacts,
   type WorktreeAppliedArtifacts,
   type AgentCommittedArtifacts,
-  type ReviewPendingArtifacts,
   type IntegratedArtifacts,
   type ReindexedArtifacts,
 } from "./checkpoints.js";
-
-export {
-  refreshRun,
-  RefreshError,
-  type SynthesisRefreshDeps,
-  type RefreshResult,
-} from "./refresh.js";
-
-export {
-  decideApprove,
-  canReject,
-  type ApproveDecision,
-  type ApproveInput,
-} from "./approve.js";
-
-export {
-  approveRun,
-  rejectRun,
-  ApproveError,
-  type ApproveDeps,
-  type ApproveOutcome,
-} from "./approve-run.js";
-
-export {
-  reviewRun,
-  verifyRun,
-  type ReviewReport,
-  type VerifyReport,
-  type VerifyDivergence,
-} from "./review.js";
 
 export {
   rebuildFromGit,
@@ -113,9 +80,9 @@ export {
 } from "./rebuild-from-git.js";
 
 export {
-  makeBrokerIntegrator,
-  type BrokerIntegratorAuth,
-} from "./broker-integrator.js";
+  makeCanonicalIntegrator,
+  CANONICAL_BRANCH,
+} from "./direct-integrator.js";
 
 export {
   makeModelPlanGenerator,
@@ -123,32 +90,6 @@ export {
   type PlanGeneratorDeps,
   type PlanModelsClient,
 } from "./model-plan-generator.js";
-
-export {
-  classifyRollback,
-  renditionDependents,
-  type RollbackClass,
-  type RollbackClassification,
-  type RunToRollback,
-} from "./rollback.js";
-
-export {
-  rollbackRun,
-  RollbackError,
-  type RollbackDeps,
-  type RollbackOutcome,
-} from "./rollback-run.js";
-
-export {
-  enqueueReverification,
-  classifyReanchor,
-  reverifyKey,
-  REVERIFY_WORKFLOW,
-  type RenditionBump,
-  type ReverifyJobPayload,
-  type ReanchorMatch,
-  type ReanchorOutcome,
-} from "./reverify.js";
 
 export {
   beginIdempotent,

@@ -11,8 +11,8 @@
     "check": "node gen-cli-contract.ts --check"
   },
   "dependencies": {
-    "@atlas/broker": "workspace:*",
-    "@atlas/contracts": "workspace:*"
+    "@atlas/contracts": "workspace:*",
+    "@atlas/models": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "catalog:",

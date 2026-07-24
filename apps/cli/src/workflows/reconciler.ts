@@ -1,27 +1,28 @@
 /**
  * `workflows/reconciler` — `reconcileRunsOnStartup`, the startup recovery pass
  * (Task 2.5) that drives every interrupted run forward or to a `failed@` terminal
- * deterministically from `docs/specs/recovery-state-machine.md`. It runs in two
- * layers:
+ * deterministically from `docs/specs/recovery-state-machine.md`.
  *
- *   1. **§2.8 ledger drain** — `reconcileInterruptedRuns` (store-level) converges
- *      any `pending` audit intent left by a crash between §2.8 steps 1–3,
- *      idempotently on `(runId, seq)`. This must precede the run sweep so a run
- *      whose checkpoint CAS never committed is first made durable.
- *   2. **Run sweep** — for every non-terminal `agent_runs` row, apply the recovery
+ * v2 (#338): the §2.8 audit-ledger drain + the un-anchored-integration barrier are
+ * RETIRED with the audit ledger. Recovery is now a pure `agent_runs` run-sweep — a
+ * crashed non-terminal run is re-driven from its durable `agent_runs.status` + gating
+ * rows, and `integrated` is re-derived from authoritative canonical containment (git
+ * is the sole source of truth). It runs in three layers:
+ *
+ *   1. **Run sweep** — for every non-terminal `agent_runs` row, apply the recovery
  *      action the contract table pins for its checkpoint:
  *        - `integrated`  → integrated-but-unfinalized: advance reindexed → finalized
  *                          (a durable canonical mutation is forward-only).
- *        - `review-pending` → leave intact (never auto-advanced; waits for
- *                          `git approve`/`git reject`).
- *        - `worktree-applied` → applied-uncommitted: commit iff planHash + baseRef
+*        - `worktree-applied` → applied-uncommitted: commit iff planHash + baseRef
  *                          unmoved, else `failed@worktree-applied` (reason
  *                          `base-moved`) and clean the orphaned worktree.
- *        - `agent-committed` → route by tier (Tier-2 integrate; Tier-3 leave).
+ *        - `agent-committed` → integrate the committed run (v2 #335: no Tier-3 park).
  *        - `planned`/`patched` → pure, no side effects past the row; safe to leave
  *                          for a fresh re-drive (recompute is deterministic).
- *   3. **Orphan sweep** — any worktree recorded for a now-terminal run that still
+ *   2. **Orphan sweep** — any worktree recorded for a now-terminal run that still
  *      exists on disk is removed (`git worktree remove --force`).
+ *   3. **Idempotency release** — claims wedged `in-progress` by a run that has since
+ *      terminated are released.
  *
  * The side-effecting recovery steps that genuinely belong to the run's producer
  * (committing an applied worktree, Tier-2 integration, reprojection) are injected
@@ -29,21 +30,12 @@
  * producer's idempotent re-drive rather than fabricating the effect.
  */
 import {
-  DB_EVENT_SEQ_BASE,
-  finalizeLedgerWrite,
-  reconcileInterruptedRuns,
-  runBackupStep,
   applyLedgerWrite,
-  payloadHashOf,
-  IntentsRepo,
-  type AuditBroker,
-  type LedgerBackupConfig,
-  type ReconcileReport as LedgerReconcileReport,
   type Store,
 } from "@atlas/sqlite-store";
 import { existsSync } from "node:fs";
 import type { Repo } from "@atlas/git";
-import { newRunId, type WorkflowState } from "@atlas/contracts";
+import { type WorkflowState } from "@atlas/contracts";
 import {
   agentRunUpsert,
   assertGatingEvidence,
@@ -60,13 +52,8 @@ import {
   type PatchedArtifacts,
   type WorktreeAppliedArtifacts,
 } from "./checkpoints.js";
-import { recordIntegration, recordIntegrationFromIntent } from "./engine.js";
+import { recordIntegration } from "./engine.js";
 import { reconcileIdempotency } from "./idempotency.js";
-
-/** `true` iff `err` is the broker's canonical-installing signing refusal (un-anchored). */
-function isAuditKindNotSignable(err: unknown): boolean {
-  return typeof err === "object" && err !== null && (err as { code?: unknown }).code === "broker.audit_kind_not_signable";
-}
 
 /** RFC-3339 UTC millisecond timestamp. */
 function rfc3339Ms(): string {
@@ -156,12 +143,11 @@ export interface ReconcileHooks {
   recomputePatch?(ctx: ReconcileRunContext): Promise<RecomputePatchResult>;
 }
 
-/** Everything the reconciler needs (matches the plan's `{store, repo, broker}`). */
+/** Everything the reconciler needs. v2 (#338): no broker, no backup — the run-sweep
+ * recovers purely from `agent_runs` + git. */
 export interface ReconcileDeps {
   readonly store: Store;
-  readonly broker: AuditBroker;
   readonly repo: Repo;
-  readonly backup: LedgerBackupConfig;
   readonly hooks?: ReconcileHooks;
   readonly now?: () => string;
 }
@@ -178,17 +164,6 @@ export interface RunReconcileOutcome {
 
 /** The full startup-reconciliation report. */
 export interface ReconcileRunsReport {
-  /** The §2.8 ledger-drain result (pending-intent convergence). */
-  readonly ledger: LedgerReconcileReport;
-  /**
-   * Anchored `run.integrated` intents whose canonical install could NOT be
-   * authoritatively verified (round-2 finding W6): the event is on the audit chain
-   * but canonical does not contain the claimed commit. Such an intent is PRESERVED
-   * (never dropped) so its linkage to immutable audit evidence survives and no fresh
-   * seq re-drives the same integration — it is surfaced here as ACTION-REQUIRED for
-   * the operator (or a later pass once canonical advances). One `runId` per entry.
-   */
-  readonly integrationActionRequired: readonly string[];
   /** Per-run recovery outcomes. */
   readonly runs: readonly RunReconcileOutcome[];
   /** Worktrees cleaned in the orphan sweep. */
@@ -213,53 +188,43 @@ export async function reconcileRunsOnStartup(deps: ReconcileDeps): Promise<Recon
   const now = deps.now ?? rfc3339Ms;
   const { store } = deps;
 
-  // Layer 0: drop un-anchored `run.integrated` pending intents (§ recovery
-  // `integrated` case (a): "canonical advanced but no intent" — here the DUAL, an
-  // intent allocated before the ref move that never anchored). A `run.integrated`
-  // is canonical-installing, so the generic ledger drain CANNOT re-sign it; a
-  // pending one that is not already anchored would abort the whole drain. We probe
-  // each with the broker's idempotent replay: an anchored event replays cleanly
-  // (leave it for the drain to land step-3); an un-anchored one throws
-  // (`broker.audit_kind_not_signable`) — drop it so the run re-drives integration
-  // from `agent-committed` with a fresh seq (the abandoned seq was never anchored).
-  const { actionRequired: integrationActionRequired, barrierSeq } = await resolveIntegrationIntents(
-    store,
-    deps.broker,
-    deps.repo,
-    now,
-  );
-
-  // Layer 1: converge §2.8 pending intents so a checkpoint whose step-3 CAS never
-  // committed becomes durable before the state sweep reads `agent_runs`. The layer-0
-  // barrier (`barrierSeq`, the lowest UNRESOLVED `run.integrated` seq) is passed through
-  // as a GLOBAL ordering stop: the gapless chain is driven oldest-first, so no later
-  // intent may be completed past an unresolved earlier sequence (round-3 finding on
-  // reconciler.ts:700-756 + reconcile.ts:94-102).
-  const ledger = await reconcileInterruptedRuns(store, deps.broker, { backup: deps.backup, now, stopAtSeq: barrierSeq });
-
-  // Layer 2: sweep non-terminal runs, oldest first (deterministic ordering).
+  // Layer 1: sweep non-terminal runs, oldest first (deterministic ordering). v2
+  // (#338): the state IS the durable `agent_runs.status` (no audit-drain precedes
+  // this) — a crashed run is re-driven forward from its checkpoint + gating rows.
   const rows = store.db
     .prepare(
       `SELECT run_id, operation, status, tier FROM agent_runs
-        WHERE status IN ('planned','patched','worktree-applied','agent-committed','review-pending','integrated','reindexed')
+        WHERE status IN ('planned','patched','worktree-applied','agent-committed','integrated','reindexed')
         ORDER BY started_at ASC`,
     )
     .all() as AgentRunRow[];
 
   const runs: RunReconcileOutcome[] = [];
   for (const row of rows) {
-    runs.push(await recoverRun(deps, row, now));
+    // Per-row isolation: one row's recovery failure (a git error, a CAS conflict, a
+    // hook throw) must NOT abort recovery of the remaining rows. Record it as `left`
+    // with the reason and continue — the row stays non-terminal for the next pass.
+    try {
+      runs.push(await recoverRun(deps, row, now));
+    } catch (err) {
+      runs.push({
+        runId: row.run_id,
+        from: row.status,
+        action: "left",
+        reason: `recovery-error: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
   }
 
-  // Layer 3: orphan-worktree sweep — a worktree recorded for a now-terminal run
+  // Layer 2: orphan-worktree sweep — a worktree recorded for a now-terminal run
   // that still exists on disk is removed (git worktree remove --force).
   const worktreesCleaned = await sweepOrphanWorktrees(deps);
 
-  // Layer 4: release idempotency claims wedged `in-progress` by a crashed run whose
+  // Layer 3: release idempotency claims wedged `in-progress` by a crashed run whose
   // owning run has since reached a terminal state (round-2 finding).
   const idempotencyReleased = reconcileIdempotency(store.db, now());
 
-  return { ledger, runs, worktreesCleaned, idempotencyReleased, integrationActionRequired };
+  return { runs, worktreesCleaned, idempotencyReleased };
 }
 
 async function recoverRun(
@@ -268,18 +233,10 @@ async function recoverRun(
   now: () => string,
 ): Promise<RunReconcileOutcome> {
   const ctx = runContext(deps.store, row);
-  // `sync`-operation runs are owned EXCLUSIVELY by the sync producer's recovery
-  // (`recoverSyncRuns`, apps/cli/src/sync/cycle.ts). The generic finalizer has no
-  // notion of the sync finalize extras — the `sync_cursors` advance, the
-  // `foldNotesForPaths` projection fold, and the single `index:reconcile` enqueue
-  // — so finalizing a sync run here would strand the cursor and silently lose the
-  // notes projection forever (the NEXT cycle re-plans against an already-absorbed
-  // canonical, classifies every path `unchanged`, and advances the cursor with an
-  // empty plan). Layer-0 (`resolveIntegrationIntents`) still lands an anchored
-  // `run.integrated` intent's step-3 (promoting agent-committed→integrated) before
-  // this sweep; we simply LEAVE the promoted run for `recoverSyncRuns` to finalize
-  // from its durable intent. (#289 review: CRITICAL — generic recovery finalizes
-  // stuck sync runs.)
+  // `sync`-operation runs are owned EXCLUSIVELY by the sync producer's recovery. The
+  // generic finalizer has no notion of the sync finalize extras (cursor advance,
+  // projection fold, `index:reconcile` enqueue), so finalizing a sync run here would
+  // strand the cursor — LEAVE it for the sync producer.
   if (row.operation === "sync" || row.operation === "sync-reset") {
     return { runId: row.run_id, from: row.status, action: "left", reason: "sync-producer-owned" };
   }
@@ -292,10 +249,6 @@ async function recoverRun(
       // the reconciler never fabricates a plan/patch — so a hook-less pass leaves
       // the run and a `recomputePlan`/`recomputePatch` hook advances it.
       return recoverPure(deps, row, ctx);
-
-    case "review-pending":
-      // Never auto-advanced — waits for git approve/reject (§ recovery).
-      return { runId: row.run_id, from: row.status, action: "left" };
 
     case "worktree-applied":
       return recoverWorktreeApplied(deps, row, ctx, now);
@@ -472,8 +425,8 @@ async function recoverWorktreeApplied(
 }
 
 /**
- * `agent-committed` recovery (§ recovery): commit present ⇒ route by tier (Tier-2
- * integrate; Tier-3 leave for review). Commit MISSING but worktree present ⇒ the
+ * `agent-committed` recovery (§ recovery): commit present ⇒ integrate the run
+ * (v2 #335: no Tier-3 review park). Commit MISSING but worktree present ⇒ the
  * commit never landed — recover as `worktree-applied` (round-2 finding: the
  * missing-commit branch was absent).
  */
@@ -499,9 +452,10 @@ async function recoverAgentCommitted(
     }
     return { runId: row.run_id, from: "agent-committed", action: "left" };
   }
-  // Auto-integration is for Tier-1 (source capture) AND Tier-2 (round finding #6:
-  // the prior `=== 2` excluded Tier-1). Tier-3 always parks for the review gate.
-  if ((row.tier === 1 || row.tier === 2) && deps.hooks?.integrate) {
+  // Auto-integration covers every committed run (v2 #335: captures tier-1,
+  // synthesis tier-2; there is no Tier-3 review park to hold one back). A run with
+  // no integrate hook is left for the producer's re-drive.
+  if (deps.hooks?.integrate) {
     // Enforce the normative git checks on the STORED commit BEFORE integrating
     // (round finding #6): trust neither the recorded `commitSha` nor `treeHash` on
     // faith. (1) The agent ref must actually CONTAIN the commit (its head resolves
@@ -527,6 +481,25 @@ async function recoverAgentCommitted(
     if (commitTree !== ctx.treeHash) {
       return { runId: row.run_id, from: "agent-committed", action: "left", reason: "commit-tree-mismatch" };
     }
+    // Crash-after-FF-before-agent_runs-flip: if canonical ALREADY contains the recorded
+    // commit, a prior (crashed) attempt landed the FF but never wrote the CLI-side
+    // `integrated` CAS. Re-running the integrate hook here would advance from a STALE
+    // base and throw `broker.cas_failed`. Finalize FORWARD instead — record `integrated`
+    // directly from the DURABLE ctx values (mirrors engine.ts `resolveIntegrationCrash`).
+    // The commit is already proven contained-in-agent-ref + tree-matched above, so this
+    // records only a genuinely-installed commit.
+    if (ctx.canonicalRef !== null) {
+      const canonicalHead = await deps.repo.readRef(ctx.canonicalRef);
+      if (canonicalHead !== null && (await deps.repo.isAncestor(ctx.commitSha, canonicalHead))) {
+        recordIntegration(deps.store, {
+          runId: row.run_id,
+          operation: row.operation,
+          artifacts: { canonicalRef: ctx.canonicalRef, canonicalSha: ctx.commitSha },
+          now: now(),
+        });
+        return { runId: row.run_id, from: "agent-committed", action: "integrated", to: "integrated" };
+      }
+    }
     const artifacts = await deps.hooks.integrate(ctx);
     // Bind the hook's result to the run's DURABLE integration intent (round-3 finding
     // on reconciler.ts:504-513): a hook that returns the UNCHANGED base sha or a
@@ -550,17 +523,19 @@ async function recoverAgentCommitted(
     recordIntegration(deps.store, { runId: row.run_id, operation: row.operation, artifacts, now: now() });
     return { runId: row.run_id, from: "agent-committed", action: "integrated", to: "integrated" };
   }
-  // Tier-3 (or no integrate hook): leave for the review gate / producer re-drive.
+  // No integrate hook: leave for the producer's re-drive.
   return { runId: row.run_id, from: "agent-committed", action: "left" };
 }
 
 /**
  * Integrated-but-unfinalized (§ recovery): a durable canonical mutation is
  * forward-only. Reproject (real hook, verified to cover `canonicalSha`) → record
- * `reindexed`; then finalize ONLY once the §2.8 step-4 backup covering the run's
- * seq is verified — a backup failure leaves the run `integrated`/`reindexed` for a
- * later retry rather than declaring `finalized` without durable coverage
- * (round-2 finding).
+ * `reindexed`, then advance `reindexed → finalized`. v2 (#338): the §2.8 audit
+ * ledger + AEAD backup/watermark are retired, so there is NO step-4 backup-coverage
+ * gate on `finalized` — git (one commit per ChangePlan on `refs/heads/main`) is the
+ * only safety mechanism, and `finalized` is durable on the commit. Reprojection stays
+ * producer-owned: without a `reindex` hook the run is LEFT `integrated` for the
+ * producer's idempotent re-drive (the reconciler never invents an index generation).
  */
 async function recoverIntegrated(
   deps: ReconcileDeps,
@@ -592,17 +567,9 @@ async function recoverIntegrated(
     })();
   }
 
-  // §2.8 step 4 FIRST: a verified backup covering this run's committed seq must
-  // precede the `finalized` CAS (the state table gates `finalized` on step-4
-  // success). Layer 1 already drained pending intents, so the safe backup cut is
-  // the latest committed run seq — a verified backup therefore covers this run. If
-  // the backup does not succeed, leave the run `reindexed`; a later reconcile
-  // retries once the fault clears (round-2 finding: no `finalized` without coverage).
-  const backedUp = await runBackupStep(deps.store, deps.backup, 2, now);
-  if (!backedUp) {
-    return { runId: row.run_id, from: row.status, action: "reindexed", to: "reindexed", reason: "backup-uncovered" };
-  }
-
+  // v2 (#338): no §2.8 step-4 backup gate — the audit ledger + AEAD backup are
+  // retired, so `finalized` advances directly once the run is reprojected (git is
+  // the only safety mechanism; the finalized state is durable on commit).
   const ts = now();
   db.transaction(() => {
     applyLedgerWrite(db, [
@@ -618,7 +585,7 @@ async function recoverIntegrated(
   return { runId: row.run_id, from: row.status, action: "finalized", to: "finalized" };
 }
 
-/** Write a `failed@<at>` terminal (run.failed) via the §2.8 orchestrator. */
+/** Write a `failed@<at>` terminal in one plain transaction (v2 #338: no audit event). */
 async function failRun(
   deps: ReconcileDeps,
   row: AgentRunRow,
@@ -626,20 +593,11 @@ async function failRun(
   reason: string,
   now: () => string,
 ): Promise<void> {
+  void reason;
   const ts = now();
-  await finalizeLedgerWrite(deps.store, deps.broker, {
-    runId: row.run_id,
-    event: {
-      schemaVersion: 1,
-      eventId: newRunId(),
-      kind: "run.failed",
-      occurredAt: ts,
-      runId: row.run_id,
-      subjects: [],
-      canonicalCommit: "0".repeat(40),
-      detail: { failedAt: at, reason },
-    },
-    ledgerWrite: [
+  const db = deps.store.db;
+  db.transaction(() => {
+    applyLedgerWrite(db, [
       agentRunUpsert({
         runId: row.run_id,
         operation: row.operation,
@@ -652,14 +610,14 @@ async function failRun(
         // Persisted-state CAS (round-3 finding #2): only fail a run still at the
         // checkpoint it is being failed FROM. A run that advanced under another
         // handle is never regressed to `failed` — the guarded upsert no-ops and the
-        // `extraCommit` affected-row assertion rolls the whole terminal tx back.
+        // affected-row assertion below rolls the whole terminal tx back.
         expectedFrom: [at],
+        assertAdvanced: true,
       }),
-    ],
-    backup: deps.backup,
-    now,
-    extraCommit: (tx) => assertRowAdvancedTo(tx, row.run_id, "failed"),
-  });
+    ]);
+    assertRowAdvancedTo(db, row.run_id, "failed");
+  })();
+  await Promise.resolve();
 }
 
 /** Assemble the recovery context for a run from its persisted artifacts. */
@@ -713,130 +671,3 @@ async function removeWorktreeBestEffort(repo: Repo, path: string | null): Promis
   }
 }
 
-/**
- * Layer 0 (§ recovery `integrated` case (a)) — resolve every `pending`
- * `run.integrated` intent left by an interrupted `RunHandle.integrate`. Because
- * `run.integrated` is canonical-INSTALLING, the generic ledger drain refuses it
- * (Layer 1 skips this kind), so this pass owns it. Each intent is classified
- * against the AUTHORITATIVE broker + canonical-ref state:
- *
- *   - **un-anchored** (broker signing refusal `broker.audit_kind_not_signable`) —
- *     the broker appends BEFORE its canonical CAS, so an un-anchored event proves
- *     canonical did not advance and the seq was never anchored. DROP the abandoned
- *     intent so the run re-drives integration from `agent-committed` with a fresh
- *     seq (gapless: the seq is unused). This is the ONLY case that deletes.
- *   - **anchored + canonical CONTAINS the commit** (by ancestry, round-2 finding
- *     W4) — the install completed; LAND step-3 here (record `integrated`) and mark
- *     the intent `done`.
- *   - **anchored + canonical does NOT contain the commit** — an append-success /
- *     canonical-CAS-failure. The event is durable audit evidence; PRESERVE the
- *     intent (round-2 finding W6) — never delete it — and SURFACE the run as
- *     action-required. A later pass lands it once canonical advances; the preserved
- *     same seq forbids re-driving another `run.integrated`.
- *
- * A transient/ambiguous broker error (not the signing refusal) is NOT proof of
- * un-anchoring: the intent is preserved and the error re-thrown so a later reconcile
- * retries. Returns the `runId`s surfaced as action-required.
- */
-async function resolveIntegrationIntents(
-  store: Store,
-  broker: AuditBroker,
-  repo: Repo,
-  now: () => string,
-): Promise<{ actionRequired: string[]; barrierSeq: number | null }> {
-  const intents = new IntentsRepo(store.db);
-  const actionRequired: string[] = [];
-  // The highest seq ever ALLOCATED (pending or done) — used to decide whether dropping
-  // an un-anchored intent would punch a permanent hole (round-3 finding on
-  // reconciler.ts:716-718): a higher allocation means a later intent depends on this
-  // seq existing in the gapless chain, so it must be PRESERVED as a barrier, not deleted.
-  // Range-partitioned to the run space (round-2 finding, same class as the #291
-  // nextRunSeq fix): an intent stranded at >= DB_EVENT_SEQ_BASE by the pre-fix
-  // allocator must not read as "a later allocation exists" forever — that would
-  // permanently disable the un-anchored auto-drop below on an ex-poisoned vault.
-  const maxAllocatedSeq = (
-    store.db.prepare(`SELECT COALESCE(MAX(seq), -1) AS m FROM audit_intents WHERE seq < ${DB_EVENT_SEQ_BASE}`).get() as { m: number }
-  ).m;
-  for (const row of intents.listPending()) {
-    if (!row.event_json) continue;
-    const event = IntentsRepo.parseEvent(row);
-    if (event.kind !== "run.integrated") continue;
-    let head: string;
-    try {
-      const anchored = await broker.signAndAppendAuditEvent(event); // idempotent replay if already anchored
-      head = anchored.head;
-    } catch (err) {
-      // Ambiguous/transient error (not the signing refusal) ⇒ cannot prove un-anchored:
-      // PRESERVE the intent as a barrier and surface it — never destroy possibly-durable
-      // evidence, and never advance past it (round-3 finding on reconciler.ts:700-756).
-      if (!isAuditKindNotSignable(err)) {
-        actionRequired.push(row.run_id);
-        return { actionRequired, barrierSeq: row.seq };
-      }
-      // Un-anchored (signing refusal) ⇒ canonical never advanced. Normally the
-      // abandoned seq is dropped so the run re-drives with a fresh seq. But if a HIGHER
-      // seq was already allocated (a concurrent later intent), deleting this seq would
-      // leave a PERMANENT hole in the gapless chain (round-3 finding on
-      // reconciler.ts:716-718) — the later intent could never anchor at `last+1`.
-      // PRESERVE it as an ordered barrier instead (the run re-drives at the SAME seq),
-      // and HALT so no later intent is completed past it.
-      if (row.seq < maxAllocatedSeq) {
-        actionRequired.push(row.run_id);
-        return { actionRequired, barrierSeq: row.seq };
-      }
-      store.db.prepare(`DELETE FROM audit_intents WHERE run_id = ? AND seq = ? AND state = 'pending'`).run(row.run_id, row.seq);
-      continue;
-    }
-
-    // Anchored — but that is NOT proof canonical advanced (append precedes the
-    // canonical CAS). Require AUTHORITATIVE containment by ANCESTRY (round-2 finding
-    // W4): a canonical tip that advanced beyond the installed commit still contains
-    // it, so ancestry — not tip-equality — is the correct test.
-    const base = readGitOp(store.db, row.run_id, "base");
-    const canonicalRef = base?.refName ?? null;
-    const installed = event.canonicalCommit;
-    const canonicalNow = canonicalRef ? await repo.readRef(canonicalRef) : null;
-    const contained =
-      canonicalRef !== null &&
-      canonicalNow !== null &&
-      installed !== "0".repeat(40) &&
-      (await repo.isAncestor(installed, canonicalNow));
-
-    if (contained) {
-      // Canonical genuinely contains the commit → land step-3 by REPLAYING the intent's
-      // EXACT persisted `write_json` (round-3 finding on reconciler.ts:738-747), NOT by
-      // reconstructing the write from current mutable `agent_runs` metadata (which may
-      // have diverged). Validate payload identity first: the recomputed hash of the
-      // stored event MUST equal the intent's `payload_hash` (the anchored event's hash),
-      // proving the persisted write belongs to this exact audit event.
-      const recomputed = payloadHashOf(event);
-      if (recomputed !== row.payload_hash) {
-        // Corrupt/mismatched intent — never fabricate. Preserve as a barrier + surface.
-        actionRequired.push(row.run_id);
-        return { actionRequired, barrierSeq: row.seq };
-      }
-      recordIntegrationFromIntent(store, {
-        runId: row.run_id,
-        seq: row.seq,
-        payloadHash: row.payload_hash,
-        canonicalRef: canonicalRef!,
-        canonicalSha: installed,
-        auditHead: head,
-        write: IntentsRepo.parseWrite(row),
-        now: now(),
-      });
-      continue;
-    }
-
-    // Anchored but canonical does NOT contain the claimed commit (append-success /
-    // CAS-failure). PRESERVE the intent (round-2 finding W6) — its linkage to the
-    // immutable audit event must survive and no fresh seq may re-drive integration —
-    // and surface the run as action-required. As the FIRST unresolved sequence it is
-    // also the ordered BARRIER (round-3 finding on reconciler.ts:700-756): HALT so
-    // layer 0 never completes a LATER integrated intent past this unresolved earlier
-    // one, and layer 1 stops before it.
-    actionRequired.push(row.run_id);
-    return { actionRequired, barrierSeq: row.seq };
-  }
-  return { actionRequired, barrierSeq: null };
-}

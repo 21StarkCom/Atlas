@@ -1,45 +1,29 @@
 /**
- * `evidence-resolve.cli` (Task 4.7 / #59) — `brain evidence resolve`. Covers the fail-closed
- * re-anchor paths that need no broker: a missing evidence ⇒ not-found (exit 1), and a blob whose
- * active rendition is GONE ⇒ the re-anchor is `failed` (never fabricates a `valid`), outcome=failed
- * exit 1. The `valid`⇒integrate (exit 0) and `moved`⇒review-pending (exit 6) paths flow through the
- * broker-backed applySynthesis integrate/review proven by broker-integrator.e2e + enrich.e2e; the
- * match classification itself is unit-covered by classifyReanchor.
+ * `evidence-resolve.cli` (v2 task 4-4) — `brain evidence resolve`. Deterministic
+ * reverification of a flat vault-derived evidence row: a present note+entry ⇒
+ * `resolved` (status written to the note frontmatter + committed + re-folded); a
+ * gone target ⇒ `target-missing` (no mutation). No renditions, no broker, no ledger.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
-import { openStore, rebuildProjections } from "@atlas/sqlite-store";
-import type { ParsedNote, VaultSnapshot } from "@atlas/contracts";
-import { buildSectionTree } from "../src/markdown/sections.js";
-import { splitFrontmatter } from "../src/markdown/parse.js";
+import { openStore, EvidenceRepo } from "@atlas/sqlite-store";
 import { parseArgs } from "../src/commands/evidence-resolve.js";
 import { runCli } from "../src/main.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..", "..", "..");
-const HEX_A = "a".repeat(64);
-const HEX_B = "b".repeat(64);
-const CONTENT_A = `sha256:${HEX_A}:text/plain`;
 
-function note(raw: string, over: Partial<ParsedNote> = {}): ParsedNote {
-  const { body } = splitFrontmatter(raw);
-  const id = /id:\s*(\S+)/.exec(raw)?.[1] ?? "n";
-  return { id, path: `${id}.md`, type: "concept", schemaVersion: 1, title: id, status: "active", created: "2026-07-11", updated: "2026-07-11", aliases: [], sources: [], declaredSensitivity: "internal", links: [], sections: buildSectionTree(body), contentHash: "sha256:0", raw, ...over };
-}
-function sourceNote(): ParsedNote {
-  const raw = ["---", "id: s-a", "type: source", "schema_version: 1", "title: s-a", "created: 2026-07-11", "updated: 2026-07-11",
-    `contentId: "${CONTENT_A}"`, "origin: notes/a.txt", "provenance:", "  vault_path: sources/a.txt", "  size_bytes: 12", "  renditions:",
-    `    - { extractor_version: 1, normalizer_version: 1, normalized_content_hash: "${HEX_B}", size_bytes: 10, locator_scheme: char }`, "---", "", "# s-a", ""].join("\n");
-  return note(raw, { type: "source", id: "s-a", path: "sources/s-a.md" });
-}
-function claimNote(): ParsedNote {
-  const raw = ["---", "id: note-a", "type: concept", "schema_version: 1", "title: note-a", "created: 2026-07-11", "updated: 2026-07-11", "claims:",
-    "  - claim_id: claim-a", '    text: "c."', "    evidence:", `      - rendition: "${CONTENT_A}:1:1"`, "        verification: pending", "---", "", "# note-a", ""].join("\n");
-  return note(raw, { id: "note-a", path: "note-a.md" });
-}
+/** A valid vault note carrying one flat `evidence:` frontmatter entry. */
+const NOTE_A = [
+  "---", "id: note-a", "type: concept", "schema_version: 1", "title: note-a",
+  "created: 2026-07-11", "updated: 2026-07-11",
+  "evidence:", "  - id: ev-note-a", '    claim: "Meridian launched."', "    status: pending",
+  "---", "", "# note-a", "", "body", "",
+].join("\n");
 
-let root: string, cwd: string, env: NodeJS.ProcessEnv, dbPath: string, evidenceId: string;
+let root: string, cwd: string, env: NodeJS.ProcessEnv, dbPath: string, vaultDir: string;
+function git(args: string[]): void { execFileSync("git", args, { cwd: vaultDir }); }
 async function cli(argv: string[]): Promise<{ code: number; out: string }> {
   let out = "";
   const realOut = process.stdout.write.bind(process.stdout);
@@ -55,24 +39,26 @@ async function cli(argv: string[]): Promise<{ code: number; out: string }> {
 }
 
 describe("evidence resolve arg parsing", () => {
-  it("requires <runId|evidenceId>; rejects unknown flags + extra args", () => {
-    expect(parseArgs(["ev-1"])).toEqual({ ref: "ev-1" });
-    expect(() => parseArgs([])).toThrow(/runId\|evidenceId/);
+  it("requires <evidenceId>; rejects unknown flags + extra args", () => {
+    expect(parseArgs(["ev-1"])).toEqual({ evidenceId: "ev-1" });
+    expect(() => parseArgs([])).toThrow(/evidenceId/);
     expect(() => parseArgs(["ev-1", "--nope"])).toThrow(/unknown/);
     expect(() => parseArgs(["ev-1", "ev-2"])).toThrow(/unexpected/);
   });
 });
 
-describe("brain evidence resolve (fail-closed, no broker)", () => {
+describe("brain evidence resolve (v2 deterministic, no broker)", () => {
   beforeEach(async () => {
     root = mkdtempSync(join("/tmp", "atlas-ers-"));
     cwd = join(root, "work");
+    vaultDir = join(cwd, "vault");
     mkdirSync(join(cwd, ".atlas"), { recursive: true });
-    mkdirSync(join(cwd, "vault"), { recursive: true });
-    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: join(cwd, "vault") });
+    mkdirSync(vaultDir, { recursive: true });
+    git(["init", "-q", "-b", "main"]);
+    git(["config", "user.email", "t@t"]); git(["config", "user.name", "t"]);
     dbPath = join(cwd, ".atlas", "atlas.db");
     const config = [
-      "vault:", `  path: ${join(cwd, "vault")}`,
+      "vault:", `  path: ${vaultDir}`,
       "sqlite:", "  path: ./.atlas/atlas.db", "  ledger_backup:", "    dir: ./.atlas/backups",
       "lancedb:", "  dir: ./.atlas/lancedb",
       "indexing:", "  chunker_version: 1", "  embedding_model: gemini-embedding-001", "  dimensions: 768",
@@ -82,11 +68,16 @@ describe("brain evidence resolve (fail-closed, no broker)", () => {
     ].join("\n");
     writeFileSync(join(cwd, "brain.config.yaml"), config, "utf8");
     env = { ...process.env, NO_COLOR: "1" };
+    // Commit the note so the working tree is clean + HEAD=main (the mutation-order gates).
+    writeFileSync(join(vaultDir, "note-a.md"), NOTE_A, "utf8");
+    git(["add", "-A"]); git(["commit", "-q", "-m", "seed"]);
     await cli(["db", "migrate", "--json"]);
+    // Seed the flat evidence rows directly (a present note-a entry + an orphan ghost row).
     const s = openStore({ path: dbPath });
     try {
-      rebuildProjections(s.db, { notes: [sourceNote(), claimNote()], errors: [] } as VaultSnapshot);
-      evidenceId = (s.db.prepare(`SELECT evidence_id AS id FROM claim_evidence WHERE claim_id = 'claim-a' AND current = 1`).get() as { id: string }).id;
+      const repo = new EvidenceRepo(s.db);
+      repo.replaceForNote("note-a", "hash-a", [{ id: "ev-note-a", claim: "Meridian launched.", status: "pending", createdAt: "2026-07-11" }]);
+      repo.replaceForNote("ghost", "hash-g", [{ id: "ev-ghost", claim: "orphan", status: "pending", createdAt: "2026-07-11" }]);
     } finally { s.close(); }
   });
   afterEach(() => rmSync(root, { recursive: true, force: true }));
@@ -97,16 +88,29 @@ describe("brain evidence resolve (fail-closed, no broker)", () => {
     expect(JSON.parse(r.out).code).toBe("not-found");
   });
 
-  it("a blob whose active rendition is GONE ⇒ failed re-anchor (never fabricates valid), exit 1", async () => {
-    // Drop the blob's active-rendition pointer so the re-anchor match is `not-found`.
+  it("a present note+entry ⇒ resolved: status written to Markdown, committed, re-folded", async () => {
+    const before = execFileSync("git", ["rev-parse", "HEAD"], { cwd: vaultDir }).toString().trim();
+    const r = await cli(["evidence", "resolve", "ev-note-a", "--json"]);
+    expect(r.code, r.out).toBe(0);
+    const out = JSON.parse(r.out);
+    expect(out).toMatchObject({ command: "evidence resolve", outcome: "resolved", evidenceId: "ev-note-a", noteId: "note-a", status: "resolved" });
+    expect(out.commit).toMatch(/^[0-9a-f]{40}$/);
+    // Exactly one new commit, and the re-folded row reads resolved (Markdown SSOT).
+    const after = execFileSync("git", ["rev-parse", "HEAD"], { cwd: vaultDir }).toString().trim();
+    expect(after).not.toBe(before);
     const s = openStore({ path: dbPath });
     try {
-      s.db.prepare(`UPDATE content_blobs SET active_extractor_version = NULL, active_normalizer_version = NULL WHERE raw_content_hash = ?`).run(HEX_A);
+      expect(new EvidenceRepo(s.db).byId("ev-note-a")?.status).toBe("resolved");
     } finally { s.close(); }
+  });
 
-    const r = await cli(["evidence", "resolve", evidenceId, "--json"]);
-    expect(r.code, r.out).toBe(1);
+  it("an evidence row whose note is gone ⇒ target-missing (needs-review, no mutation, exit 0)", async () => {
+    const before = execFileSync("git", ["rev-parse", "HEAD"], { cwd: vaultDir }).toString().trim();
+    const r = await cli(["evidence", "resolve", "ev-ghost", "--json"]);
+    expect(r.code, r.out).toBe(0);
     const out = JSON.parse(r.out);
-    expect(out).toMatchObject({ command: "evidence resolve", outcome: "failed", verification: "failed", evidenceId });
+    expect(out).toMatchObject({ command: "evidence resolve", outcome: "target-missing", evidenceId: "ev-ghost", status: "needs-review" });
+    expect(out.commit).toBeUndefined();
+    expect(execFileSync("git", ["rev-parse", "HEAD"], { cwd: vaultDir }).toString().trim()).toBe(before);
   });
 });

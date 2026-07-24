@@ -1,5 +1,5 @@
 /**
- * `brain index status|verify|repair|rebuild` (Task 3.5 / #42) — retrieval-index
+ * `brain index rebuild` (Task 3.5 / #42; v2 #333 folded status→`status`, repair/verify→rebuild) — retrieval-index
  * maintenance, per `retrieval-index-contract.md` §3/§4 and the four committed
  * `cli-contract/index-*.schema.json` contracts.
  *
@@ -11,7 +11,7 @@
  *   - **rebuild** full regeneration from Markdown: clear the table, re-embed every note.
  *
  * Every EXECUTED index operation is a projection-class op: it appends EXACTLY ONE
- * terminal `run.projection` git-ref audit event (via {@link runReadAudit} →
+ * (v2 #334: the formerly-appended `run.projection` audit event is retired; via
  * `finalizeLedgerWrite`, §2.8) and — because a projection is a real state change — takes
  * its mandatory covering backup (`strictBackup`, never coalesced). status/verify write
  * NO ledger business row; repair/rebuild mutate only the LanceDB projection + the SQLite
@@ -23,6 +23,7 @@
  * convergence FIRST and then anchor the single `run.projection` marker; a crash between
  * the two re-converges idempotently on rerun (`reconcileIndex` is crash-safe).
  */
+import { writeFileSync } from "node:fs";
 import * as lancedb from "@lancedb/lancedb";
 import type { ParsedNote, VaultSnapshot } from "@atlas/contracts";
 import {
@@ -42,21 +43,16 @@ import {
   type UnresolvedNote,
 } from "@atlas/lancedb-index";
 import type { IndexRebuildReport } from "@atlas/lancedb-index";
-import { ModelsClient, mintEgressCapability, type EgressLimits, type ModelCallReceipt } from "@atlas/models";
-import { EgressClient } from "@atlas/broker";
+import { ModelsClient, createInProcessInvoker, type ModelCallReceipt } from "@atlas/models";
 import { GenerationRepo, type SqliteDatabase, type Store } from "@atlas/sqlite-store";
 import { readVault } from "../vault/reader.js";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { openMigratedStore } from "./store-open.js";
-import { resolvePath } from "./backup-config.js";
-import { runReadAudit } from "../audit/readonly.js";
+import { resolvePath } from "./paths.js";
 
 // Per-run egress ceilings for the index-embedding capability (D19) — generous; the
 // payload scan + capability enforce the real limits.
-const EGRESS_MAX_BYTES = 8_000_000;
-const EGRESS_MAX_TOKENS = 2_000_000;
-const EGRESS_COST_CEILING = 10_000_000;
 
 function noFlags(cmd: string, argv: string[]): void {
   for (const a of argv) throw CliError.usage(`unknown flag/argument for \`${cmd}\`: ${a}`);
@@ -108,8 +104,9 @@ export function noteFencesForNotes(store: Store, noteIds: string[]): NoteFenceIn
 }
 
 /** Open the LanceDB search table, or `null` when the directory/table is absent — the
- * contract's `not-configured` (never a failure) for the read-only status path. */
-async function openTableOrNull(ctx: RunContext, cfg: IndexingConfig): Promise<SearchTable | null> {
+ * contract's `not-configured` (never a failure) for the read-only status path.
+ * Exported for the v2 merged `status` (#332), which folds the `index status` read. */
+export async function openTableOrNull(ctx: RunContext, cfg: IndexingConfig): Promise<SearchTable | null> {
   const dir = resolvePath(ctx, ctx.config.config.lancedb.dir);
   try {
     const conn = await lancedb.connect(dir);
@@ -138,44 +135,38 @@ async function readNotes(ctx: RunContext): Promise<readonly ParsedNote[]> {
   return snapshot.notes;
 }
 
-/** Build the batch {@link Embedder} over the egress broker (repair/rebuild + the
- * `index:reconcile` job handler). Returns a disposer to close the egress socket. */
+/** Build the batch {@link Embedder} over the IN-PROCESS model boundary (repair/rebuild
+ * + the `index:reconcile` job handler). No egress daemon, no capability mint; the
+ * credential resolves lazily on the first call. Returns a no-op disposer. */
 export async function buildEmbedder(
   ctx: RunContext,
   cfg: IndexingConfig,
   runId: string,
 ): Promise<{ embed: Embedder; close: () => void }> {
-  const socketPath = ctx.config.config.broker.egress_socket_path;
-  let egress: EgressClient;
-  try {
-    egress = await EgressClient.connect(socketPath);
-  } catch (e) {
-    throw new CliError({
-      code: "internal",
-      message: `the egress broker is unreachable at ${socketPath}: ${e instanceof Error ? e.message : String(e)}`,
-      hint: "Start the egress broker daemon before `brain index repair`/`rebuild`.",
-      exitCode: EXIT.INTERNAL,
-      retryable: true,
-      cause: e,
-    });
-  }
   const receipts: ModelCallReceipt[] = [];
   const models = new ModelsClient(
-    (params, signal) => egress.invoke(params, signal),
+    createInProcessInvoker({ env: ctx.env }),
     (r: ModelCallReceipt) => {
       receipts.push(r);
     },
   );
-  const limits: EgressLimits = {
-    operation: "embed",
-    model: cfg.embedding_model,
-    maxBytes: EGRESS_MAX_BYTES,
-    maxTokens: EGRESS_MAX_TOKENS,
-    costCeiling: EGRESS_COST_CEILING,
-    allowedSensitivity: "internal",
-  };
-  const cap = mintEgressCapability({ runId }, limits);
-  return { embed: embedderFromClient(models, cap, cfg), close: () => egress.close() };
+  // The embed transmission binds to the run id (no capability mint).
+  const embed = embedderFromClient(models, { runId }, cfg);
+  // Test-only observable (gated; inert in production): when ATLAS_EMBED_COUNT_FILE
+  // is set, persist the cumulative count of embed() calls this command made, so a
+  // test can assert "zero embeddings on a noop/pure-move, exactly one on a
+  // rename-plus-edit" without reaching into the provider.
+  const countFile = ctx.env.ATLAS_EMBED_COUNT_FILE;
+  if (ctx.env.ATLAS_TEST_MODE === "1" && countFile) {
+    let calls = 0;
+    const counting: Embedder = async (texts) => {
+      calls += 1;
+      writeFileSync(countFile, String(calls), "utf8");
+      return embed(texts);
+    };
+    return { embed: counting, close: () => {} };
+  }
+  return { embed, close: () => {} };
 }
 
 /** Build the reconcile {@link IndexDeps} shared by repair + rebuild. */
@@ -221,132 +212,14 @@ export async function rebuildIndexFromVault(ctx: RunContext, db: SqliteDatabase,
  * expressed as exit 6 (action-required) — the retryability a jobs runner consumes lives
  * on each `unresolved[].retryable` flag, not on a code the exit set does not define. */
 function partialExit(unresolved: readonly UnresolvedNote[]): number {
-  return unresolved.length > 0 ? EXIT.ACTION_REQUIRED : EXIT.OK;
+  return unresolved.length > 0 ? EXIT.CONFIG : EXIT.OK;
 }
 
 // ---------------------------------------------------------------------------
-// index status (read-only)
-// ---------------------------------------------------------------------------
-
-async function indexStatus(ctx: RunContext): Promise<number> {
-  noFlags("index status", ctx.argv);
-  const cfg = indexingConfig(ctx);
-  const store = openMigratedStore(ctx);
-  try {
-    const table = await openTableOrNull(ctx, cfg);
-    const fences = noteFences(store);
-    const staleness = await computeStaleness(fences, table, cfg);
-
-    let indexed = 0;
-    let stale = 0;
-    let missing = 0;
-    for (const s of staleness) {
-      if (s.status === "indexed") indexed++;
-      else if (s.status === "stale") stale++;
-      else missing++;
-    }
-    const chunkCount = table === null ? 0 : await table.countRows();
-
-    const out = {
-      command: "index status" as const,
-      index: { configured: table !== null, chunkCount },
-      generation: {
-        chunkerVersion: cfg.chunker_version,
-        embeddingModel: cfg.embedding_model,
-        embeddingDimensions: cfg.dimensions,
-      },
-      notes: { total: fences.length, indexed, stale, missing },
-      staleness: staleness
-        .filter((s) => s.status !== "indexed")
-        .map((s) => ({ noteId: s.noteId, triggers: s.triggers })),
-    };
-
-    const audit = await runReadAudit(ctx, "run.projection", "index status", store, { strictBackup: true });
-    ctx.log.info("index.status", { indexed, stale, missing, configured: out.index.configured, audited: audit.recorded, runId: audit.runId });
-    if (ctx.output.mode === "json") emitJson(out);
-    else ctx.render(`index status — ${indexed} indexed, ${stale} stale, ${missing} missing (${out.index.configured ? `${chunkCount} chunks` : "not configured"})`);
-    return EXIT.OK;
-  } finally {
-    store.close();
-  }
-}
-
-// ---------------------------------------------------------------------------
-// index verify (read-only; exit 1 on divergence)
-// ---------------------------------------------------------------------------
-
-async function indexVerifyCmd(ctx: RunContext): Promise<number> {
-  noFlags("index verify", ctx.argv);
-  const cfg = indexingConfig(ctx);
-  const store = openMigratedStore(ctx);
-  try {
-    const table = await openTableOrNull(ctx, cfg);
-    const report = await indexVerify({
-      notes: noteFences(store),
-      table,
-      config: cfg,
-      activeGenerationIds: store.generation.activeGenerationIds(),
-    });
-
-    const out = {
-      command: "index verify" as const,
-      consistent: report.consistent,
-      checked: report.checked,
-      divergences: report.divergences.map((d) => ({ noteId: d.noteId, kind: d.kind, ...(d.detail !== undefined ? { detail: d.detail } : {}) })),
-    };
-
-    const audit = await runReadAudit(ctx, "run.projection", "index verify", store, { strictBackup: true });
-    ctx.log.info("index.verify", { consistent: report.consistent, checked: report.checked, divergences: report.divergences.length, audited: audit.recorded, runId: audit.runId });
-    if (ctx.output.mode === "json") emitJson(out);
-    else ctx.render(`index verify — ${report.consistent ? "consistent" : `${report.divergences.length} divergence(s)`} (${report.checked} checked)`);
-    return report.consistent ? EXIT.OK : EXIT.VALIDATION;
-  } finally {
-    store.close();
-  }
-}
-
-// ---------------------------------------------------------------------------
-// index repair (projection-write)
-// ---------------------------------------------------------------------------
-
-async function indexRepairCmd(ctx: RunContext): Promise<number> {
-  noFlags("index repair", ctx.argv);
-  const cfg = indexingConfig(ctx);
-  const runId = ctx.runId;
-  return ctx.withLock("vault-maintenance", async () => {
-    const store = openMigratedStore(ctx);
-    const table = await requireTable(ctx, cfg);
-    const { embed, close } = await buildEmbedder(ctx, cfg, runId);
-    try {
-      const started = Date.now();
-      const notes = await readNotes(ctx);
-      const report = await indexRepair(indexDeps(ctx, cfg, store, table, embed, notes));
-      // Re-derive the `text` FTS index to cover any newly written rows (§6, #156).
-      await ensureFtsIndex(table);
-      const durationMs = Date.now() - started;
-
-      const out = {
-        command: "index repair" as const,
-        outcome: report.outcome,
-        repaired: report.repaired.map((r) => ({ noteId: r.noteId, action: r.action, ...(r.generationId !== undefined ? { generationId: r.generationId } : {}) })),
-        ...(report.outcome === "partial" ? { unresolved: report.unresolved.map(serializeUnresolved) } : {}),
-        durationMs,
-      };
-
-      const audit = await runReadAudit(ctx, "run.projection", "index repair", store, { strictBackup: true });
-      ctx.log.info("index.repair", { outcome: report.outcome, repaired: report.repaired.length, unresolved: report.unresolved.length, audited: audit.recorded, runId: audit.runId });
-      if (ctx.output.mode === "json") emitJson(out);
-      else ctx.render(`index repair — ${report.outcome}: ${report.repaired.length} repaired, ${report.unresolved.length} unresolved (${durationMs}ms)`);
-      return partialExit(report.unresolved);
-    } finally {
-      close();
-      store.close();
-    }
-  });
-}
-
-// ---------------------------------------------------------------------------
-// index rebuild (projection-write; full regeneration)
+// index rebuild (projection-write; full regeneration) — the ONE surviving
+// index maintenance command (v2, #333): status folded into `status`,
+// repair/verify folded into rebuild (a full deterministic regeneration
+// subsumes convergent repair for a single-user vault).
 // ---------------------------------------------------------------------------
 
 async function indexRebuildCmd(ctx: RunContext): Promise<number> {
@@ -369,8 +242,8 @@ async function indexRebuildCmd(ctx: RunContext): Promise<number> {
         durationMs,
       };
 
-      const audit = await runReadAudit(ctx, "run.projection", "index rebuild", store, { strictBackup: true });
-      ctx.log.info("index.rebuild", { notesIndexed: report.notesIndexed, chunksWritten: report.chunksWritten, unresolved: report.unresolved.length, audited: audit.recorded, runId: audit.runId });
+      // v2 (#334): the run.projection audit append is retired (ADR-0003).
+      ctx.log.info("index.rebuild", { notesIndexed: report.notesIndexed, chunksWritten: report.chunksWritten, unresolved: report.unresolved.length, runId: ctx.runId });
       if (ctx.output.mode === "json") emitJson(out);
       else ctx.render(`index rebuild — ${report.notesIndexed} note(s), ${report.chunksWritten} chunk(s), ${report.generationsRetired} retired (${durationMs}ms)`);
       return partialExit(report.unresolved);
@@ -405,9 +278,6 @@ function serializeUnresolved(u: UnresolvedNote): Record<string, unknown> {
   };
 }
 
-registerCommand("index status", indexStatus);
-registerCommand("index verify", indexVerifyCmd);
-registerCommand("index repair", indexRepairCmd);
 registerCommand("index rebuild", indexRebuildCmd);
 
-export { indexStatus, indexVerifyCmd, indexRepairCmd, indexRebuildCmd };
+export { indexRebuildCmd };

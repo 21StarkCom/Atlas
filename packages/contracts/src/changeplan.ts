@@ -3,7 +3,7 @@
  *
  * A ChangePlan is the stable Phase-1 ENVELOPE (`changeplan-envelope.ts`) crossed
  * with a per-operation discriminated payload. This module assembles the
- * `ChangePlanOperation` union over ALL 17 operations (15 active + the 2 reserved
+ * `ChangePlanOperation` union over ALL 12 operations (10 active + the 2 reserved
  * task ops) from the per-op files under `ops/`, then extends the envelope with a
  * schema version + the `operation` payload.
  *
@@ -25,17 +25,10 @@ import { SetFrontmatterFieldOpSchema } from "./ops/frontmatter.js";
 import { AddAliasOpSchema } from "./ops/add-alias.js";
 import { SetLinkOpSchema } from "./ops/links.js";
 import { CreateRelationshipOpSchema } from "./ops/relationship.js";
-import { CreateClaimOpSchema } from "./ops/claim.js";
-import {
-  AttachEvidenceOpSchema,
-  UpdateEvidenceVerificationOpSchema,
-  refineAttachEvidence,
-} from "./ops/evidence.js";
 import { ProposeMergeOpSchema } from "./ops/merge.js";
 import { ProposeRenameOpSchema, refineProposeRename } from "./ops/rename.js";
 import { refineSetFrontmatterField } from "./ops/frontmatter.js";
 import { ProposeArchiveOpSchema } from "./ops/archive.js";
-import { PromoteTrustOpSchema, RevokeTrustOpSchema } from "./ops/trust.js";
 import { CreateTaskOpSchema, UpdateTaskStateOpSchema } from "./ops/task.js";
 
 /**
@@ -51,14 +44,9 @@ export const ChangePlanOperationSchema = z.discriminatedUnion("op", [
   AddAliasOpSchema,
   SetLinkOpSchema,
   CreateRelationshipOpSchema,
-  CreateClaimOpSchema,
-  AttachEvidenceOpSchema,
-  UpdateEvidenceVerificationOpSchema,
   ProposeMergeOpSchema,
   ProposeRenameOpSchema,
   ProposeArchiveOpSchema,
-  PromoteTrustOpSchema,
-  RevokeTrustOpSchema,
   CreateTaskOpSchema,
   UpdateTaskStateOpSchema,
 ]);
@@ -72,7 +60,7 @@ export type ChangePlanOperation = z.infer<typeof ChangePlanOperationSchema>;
 export const CHANGE_PLAN_OPERATION_NAMES: readonly ChangePlanOpName[] =
   ChangePlanOperationSchema.options.map((o) => o.shape.op.value as ChangePlanOpName);
 
-// Load-time invariant: the union covers EXACTLY the 17 declared op names (no
+// Load-time invariant: the union covers EXACTLY the 12 declared op names (no
 // missing member, no stray/duplicate). A drift here is a build-time throw, not a
 // silently incomplete gate.
 {
@@ -111,9 +99,6 @@ export const ChangePlanSchema = ChangePlanEnvelopeSchema.extend({
         break;
       case "ProposeRename":
         refineProposeRename(plan.operation, ctx);
-        break;
-      case "AttachEvidence":
-        refineAttachEvidence(plan.operation, ctx);
         break;
       default:
         break;

@@ -1,33 +1,25 @@
 /**
- * `store-vault` (Task 4.11) — the production ValidationVault resolves note/identity/provenance/
- * claim/evidence facts from the SQLite projections, so a ChangePlan validates against the real
- * current vault state.
+ * `store-vault` (Task 4.11) — the production ValidationVault resolves note/identity/source
+ * facts from the SQLite projections + the operational `source` registry, so a ChangePlan
+ * validates against the real current vault state. v2 (#340): `hasSourceRef` resolves a
+ * `sources:` id against the flat `source` REGISTRY (`0015_source_registry`), NOT the retired
+ * v1 content-addressed provenance model. (The v1 claim/evidence resolvers were retired with
+ * the claims model — #337.)
  */
 import { describe, expect, it } from "vitest";
-import { normalizeIdentityKey, type ContentId, type ParsedNote, type VaultSnapshot } from "@atlas/contracts";
-import { openStore, rebuildProjections, type Store } from "@atlas/sqlite-store";
+import { normalizeIdentityKey, type ParsedNote, type VaultSnapshot } from "@atlas/contracts";
+import { openStore, rebuildProjections, SourceRepo, type Store } from "@atlas/sqlite-store";
 import { buildSectionTree } from "../src/markdown/sections.js";
 import { splitFrontmatter } from "../src/markdown/parse.js";
 import { makeStoreValidationVault } from "../src/validation/store-vault.js";
-
-const HEX_A = "a".repeat(64);
-const HEX_B = "b".repeat(64);
-const CONTENT_A = `sha256:${HEX_A}:text/plain`;
 
 function makeNote(raw: string, over: Partial<ParsedNote> = {}): ParsedNote {
   const { body } = splitFrontmatter(raw);
   const id = /id:\s*(\S+)/.exec(raw)?.[1] ?? "n";
   return { id, path: `${id}.md`, type: "concept", schemaVersion: 1, title: id, status: "active", created: "2026-07-11", updated: "2026-07-11", aliases: [], sources: [], declaredSensitivity: "internal", links: [], sections: buildSectionTree(body), contentHash: "sha256:0", raw, ...over };
 }
-function sourceNote(): ParsedNote {
-  const raw = ["---", "id: s-a", "type: source", "schema_version: 1", "title: s-a", "created: 2026-07-11", "updated: 2026-07-11",
-    `contentId: "${CONTENT_A}"`, "origin: notes/a.txt", "provenance:", "  vault_path: sources/a.txt", "  size_bytes: 12", "  renditions:",
-    `    - { extractor_version: 1, normalizer_version: 1, normalized_content_hash: "${HEX_B}", size_bytes: 10, locator_scheme: char }`, "---", "", "# s-a", ""].join("\n");
-  return makeNote(raw, { type: "source", id: "s-a", path: "sources/s-a.md" });
-}
-function claimNote(): ParsedNote {
-  const raw = ["---", "id: note-a", "type: concept", "schema_version: 1", "title: note-a", "created: 2026-07-11", "updated: 2026-07-11", "aliases:", "  - Alpha Note", "claims:",
-    "  - claim_id: claim-a", '    text: "A."', "    evidence:", `      - rendition: "${CONTENT_A}:1:1"`, "        verification: pending", "---", "", "# note-a", ""].join("\n");
+function aliasedNote(): ParsedNote {
+  const raw = ["---", "id: note-a", "type: concept", "schema_version: 1", "title: note-a", "created: 2026-07-11", "updated: 2026-07-11", "aliases:", "  - Alpha Note", "---", "", "# note-a", ""].join("\n");
   return makeNote(raw, { id: "note-a", path: "note-a.md", aliases: ["Alpha Note"] });
 }
 function storeWith(notes: ParsedNote[]): Store {
@@ -38,43 +30,31 @@ function storeWith(notes: ParsedNote[]): Store {
 }
 
 describe("store-backed ValidationVault (Task 4.11)", () => {
-  it("resolves notes, provenance, and claims from the projections", () => {
-    const s = storeWith([sourceNote(), claimNote()]);
+  it("resolves notes + `sources:` ids from the projections and the source registry", () => {
+    const s = storeWith([aliasedNote()]);
     try {
+      // Seed the operational `source` registry (what `source add`/`ingest` write).
+      new SourceRepo(s.db).insert({ id: "src-abc", kind: "file", locator: "/inbox/a.md", addedAt: "2026-07-23T00:00:00Z" });
       const v = makeStoreValidationVault(s.db);
       expect(v.hasNoteId("note-a")).toBe(true);
       expect(v.hasNoteId("does-not-exist")).toBe(false);
-      expect(v.hasSourceRef(`${CONTENT_A}:1:1`)).toBe(true);
-      expect(v.hasSourceRef(`sha256:${"c".repeat(64)}:text/plain:1:1`)).toBe(false);
-      expect(v.hasSourceRef("garbage")).toBe(false);
-      expect(v.hasClaimKey("claim-a")).toBe(true);
-      expect(v.hasClaimKey("claim-z")).toBe(false);
+      // v2 (#340): hasSourceRef resolves a `sources:` id against the `source` REGISTRY.
+      expect(v.hasSourceRef("src-abc")).toBe(true);
+      // An unknown id and a legacy v1 content handle both resolve to no registry row
+      // (non-fatal — the validator never blocks on a dangling `sources:` ref).
+      expect(v.hasSourceRef("src-unknown")).toBe(false);
+      expect(v.hasSourceRef("sha256:cccc:text/plain:1:1")).toBe(false);
     } finally { s.close(); }
   });
 
   it("reports identity-key owners (id/slug/alias)", () => {
-    const s = storeWith([sourceNote(), claimNote()]);
+    const s = storeWith([aliasedNote()]);
     try {
       const v = makeStoreValidationVault(s.db);
       // The note owns its id key + its alias key (queried by the normalized key).
       expect(v.identityOwners(normalizeIdentityKey("note-a"))).toContain("note-a");
       expect(v.identityOwners(normalizeIdentityKey("Alpha Note"))).toContain("note-a");
       expect(v.identityOwners(normalizeIdentityKey("nonexistent-key"))).toEqual([]);
-    } finally { s.close(); }
-  });
-
-  it("attachWouldDuplicate detects a re-attach of an existing current evidence pin", () => {
-    const s = storeWith([sourceNote(), claimNote()]);
-    try {
-      const v = makeStoreValidationVault(s.db);
-      const contentId: ContentId = { kind: "content", rawContentHash: HEX_A, canonicalMediaType: "text/plain" };
-      void contentId;
-      // The seeded evidence pins rendition 1:1 with no locator ((none) sentinel).
-      const dup = v.attachWouldDuplicate({ op: "AttachEvidence", opVersion: 1, claimKey: "claim-a", renditionId: `${CONTENT_A}:1:1` } as never);
-      expect(dup).toBe(true);
-      // A different rendition is not a duplicate.
-      const notDup = v.attachWouldDuplicate({ op: "AttachEvidence", opVersion: 1, claimKey: "claim-a", renditionId: `${CONTENT_A}:2:1` } as never);
-      expect(notDup).toBe(false);
     } finally { s.close(); }
   });
 });

@@ -4,7 +4,6 @@ import type { RetrievalResult } from "../src/retrieval/layers.js";
 import { splitFrontmatter } from "../src/markdown/parse.js";
 import { buildSectionTree, resolveSections } from "../src/markdown/sections.js";
 import { sectionContentHash } from "../src/markdown/patch.js";
-import { riskConfigFrom } from "../src/policies/risk.js";
 import type { ValidationVault } from "../src/validation/index.js";
 import {
   planSynthesis,
@@ -13,8 +12,6 @@ import {
   type PlanGenerationInput,
   type SynthesisPlanDeps,
 } from "../src/workflows/synthesis.js";
-
-const RISK = riskConfigFrom({ tier2_min_confidence: 0.8, tier2_max_changed_lines: 50, tier2_max_sections: 3 });
 
 const NOTE_RAW = `---
 id: note-a
@@ -67,8 +64,7 @@ function updateGoalsPlan(newContent = "- goal one\n- goal two\n", over: Partial<
 
 function vault(over: Partial<ValidationVault> = {}): ValidationVault {
   return {
-    hasNoteId: () => true, identityOwners: () => [], hasSourceRef: () => true, hasClaimKey: () => true,
-    hasEvidenceLineage: () => true, hasEvidenceId: () => true, attachWouldDuplicate: () => false, ...over,
+    hasNoteId: () => true, identityOwners: () => [], hasSourceRef: () => true, ...over,
   };
 }
 
@@ -79,9 +75,7 @@ function deps(over: Partial<SynthesisPlanDeps> = {}): SynthesisPlanDeps {
     readNote: () => mkNote(),
     validationVault: vault(),
     supportingEvidenceStates: () => [],
-    inputsTrusted: () => true,
-    evidenceValid: () => true,
-    config: { packBudgetTokens: 4000, requireSourcesForSynthesis: true, risk: RISK },
+    config: { packBudgetTokens: 4000, requireSourcesForSynthesis: true },
     ...over,
   };
 }
@@ -113,21 +107,19 @@ describe("synthesis: retrieval-first (order-invariant)", () => {
   });
 });
 
-describe("synthesis: plan → validate → risk → patch", () => {
-  it("produces a Tier-2 plan + patch for a clean auto op within bounds", async () => {
+describe("synthesis: plan → validate → patch (no tier gate)", () => {
+  it("produces a patch for a clean, patchable op against a real note", async () => {
     const plan = await planSynthesis("enrich", { target: "note-a", instruction: "add a goal" }, deps());
     expect(plan.report.ok).toBe(true);
-    expect(plan.tier2Eligible).toBe(true);
-    expect(plan.tier).toBe("tier-2");
     expect(plan.patch).not.toBeNull();
     expect(plan.patch!.noteId).toBe("note-a");
   });
 
-  it("escalates to Tier-3 when the patch exceeds the changed-lines bound", async () => {
+  it("validates a large edit clean — there is no changed-lines tier bound", async () => {
     const big = Array.from({ length: 60 }, (_, i) => `- goal ${i}`).join("\n") + "\n";
     const plan = await planSynthesis("enrich", { target: "note-a", instruction: "add many goals" }, deps({ generatePlan: async () => updateGoalsPlan(big) }));
     expect(plan.report.ok).toBe(true);
-    expect(plan.tier).toBe("tier-3");
+    expect(plan.patch).not.toBeNull();
   });
 
   it("blocks (report.ok=false) and produces no patch when validation rejects the op", async () => {
@@ -137,18 +129,6 @@ describe("synthesis: plan → validate → risk → patch", () => {
     expect(plan.report.ok).toBe(false);
     expect(plan.report.findings.map((f) => f.code)).toContain("reserved-operation");
     expect(plan.patch).toBeNull();
-    expect(plan.tier).toBe("tier-3");
-  });
-
-  it("clears Tier-2 (Tier-3) when supporting evidence is non-valid", async () => {
-    const plan = await planSynthesis("enrich", { target: "note-a", instruction: "x" }, deps({ supportingEvidenceStates: () => ["stale"] }));
-    expect(plan.tier2Eligible).toBe(false);
-    expect(plan.tier).toBe("tier-3");
-  });
-
-  it("forces Tier-3 for untrusted-derived input (taint)", async () => {
-    const plan = await planSynthesis("enrich", { target: "note-a", instruction: "x" }, deps({ inputsTrusted: () => false }));
-    expect(plan.tier).toBe("tier-3");
   });
 });
 
@@ -159,7 +139,7 @@ describe("synthesis: preview is side-effect-free", () => {
     expect(preview.mode).toBe("preview");
     expect(preview.plan.changePlan.operation.op).toBe("UpdateSection");
     // The deps interface exposes only read/compute seams — there is no store/repo/
-    // broker/commit sink to assert-unused; side-effect-freedom is structural.
+    // commit sink to assert-unused; side-effect-freedom is structural.
     expect(Object.keys(d)).toEqual(
       expect.arrayContaining(["retrieve", "generatePlan", "readNote", "validationVault", "config"]),
     );

@@ -16,14 +16,14 @@ const REPO_ROOT = join(import.meta.dirname, "..", "..", "..");
 
 let root: string, cwd: string, env: NodeJS.ProcessEnv;
 
-async function cli(argv: string[]): Promise<{ code: number; out: string }> {
+async function cli(argv: string[], envOverride?: NodeJS.ProcessEnv): Promise<{ code: number; out: string }> {
   let out = "";
   const realOut = process.stdout.write.bind(process.stdout);
   const realErr = process.stderr.write.bind(process.stderr);
   (process.stdout as unknown as { write: (s: string) => boolean }).write = (s: string) => ((out += s), true);
   (process.stderr as unknown as { write: (s: string) => boolean }).write = () => true;
   try {
-    return { code: await runCli(argv, env, { cwd, root: REPO_ROOT }), out };
+    return { code: await runCli(argv, envOverride ?? env, { cwd, root: REPO_ROOT }), out };
   } finally {
     process.stdout.write = realOut;
     process.stderr.write = realErr;
@@ -85,10 +85,12 @@ describe("brain index eval — eval-set validation precedes the egress broker (#
     expect(out).not.toContain("broker-unreachable");
   });
 
-  it("a well-formed, resolvable eval set DOES proceed to the broker (proves validation is not over-eager)", async () => {
+  it("a well-formed, resolvable eval set proceeds PAST validation and RUNS the eval (proves validation is not over-eager)", async () => {
     // Insert a note into the projection so its label resolves; validation then passes
-    // and the command advances to the egress connect, which fails (no daemon) —
-    // exit 2 broker-unreachable is the CORRECT boundary marker here.
+    // and the command advances past validation into the retrieval eval. Post the Phase-2
+    // in-process cutover there is no egress daemon, so we activate the gated deterministic
+    // in-process fake provider (ATLAS_TEST_MODE + ATLAS_FAKE_PROVIDER) — the eval RUNS
+    // against an empty index and reports below-threshold (exit 1), never eval-set-invalid.
     execFileSync("node", ["-e", `
       const Database = require('better-sqlite3');
       const db = new Database(${JSON.stringify(join(cwd, ".atlas", "atlas.db"))});
@@ -99,9 +101,14 @@ describe("brain index eval — eval-set validation precedes the egress broker (#
       { version: 1, queries: [{ id: "q1", text: "who runs the cloud team" }] },
       { version: 1, labels: { q1: ["team-cloud"] } },
     );
-    const { code, out } = await cli(["index", "eval", "--queries", q, "--labels", l, "--json"]);
-    expect(code).toBe(2);
-    expect(out).toContain("broker-unreachable");
+    const fakeEnv = { ...env, ATLAS_TEST_MODE: "1", ATLAS_FAKE_PROVIDER: "1" };
+    const { code, out } = await cli(["index", "eval", "--queries", q, "--labels", l, "--json"], fakeEnv);
+    // The eval RAN (validation was not over-eager): it emits the eval-result payload and
+    // exits 1 as below-threshold over an empty index — NOT eval-set-invalid, NOT broker-unreachable.
+    expect(code).toBe(1);
+    expect(out).toContain(`"command":"index eval"`);
+    expect(out).toContain(`"pass":false`);
     expect(out).not.toContain("eval-set-invalid");
+    expect(out).not.toContain("broker-unreachable");
   });
 });

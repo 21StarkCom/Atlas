@@ -13,9 +13,12 @@ export {
   type WorktreeEntry,
   type ChangeStatus,
   type PathChange,
+  type RawStatusChange,
   type CommitChanges,
+  type WorktreeStatusEntry,
 } from "./repo.js";
 export { type Worktree } from "./worktree.js";
+export { commitPaths } from "./commit-paths.js";
 export {
   AGENT_REF_PREFIX,
   AGENT_REF_RE,
@@ -26,6 +29,9 @@ export {
   updateAgentRef,
   deleteAgentRef,
   attachHeadToAgentRef,
+  assertCanonicalRef,
+  advanceCanonicalRef,
+  CanonicalRefError,
 } from "./refs.js";
 export {
   RUN_MANIFEST_TRAILER,

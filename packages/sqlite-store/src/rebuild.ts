@@ -47,7 +47,13 @@ import { deriveAndPersistNote } from "./note-derivation.js";
 /** The normalization-contract version stamped into `note_identity_keys.normalizer_version`. */
 export const IDENTITY_NORMALIZER_VERSION = 1;
 
-/** Default predicate for a plain (untyped) `[[wiki-link]]` until typed links land. */
+/**
+ * The v1 synthetic predicate a plain `[[wiki-link]]` was forced to carry (v1
+ * `note_links.predicate` was `NOT NULL`). The v2 rebuild (`0013_links_v2`) emits
+ * a plain link as `predicate NULL` instead, so this is NO LONGER written by the
+ * fold; it is retained only for the read-side link/relationship classifier that
+ * task 3-6 (`link`) replaces.
+ */
 export const DEFAULT_LINK_PREDICATE = "references";
 
 /** Outcome of a {@link rebuildProjections} call. */
@@ -179,15 +185,13 @@ export function rebuildProjections(
   const schemaVersionCounts = new Map<number, number>();
 
   const run = db.transaction(() => {
-    // Pre-clear steps run BEFORE the core projection clear. A retained-PR fold
-    // whose projection cascades from `notes` must drop its rows here: the claims
-    // fold (0004) owns `claim_evidence`, which carries a self-`ON DELETE RESTRICT`
-    // supersession FK (`supersedes_evidence_id`) AND a `RESTRICT` FK onto
-    // `source_renditions`. If those rows survived, `repo.clearAll()` deleting
-    // `notes` (cascade → `claims` → `claim_evidence`) or the provenance fold
-    // deleting `source_renditions` would trip a RESTRICT and abort a valid
-    // rebuild of a claim carrying a supersession chain. Clearing successors before
-    // predecessors here makes the subsequent core/provenance cleanup FK-safe.
+    // Pre-clear steps run BEFORE the core projection clear. A projection fold whose
+    // table is emptied here (rather than inside the fold) registers a pre-clear so
+    // its rows are gone before `repo.clearAll()` deletes `notes` and before any fold
+    // rewrites its own table (the v2 `evidence` fold registers `clearEvidenceProjection`
+    // here). This ordering also kept the retired v1 claims fold FK-safe — its
+    // `claim_evidence` table carried self-`RESTRICT` + `source_renditions` `RESTRICT`
+    // FKs — but that fold is gone (0014 forward-DROPs the v1 claims tables).
     for (const step of preClearSteps) step(db);
 
     // The generation fence columns (`active_generation`, `active_generation_id`)
@@ -259,17 +263,36 @@ export function rebuildProjections(
     // An unresolved target is a dangling reference: throw so the transaction
     // rolls back and the prior projection survives (dictionary §2 `note_links`).
     for (const note of snapshot.notes) {
-      let ordinal = 0;
       for (const link of note.links) {
         const target = resolveTarget(link.target);
         if (target === undefined) {
           throw new DanglingLinkError(note.id, link.target, link.raw);
         }
+        // A parsed `[[wiki-link]]` is a PLAIN link in the v2 shape (0013): no
+        // relationship type, so `predicate` is NULL and the optional
+        // `[[target|display]]` text lands in `alias`.
         repo.insertLink({
           source_note_id: note.id,
           target_note_id: target,
-          predicate: DEFAULT_LINK_PREDICATE,
-          ordinal: ordinal++,
+          predicate: null,
+          alias: link.alias ?? null,
+        });
+        report.links++;
+      }
+      // Typed relationship edges (v2, #331) — DERIVED from the note's frontmatter
+      // `related` list (`ParsedNote.relationships`), NOT projection-authored. Each
+      // carries a non-null `predicate` and lands as a distinct `note_links` row
+      // (the ux_note_links_pred partial index dedupes per (source,target,predicate)).
+      for (const rel of note.relationships ?? []) {
+        const target = resolveTarget(rel.target);
+        if (target === undefined) {
+          throw new DanglingLinkError(note.id, rel.target, `related:${rel.predicate}:${rel.target}`);
+        }
+        repo.insertLink({
+          source_note_id: note.id,
+          target_note_id: target,
+          predicate: rel.predicate,
+          alias: rel.alias ?? null,
         });
         report.links++;
       }
@@ -288,11 +311,12 @@ export function rebuildProjections(
 
     // Run every registered projection fold INSIDE the same transaction, after
     // the core `notes` projection exists (folds resolve their citations against
-    // `notes`). `foldProvenanceManifests` (0003 PR-A) registers here; the claims
-    // fold (0004 PR-A) will too. A fold whose tables are absent (migration not
-    // yet applied) is a self-guarded no-op, so a Phase-1 DB still rebuilds. A
-    // fold that throws rolls the whole rebuild back — the old projection stays
-    // readable (dictionary §8).
+    // `notes`). `foldEvidenceManifests` (0014, the v2 vault-derived evidence
+    // projection) registers here. (The v1 `foldProvenanceManifests` is GONE — 0015
+    // forward-DROPs its four content-addressed tables, #340.) A fold whose tables are
+    // absent (migration not yet applied) is a self-guarded no-op, so a Phase-1 DB
+    // still rebuilds. A fold that throws rolls the whole rebuild back — the old
+    // projection stays readable (dictionary §8).
     for (const fold of projectionFolds) fold(snapshot, db);
 
     // Restore the generation fences for surviving note_ids (see the snapshot above).
@@ -311,14 +335,15 @@ export function rebuildProjections(
 }
 
 // ---------------------------------------------------------------------------
-// Projection fold registry (§2.7 / §8): retained-PR provenance & claims folds.
+// Projection fold registry (§2.7 / §8): the v2 evidence (0014) fold. (The v1
+// provenance fold is retired — 0015 forward-DROPs its four tables, #340.)
 // ---------------------------------------------------------------------------
 
 /**
  * A projection fold reconstructs additional retained-PR projection tables from a
  * `VaultSnapshot` (its canonical Markdown manifests) inside the rebuild
  * transaction. `db` is the transaction-scoped connection (the "`tx`" of the
- * task's `foldProvenanceManifests(snapshot, tx)` signature).
+ * task's `foldEvidenceManifests(snapshot, tx)` signature).
  */
 export type ProjectionFold = (snapshot: VaultSnapshot, db: SqliteDatabase) => void;
 
@@ -326,9 +351,9 @@ const projectionFolds: ProjectionFold[] = [];
 
 /**
  * Register a projection fold to run inside every {@link rebuildProjections}
- * transaction (Task 2.1 registers {@link foldProvenanceManifests}). Idempotent
- * per fold reference — registering the same function twice is a no-op, so
- * importing the provenance module more than once cannot double-apply it.
+ * transaction (the v2 `foldEvidenceManifests` registers here; the v1 provenance fold
+ * is retired — #340). Idempotent per fold reference — registering the same function
+ * twice is a no-op, so importing a fold module more than once cannot double-apply it.
  */
 export function registerProjectionFold(fold: ProjectionFold): void {
   if (!projectionFolds.includes(fold)) projectionFolds.push(fold);
@@ -350,12 +375,11 @@ export function _resetProjectionFolds(): void {
 // ---------------------------------------------------------------------------
 
 /**
- * A pre-clear step drops a retained-PR projection's rows at the very start of the
- * rebuild transaction, before `ProjectionRepo.clearAll()` deletes `notes` and
- * before any projection fold clears its own tables. The claims fold registers one
- * here because `claim_evidence` cascades from `notes` and would otherwise trip a
- * self-`RESTRICT` supersession FK (or the `RESTRICT` FK onto `source_renditions`)
- * mid-rebuild. `db` is the transaction-scoped connection.
+ * A pre-clear step drops a projection's rows at the very start of the rebuild
+ * transaction, before `ProjectionRepo.clearAll()` deletes `notes` and before any
+ * projection fold clears its own tables. The v2 `evidence` fold registers one here
+ * (`clearEvidenceProjection`) so the flat table is emptied up front. `db` is the
+ * transaction-scoped connection.
  */
 export type PreClearStep = (db: SqliteDatabase) => void;
 
@@ -379,40 +403,3 @@ export function _resetPreClears(): void {
   preClearSteps.length = 0;
 }
 
-// ---------------------------------------------------------------------------
-// Post-restore rebuild hook registry (fixes R1-F1).
-// ---------------------------------------------------------------------------
-
-/** Context passed to each post-restore rebuild step. */
-export interface RebuildCtx {
-  readonly db: SqliteDatabase;
-}
-
-/** A registered post-restore rebuild step. */
-export type PostRestoreRebuildStep = (ctx: RebuildCtx) => Promise<void>;
-
-const postRestoreSteps: PostRestoreRebuildStep[] = [];
-
-/**
- * Register a rebuild step to run after a `db restore` re-lands the ledger
- * tables (Task 1.7). Phase 3 registers the LanceDB index rebuild here; Task 1.7
- * registers the projection rebuild. Steps run in registration order.
- */
-export function registerPostRestoreRebuild(step: PostRestoreRebuildStep): void {
-  postRestoreSteps.push(step);
-}
-
-/** Run every registered post-restore rebuild step, in order. */
-export async function runPostRestoreRebuild(ctx: RebuildCtx): Promise<void> {
-  for (const step of postRestoreSteps) await step(ctx);
-}
-
-/** Test-only: number of registered steps. */
-export function postRestoreRebuildStepCount(): number {
-  return postRestoreSteps.length;
-}
-
-/** Test-only: clear the registry so tests do not leak into one another. */
-export function _resetPostRestoreRebuild(): void {
-  postRestoreSteps.length = 0;
-}

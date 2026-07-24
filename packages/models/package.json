@@ -16,13 +16,11 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
-    "@atlas/broker": "workspace:*",
     "@atlas/contracts": "workspace:*",
     "@atlas/sqlite-store": "workspace:*",
     "zod": "catalog:"
   },
   "devDependencies": {
-    "@atlas/scan": "workspace:*",
     "@atlas/testing": "workspace:*",
     "@types/better-sqlite3": "catalog:",
     "@types/node": "catalog:",

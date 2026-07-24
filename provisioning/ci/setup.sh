@@ -1,30 +1,16 @@
 #!/usr/bin/env bash
-# CI host provisioning (Task 1.0 / #16, D1). Runs the dev provisioning, then installs
-# a sudoers drop-in allowing the (passwordless-sudo) runner user to `sudo -u
-# atlas-broker` / `sudo -u atlas-egress` ONLY the two installed launchers. CI always
-# provisions, so the ATLAS_PROVISIONED-gated suites never skip on CI.
+# CI host provisioning — RETIRED (phase-2-in-process-cutover, #312).
 #
-#   sudo provisioning/ci/setup.sh
+# The in-process cutover means CI no longer provisions the two-UID / daemon /
+# key-custody host layout: `.github/workflows/ci.yml` runs `pnpm -r test`
+# daemon-free with ATLAS_PROVISIONED unset, so the provisioning-gated suites
+# cleanly subset (run their in-process subset) instead of exercising the real
+# OS identities. This script is intentionally kept as a no-op stub for one more
+# phase — the provisioned suites and the dev provisioning it wrapped are DELETED
+# (not skipped) in Phase 3, at which point this file goes with them.
+#
+# Local/manual host provisioning still lives at provisioning/dev/setup.sh; run
+# that directly if you need the real two-UID layout for a live drive.
 set -euo pipefail
-HERE="$(cd "$(dirname "$0")/.." && pwd)"
-# shellcheck source=../lib.sh
-source "$HERE/lib.sh"
-require_root "$@"
 
-"$HERE/dev/setup.sh"
-
-RUNNER="${SUDO_USER:-${CI_RUNNER_USER:-runner}}"
-DROPIN="/etc/sudoers.d/atlas-ci"
-step "install sudoers drop-in $DROPIN (runner=$RUNNER)"
-if [ "$DRY_RUN" != "1" ]; then
-  cat > "$DROPIN" <<EOF
-# Atlas CI: allow the runner to launch ONLY the two privileged launchers as their
-# service identities — nothing else. (D1)
-$RUNNER ALL=(atlas-broker) NOPASSWD: $ATLAS_INSTALL_BIN/broker-launcher.sh
-$RUNNER ALL=(atlas-egress) NOPASSWD: $ATLAS_INSTALL_BIN/egress-launcher.sh
-EOF
-  chmod 0440 "$DROPIN"
-  visudo -cf "$DROPIN" >/dev/null
-fi
-
-step "DONE — CI provisioned. Export ATLAS_PROVISIONED=1 in the job env."
+echo "provisioning/ci/setup.sh: no-op — CI is zero-provisioning (#312). See dev/setup.sh for a real host provision."

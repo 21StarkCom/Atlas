@@ -11,10 +11,8 @@ function plan(over: Partial<SynthesisPlan> = {}): SynthesisPlan {
   return {
     retrievalRunId: "ret-1",
     changePlan: { target: "note-a", operation: { op: "AppendSection", opVersion: 1, content: "x", createIfAbsent: true, selector: { path: "Log" } } } as never,
-    report: { ok: true, findings: [], gates: { tier2Eligible: true } } as never,
+    report: { ok: true, findings: [], gates: {} } as never,
     patch: { ops: [{ kind: "insert" }, { kind: "insert" }] } as never,
-    tier: "tier-2",
-    tier2Eligible: true,
     ...over,
   };
 }
@@ -37,15 +35,17 @@ describe("enrich argument parsing (Task 4.11)", () => {
 });
 
 describe("enrich preview-output mapping (Task 4.11)", () => {
-  it("maps a Tier-2 patchable plan → preview envelope with changedLines + sections", () => {
+  it("maps a validated, patchable plan → preview envelope with changedLines + sections", () => {
     const out = enrichPreviewOutput("run-1", plan());
-    expect(out).toMatchObject({ command: "enrich", mode: "preview", runId: "run-1", risk: "tier-2", validationConfidence: 1, changedLines: 2, sections: 1 });
-    expect((out.plan as { operation: string }).operation).toBe("AppendSection");
+    expect(out).toMatchObject({ command: "enrich", mode: "preview", runId: "run-1", changedLines: 2, sections: 1 });
+    expect((out.plan as { operation: string; ok: boolean }).operation).toBe("AppendSection");
+    expect((out.plan as { ok: boolean }).ok).toBe(true);
   });
-  it("a Tier-3, unpatchable plan omits changedLines/sections and reports validationConfidence 0", () => {
-    const out = enrichPreviewOutput("run-2", plan({ patch: null, tier: "tier-3", tier2Eligible: false, report: { ok: false, findings: [], gates: { tier2Eligible: false } } as never }));
-    expect(out).toMatchObject({ command: "enrich", mode: "preview", risk: "tier-3", validationConfidence: 0 });
+  it("an unpatchable plan omits changedLines/sections and reports the invalid plan", () => {
+    const out = enrichPreviewOutput("run-2", plan({ patch: null, report: { ok: false, findings: [], gates: {} } as never }));
+    expect(out).toMatchObject({ command: "enrich", mode: "preview" });
     expect(out).not.toHaveProperty("changedLines");
     expect(out).not.toHaveProperty("sections");
+    expect((out.plan as { ok: boolean }).ok).toBe(false);
   });
 });

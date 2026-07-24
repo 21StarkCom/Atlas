@@ -1,61 +1,87 @@
 /**
- * `@atlas/models` — the typed IPC client for the egress broker
- * (`generateText`/`generateObject`/`embed`), CLI-side capability minting (D19),
- * and CLI-side `model_calls` persistence via `finalizeLedgerWrite` (D6/D18). The
- * Gemini adapter, the provider credential, the outbound network, and the payload
- * scan all live INSIDE the egress broker (`@atlas/broker`) — this package never
- * touches a provider key or the network.
+ * `@atlas/models` — the typed model client (`generateText`/`generateObject`/`embed`)
+ * driven over an IN-PROCESS Gemini adapter, plus CLI-side `model_calls` persistence
+ * via `buildModelCallStatement` + a plain `applyLedgerWrite` (D6/D18). Post the
+ * Phase-2 cutover the adapter, the provider credential, and the outbound network all
+ * live HERE, in-process — there is no egress daemon, no capability mint, no per-run
+ * budget, and no egress scan gate. v2 (#338) also retired the §2.8 audit ledger, so
+ * a `model_calls` row is now a plain operational row (no `finalizeLedgerWrite`, no
+ * audit event, no per-run receipt journal). The credential resolves LAZILY on the
+ * first provider call.
  */
 
 export {
   ModelsClient,
+  createInProcessInvoker,
+  resolveGeminiApiKey,
+  hasGeminiApiKey,
+  GEMINI_API_KEY_ENV,
+  GEMINI_KEYCHAIN_SERVICE,
+  EgressInvokeParamsSchema,
+  EgressRequestBodySchema,
   type Invoker,
+  type InProcessInvokerConfig,
   type CallOptions,
   type SignalOrOptions,
   type GenerateObjectClientRequest,
+  type RunBinding,
+  type EgressInvokeParams,
+  type EgressRequestBody,
+  type EgressInvokeResult,
 } from "./client.js";
 
 export {
-  mintEgressCapability,
-  setCapabilityMintSecretResolver,
-  CAPABILITY_KEY_ENV,
-  DEFAULT_CAPABILITY_KEY_ID,
-  DEFAULT_CAPABILITY_TTL_SECONDS,
-  SENSITIVITY_ORDER,
-  EGRESS_OPERATIONS,
-  type CapabilityMintSecretResolver,
-  type EgressCapability,
-  type EgressLimits,
-  type EgressOperation,
-  type CapabilitySensitivity,
-  type RunBinding,
-} from "./capability.js";
+  GeminiAdapter,
+  type GeminiAdapterConfig,
+  type Transport,
+  type ProviderAdapter,
+  type SerializedRequest,
+  type TransmittedResponse,
+  type ParsedResult,
+  type ResponseScanHook,
+  type AttemptMeta,
+} from "./gemini.js";
+
+export {
+  ProviderCallError,
+  providerError,
+  providerCallErrorFromBody,
+} from "./provider-error.js";
+
+export {
+  DEFAULT_PROMPT_REGISTRY,
+  MapPromptRegistry,
+  PROMPT_REFS,
+  resolvePromptOrThrow,
+  type PromptRegistry,
+  type ResolvedPrompt,
+} from "./prompt-registry.js";
+
+export {
+  EgressRefusal,
+  egressExitCodeFor,
+  EGRESS_ERROR_CATALOG,
+  type EgressCode,
+  type ExitCode,
+} from "./errors.js";
 
 export {
   buildModelCallStatement,
-  persistModelCalls,
   modelCallId,
   modelCallAuditRecord,
   ModelCallAuditRecordSchema,
-  type PersistModelCallsOptions,
   type ModelCallAuditRecord,
 } from "./ledger.js";
 
 export {
-  DurableReceiptSink,
-  loadJournaledReceipts,
-  finalizeRunModelCalls,
-  type FinalizeRunModelCallsOptions,
-} from "./receipt-journal.js";
-
-export {
-  ProviderCallError,
-  EgressRefusal,
   GenerateTextResultSchema,
   EmbedResultSchema,
   ModelCallReceiptSchema,
+  PROVIDER_OPERATIONS,
+  SENSITIVITY_ORDER,
   type PromptRef,
   type Usage,
+  type ProviderOperation,
   type GenerateTextRequest,
   type GenerateObjectRequest,
   type EmbedRequest,

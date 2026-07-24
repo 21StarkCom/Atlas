@@ -33,8 +33,28 @@ const REF_WRITE_SUBCOMMANDS = ["update-ref", "symbolic-ref", "branch", "push", "
 
 /** The one module allowed to contain guarded ref-write call sites. */
 const GUARDED_WRITE_FILE = "refs.ts";
-/** The one guard every write call site must be co-located with. */
-const GUARD_CALL = "assertAgentRef";
+/**
+ * The guards a write call site may be co-located with. `assertAgentRef` guards
+ * agent-ref writes; `assertCanonicalRef` guards the v2 in-process canonical-ref
+ * fast-forward advance (ADR-0003 — the retired broker no longer owns it). Both
+ * reject the audit/trust anchor namespaces, so no write can reach a ledger ref.
+ */
+const GUARD_CALLS = ["assertAgentRef", "assertCanonicalRef"];
+
+/**
+ * The EXACT guard each known ref-writing function must carry. The canonical
+ * advance is guarded only by `assertCanonicalRef` (rejects agent/audit/trust);
+ * the agent-ref writers only by `assertAgentRef` (rejects everything but
+ * `refs/agent/<ulid>`). Binding the guard to the writer prevents a swapped
+ * guard from smuggling a writer into the wrong namespace. A ref-writing
+ * function not listed here falls back to "any guard in GUARD_CALLS".
+ */
+const REQUIRED_GUARD: Record<string, string> = {
+  advanceCanonicalRef: "assertCanonicalRef",
+  updateAgentRef: "assertAgentRef",
+  deleteAgentRef: "assertAgentRef",
+  attachHeadToAgentRef: "assertAgentRef",
+};
 
 interface SrcFile {
   /** Path relative to `src/` (posix-normalized), e.g. `refs.ts` or `sub/x.ts`. */
@@ -92,9 +112,22 @@ export function auditSources(files: SrcFile[]): string[] {
       violations.push(`ref-write subcommand outside ${GUARDED_WRITE_FILE}: ${file.path}`);
       continue;
     }
-    // (b) In that module, each write must sit inside a function that guards.
+    // (b) In that module, each write must sit inside a function that guards —
+    // and with the SPECIFIC guard its ref namespace requires. The canonical
+    // advance may use ONLY assertCanonicalRef; the agent-ref writers may use
+    // ONLY assertAgentRef. Accepting either guard for either writer would let
+    // an agent writer be silently re-guarded by assertCanonicalRef (or vice
+    // versa) and escape its namespace check.
     for (const fn of functionsOf(file.text)) {
-      if (hasWriteSubcommand(fn.body) && !fn.body.includes(GUARD_CALL)) {
+      if (!hasWriteSubcommand(fn.body)) continue;
+      const required = REQUIRED_GUARD[fn.name];
+      if (required) {
+        if (!fn.body.includes(required)) {
+          violations.push(
+            `ref-write call site ${file.path}#${fn.name} must be guarded by ${required}`,
+          );
+        }
+      } else if (!GUARD_CALLS.some((g) => fn.body.includes(g))) {
         violations.push(`unguarded ref-write call site: ${file.path}#${fn.name}`);
       }
     }
@@ -145,7 +178,16 @@ describe("structural source audit (recursive)", () => {
     };
     const mutated = files.map((f) => (f.path === refs.path ? guardless : f));
     const v = auditSources(mutated);
-    expect(v.some((s) => s.startsWith("unguarded ref-write call site: refs.ts#"))).toBe(true);
+    // The agent-ref writers require assertAgentRef specifically; stripping it
+    // must be flagged (either the writer-specific "must be guarded by" message
+    // or the generic unguarded fallback for any unlisted writer).
+    expect(
+      v.some(
+        (s) =>
+          s.startsWith("unguarded ref-write call site: refs.ts#") ||
+          (s.startsWith("ref-write call site refs.ts#") && s.includes("must be guarded by assertAgentRef")),
+      ),
+    ).toBe(true);
   });
 
   it("MUTATION: catches a protected-namespace literal reaching a write module", () => {

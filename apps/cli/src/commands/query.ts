@@ -82,30 +82,24 @@ import {
 } from "@atlas/lancedb-index";
 import {
   ModelsClient,
-  mintEgressCapability,
+  createInProcessInvoker,
   buildModelCallStatement,
   ProviderCallError,
   EgressRefusal,
-  SENSITIVITY_ORDER,
-  type CapabilitySensitivity,
-  type EgressLimits,
+  PROMPT_REFS,
   type GenerateTextResult,
   type ModelCallReceipt,
 } from "@atlas/models";
-import { EgressClient, BrokerClient, PROMPT_REFS } from "@atlas/broker";
 import {
-  assertBackupHealthy,
-  BackupUnhealthyError,
-  finalizeLedgerWrite,
+  applyLedgerWrite,
   type LedgerStatement,
   type Store,
 } from "@atlas/sqlite-store";
 import { CliError, EXIT, emitJson } from "../errors/envelope.js";
 import { registerCommand, type RunContext } from "../handlers.js";
 import { openMigratedStore } from "./store-open.js";
-import { resolvePath, backupConfig } from "./backup-config.js";
+import { resolvePath } from "./paths.js";
 import { agentRunUpsert } from "../workflows/checkpoints.js";
-import { runReadAudit } from "../audit/readonly.js";
 import {
   retrieve,
   AmbiguousNoteError,
@@ -137,11 +131,6 @@ const GENERATION_MAX_TOKENS = 4096;
 /** The versioned egress prompt for grounded synthesis (broker PROMPT_REFS SSOT). */
 const ANSWER_PROMPT_REF = PROMPT_REFS.synthesize;
 
-/** Per-run egress ceilings (D19). Generous — the per-run budget is a compromise
- * bound, not a quota; the payload scan + capability enforce the real limits. */
-const EGRESS_MAX_BYTES = 1_000_000;
-const EGRESS_MAX_TOKENS = 200_000;
-const EGRESS_COST_CEILING = 1_000_000;
 
 // ---------------------------------------------------------------------------
 // Args.
@@ -233,18 +222,13 @@ export interface QueryExecDeps {
   /** The retrieval seams (recorder + runId are supplied HERE, not by the caller). */
   readonly retrieval: Omit<RetrievalDeps, "recorder" | "runId">;
   /** The grounded-answer generation call (a `models.generateText` closure). Invoked
-   * ONLY in answered mode. Receives the packed payload's EFFECTIVE sensitivity (D19,
-   * round-2 finding F4) so the production closure mints a capability bound to a
-   * matching `allowedSensitivity` ceiling and declares it on the export. */
-  readonly generate: (input: string, declaredSensitivity: CapabilitySensitivity) => Promise<GenerateTextResult>;
-  /** Read the receipts collected so far across every egress transmission (embed +
+   * ONLY in answered mode. */
+  readonly generate: (input: string) => Promise<GenerateTextResult>;
+  /** Read the receipts collected so far across every transmission (embed +
    * generation) — the `model_calls` source. */
   readonly getReceipts: () => readonly ModelCallReceipt[];
   /** Token budget for context packing. */
   readonly packBudget: number;
-  /** The floor sensitivity of the query text itself (config `default_sensitivity`), the
-   * lower bound of the packed payload's effective sensitivity (F4). */
-  readonly baseSensitivity: CapabilitySensitivity;
   readonly now: () => string;
 }
 
@@ -295,17 +279,11 @@ export async function executeQuery(deps: QueryExecDeps): Promise<QueryExecResult
   // Grounded answer (answered mode only). A generation call happens even when no
   // context met the threshold — the model reports the absence — so answered mode
   // always records exactly one generation `model_calls` row (schema: modelCalls >= 1).
-  // The export's declared sensitivity is the EFFECTIVE sensitivity of the packed
-  // payload (D19, F4): the most-restrictive class across the query text and every
-  // packed note. The production `generate` closure binds the capability's
-  // `allowedSensitivity` to it, so a confidential/restricted note is never exported
-  // under a falsely-lower classification.
   let answer: string | undefined;
   let generationCalls = 0;
   let truncated = false;
   if (args.answer) {
-    const declared = effectiveSensitivity(deps.baseSensitivity, pack.notes);
-    const gen = await deps.generate(buildAnswerInput(args.text, pack), declared);
+    const gen = await deps.generate(buildAnswerInput(args.text, pack));
     answer = gen.text;
     generationCalls = 1;
     // A non-STOP finish means the provider cut the answer (MAX_TOKENS etc.) —
@@ -385,41 +363,9 @@ export function citedNoteIds(answer: string, noteIds: readonly string[]): Set<st
 
 /** Rank a sensitivity class most-restrictive-highest; an unrecognized label ranks as
  * the MOST restrictive (fail-closed — an unknown class is never treated as low). */
-function rankSensitivity(s: string): number {
-  const i = (SENSITIVITY_ORDER as readonly string[]).indexOf(s);
-  return i === -1 ? SENSITIVITY_ORDER.length - 1 : i;
-}
-
-/**
- * The EFFECTIVE sensitivity of the packed export (D19, round-2 finding F4): the
- * MOST-RESTRICTIVE class across the query text's floor (`base`) and every packed note's
- * surfaced sensitivity. This is what the generation declares and what its capability's
- * `allowedSensitivity` ceiling is bound to, so a confidential/restricted note can never
- * be exported under a falsely-lower label.
- */
-export function effectiveSensitivity(
-  base: CapabilitySensitivity,
-  notes: readonly { readonly sensitivity: string }[],
-): CapabilitySensitivity {
-  let best = base as string;
-  let bestRank = rankSensitivity(best);
-  for (const n of notes) {
-    const r = rankSensitivity(n.sensitivity);
-    if (r > bestRank) {
-      bestRank = r;
-      best = n.sensitivity;
-    }
-  }
-  // The winner is either `base` (already a valid class) or a note whose rank beat it;
-  // an unrecognized note label ranks most-restrictive, so clamp to the SSOT order.
-  return (SENSITIVITY_ORDER as readonly string[]).includes(best)
-    ? (best as CapabilitySensitivity)
-    : SENSITIVITY_ORDER[SENSITIVITY_ORDER.length - 1]!;
-}
-
 /** Assemble the grounded-answer generation input: the question + the packed notes,
  * each labeled by its citable note id + section path. The versioned synthesis prompt
- * (broker-side) supplies the task instructions; this is the source material. */
+ * supplies the task instructions; this is the source material. */
 function buildAnswerInput(query: string, pack: ReturnType<typeof packContext>): string {
   const lines: string[] = [
     `Question: ${query}`,
@@ -502,27 +448,13 @@ export async function recordFailedTransmissions(
   now: () => string,
 ): Promise<void> {
   if (receipts.length === 0) return;
-  let broker: BrokerClient;
-  try {
-    broker = await BrokerClient.connect(ctx.config.config.broker.socket_path);
-  } catch {
-    return; // audit broker unreachable — surface the original error (WORM retains receipts)
-  }
+  // v2 (#334): no audit event, no broker — the receipts + the failed-run row land
+  // as plain observability rows, best-effort (the caller surfaces the original
+  // model error regardless).
   try {
     const ts = now();
-    await finalizeLedgerWrite(store, broker, {
-      runId,
-      event: {
-        schemaVersion: 1,
-        eventId: newRunId(),
-        kind: "run.failed",
-        occurredAt: ts,
-        runId,
-        subjects: [],
-        canonicalCommit: "0".repeat(40),
-        detail: { failedAt: "retrieve", reason },
-      },
-      ledgerWrite: [
+    store.db.transaction(() =>
+      applyLedgerWrite(store.db, [
         agentRunUpsert({
           runId,
           operation: "retrieve",
@@ -533,14 +465,15 @@ export async function recordFailedTransmissions(
           finishedAt: ts,
         }),
         ...receipts.map((r) => buildModelCallStatement(r, { now, operation: operationFor(r) })),
-      ],
-      backup: backupConfig(ctx),
-    });
-  } catch {
-    // Best-effort: the caller surfaces the original model error regardless.
-  } finally {
-    broker.close();
+      ]),
+    )();
+  } catch (e) {
+    // Best-effort: the caller surfaces the original model error regardless —
+    // but the swallow is LOGGED (#334 review): a deterministic row failure here
+    // would otherwise silently lose all failed-run model-call accounting.
+    ctx.log?.warn?.("query.failed-transmission-rows", { error: e instanceof Error ? e.message : String(e) });
   }
+  await Promise.resolve();
 }
 
 // ---------------------------------------------------------------------------
@@ -668,89 +601,31 @@ async function query(ctx: RunContext): Promise<number> {
   const now = (): string => new Date().toISOString();
 
   try {
-    // FAIL-CLOSED gate (contract): a query WRITES ledger rows via finalizeLedgerWrite,
-    // so a blocked backup watermark refuses BOTH modes UP FRONT — before spending any
-    // model call — with `backup-unhealthy` (exit 2).
-    try {
-      assertBackupHealthy(store.db);
-    } catch (e) {
-      if (e instanceof BackupUnhealthyError) {
-        throw new CliError({
-          code: e.code,
-          message: e.message,
-          hint: "Run `db backup` (or `db backup --force-unblock` / `db restore`) to clear the block, then retry.",
-          exitCode: EXIT.CONFIG,
-          retryable: true,
-          cause: e,
-        });
-      }
-      throw e;
-    }
-
+    // v2 (#338): the §2.8 fail-closed backup-watermark gate is retired with the audit
+    // ledger + AEAD backup. `query` writes only plain operational rows (retrieval +
+    // model_calls); there is no watermark to block on.
     const table = await openTable(ctx, indexingCfg);
 
-    // The egress model boundary: one client over the egress socket, one receipt sink
-    // collecting EVERY transmission (D6/D18 — one `model_calls` row per call).
+    // The in-process model boundary: one client, one receipt sink collecting EVERY
+    // transmission (D6/D18 — one `model_calls` row per call). No egress daemon, no
+    // capability mint; the credential resolves lazily on the first call.
     const receipts: ModelCallReceipt[] = [];
-    let egressClient: EgressClient;
-    try {
-      egressClient = await EgressClient.connect(cfgAll.broker.egress_socket_path);
-    } catch (e) {
-      throw new CliError({
-        code: "internal",
-        message: `the egress broker is unreachable at ${cfgAll.broker.egress_socket_path}: ${e instanceof Error ? e.message : String(e)}`,
-        hint: "Start the egress broker daemon before `brain query`.",
-        exitCode: EXIT.INTERNAL,
-        retryable: true,
-        cause: e,
-      });
-    }
-
     const models = new ModelsClient(
-      (params, signal) => egressClient.invoke(params, signal),
+      createInProcessInvoker({ env: ctx.env }),
       (r: ModelCallReceipt) => {
         receipts.push(r);
       },
     );
 
-    try {
-      // Run-bound capabilities (D19): one per operation, both bound to this run id so
-      // every receipt attributes to it.
-      const embedLimits: EgressLimits = {
-        operation: "embed",
-        model: indexingCfg.embedding_model,
-        maxBytes: EGRESS_MAX_BYTES,
-        maxTokens: EGRESS_MAX_TOKENS,
-        costCeiling: EGRESS_COST_CEILING,
-        allowedSensitivity: "internal",
-      };
-      const embedCap = mintEgressCapability({ runId }, embedLimits);
-      const embed = embedderFromClient(models, embedCap, indexingCfg);
+    {
+      // Every transmission binds to this run id (no capability mint).
+      const embed = embedderFromClient(models, { runId }, indexingCfg);
 
-      // The grounded-answer generation is minted PER CALL, bound to the packed
-      // payload's EFFECTIVE sensitivity (D19, round-2 finding F4). Both the capability's
-      // `allowedSensitivity` ceiling AND the transmission's declared sensitivity equal
-      // the most-restrictive class across the query text and every packed note, so a
-      // confidential/restricted note can never be exported under a falsely-lower label.
-      const generate = (
-        input: string,
-        declaredSensitivity: CapabilitySensitivity,
-      ): Promise<GenerateTextResult> => {
-        const genLimits: EgressLimits = {
-          operation: "generateText",
-          model: cfgAll.models.generation_model,
-          maxBytes: EGRESS_MAX_BYTES,
-          maxTokens: EGRESS_MAX_TOKENS,
-          costCeiling: EGRESS_COST_CEILING,
-          allowedSensitivity: declaredSensitivity,
-        };
-        const genCap = mintEgressCapability({ runId }, genLimits);
-        return models.generateText(
+      const generate = (input: string): Promise<GenerateTextResult> =>
+        models.generateText(
           { model: cfgAll.models.generation_model, prompt: { ref: ANSWER_PROMPT_REF }, input, maxTokens: GENERATION_MAX_TOKENS },
-          genCap,
-          { declaredSensitivity },
+          { runId },
         );
-      };
 
       const retrievalDeps: Omit<RetrievalDeps, "recorder" | "runId"> = {
         config: { rrf: cfgAll.retrieval.rrf, fts: cfgAll.retrieval.fts },
@@ -774,7 +649,6 @@ async function query(ctx: RunContext): Promise<number> {
           generate,
           getReceipts: () => receipts,
           packBudget: PACK_TOKEN_BUDGET,
-          baseSensitivity: cfgAll.policies.default_sensitivity,
           now,
         });
       } catch (e) {
@@ -788,19 +662,16 @@ async function query(ctx: RunContext): Promise<number> {
         throw e;
       }
 
-      // Record the SINGLE terminal `run.readonly` + the correlated business rows via
-      // 1.9's audited read path (→ finalizeLedgerWrite). STRICT (round-2 finding F1): a
-      // ledger-WRITING read is not best-effort — `runReadAudit` treats a non-empty
-      // `ledgerWrite` as strict, and `strictBackup` makes the mandatory covering backup
-      // load-bearing, so a failed finalize or failed covering backup FAILS the command
-      // rather than returning an exit-0 answer without the durable audit + rows.
-      const audit = await runReadAudit(ctx, "run.readonly", "query", store, { runId, ledgerWrite: exec.ledgerWrite, strictBackup: true });
+      // v2 (#334): the run.readonly audit event + covering backup are retired with
+      // the audit machinery (ADR-0003). The correlated BUSINESS rows (retrieval
+      // run/results + model_calls receipts) still land, in one plain transaction —
+      // observability data, not an audit chain. #338 owns any further strip.
+      store.db.transaction(() => applyLedgerWrite(store.db, exec.ledgerWrite))();
       ctx.log.info("query", {
         mode: exec.output.mode,
         items: exec.output.items.length,
         modelCalls: receipts.length,
         degraded: exec.output.degraded,
-        audited: audit.recorded,
         runId,
       });
 
@@ -810,8 +681,6 @@ async function query(ctx: RunContext): Promise<number> {
         renderHuman(ctx, exec.output);
       }
       return EXIT.OK;
-    } finally {
-      egressClient.close();
     }
   } finally {
     store.close();

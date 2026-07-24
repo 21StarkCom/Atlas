@@ -1,117 +1,72 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "atlas://cli-contract/evidence-resolve.schema.json",
-  "title": "brain evidence resolve <runId|evidenceId> — --json success output",
-  "description": "Resolve a pending or ambiguous evidence re-verification outcome by re-anchoring the evidence to its current rendition. Evidence verification is MARKDOWN-SSOT: the resolution is NOT a direct anchoring-metadata/ledger write (that would be lost on a `db rebuild`). A re-anchor that CONFIRMS the evidence flows through the canonical mutation workflow — a validated `UpdateEvidenceVerification` ChangePlan → patch → agent commit → broker CAS integration (workflow-risk-contract.md §cas) — so the confirmed verification lives in canonical Markdown and survives a projection rebuild. Task 4.7 gating: integration is CONDITIONAL on the re-verification result. Only a `valid` re-anchor integrates (`outcome=integrated`, exit 0). Evidence that remains `pending` NEVER auto-integrates — it escalates to Tier-3 and stops review-pending (`outcome=review_pending`, exit 6). Evidence that cannot be re-anchored is a typed failure (`outcome=failed`, exit 1) and never fabricates a valid verification. On integration the op supersedes the prior evidence head (new immutable `evidenceId`, new pinned `replacementRenditionId`, new locator/quoteHash) and tombstones the current head via `supersedesEvidenceId`, inheriting the stable `lineageId`. Shared, intrinsically idempotent by the evidence supersession identity (re-resolving already-`valid` evidence at the same lineage/rendition is a no-op success returning the existing head). Exit 1 when the evidence/run does not exist.",
+  "title": "brain evidence resolve <evidenceId> — --json success output",
+  "description": "Deterministically reverify a flat v2 vault-derived evidence row by re-anchoring it to the CURRENT state of its note. Evidence is vault-authoritative: the resolution is NOT a direct SQLite/ledger write — a `resolved` outcome writes status/verdict/lastCheckedAt into the note's `evidence:` frontmatter entry through the canonical mutation order (one commit onto refs/heads/main, then re-fold), so it lives in canonical Markdown and survives a rebuild. A note (or its frontmatter entry) that no longer resolves is `outcome: target-missing`, `status: needs-review`, no mutation, exit 0 — never a crash. No renditions, no run-id, no ledger-seq, no audit signature (ADR-0003). A dirty target note is refused by the dirty-vault gate (exit 2). Missing evidence ⇒ not-found (exit 1).",
   "type": "object",
   "unevaluatedProperties": false,
-  "required": ["command", "outcome", "verification", "runId"],
+  "required": ["command", "outcome", "evidenceId", "noteId", "status"],
   "allOf": [
     {
-      "description": "outcome=integrated ⇔ verification=valid: the re-anchor was confirmed and CAS-integrated. Requires the full superseding-head identity AND the canonical commit it landed as (exit 0).",
-      "if": { "properties": { "outcome": { "const": "integrated" } }, "required": ["outcome"] },
-      "then": {
-        "required": ["evidenceId", "lineageId", "supersedesEvidenceId", "replacementRenditionId", "integratedCommit"],
-        "properties": { "verification": { "const": "valid" } }
-      }
+      "description": "outcome=resolved ⇒ status=resolved AND a canonical commit (the Markdown SSOT write).",
+      "if": { "properties": { "outcome": { "const": "resolved" } }, "required": ["outcome"] },
+      "then": { "required": ["commit"], "properties": { "status": { "const": "resolved" } } }
     },
     {
-      "description": "outcome=review_pending ⇔ verification=pending: re-verification is inconclusive; the run escalated to Tier-3 and stopped at the review gate. NEVER carries an integratedCommit — pending evidence never auto-integrates (Task 4.7). Exit 6.",
-      "if": { "properties": { "outcome": { "const": "review_pending" } }, "required": ["outcome"] },
-      "then": {
-        "properties": { "verification": { "const": "pending" }, "integratedCommit": false }
-      }
-    },
-    {
-      "description": "outcome=failed ⇔ verification=failed: the evidence could not be re-anchored. No superseding head, no canonical commit, no fabricated valid verification. Exit 1.",
-      "if": { "properties": { "outcome": { "const": "failed" } }, "required": ["outcome"] },
-      "then": {
-        "properties": { "verification": { "const": "failed" }, "integratedCommit": false }
-      }
+      "description": "outcome=target-missing ⇒ status=needs-review, no commit (nothing was mutated).",
+      "if": { "properties": { "outcome": { "const": "target-missing" } }, "required": ["outcome"] },
+      "then": { "properties": { "status": { "const": "needs-review" }, "commit": false } }
     }
   ],
   "properties": {
     "command": { "const": "evidence resolve" },
     "outcome": {
-      "enum": ["integrated", "review_pending", "failed"],
-      "description": "Discriminated resolution outcome: integrated = valid re-anchor, CAS-integrated (exit 0); review_pending = inconclusive, escalated to Tier-3, stopped at review (exit 6); failed = could not re-anchor (exit 1)."
+      "enum": ["resolved", "target-missing"],
+      "description": "resolved = the note + its frontmatter entry resolve, status written to Markdown + committed; target-missing = the soft noteId/entry no longer resolves, no mutation."
     },
-    "evidenceId": { "type": "string", "minLength": 1, "description": "The NEW immutable evidence head id produced by the re-anchor (UpdateEvidenceVerification). Present only on outcome=integrated." },
-    "lineageId": { "type": "string", "minLength": 1, "description": "Stable lineage key (root head's evidenceId) inherited by the new head." },
-    "supersedesEvidenceId": { "type": "string", "minLength": 1, "description": "The prior head this resolution superseded/tombstoned (the re-anchor precondition token)." },
-    "replacementRenditionId": { "type": "string", "minLength": 1, "description": "The new pinned rendition the head was re-anchored to (the re-pointed active rendition)." },
-    "quoteHash": { "type": "string", "description": "The quote hash carried across the re-anchor (the deterministic match key)." },
-    "verification": {
-      "enum": ["valid", "pending", "failed"],
-      "description": "Verification state after resolution, bound to outcome: valid ⇔ integrated; pending ⇔ review_pending; failed ⇔ failed."
+    "evidenceId": { "type": "string", "minLength": 1 },
+    "noteId": { "type": "string", "minLength": 1, "description": "The soft-referenced owning note (`(unknown)` when the row carries no noteId)." },
+    "status": {
+      "enum": ["resolved", "needs-review"],
+      "description": "The evidence status after resolution, bound to outcome: resolved ⇔ resolved; needs-review ⇔ target-missing."
     },
-    "runId": { "type": "string", "minLength": 1, "description": "ULID id of the run that carried (or attempted) the UpdateEvidenceVerification ChangePlan through validate → patch → commit → CAS." },
-    "integratedCommit": { "type": "string", "minLength": 1, "description": "40-char hex canonical commit the re-anchored verification was integrated as (the Markdown SSOT write). Present ONLY on outcome=integrated; a pending/failed outcome never carries one." }
+    "commit": {
+      "type": "string",
+      "minLength": 1,
+      "description": "40-char hex canonical commit the resolution landed as (the Markdown SSOT write). Present ONLY on outcome=resolved."
+    }
   },
   "examples": [
-    {
-      "command": "evidence resolve",
-      "outcome": "integrated",
-      "evidenceId": "ev-01J9Z8Q0000000000000000010",
-      "lineageId": "ev-01J9Z8Q0000000000000000000",
-      "supersedesEvidenceId": "ev-01J9Z8Q0000000000000000000",
-      "replacementRenditionId": "rend-01J9Z8Q0000000000000000005",
-      "quoteHash": "sha256:9a1c2b3d4e5f60718293a4b5c6d7e8f901234567aabbccddeeff00112233445566",
-      "verification": "valid",
-      "runId": "01J9Z8Q0000000000000000090",
-      "integratedCommit": "e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4"
-    },
-    {
-      "command": "evidence resolve",
-      "outcome": "review_pending",
-      "verification": "pending",
-      "runId": "01J9Z8Q0000000000000000091"
-    },
-    {
-      "command": "evidence resolve",
-      "outcome": "failed",
-      "verification": "failed",
-      "runId": "01J9Z8Q0000000000000000092"
-    }
+    { "command": "evidence resolve", "outcome": "resolved", "evidenceId": "ev-meridian-2025", "noteId": "project-meridian", "status": "resolved", "commit": "e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4" },
+    { "command": "evidence resolve", "outcome": "target-missing", "evidenceId": "ev-orphan", "noteId": "deleted-note", "status": "needs-review" }
   ],
   "x-atlas-contract": {
     "command": "evidence resolve",
     "phase": 4,
     "privilege": "shared",
-    "idempotency": "intrinsic",
-    "executionClass": "ledger-writing",
-    "summary": "Resolve a pending/ambiguous evidence re-verification by re-anchoring through a validated UpdateEvidenceVerification ChangePlan (patch → commit → CAS, Markdown SSOT); supersedes the prior head; idempotent by supersession identity.",
+    "idempotency": "none",
+    "executionClass": "mutating",
+    "summary": "Deterministically reverify a flat evidence row against its note; a resolved outcome writes status/verdict to the note frontmatter through the mutation order (one commit); a gone target is target-missing (needs-review, no mutation).",
     "args": [
-      { "arg": "<runId|evidenceId>", "type": "string", "required": true, "description": "The run id or evidence id whose re-verification outcome to resolve." }
+      { "arg": "<evidenceId>", "type": "string", "required": true, "description": "The evidence id to reverify (from `brain evidence review`)." }
     ],
     "flags": [],
     "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
     "sideEffects": [
-      "generates + validates an UpdateEvidenceVerification ChangePlan (Task 4.4)",
-      "materializes the patch, commits it to the agent branch, and integrates via broker CAS (workflow-risk-contract.md §cas)",
-      "supersedes the prior evidence head and tombstones it (lineageId retained)",
-      "finalizeLedgerWrite (run.integrated)"
+      "on outcome=resolved: writes status/verdict/lastCheckedAt into the note's evidence frontmatter and commits it onto refs/heads/main via the canonical mutation order, then re-folds the projection"
     ],
     "prohibitedEffects": [
-      "never writes evidence verification directly to anchoring metadata / the ledger bypassing the ChangePlan → patch → commit → CAS workflow (would be lost on db rebuild)",
-      "never fabricates a valid verification for evidence it could not re-anchor",
-      "never auto-integrates pending/inconclusive evidence — it escalates to Tier-3 and stops review-pending (Task 4.7)",
-      "never double-supersedes: a rendition-precondition mismatch is a typed failure, not a silent re-anchor"
+      "never writes the evidence status directly to SQLite bypassing the note-frontmatter mutation order (would be lost on db rebuild)",
+      "no run-id / ledger-seq / audit signature read or write",
+      "never mutates a gone target note"
     ],
-    "locks": [
-      { "scope": "canonical-integration", "mode": "exclusive", "when": "CAS integration of the re-anchor commit (outcome=integrated only)" },
-      { "scope": "shared", "mode": "shared" }
-    ],
-    "exitCodes": [0, 1, 2, 4, 5, 6],
+    "locks": [{ "scope": "vault-maintenance", "mode": "exclusive", "when": "outcome=resolved (the mutation order holds the vault lock)" }],
+    "exitCodes": [0, 1, 2, 4, 5],
     "errorCodes": [
-      { "code": "usage", "exit": 5, "when": "unknown flag/argument or missing <runId|evidenceId>" },
-      { "code": "not-found", "exit": 1, "when": "the evidence or run does not exist" },
-      { "code": "validation-failed", "exit": 1, "when": "the UpdateEvidenceVerification ChangePlan fails validation (e.g. supersede-precondition-failed), or the re-anchor failed (outcome=failed)" },
-      { "code": "review-pending", "exit": 6, "when": "re-verification is inconclusive (still pending): the run escalates to Tier-3 and stops at the review gate (outcome=review_pending, success-shaped)" },
-      { "code": "vault-error", "exit": 2, "when": "the vault repo is missing or unreadable" },
-      { "code": "locked:canonical-integration", "exit": 2, "when": "another integration holder is active" },
-      { "code": "backup-unhealthy", "exit": 2, "retryable": true, "when": "the fail-closed backup watermark blocks a ledger-writing run" },
-      { "code": "internal", "exit": 4, "when": "unexpected internal failure" }
+      { "code": "usage", "exit": 5, "when": "unknown flag/argument or missing <evidenceId>" },
+      { "code": "not-found", "exit": 1, "when": "the evidence id does not exist" },
+      { "code": "vault-error", "exit": 2, "when": "the vault repo is missing/unreadable, HEAD is not main, or the target note is dirty" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure (incl. projection/markdown drift)" }
     ],
     "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
   }

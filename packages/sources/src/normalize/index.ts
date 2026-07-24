@@ -1,42 +1,28 @@
 /**
- * `normalize` (Task 2.4) — the guard-enforced normalization entry point that turns a
- * captured source file into a deterministic {@link NormalizedRendition}, driven by
+ * `normalize` (v2, #334) — the normalization entry point that turns a captured
+ * source file into a deterministic {@link NormalizedRendition}, driven by
  * `docs/specs/normalization-contract.md` (SSOT).
  *
- * CONTAINMENT (wing round-2 finding 1): the untrusted parse runs INSIDE the sandbox
- * worker via {@link runInSandbox} (D15) — never in this trusted process. So a malicious
- * PDF/HTML cannot escape capability checks or resource limits: this orchestrator only
- * detects the format, scans the RAW bytes, hands the file to the confined worker, scans
- * the NORMALIZED output the worker attests, and assembles the rendition. No per-format
- * parser is ever invoked here.
- *
- * SCAN-BEFORE-PERSIST (fixes R4-F3): it REQUIRES a {@link PrePersistenceGuard} and scans
- * on BOTH sides of the parse — the RAW source bytes BEFORE the sandbox, and the
- * NORMALIZED output the sandbox releases BEFORE returning — so no raw or normalized byte
- * can ever leave unscanned. A secret hit ⇒ the guard quarantines the bytes and throws
- * {@link SecretDetectedError} (exit 3): this function therefore yields NO rendition for a
- * secret-bearing source. The raw scan catches obfuscation present in the bytes; the
- * normalized scan is load-bearing for content that only becomes a matchable secret AFTER
- * extraction (e.g. HTML entity-encoded credentials) — the sandbox scans that too (D15,
- * defence in depth) and hands the offending decoded bytes back for the guard to
- * quarantine, so the trusted guard is always the single quarantine authority.
- *
- * DETERMINISM + PINNING: the rendition carries {@link EXTRACTOR_VERSION} +
- * {@link NORMALIZER_VERSION}. Identical raw bytes + identical versions ⇒ byte-identical
- * `normalizedContentHash` (the extractors are pure). {@link EXTRACTOR_VERSION} PINS the
- * extractor generation — including the pinned `parse5` version ({@link PARSE5_VERSION})
- * the HTML path uses — so any behavioural change bumps a version and an upgrade is a NEW
- * rendition identity, never silent drift on the old one.
+ * The v1 sandbox jail + scan-before-persist guard are RETIRED (ADR-0003): the
+ * per-format extractors run IN-PROCESS (they are pure functions over the raw
+ * bytes — the same modules the confined worker used to run), no secret scan
+ * gates the output, and a rejection is always a typed VALUE. What survives
+ * unchanged is the contract's determinism core: bounded single-fd reads (no
+ * stat→read TOCTOU, no FIFO/device slurp), signature-before-parse, per-format
+ * ceilings, and the pinned extractor/normalizer generations — identical raw
+ * bytes + identical versions ⇒ byte-identical `normalizedContentHash`.
  */
 import { createHash } from "node:crypto";
-import { closeSync, constants as fsConstants, fstatSync, mkdtempSync, openSync, readSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { extname, join } from "node:path";
+import { closeSync, constants as fsConstants, fstatSync, openSync, readSync } from "node:fs";
+import { extname } from "node:path";
 import type { ContentId, LocatorScheme, NormalizedRendition, RepresentedGap } from "@atlas/contracts";
-import { PrePersistenceGuard, SecretDetectedError } from "@atlas/scan";
-import { CANONICAL_MEDIA_TYPE, MAX_BYTES, type SourceFormat } from "../formats.js";
-import type { NormalizationRejection, WorkerResult } from "../types.js";
-import { runInSandbox } from "../sandbox/launcher.js";
+import { CANONICAL_MEDIA_TYPE, MAX_BYTES, signatureMatches, type SourceFormat } from "../formats.js";
+import type { NormalizationRejection } from "../types.js";
+import type { NormalizeOutcome } from "./media.js";
+import { normalizeMarkdown } from "./markdown.js";
+import { normalizeText } from "./text.js";
+import { normalizePdf } from "./pdf.js";
+import { normalizeHtml } from "./html.js";
 import { PARSE5_VERSION } from "./pins.js";
 
 /**
@@ -149,17 +135,15 @@ function readSourceBounded(path: string, ceiling: number): Uint8Array | "too-lar
   }
 }
 
-/** The public `normalize` input: a source path + the required scan guard. */
+/** The public `normalize` input: the source path. */
 export interface NormalizeInput {
   readonly path: string;
-  readonly guard: PrePersistenceGuard;
 }
 
 /**
  * The `normalize` result — a full rendition, or a typed normalization rejection (a
- * VALUE, exit 1). A secret hit is NOT in this union: the guard throws
- * {@link SecretDetectedError} (exit 3), so a secret-bearing source yields neither an
- * `ok: true` nor an `ok: false` result — it throws.
+ * VALUE, exit 1). Nothing throws for CONTENT: an unsupported extension or an
+ * irregular file are usage errors (exit 5); everything in-contract is a value.
  */
 export type NormalizeResult =
   | { readonly ok: true; readonly rendition: NormalizedRendition }
@@ -182,18 +166,30 @@ function formatFromPath(path: string): SourceFormat {
   return format;
 }
 
+/** Dispatch to the pure per-format extractor (the one owner of extraction logic). */
+function runExtractor(format: SourceFormat, raw: Uint8Array): NormalizeOutcome {
+  switch (format) {
+    case "markdown":
+      return normalizeMarkdown(raw);
+    case "text":
+      return normalizeText(raw);
+    case "pdf":
+      return normalizePdf(raw);
+    case "html":
+      return normalizeHtml(raw);
+  }
+}
+
 /**
- * Normalize the source at `input.path` into a deterministic {@link NormalizedRendition}.
- * Scans the RAW bytes through the required {@link PrePersistenceGuard}, parses the file
- * INSIDE the sandbox worker, then scans the sandbox's NORMALIZED output before returning.
+ * Normalize the source at `input.path` into a deterministic {@link NormalizedRendition}:
+ * bounded single-fd read → content-signature check (`signature-mismatch`, never a
+ * guess) → the pure per-format extractor, in-process → the pinned rendition identity.
+ * Kept `async` so the call sites are unchanged from the guarded v1 surface.
  */
 export async function normalize(input: NormalizeInput): Promise<NormalizeResult> {
-  const { path, guard } = input;
+  const { path } = input;
   const format = formatFromPath(path);
 
-  // Per-format raw-byte ceiling enforced via a SINGLE opened descriptor (finding 4): open
-  // once, require a regular file, fstat that fd, and bounded-read at most ceiling+1 — no
-  // stat→read TOCTOU window, no unbounded read of a growing/FIFO/device source.
   const ceiling = MAX_BYTES[format];
   const read = readSourceBounded(path, ceiling);
   if (read === "too-large") {
@@ -201,65 +197,20 @@ export async function normalize(input: NormalizeInput): Promise<NormalizeResult>
   }
   const raw = read;
 
-  // (1) Scan the RAW bytes BEFORE the sandbox — quarantines + throws on a secret (exit 3).
-  await guard.assertClean({ bytes: raw, origin: path, kind: "raw" });
-
-  // (2) Parse INSIDE the sandbox (containment + caps + in-sandbox D15 scan) over the EXACT
-  // bytes just scanned + hashed — NOT the mutable source pathname (wing round-3 finding 1).
-  // If the worker re-opened `path`, a replacement between our read and its open (TOCTOU)
-  // could be parsed UNSCANNED and produce text under the wrong `contentId.rawContentHash`.
-  // So we stage the scanned snapshot into a freshly-named private temp file no other party
-  // can race, and point the confined worker at THAT immutable handle. The worker's signature
-  // check + normalization then run on the same bytes the guard cleared and the contentId
-  // commits to. The staged file is the worker's sole read handle (granted as the input
-  // literal), removed in the finally even after a forced termination.
-  const stageDir = mkdtempSync(join(tmpdir(), "atlas-stage-"));
-  const stagedPath = join(stageDir, "source");
-  let result: WorkerResult;
-  try {
-    writeFileSync(stagedPath, raw);
-    result = await runInSandbox({ inputPath: stagedPath, format });
-  } finally {
-    rmSync(stageDir, { recursive: true, force: true });
+  // Signature first, extension second (contract §1): a .pdf whose bytes are not
+  // %PDF- is a typed mismatch, never a guessed parse.
+  if (!signatureMatches(format, raw)) {
+    return {
+      ok: false,
+      rejection: { code: "signature-mismatch", format, detail: "content signature does not match declared format" },
+    };
   }
 
-  if (!result.ok && result.kind === "normalization-rejection") {
-    // (3a) A typed, in-contract rejection is a VALUE (exit 1) — never a throw.
-    return { ok: false, rejection: result.rejection };
-  }
+  const outcome = runExtractor(format, raw);
+  if (!outcome.ok) return { ok: false, rejection: outcome.rejection };
 
-  if (!result.ok) {
-    // (3b) The in-sandbox scan flagged a secret in the NORMALIZED output. A valid, NON-EMPTY
-    // quarantine artifact is MANDATORY on every scan rejection (finding 7): a secret-bearing
-    // source MUST land in quarantine, never merely reject.
-    //   - Payload PRESENT (the common case): route the offending decoded bytes through the
-    //     guard so the trusted-side quarantine captures the exact content and raises the
-    //     exit-3 refusal. The worker ships these for a real hit — the whole output when it
-    //     fits the channel, else a bounded window around the match (wing round-3 finding 5).
-    //   - Payload ABSENT or EMPTY (previously threw WITHOUT quarantining anything): fall back
-    //     to quarantining the trusted RAW snapshot. `assertClean` is NOT reused for this — the
-    //     raw bytes can be individually clean (a secret that only becomes matchable AFTER
-    //     normalization), so a re-scan would wave them through; `quarantineRejection` captures
-    //     them unconditionally (the sandbox verdict is the authority) and throws exit-3.
-    if (result.quarantineBytes !== undefined && result.quarantineBytes.length > 0) {
-      await guard.assertClean({ bytes: result.quarantineBytes, origin: path, kind: "normalized" });
-      // `assertClean` throws on the (guaranteed dirty) payload; a defensively-clean payload
-      // still requires a mandatory artifact, so fall through to quarantine the raw snapshot.
-    }
-    // Mandatory non-empty artifact: quarantine the trusted raw snapshot, THEN refuse exit-3.
-    await guard.quarantineRejection({ bytes: raw, origin: path });
-    throw new SecretDetectedError(path, [], "pre-persistence");
-  }
-
-  // (4) Consume the attested clean stream, then scan the NORMALIZED output BEFORE
-  // returning (the required normalized-output guard; a clean stream passes, and this is
-  // the trusted authority for any residual match).
-  const normalizedBytes = new Uint8Array(await new Response(result.stream).arrayBuffer());
-  await guard.assertClean({ bytes: normalizedBytes, origin: path, kind: "normalized" });
-
-  // (5) Assemble the pinned rendition identity. Gaps come from the sandbox result
-  // (validated deterministic metadata; wing round-2 finding 2).
-  const gaps: readonly RepresentedGap[] = result.gaps;
+  const normalizedBytes = new TextEncoder().encode(outcome.text);
+  const gaps: readonly RepresentedGap[] = outcome.gaps;
   const contentId: ContentId = {
     kind: "content",
     rawContentHash: rawHash(raw),
@@ -272,7 +223,7 @@ export async function normalize(input: NormalizeInput): Promise<NormalizeResult>
     normalizedContentHash: prefixedHash(normalizedBytes),
     sizeBytes: normalizedBytes.length,
     locatorScheme: LOCATOR_SCHEME[format],
-    text: new TextDecoder().decode(normalizedBytes),
+    text: outcome.text,
     gaps,
   };
   return { ok: true, rendition };

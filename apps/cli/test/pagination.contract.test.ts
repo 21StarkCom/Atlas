@@ -1,7 +1,7 @@
 /**
  * `pagination.contract.test` — the Task 2.9 pagination CONTRACT (the load-bearing
  * part). Proves, across the four paginated read commands (`source list`,
- * `note related`, `note history`, `git status`):
+ * `note related`, `note history`; `git status` retired v2, #333):
  *
  *  1. DETERMINISTIC ordering with a UNIQUE tie-breaker — rows sharing the primary
  *     sort key are ordered by the unique secondary key, so offset pagination is
@@ -20,9 +20,8 @@ import { join } from "node:path";
 import { readFileSync } from "node:fs";
 import _Ajv2020 from "ajv/dist/2020.js";
 import { runCli } from "../src/main.js";
-import { openStore, type Store } from "@atlas/sqlite-store";
-import { querySources } from "../src/commands/source.js";
-import { queryOpenRuns } from "../src/commands/git-status.js";
+import { openStore, rebuildProjections, SourceRepo, type Store } from "@atlas/sqlite-store";
+import type { ParsedNote, VaultSnapshot } from "@atlas/contracts";
 import { traverseRelated } from "../src/commands/note.js";
 import {
   parseLimit,
@@ -71,15 +70,18 @@ const hash = (n: number): string => n.toString(16).padStart(64, "0");
 const iso = (n: number): string => `2026-07-13T10:00:${String(n % 60).padStart(2, "0")}.000Z`;
 // A valid ULID (26 Crockford chars, first ≤ 7) that sorts by n via its numeric suffix.
 const ulid = (n: number): string => `01J9Z8Q${"0".repeat(17)}${String(n).padStart(2, "0")}`;
+/** The deterministic `source` id `seedSource(n)` writes (matches its `src-NN`). */
+const sid = (n: number): string => `src-${String(n).padStart(2, "0")}`;
 
-/** Seed a captured blob (+ one rendition, active). */
-function seedBlob(store: Store, n: number, firstSeenAt: string): void {
-  const raw = hash(n);
-  const media = "text/markdown";
-  store.provenance.upsertBlob({ raw_content_hash: raw, canonical_media_type: media, size_bytes: 100 + n, vault_path: `blob/${n}`, first_seen_at: firstSeenAt });
-  store.provenance.recordCapture({ raw_content_hash: raw, canonical_media_type: media, origin: `/inbox/${n}.md`, first_seen_at: firstSeenAt, last_seen_at: firstSeenAt });
-  store.provenance.recordRendition({ raw_content_hash: raw, canonical_media_type: media, extractor_version: 1, normalizer_version: 1, normalized_content_hash: `sha256:${hash(1000 + n)}`, size_bytes: 90 + n, locator_scheme: "char", created_at: firstSeenAt });
-  store.provenance.setActiveRendition({ raw_content_hash: raw, canonical_media_type: media, extractor_version: 1, normalizer_version: 1 });
+/** Seed a v2 `source` registry row (id `src-NN`, unique locator, given addedAt). */
+function seedSource(store: Store, n: number, addedAt: string): void {
+  new SourceRepo(store.db).insert({
+    id: `src-${String(n).padStart(2, "0")}`,
+    kind: "file",
+    locator: `sources/${n}.txt`,
+    title: `source ${n}`,
+    addedAt,
+  });
 }
 
 /** Seed an open agent run. */
@@ -166,38 +168,26 @@ describe("jobs list routes through the shared pagination contract (SP-1 Phase 6 
 });
 
 describe("deterministic ordering + unique tie-breaker", () => {
-  it("source list: ties on capturedAt broken by contentId (ascending), stable across offset", async () => {
-    (await cli(["db", "migrate", "--json"])).code;
+  it("source list: ties on addedAt broken by id (ascending), stable across offset", async () => {
+    await cli(["db", "migrate", "--json"]);
     const store = openStore({ path: dbPath });
     try {
-      // All share the SAME first_seen_at → the tie-breaker (contentId) decides order.
-      for (const n of [5, 1, 3, 2, 4]) seedBlob(store, n, iso(0));
-      const { rows, total } = querySources(store.db, { limit: 50, offset: 0 });
-      expect(total).toBe(5);
-      const ids = rows.map((r) => r.raw_content_hash);
-      expect(ids).toEqual([...ids].sort()); // contentId (raw_content_hash) ascending
-      // Page boundary is stable: page1 ++ page2 === full order, no dup/skip.
-      const p1 = querySources(store.db, { limit: 2, offset: 0 }).rows.map((r) => r.raw_content_hash);
-      const p2 = querySources(store.db, { limit: 2, offset: 2 }).rows.map((r) => r.raw_content_hash);
-      const p3 = querySources(store.db, { limit: 2, offset: 4 }).rows.map((r) => r.raw_content_hash);
+      const repo = new SourceRepo(store.db);
+      // All share the SAME addedAt → the v2 tie-breaker (id ASC) decides order.
+      for (const n of [5, 1, 3, 2, 4]) seedSource(store, n, iso(0));
+      expect(repo.count()).toBe(5);
+      const ids = repo.list({ limit: 50, offset: 0 }).map((r) => r.id);
+      expect(ids).toEqual([...ids].sort()); // id ascending (the total-order tie-breaker)
+      // Page boundary is stable: page1 ++ page2 ++ page3 === full order, no dup/skip.
+      const p1 = repo.list({ limit: 2, offset: 0 }).map((r) => r.id);
+      const p2 = repo.list({ limit: 2, offset: 2 }).map((r) => r.id);
+      const p3 = repo.list({ limit: 2, offset: 4 }).map((r) => r.id);
       expect([...p1, ...p2, ...p3]).toEqual(ids);
     } finally {
       store.close();
     }
   });
 
-  it("git status: ties on updatedAt broken by runId (ascending)", async () => {
-    await cli(["db", "migrate", "--json"]);
-    const store = openStore({ path: dbPath });
-    try {
-      for (const n of [4, 2, 5, 1, 3]) seedOpenRun(store, n, iso(0));
-      const { rows } = queryOpenRuns(store.db, { limit: 50, offset: 0 });
-      const ids = rows.map((r) => r.run_id);
-      expect(ids).toEqual([...ids].sort());
-    } finally {
-      store.close();
-    }
-  });
 
   it("note related: ordered by (distance asc, noteId asc), each noteId once", async () => {
     await cli(["db", "migrate", "--json"]);
@@ -223,6 +213,94 @@ describe("deterministic ordering + unique tie-breaker", () => {
       store.close();
     }
   });
+
+  it("pre-0013 frontier: the synthetic DEFAULT_LINK_PREDICATE is via=link; typed predicates stay relationships", async () => {
+    // Regression (round-3 finding): `note related` must stay readable against a
+    // valid PRE-0013 database, where plain links carry the synthetic
+    // "references" predicate (the v1 schema had predicate NOT NULL — NULL could
+    // not occur). Classifying on nullability alone would emit those plain links
+    // as via="relationship". Post-0013, migrated "references" rows are
+    // deliberately typed edges — covered by the v2 test below.
+    await cli(["db", "migrate", "--json"]);
+    const store = openStore({ path: dbPath });
+    try {
+      // Simulate the pre-0013 frontier honestly: un-record 0013 and restore the
+      // v1 note_links shape (3-col PK, predicate NOT NULL).
+      store.db.exec(`
+        DELETE FROM db_schema_migrations WHERE id = '0013_links_v2';
+        DROP TABLE note_links;
+        CREATE TABLE note_links (
+          source_note_id TEXT NOT NULL,
+          target_note_id TEXT NOT NULL,
+          predicate TEXT NOT NULL,
+          PRIMARY KEY (source_note_id, target_note_id, predicate)
+        );
+        INSERT INTO note_links VALUES ('vseed', 'vplain', 'references');
+        INSERT INTO note_links VALUES ('vseed', 'vtyped', 'supports');
+      `);
+
+      const related = traverseRelated(store.db, "vseed", 1);
+      const plain = related.find((r) => r.noteId === "vplain");
+      expect(plain?.via).toBe("link");
+      expect(plain?.predicate).toBeUndefined();
+      const typed = related.find((r) => r.noteId === "vtyped");
+      expect(typed?.via).toBe("relationship");
+      expect(typed?.predicate).toBe("supports");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("rebuild → note related: a plain [[wikilink]] (predicate NULL) is via=link, never a null-predicate relationship", async () => {
+    // Regression (0013 v2 shape): `rebuildProjections` stores a parsed
+    // `[[wikilink]]` with predicate NULL. `traverseRelated` MUST classify a NULL
+    // predicate as a PLAIN link (via "link", no `predicate`) — not via
+    // "relationship" with `predicate: null`, which violates the note-related JSON
+    // schema (predicate is a string, only present when via=relationship).
+    await cli(["db", "migrate", "--json"]);
+    const store = openStore({ path: dbPath });
+    try {
+      const mkNote = (id: string, links: ParsedNote["links"]): ParsedNote => ({
+        id, path: `${id}.md`, type: "concept", schemaVersion: 1, title: id, status: "active",
+        created: iso(0), updated: iso(0), aliases: [], sources: [], declaredSensitivity: "internal",
+        links, relationships: [], sections: { heading: "", level: 0, path: "", children: [] },
+        contentHash: `sha256:${hash(1)}`, raw: `# ${id}\n`,
+      });
+      // `pseed` plainly wiki-links `ptarget` (with a display alias) — no predicate.
+      const snapshot: VaultSnapshot = {
+        notes: [
+          mkNote("pseed", [{ target: "ptarget", alias: "The Target", raw: "[[ptarget|The Target]]" }]),
+          mkNote("ptarget", []),
+        ],
+        errors: [],
+      };
+      rebuildProjections(store.db, snapshot);
+
+      // The persisted link carries a NULL predicate (the v2 plain-link shape).
+      const row = store.db
+        .prepare(`SELECT predicate, alias FROM note_links WHERE source_note_id = 'pseed' AND target_note_id = 'ptarget'`)
+        .get() as { predicate: string | null; alias: string | null };
+      expect(row.predicate).toBeNull();
+      expect(row.alias).toBe("The Target");
+
+      const related = traverseRelated(store.db, "pseed", 1);
+      const edge = related.find((r) => r.noteId === "ptarget");
+      expect(edge?.via).toBe("link");
+      expect(edge?.predicate).toBeUndefined();
+
+      // The full `note related` --json envelope validates against the committed schema
+      // (a `predicate: null` on a via="link" entry would fail `predicate: string`).
+      const r = await cli(["note", "related", "pseed", "--json"]);
+      expect(r.code, r.out).toBe(0);
+      const out = JSON.parse(r.out);
+      validateSchema("note-related", out);
+      expect(out.related.find((e: { noteId: string }) => e.noteId === "ptarget")).toEqual({
+        noteId: "ptarget", via: "link", distance: 1,
+      });
+    } finally {
+      store.close();
+    }
+  });
 });
 
 describe("out-of-range bounds ⇒ exit 5 (via the CLI)", () => {
@@ -230,7 +308,7 @@ describe("out-of-range bounds ⇒ exit 5 (via the CLI)", () => {
     await cli(["db", "migrate", "--json"]);
     const store = openStore({ path: dbPath });
     try {
-      for (const n of [1, 2, 3] as const) seedBlob(store, n, iso(n));
+      for (const n of [1, 2, 3] as const) seedSource(store, n, iso(n));
     } finally {
       store.close();
     }
@@ -265,23 +343,21 @@ describe("command-level pagination bounds (all four commands, via the CLI)", () 
   const seed = (): void => {
     const store = openStore({ path: dbPath });
     try {
-      for (const n of [1, 2, 3] as const) seedBlob(store, n, iso(n)); // source list total=3
-      for (const n of [1, 2, 3] as const) seedOpenRun(store, n, iso(n)); // git status total=3
+      for (const n of [1, 2, 3] as const) seedSource(store, n, iso(n)); // source list total=3
       // note related: a seed note linking to 3 others (related total=3).
       const mk = (id: string) => store.projections.insertNote({ note_id: id, slug: id, title: id, type: "concept", schema_version: 1, status: "active", file_path: `${id}.md`, content_hash: `sha256:${hash(1)}`, created: iso(0), updated: iso(0) });
       ["rseed", "r1", "r2", "r3"].forEach(mk);
       ["r1", "r2", "r3"].forEach((t, i) => store.projections.insertLink({ source_note_id: "rseed", target_note_id: t, predicate: "references", ordinal: i }));
-      // note history: a note with 3 audit events (history total=3).
+      // note history: a note with 3 runs targeting it (history total=3). v2 (#338):
+      // note history projects one entry per `agent_runs` row (audit ledger retired).
       mk("hseed");
-      store.ledger.upsertAgentRun({ run_id: ulid(9), operation: "ingest", status: "integrated", tier: 1, target_note_id: "hseed", started_at: iso(0), updated_at: iso(0), finished_at: iso(0) });
-      for (const s of [1, 2, 3]) store.ledger.insertAuditEvent({ seq: s, run_id: ulid(9), event_type: "run.integrated", payload_hash: hash(s), git_head: hash(100 + s), created_at: iso(s) });
+      for (const n of [1, 2, 3]) store.ledger.upsertAgentRun({ run_id: ulid(n), operation: "ingest", status: "integrated", tier: 1, target_note_id: "hseed", started_at: iso(0), updated_at: iso(0), finished_at: iso(0) });
     } finally {
       store.close();
     }
   };
   const COMMANDS: { name: string; argv: (flags: string[]) => string[] }[] = [
     { name: "source list", argv: (f) => ["source", "list", ...f, "--json"] },
-    { name: "git status", argv: (f) => ["git", "status", ...f, "--json"] },
     { name: "note related", argv: (f) => ["note", "related", "rseed", ...f, "--json"] },
     { name: "note history", argv: (f) => ["note", "history", "hseed", ...f, "--json"] },
   ];
@@ -319,9 +395,9 @@ describe("note history: seq-DESC ordering is stable across page boundaries", () 
     const store = openStore({ path: dbPath });
     try {
       store.projections.insertNote({ note_id: "hist", slug: "hist", title: "H", type: "concept", schema_version: 1, status: "active", file_path: "hist.md", content_hash: `sha256:${hash(1)}`, created: iso(0), updated: iso(0) });
-      store.ledger.upsertAgentRun({ run_id: ulid(9), operation: "ingest", status: "integrated", tier: 1, target_note_id: "hist", started_at: iso(0), updated_at: iso(0), finished_at: iso(0) });
-      // 5 events; created_at DELIBERATELY constant so ordering rests on the unique seq tie-breaker.
-      for (const s of [3, 1, 5, 2, 4]) store.ledger.insertAuditEvent({ seq: s, run_id: ulid(9), event_type: "run.integrated", payload_hash: hash(s), git_head: hash(100 + s), created_at: iso(0) });
+      // v2 (#338): 5 runs target the note; created_at DELIBERATELY constant so ordering
+      // rests on the unique monotonic seq (agent_runs.rowid) tie-breaker.
+      for (const n of [1, 2, 3, 4, 5]) store.ledger.upsertAgentRun({ run_id: ulid(n), operation: "ingest", status: "integrated", tier: 1, target_note_id: "hist", started_at: iso(0), updated_at: iso(0), finished_at: iso(0) });
     } finally {
       store.close();
     }
@@ -334,7 +410,10 @@ describe("note history: seq-DESC ordering is stable across page boundaries", () 
       return JSON.parse(r.out).events.map((e: { seq: number }) => e.seq);
     };
     const full = await seqs(["--limit", "50"]);
-    expect(full).toEqual([5, 4, 3, 2, 1]); // seq DESC
+    expect(full.length).toBe(5);
+    // Strictly descending by the unique seq — its own tie-breaker, so pagination is stable.
+    expect([...full].sort((a, b) => b - a)).toEqual(full);
+    expect(new Set(full).size).toBe(5);
     const p1 = await seqs(["--limit", "2", "--offset", "0"]);
     const p2 = await seqs(["--limit", "2", "--offset", "2"]);
     const p3 = await seqs(["--limit", "2", "--offset", "4"]);
@@ -348,12 +427,11 @@ describe("stable JSON schemas (every paginated success validates)", () => {
     await cli(["db", "migrate", "--json"]);
     const store = openStore({ path: dbPath });
     try {
-      for (const n of [1, 2, 3] as const) seedBlob(store, n, iso(n));
+      for (const n of [1, 2, 3] as const) seedSource(store, n, iso(n));
       seedOpenRun(store, 1, iso(1));
-      // A note with audit history.
+      // A note with run history (one integrated run).
       store.projections.insertNote({ note_id: "concept-atlas", slug: "atlas", title: "Atlas", type: "concept", schema_version: 1, status: "active", file_path: "atlas.md", content_hash: `sha256:${hash(9)}`, created: iso(0), updated: iso(0) });
       store.ledger.upsertAgentRun({ run_id: ulid(9), operation: "ingest", status: "integrated", tier: 1, target_note_id: "concept-atlas", started_at: iso(0), updated_at: iso(0), finished_at: iso(0) });
-      store.ledger.insertAuditEvent({ seq: 1, run_id: ulid(9), event_type: "run.integrated", payload_hash: hash(7), git_head: hash(8), created_at: iso(0) });
     } finally {
       store.close();
     }
@@ -364,17 +442,14 @@ describe("stable JSON schemas (every paginated success validates)", () => {
     expect(r.code, r.out).toBe(0);
     validateSchema("source-list", JSON.parse(r.out));
   });
-  it("git status", async () => {
-    const r = await cli(["git", "status", "--json"]);
-    expect(r.code, r.out).toBe(0);
-    validateSchema("git-status", JSON.parse(r.out));
-  });
   it("note history", async () => {
     const r = await cli(["note", "history", "concept-atlas", "--json"]);
     expect(r.code, r.out).toBe(0);
     validateSchema("note-history", JSON.parse(r.out));
     const events = JSON.parse(r.out).events;
-    expect(events[0].seq).toBe(1);
+    // v2 (#338): seq is the run's monotonic agent_runs.rowid (its own tie-breaker),
+    // not a hardcoded value — assert it is a non-negative integer per the schema.
+    expect(Number.isInteger(events[0].seq) && events[0].seq >= 0).toBe(true);
     expect(events[0].kind).toBe("run.integrated");
   });
 });
@@ -384,19 +459,21 @@ describe("concurrent-insert anomaly bound", () => {
     await cli(["db", "migrate", "--json"]);
     const store = openStore({ path: dbPath });
     try {
-      // 6 blobs with STRICTLY DESCENDING sort key by design (newest first → offset DESC).
-      for (const n of [1, 2, 3, 4, 5, 6]) seedBlob(store, n, iso(n));
+      const repo = new SourceRepo(store.db);
+      // 6 sources with STRICTLY DESCENDING sort key by design (addedAt DESC → newest first).
+      for (const n of [1, 2, 3, 4, 5, 6]) seedSource(store, n, iso(n));
       const limit = 2;
       const seen: string[] = [];
       // Page 1.
-      seen.push(...querySources(store.db, { limit, offset: 0 }).rows.map((r) => r.raw_content_hash));
-      // A concurrent insert AHEAD of the window (newest capturedAt) shifts offsets down by 1.
-      seedBlob(store, 7, iso(59));
+      seen.push(...repo.list({ limit, offset: 0 }).map((r) => r.id));
+      // A concurrent insert AHEAD of the window (newest addedAt) shifts offsets down by 1.
+      seedSource(store, 7, iso(59));
       // Continue the walk from where page 1 ended.
       for (let off = limit; ; off += limit) {
-        const { rows, total } = querySources(store.db, { limit, offset: off });
+        const rows = repo.list({ limit, offset: off });
+        const total = repo.count();
         if (off >= total) break;
-        seen.push(...rows.map((r) => r.raw_content_hash));
+        seen.push(...rows.map((r) => r.id));
         if (off + rows.length >= total) break;
       }
       // Count anomalies EXPLICITLY — both duplicates AND omissions (the documented
@@ -408,12 +485,12 @@ describe("concurrent-insert anomaly bound", () => {
       const counts = new Map<string, number>();
       for (const id of seen) counts.set(id, (counts.get(id) ?? 0) + 1);
       const duplicates = [...counts.values()].filter((c) => c > 1).reduce((a, c) => a + (c - 1), 0);
-      const originals = [1, 2, 3, 4, 5, 6].map(hash);
-      const omissions = originals.filter((h) => !seen.includes(h)).length;
+      const originals = [1, 2, 3, 4, 5, 6].map(sid);
+      const omissions = originals.filter((id) => !seen.includes(id)).length;
       expect(duplicates + omissions).toBeLessThanOrEqual(1);
       // Every ORIGINAL row (1..6) is still reachable in a fresh full scan (ordering total).
-      const full = querySources(store.db, { limit: 50, offset: 0 }).rows.map((r) => r.raw_content_hash);
-      for (const n of [1, 2, 3, 4, 5, 6]) expect(full).toContain(hash(n));
+      const full = repo.list({ limit: 50, offset: 0 }).map((r) => r.id);
+      for (const n of [1, 2, 3, 4, 5, 6]) expect(full).toContain(sid(n));
     } finally {
       store.close();
     }

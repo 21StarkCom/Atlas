@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "atlas://cli-contract/source-show.schema.json",
   "title": "brain source show — --json success output",
-  "description": "Show one captured source: its content blob, capture events, and renditions (with the active-rendition pointer). Tier-0 read; no mutation.",
+  "description": "Show one registered source from the v2 operational `source` registry (0015_source_registry), resolved by id then (fallback) by its UNIQUE locator. Tier-0 read; no mutation.",
   "type": "object",
   "unevaluatedProperties": false,
   "required": ["command", "source"],
@@ -11,42 +11,14 @@
     "source": {
       "type": "object",
       "unevaluatedProperties": false,
-      "required": ["contentId", "canonicalMediaType", "sizeBytes", "captures", "renditions"],
+      "required": ["id", "kind", "locator", "addedAt"],
       "properties": {
-        "contentId": { "type": "string", "minLength": 1 },
-        "canonicalMediaType": { "type": "string", "minLength": 1 },
-        "sizeBytes": { "type": "integer", "minimum": 0 },
-        "activeRenditionId": { "type": "string" },
-        "trustLevel": { "enum": ["untrusted", "provisional", "trusted", "authoritative"] },
-        "captures": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "unevaluatedProperties": false,
-            "required": ["captureId", "origin", "capturedAt"],
-            "properties": {
-              "captureId": { "type": "string", "minLength": 1 },
-              "origin": { "type": "string", "minLength": 1 },
-              "capturedAt": { "type": "string" }
-            }
-          }
-        },
-        "renditions": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "unevaluatedProperties": false,
-            "required": ["renditionId", "extractorVersion", "normalizerVersion", "normalizedContentHash", "sizeBytes"],
-            "properties": {
-              "renditionId": { "type": "string", "minLength": 1 },
-              "extractorVersion": { "type": "integer", "minimum": 0 },
-              "normalizerVersion": { "type": "integer", "minimum": 0 },
-              "normalizedContentHash": { "type": "string", "minLength": 1 },
-              "sizeBytes": { "type": "integer", "minimum": 0 },
-              "active": { "type": "boolean" }
-            }
-          }
-        }
+        "id": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["file", "url"] },
+        "locator": { "type": "string", "minLength": 1 },
+        "title": { "type": "string" },
+        "addedAt": { "type": "string", "description": "RFC-3339 time the source was added." },
+        "lastIngestedAt": { "type": "string", "description": "RFC-3339 time `ingest` last folded this source (present only once ingested)." }
       }
     }
   },
@@ -54,13 +26,11 @@
     {
       "command": "source show",
       "source": {
-        "contentId": "sha256:aaaa:text/markdown",
-        "canonicalMediaType": "text/markdown",
-        "sizeBytes": 1024,
-        "activeRenditionId": "sha256:aaaa:text/markdown:1:1",
-        "trustLevel": "provisional",
-        "captures": [{ "captureId": "cap-1", "origin": "/inbox/sample.md", "capturedAt": "2026-07-13T10:00:00.000Z" }],
-        "renditions": [{ "renditionId": "sha256:aaaa:text/markdown:1:1", "extractorVersion": 1, "normalizerVersion": 1, "normalizedContentHash": "sha256:bbbb", "sizeBytes": 990, "active": true }]
+        "id": "src_0123456789abcdef",
+        "kind": "url",
+        "locator": "https://example.com/doc",
+        "title": "Example Doc",
+        "addedAt": "2026-07-23T10:00:00.000Z"
       }
     }
   ],
@@ -70,19 +40,19 @@
     "privilege": "shared",
     "idempotency": "none",
     "executionClass": "read",
-    "summary": "Show one source capture + its renditions.",
-    "args": [{ "name": "<source>", "required": true, "description": "A serialized contentId or renditionId (D3)." }],
+    "summary": "Show one registered source (resolved by id or locator).",
+    "args": [{ "name": "<source>", "required": true, "description": "A source id or locator." }],
     "flags": [],
     "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
     "sideEffects": [],
-    "prohibitedEffects": ["no vault/projection/ledger mutation", "no git or audit-ref write"],
+    "prohibitedEffects": ["no vault/projection/registry mutation", "no git write"],
     "locks": [{ "scope": "shared", "mode": "shared" }],
     "exitCodes": [0, 1, 2, 4, 5],
     "errorCodes": [
-      { "code": "usage", "exit": 5, "when": "missing/malformed <source> argument" },
-      { "code": "invalid-source-handle", "exit": 1, "when": "the handle is not a valid contentId/renditionId" },
-      { "code": "source-not-found", "exit": 1, "when": "no capture resolves for the handle" },
+      { "code": "usage", "exit": 5, "when": "missing <source> argument or unknown flag" },
+      { "code": "source-not-found", "exit": 1, "when": "no source resolves for the handle (by id or locator)" },
       { "code": "config-invalid", "exit": 2, "when": "brain.config.yaml fails schema validation" },
+      { "code": "db-unavailable", "exit": 2, "when": "the ledger is absent or not migrated (run `brain db migrate`)" },
       { "code": "internal", "exit": 4, "when": "unexpected internal failure" }
     ],
     "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"

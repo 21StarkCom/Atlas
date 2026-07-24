@@ -22,6 +22,7 @@
 import type { ParsedNote } from "@atlas/contracts";
 import type { Store } from "./store.js";
 import { deriveAndPersistNote } from "./note-derivation.js";
+import { replaceNoteEvidence } from "./evidence/fold.js";
 
 /**
  * Reconcile the `notes` projection for `noteIds` only. For each id, `resolve`
@@ -37,7 +38,12 @@ export function foldNotesForPaths(
   if (ids.length === 0) return;
   const run = store.db.transaction(() => {
     for (const id of ids) {
-      deriveAndPersistNote(store.db, id, resolve(id));
+      const parsed = resolve(id);
+      deriveAndPersistNote(store.db, id, parsed);
+      // Evidence is a vault-derived projection (task 4-4): re-fold this note's
+      // evidence rows from its frontmatter in the same transaction (self-guarded
+      // no-op when 0014 is unapplied).
+      replaceNoteEvidence(store.db, id, parsed);
     }
   });
   run();

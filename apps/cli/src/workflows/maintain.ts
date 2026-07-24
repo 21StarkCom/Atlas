@@ -1,33 +1,36 @@
 /**
  * `workflows/maintain` — the vault-maintenance issue detector (Task 4.11). `maintain` scans
  * the projection for hygiene issues — orphan notes (no inbound or outbound link) and evidence
- * that is not `valid` (stale/pending/failed, needing re-verification) — and turns each into a
- * maintenance proposal the synthesis pipeline (Task 4.5) drives through preview/apply.
+ * that is not `resolved` (pending/failed/needs-review, needing re-verification) — and turns each
+ * into a maintenance proposal the synthesis pipeline (Task 4.5) drives through preview/apply.
  *
- * DESTRUCTIVE maintenance (archiving an orphan, dropping a link) is ALWAYS Tier-3 — it can
- * never auto-commit; a human approves it at the review gate. Non-destructive prompts (flagging
- * stale evidence for re-verification) may be Tier-2-eligible. This module is the deterministic
- * read-only detector; turning an issue into a validated ChangePlan + running it is the command.
+ * v2 (#335, ADR-0003): the Tier-3 review gate is retired — every remediation
+ * (destructive included) applies directly, exactly like `enrich`. Git is the undo
+ * (`git revert` + `brain sync`). This module is the deterministic read-only
+ * detector; turning an issue into a validated ChangePlan + running it is the command.
+ *
+ * v2 evidence (#337): the unverified-evidence scan reads the flat vault-derived
+ * `evidence` projection (`EvidenceRepo`), not the retired `claims`/`claim_evidence`
+ * model — `noteId` rides each row, so no claims join is needed.
  */
-import { ClaimsRepo, type SqliteDatabase } from "@atlas/sqlite-store";
+import { EvidenceRepo, type SqliteDatabase } from "@atlas/sqlite-store";
 
-/** A detected maintenance issue + the tier its remediation must land at. */
+/** A detected maintenance issue. */
 export interface MaintenanceIssue {
   readonly kind: "orphan-note" | "unverified-evidence";
   /** The note the issue concerns (owning note for evidence). */
   readonly noteId: string;
   /** A short, allowlisted description (never raw content). */
   readonly detail: string;
-  /** The minimum tier the remediation must land at (destructive ⇒ tier-3). */
-  readonly minTier: "tier-2" | "tier-3";
+  /** `true` ⇒ the remediation removes content (archive/merge an orphan). */
+  readonly destructive: boolean;
 }
 
 /**
  * Detect maintenance issues in the current projection (deterministic, read-only, sorted):
- *  - `orphan-note` — a note with NO inbound and NO outbound link. Remediating an orphan
- *    (archive/merge) is destructive ⇒ Tier-3.
- *  - `unverified-evidence` — a current evidence head whose verification is not `valid`
- *    (stale/pending/failed). Flagging it for re-verification is non-destructive ⇒ Tier-2.
+ *  - `orphan-note` — a note with NO inbound and NO outbound link (remediation is destructive).
+ *  - `unverified-evidence` — a note owning an evidence row whose status is not `resolved`
+ *    (pending/failed/needs-review); flagging it for re-verification is non-destructive.
  */
 export function detectMaintenanceIssues(db: SqliteDatabase): MaintenanceIssue[] {
   const issues: MaintenanceIssue[] = [];
@@ -40,26 +43,24 @@ export function detectMaintenanceIssues(db: SqliteDatabase): MaintenanceIssue[] 
     )
     .all() as { note_id: string }[];
   for (const o of orphans) {
-    issues.push({ kind: "orphan-note", noteId: o.note_id, detail: `note "${o.note_id}" has no links (orphan)`, minTier: "tier-3" });
+    issues.push({ kind: "orphan-note", noteId: o.note_id, detail: `note "${o.note_id}" has no links (orphan)`, destructive: true });
   }
 
-  const unverified = new ClaimsRepo(db)
-    .allEvidence()
-    .filter((e) => e.current === 1 && e.verification !== "valid");
-  // Group to the owning note for a per-note remediation proposal (deterministic order).
-  const owningStmt = db.prepare(`SELECT owning_note_id FROM claims WHERE claim_id = ?`);
+  // Every evidence row not `resolved` (needs-attention) rides its owning `noteId` directly —
+  // no claims join. Collapse to a per-note + per-status remediation proposal (deterministic).
+  const unresolved = new EvidenceRepo(db).needingAttention({ limit: 1_000_000_000, offset: 0 });
   const seen = new Set<string>();
-  for (const e of unverified) {
-    const row = owningStmt.get(e.claim_id) as { owning_note_id: string } | undefined;
-    if (!row) continue;
-    const key = `${row.owning_note_id}:${e.claim_id}:${e.verification}`;
+  for (const e of unresolved) {
+    if (e.noteId === null) continue; // soft reference may be null; nothing to remediate against
+    const status = e.status ?? "unresolved";
+    const key = `${e.noteId}:${status}`;
     if (seen.has(key)) continue;
     seen.add(key);
     issues.push({
       kind: "unverified-evidence",
-      noteId: row.owning_note_id,
-      detail: `claim "${e.claim_id}" has ${e.verification} evidence needing re-verification`,
-      minTier: "tier-2",
+      noteId: e.noteId,
+      detail: `note "${e.noteId}" has ${status} evidence needing re-verification`,
+      destructive: false,
     });
   }
 

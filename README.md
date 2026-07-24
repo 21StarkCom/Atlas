@@ -1,192 +1,172 @@
 <!--
   Root README — the public face of Atlas. Keep claims verifiable in-repo
   (real paths, real commands, real PR numbers). Playground posture: no semver,
-  no badges, honest about being a personal project.
+  no badges, honest about being a personal project. v2 (ADR-0003): single
+  process, git is the only safety mechanism.
 -->
 
 # Atlas
 
 **The LLM-native second-brain wiki engine.** A pnpm/TypeScript monorepo whose CLI binary is `brain`.
 
-Atlas treats a git-backed Markdown vault as the **durable memory** and everything else as derived state. The LLM is a *reasoning component, not the database* — every model-authored change is captured, validated, and integrated through a privilege-separated safety spine before a single byte lands in the vault.
+Atlas is **one process** on top of a git-backed Markdown vault plus a vector DB: it opens the vault working tree, the SQLite projection, and the LanceDB index, retrieves and rewrites notes, commits to git, and exits. The LLM is a *reasoning component, not the database* — every model-authored change is grounded, validated, and applied as exactly one git commit.
 
-> Markdown is the memory. SQLite is the operational projection. LanceDB is the retrieval projection. Git is the safety/audit mechanism.
-> — [`docs/specs/2026-07-11-atlas-v1-design.md`](docs/specs/2026-07-11-atlas-v1-design.md)
+> Markdown is the memory. SQLite is the operational projection. LanceDB is the retrieval projection. **Git is the only safety mechanism** — one commit per applied ChangePlan is both the audit trail and the undo.
+> — [`docs/adr/0003-retire-security-architecture.md`](docs/adr/0003-retire-security-architecture.md)
 
 **Two classes of state, deliberately never conflated:**
 
-- **Vault projections** — `notes`, links, identity keys, provenance, claims (SQLite) + the chunk/embedding index (LanceDB). Deterministically **rebuildable from canonical Markdown** at any time (`brain db rebuild` / `brain index rebuild`).
-- **Operational / audit ledger** — `agent_runs`, `audit_events`, backup watermark, `model_calls`. **Primary state, NOT rebuildable from Markdown** — recovered only from the encrypted ledger backup, tamper-evidenced by a signed `refs/audit/runs` chain and a WORM anchor.
+- **Vault-derived projections** — `notes`, `sections`, `links`, `evidence`, chunk metadata (SQLite) + the chunk/embedding index (LanceDB). Deterministically **rebuildable from canonical Markdown** at any time (`brain db rebuild` / `brain index rebuild`). Disposable.
+- **Operational tables** — `jobs` / `job_attempts`, the `source` registry, `model_calls`, `agent_runs` (SQLite). **Not** vault-derived; **retained** across `db rebuild`. Losing them loses history, not correctness.
 
-The vault is the artifact you keep. The projections you can throw away and regenerate; the ledger you protect with backups.
+The vault is the artifact you keep. Everything else you can throw away and regenerate.
 
 ---
 
 ## Why it exists
 
-Handing an agent write access to your knowledge base is a trust problem, not a prompt problem. Atlas answers it structurally:
+Atlas began as a security-first, contract-first, fail-closed exercise — privilege-separated brokers, scan-before-persist, a signed audit ledger, biometric authorization. That fortress became the reason the *actual product* couldn't move: every agentic experiment paid a broker round-trip, a capability mint, and a scan gate before it could touch a note.
 
-- **The CLI holds no dangerous capability.** It can't write a protected git ref, can't hold the provider credential, can't reach the network. Those live behind two separate OS identities.
-- **Raw model output never becomes a file.** Synthesis is retrieval-first, validated against a deterministic risk/mutation policy, scanned for secrets, and integrated by the broker as a persisted, crash-safe workflow.
-- **Nothing is best-effort.** Secret scanning, the backup watermark, the graduation gate, and rollback all **fail closed** — a missing guarantee refuses the operation instead of degrading it.
+**v2 tore the fortress down** ([ADR-0003](docs/adr/0003-retire-security-architecture.md), [spec](docs/specs/2026-07-21-atlas-v2-single-process-simplification-spec.md)). The threat model the fortress defended — hostile multi-tenant egress, untrusted contributors, credential exfiltration — does not exist for a single operator on a single machine editing their own vault. What remains is the agentic core: **getting, fetching, rewriting, enhancing, and relating notes.**
 
-This is a **playground, not a product** — a personal project built to a production-grade security bar for the exercise, not shipped to anyone. No semver, no compatibility promises, no rollout ceremony.
+**Safety collapses to git.** One commit per applied ChangePlan, so `git revert <sha>` followed by `brain sync` is the undo, and `git log` / `git blame` is the audit trail. A bad or buggy write is recovered from history, not prevented by a wall.
+
+This is a **playground, not a product** — a personal project. No semver, no compatibility promises, no rollout ceremony. That posture is honest, not licence to be sloppy.
 
 ---
 
 ## Headline capabilities
 
-- **Ingest** local sources (`markdown` / `text` / `pdf` / `html`) through a per-host OS sandbox (macOS Seatbelt, Linux bwrap+seccomp+cgroup) that parses and secret-scans **inside the jail** and hands back an attested-clean stream — never a path.
-- **Hybrid retrieval** — a deterministic section chunker + Gemini embeddings in LanceDB, fused with a real stemmed/stop-word FTS index via reciprocal-rank fusion; `brain query` returns a grounded, cited, audited Tier-0 answer.
-- **Model-authored synthesis** as a persisted state machine (`planned → patched → worktree-applied → agent-committed → [review-pending] → integrated → reindexed → finalized`) with one atomic write per transition and full crash recovery.
-- **Graduation** — bring a *real* vault onto Atlas: full working-tree + git-history secret scan → audit → deterministic byte-exact migrate plan → resumable apply/rollback.
-- **Disaster recovery** — AEAD-encrypted ledger backups with a fail-closed watermark; `db restore`; `db rebuild --from-git` reconstructs projections from canonical Markdown.
-- **GDPR-style erasure** (`brain purge`) with audit-ref reconciliation (tombstone, never orphan).
+- **Ingest** local sources (`markdown` / `text` / `pdf` / `html`) — `normalize()` parses in-process into notes.
+- **Hybrid retrieval** — a deterministic section chunker + Gemini embeddings in LanceDB, fused with a stemmed/stop-word FTS index via reciprocal-rank fusion; `brain query` returns a grounded, cited answer.
+- **Model-authored synthesis** — `enrich` / `maintain` run retrieve → LLM plan (`generateObject<ChangePlan>`) → validate → ground → apply, producing **exactly one commit** touching only the ChangePlan's paths.
+- **Typed relationships** — `link` fronts `CreateRelationship` (typed edge, stored in the source note's frontmatter `related:` list) and `SetLink` (a plain body `[[wikilink]]`).
+- **Evidence** — `evidence review` / `retry` / `resolve` over a vault-derived projection folded from each note's frontmatter `evidence:` block.
+- **Reconcile** — `brain sync` diffs the working tree against the SQLite projection by per-note content hash (the hash **is** the cursor) and reindexes the delta; `db rebuild` regenerates the whole vault-derived projection from Markdown.
 
-Provider: Google **Gemini** — `gemini-3.5-flash` (generation), `gemini-embedding-001` (embeddings, 768-dim). The adapter is broker-internal and provably non-mutating.
+Provider: Google **Gemini** — `gemini-3.5-flash` (generation), `gemini-embedding-001` (embeddings, 768-dim). A direct in-process client; the key resolves lazily from `ATLAS_GEMINI_API_KEY` (env override wins) else the macOS Keychain item `atlas-gemini-api-key`, held in-process only.
 
 ---
 
 ## Architecture
 
-Ten workspace packages + one app + the contract harness + host provisioning, split across three trust boundaries. The `brain` CLI is unprivileged; the two brokers each run as a distinct OS identity.
+Eight workspace packages + one app + the CLI-contract harness. **No daemons, no OS identities, no privilege boundary except git.** `brain` runs as you.
 
 ```mermaid
-flowchart TB
-  subgraph agent["atlas-agent — unprivileged"]
-    CLI["brain CLI<br/>router · workflows · policies · retrieval · graduation"]
-    SBX["sandbox worker<br/>parse + scan (Seatbelt / bwrap)"]
-    SQL[("SQLite<br/>projections + ledger")]
+flowchart LR
+  subgraph proc["brain — one process, runs as the invoking user"]
+    CLI["router · workflows · synthesis · retrieval · evidence"]
+    SQL[("SQLite<br/>projection + operational tables")]
     LDB[("LanceDB<br/>chunk + embedding index")]
-    CLI --- SBX
     CLI --- SQL
     CLI --- LDB
   end
 
-  subgraph broker["atlas-broker — separate OS identity"]
-    BRK["integration broker<br/>protected-ref CAS · signed audit append · challenge/authz"]
-    WORM[("WORM anchor<br/>0600, append-only")]
-    BRK --- WORM
-  end
-
-  subgraph egress["atlas-egress — separate OS identity"]
-    EGR["egress daemon<br/>run-bound capability + budget · exact-byte scan · Gemini adapter"]
-    CRED(["provider credential<br/>+ the only outbound network"])
-    EGR --- CRED
-  end
-
   VAULT[("vault<br/>canonical Markdown · git")]
+  GEM["Google Gemini<br/>generation + embeddings"]
 
-  CLI -- "read any ref · write only refs/agent/*" --> VAULT
-  BRK == "SOLE writer of protected refs<br/>main · refs/audit/runs · trust ledger" ==> VAULT
-  CLI -- "unix socket · sign+advance / audit append" --> BRK
-  CLI -- "unix socket · generate / embed" --> EGR
+  CLI -- "read + write · one applied ChangePlan = one commit on refs/heads/main" --> VAULT
+  CLI -- "direct HTTPS · in-process key" --> GEM
 ```
 
 **Packages** (all `private`, `0.0.0`, ESM/NodeNext, strict TS):
 
 | Package | Role |
 |---|---|
-| [`apps/cli`](apps/cli/CLAUDE.md) (`@atlas/cli`) | The `brain` binary: registry-driven router, ~50 command handlers, the workflow/policy/trust/graduation/retrieval/quarantine/purge engine, terminal-safe renderer. |
-| [`packages/contracts`](packages/contracts/CLAUDE.md) | Zero-dep (Zod-only) process-seam leaf: canonical serialization (`atlas-jcs-v1`), stable IDs, the ChangePlan op catalog, identity-key algorithm, audit/authorization Zod mirrors. Byte-identity across the CLI↔broker seam is *the* contract. |
-| [`packages/broker`](packages/broker/CLAUDE.md) | Both privileged daemons — integration broker (protected-ref CAS, WORM audit) + egress broker (credential, network, exact-byte scan, budget). Never imports the ledger. |
-| [`packages/sqlite-store`](packages/sqlite-store/CLAUDE.md) | Persistence core: checksum-guarded gap-tolerant migrations, transactional projection rebuild, the 4-step cross-store ledger write protocol, AEAD backup/restore. |
-| [`packages/lancedb-index`](packages/lancedb-index/CLAUDE.md) | Deterministic chunker + generation-fenced write path + hybrid search + FTS index + the recall@10/MRR eval harness. |
-| [`packages/scan`](packages/scan/CLAUDE.md) | Fail-closed secret-detection leaf: one versioned ruleset, two quarantine-before-throw guards. |
-| [`packages/sources`](packages/sources/CLAUDE.md) | The OS-jailed parser worker + per-format normalizers (scan-before-persist). |
-| [`packages/models`](packages/models/CLAUDE.md) | CLI-side typed IPC client for the egress broker + capability minting + `model_calls` ledger persistence. Holds no credential. |
-| [`packages/jobs`](packages/jobs/CLAUDE.md) | SQLite-backed single-runner durable queue (idempotent enqueue, atomic claim, full-jitter backoff, cross-process cancel). |
-| [`packages/git`](packages/git/CLAUDE.md) | Typed git plumbing for the agent side — makes protected-ref writes *structurally impossible* (`runGit` unexported). |
-| [`packages/testing`](packages/testing/CLAUDE.md) | The `withFixtureVault` harness. |
+| [`apps/cli`](apps/cli/CLAUDE.md) (`@atlas/cli`) | The `brain` binary: registry-driven router, the 24 command handlers, the workflow/synthesis/retrieval/evidence engine, terminal-safe renderer. |
+| [`packages/contracts`](packages/contracts/CLAUDE.md) | Zero-dep-besides-zod leaf: canonical serialization (`atlas-jcs-v1`), stable IDs, the **12-op** ChangePlan catalog (`CHANGE_PLAN_OPS`, incl. `CreateRelationship`/`SetLink`), identity-key algorithm, shared DTOs. |
+| [`packages/sources`](packages/sources/CLAUDE.md) | The md/txt/pdf/html normalizers — `normalize()` parses **in-process** (the sandbox jail is retired). |
+| [`packages/sqlite-store`](packages/sqlite-store/CLAUDE.md) | Persistence core: the migration runner + the deterministic projection rebuild-from-vault. |
+| [`packages/lancedb-index`](packages/lancedb-index/CLAUDE.md) | Deterministic chunker + embedding write path + hybrid search + FTS index + the recall@10/MRR eval harness. |
+| [`packages/models`](packages/models/CLAUDE.md) | The in-process Gemini client: lazy env→Keychain key resolution, `model_calls` persistence, the prompt registry. Per-call token cap. |
+| [`packages/git`](packages/git/CLAUDE.md) | Typed git plumbing — commits an applied ChangePlan's touched paths onto `refs/heads/main`. |
+| [`packages/jobs`](packages/jobs/CLAUDE.md) | SQLite-backed durable queue — sole owner of `jobs` / `job_attempts`. |
+| [`packages/testing`](packages/testing/CLAUDE.md) | The `withFixtureVault` harness (a fixture vault in a throwaway git repo). |
 | [`tools`](tools/CLAUDE.md) | The retained CLI-contract harness: registry SSOT, drift generators, the mega-lint. |
-| [`provisioning`](provisioning/CLAUDE.md) | The one human/`sudo` step: OS identities, key custody, WORM anchor, sockets, sandbox prerequisites. |
 
 ---
 
-## The security model
+## The safety model
 
-Not a feature — the reason the project exists. Six load-bearing mechanisms:
+Not a fortress — **git**. There is no privilege boundary beyond git history, by design ([ADR-0003](docs/adr/0003-retire-security-architecture.md)).
 
-- **Privilege separation.** Three OS identities: `atlas-agent` (the CLI + parser + workflow, network-denied at the UID), `atlas-broker` (sole protected-ref mutator + sole audit-append signer + WORM anchor), `atlas-egress` (sole provider-credential holder + sole outbound-network process, *no vault access*). The attestation key never leaves the broker; every canonical git move is broker-signed under a service-wide mutation lock.
-- **Fail-closed secret scanning.** One deterministic, versioned engine ([`packages/scan`](packages/scan/CLAUDE.md)) runs at every boundary — ingest, sandbox output, generated artifacts, graduation (working tree **and** full git history), and egress (both directions). A dirty verdict quarantines the bytes *before* the abort unwinds and returns exit 3. No allowlist, no suppression.
-- **WORM audit anchor.** `refs/audit/runs` is a signed, gapless, chained event stream; a `0600` append-only anchor binds the chain head to its exact position, so truncate-then-append and rewrite-then-append are both detectable. The broker re-verifies the whole chain at startup.
-- **Capability-key egress.** Every model call carries a short-lived, run-bound capability (HMAC over `{runId, operation, model, maxBytes/tokens, costCeiling, sensitivity, expiry}`) plus a per-run byte/token/cost budget the egress daemon enforces. The CLI mints; the daemon verifies against the same secret.
-- **Trust tiers + taint.** Sources carry trust (untrusted by default); taint is transitive by floor, never averaged; sensitivity is most-restrictive on read. Risk is a deterministic function of `operation × targetType × scope × config`, monotonic-upward — **Tier-3 changes require human review**.
-- **Challenge/authorization for privileged mutations.** `db restore`, `purge`, `graduation migrate --apply`, `git approve/rollback`, `source trust promote/revoke`, `quarantine resolve` all follow `--export-challenge` → sign out-of-band → `--authorization`. **`--yes` never authorizes anything** — it is explicitly documented as inert. The broker independently re-derives risk/policy/trust from the candidate tree; any mismatch escalates to Tier-3.
+- **One commit per ChangePlan.** Every mutation follows the canonical order in [`apps/cli/src/workflows/mutation-order.ts`](apps/cli/src/workflows/mutation-order.ts): take the vault lock → assert `HEAD == refs/heads/main` → validate the ChangePlan → ground it against the projection → capture the touched-path preimage → apply to the working tree → commit **only** the ChangePlan's paths → refresh LanceDB, then the SQLite projection → release. A thrown error restores the preimage.
+- **The projection content-hash IS the sync cursor.** No `head` marker, no canonical-ref indirection — the canonical ref *is* `refs/heads/main`. A crash after the commit leaves the projection stale; the next `brain sync` heals it structurally.
+- **Dirty-vault doctrine.** Reads and `sync` treat a dirty tree as normal input. A mutating command tolerates *unrelated* dirt but fails grounding (exit 1) if any note it edits or names is dirty — dirty being an on-disk hash ≠ projection `content_hash`, **or** an uncommitted git diff vs `HEAD`.
+- **Remediation is git.** Undo a bad write with `git revert <sha>` **then** `brain sync` (the revert restores the tree; the sync refolds the derived stores). `git log` is the audit trail.
 
-**Graduation** is the security model applied to onboarding: a real vault is scanned, audited, and migrated by a **byte-exact, deterministic, resumable** pipeline that refuses to proceed without a clean recorded scan and hard-fails on a history-only credential even with a working-tree handshake.
+**Named, accepted residual risks** (playground tier — a multi-tenant deployment would not accept these):
 
-One [ADR](docs/adr/0001-egress-response-scan-released-bytes.md) governs a subtle egress corner: the response-direction scan runs on the *released* serialized result, not the raw provider envelope — because Gemini's opaque per-response `thoughtSignature` is byte-indistinguishable from a secret and refused every generated answer until [ADR-0001](docs/adr/0001-egress-response-scan-released-bytes.md).
+- **Direct writes to the real brain** — no broker mediates, no ledger signs. Mitigated only by one-commit-per-ChangePlan reverts.
+- **Unsandboxed ingest** — externally-sourced PDF/HTML bytes are parsed in-process with the operator's privileges and are **not** secret-scanned. Unmitigated by design; the only control is the operator choosing what to ingest.
 
-Full contract: [`docs/specs/security-broker-contract.md`](docs/specs/security-broker-contract.md).
+The retired fortress (brokers, OS identities, scan engine, signed ledger, graduation, authorization signer, Console) is revivable from the **`v1-fortress`** annotated tag — code + provisioning only, not migrated data. See [ADR-0003](docs/adr/0003-retire-security-architecture.md).
 
 ---
 
 ## Quickstart
 
-Requires **Node ≥ 24** (CI runs 26) and **pnpm ≥ 11**. Dependency versions are pinned centrally via `catalog:` in `pnpm-workspace.yaml`.
+Requires **Node ≥ 24** (CI runs 26) and **pnpm ≥ 11**. Dependency versions are pinned centrally via `catalog:` in `pnpm-workspace.yaml`. **macOS is the supported target** (the Keychain read is macOS-only; the env-var key override works anywhere).
 
 ```bash
 git clone git@github.com:21StarkCom/Atlas.git
 cd Atlas
 pnpm install --frozen-lockfile
-pnpm -r build          # tsc per package; @atlas/sources must build before its worker runs
-pnpm -r test           # vitest per package (in-process/local subset without provisioning)
+pnpm -r build                            # tsc per package
+pnpm -r test                             # vitest per package — zero provisioning, no daemons
 node tools/gen-cli-contract.ts --check   # command-registry drift gate
+
+# point the config at your vault, then build the stores
+cp brain.config.example.yaml brain.config.yaml   # set vault.path (defaults to ~/Code/Vaults/main-vault)
+alias brain="node $PWD/apps/cli/dist/bin.js"
+
+brain db migrate       # create the SQLite DB + apply all migrations (sole migration composition root)
+brain db rebuild       # regenerate the vault-derived projection from Markdown
+export ATLAS_GEMINI_API_KEY=…            # or store it in the Keychain (service atlas-gemini-api-key)
+brain index rebuild    # chunk → embed → write the LanceDB retrieval index
+
+brain query "who runs the Cloud team"    # grounded, cited answer
+brain enrich <note> --apply              # model-authored synthesis, one commit
+brain link <source> <target> --predicate cites   # a typed relationship in source's frontmatter
 ```
 
-That builds and runs the local test subset. **Exercising the real security spine** — the two-UID broker/egress separation, file-based key custody, WORM anchor, sandbox containment — needs host provisioning (a `sudo` step) and `ATLAS_PROVISIONED=1`. The complete provision → run-a-broker → drive-a-vault runbook, including the live-drive gotchas, is in **[`docs/install.md`](docs/install.md)**.
+`vault.path` defaults to `~/Code/Vaults/main-vault` ([`apps/cli/src/config/schema.ts`](apps/cli/src/config/schema.ts) `DEFAULT_VAULT_PATH`). To pin the intended target and fail-closed on a stale override, export **`ATLAS_EXPECT_VAULT=<vault>`** — `loadConfig` canonicalizes both it and `vault.path` and refuses (exit 2) any mismatch. The full cold-start runbook is [`docs/install.md`](docs/install.md).
 
 ---
 
 ## Command surface
 
-`brain` exposes **55 commands** across 5 phases, driven by a single registry SSOT (`docs/specs/cli-contract/commands.json`, version 1). The full generated list with args, flags, exit codes, and side-effects is [`docs/specs/cli-contract/commands-overview.md`](docs/specs/cli-contract/commands-overview.md). A curated tour by domain:
+`brain` exposes **24 commands** driven by a single registry SSOT (`docs/specs/cli-contract/commands.json`, version 2 — the #333 survivor set, shrunk 55 → 24). The full generated list with args, flags, exit codes, and side-effects is [`docs/specs/cli-contract/commands-overview.md`](docs/specs/cli-contract/commands-overview.md). A curated tour by domain:
 
 | Domain | Commands | Notes |
 |---|---|---|
-| **Inspect** | `inspect` · `doctor` · `status` · `note show/related/history` | Diagnostic reads stay available even when writes are blocked. |
-| **Ingest & sources** | `ingest` · `source add` · `source list/show` · `source trust show/promote/revoke` | Scan-before-persist; preview unless `--apply`. |
-| **Query & index** | `query` · `index status/verify/repair/rebuild/eval` | `query` is an audited Tier-0 grounded answer; `index eval` is the retrieval graduation gate. |
-| **Synthesis** | `enrich` · `reconcile` · `maintain` · `validate` | Model-authored, retrieval-first, non-mutating previews unless `--apply`. |
-| **Git review (Tier-3)** | `git status/verify/review/approve/reject/rollback/refresh/cleanup` | The human review loop; `approve`/`rollback` are broker-authorized. |
-| **Graduation** | `graduation scan/audit/migrate` · `quarantine inspect/resolve` | Fail-closed, byte-exact, resumable. |
-| **DB / DR** | `db status/verify/migrate/rebuild/backup/restore` | `db migrate` is the sole migration composition root; `db restore` is privileged. |
-| **Jobs** | `jobs list/run/retry/cancel` | Durable single-runner queue; batch commands emit `{items, aggregate}`. |
-| **Vault sync (60-B)** | `sync` · `sync status` · `sync reset` | One-way absorb of the adopted vault's upstream into `refs/atlas/main`: scan-before-persist, delete→archive, OQ#5 divergence REJECT-halt, O(delta) `index:reconcile` enqueue. `sync reset` is the privileged, broker-authorized tree-reconcile recovery from a divergence/exit-3 halt (accepts + audits a history gap). |
-| **Evidence & purge** | `evidence review/retry/resolve` · `purge` | `purge` is authorize-first, one transaction, post-purge verified. |
+| **Inspect** | `status` · `note show/related/history` | `status` merges the old `doctor` + `db status` + `index status` + `sync status`; `checks[]` = `vault-reachable`, `git-healthy`, `provider-key-present`, `index-not-stale`, `migrations-current`. Exits 0 even when a probe fails (`ok:false` is data). |
+| **Notes & links** | `note add` · `link` | `link` fronts `CreateRelationship` (`--predicate`, stored in frontmatter `related:`) and `SetLink` (plain `[[wikilink]]`); `--remove` and `--alias` per the schema. |
+| **Ingest & sources** | `ingest` · `source add/list/show` | `source` is an operational registry; `ingest` normalizes a source's bytes into notes. |
+| **Query & index** | `query` · `index rebuild` · `index eval` | `index rebuild` absorbs the old `repair`/`status`/`verify`; `index eval` is the retrieval gate. |
+| **Synthesis** | `enrich` · `maintain` · `validate` | Model-authored, retrieval-first; mutate only with `--apply`. |
+| **Evidence** | `evidence review/retry/resolve` | Over a vault-derived projection folded from note frontmatter. |
+| **Sync & persistence** | `sync` · `db migrate` · `db rebuild` | `sync` reconciles the working tree vs projection by content hash; `db migrate` is the sole migration composition root. |
+| **Jobs** | `jobs run` · `jobs list` | Durable single-runner queue; `jobs run` emits `{items, aggregate}`. |
 
-**Global conventions:** every command supports `--json` (one NDJSON envelope), `--plain`/`--quiet`/`--verbose`, `--config <path>`. Output is terminal-injection-safe by construction (all CSI/OSC/bidi stripped). Exit codes: `0` ok · `1` validation · `2` config/vault/lock · `3` secret-scan · `4` internal · `5` usage · `6` action-required. *(The contracts name a nominal exit 7 "provider-retryable"; a single-command run expresses retryability as a `retryable` flag on the exit-4/6 envelope, and only the `jobs run` batch aggregate can actually return exit 7.)*
+**Global conventions:** every command supports `--json` (one NDJSON envelope), `--plain`/`--quiet`/`--verbose`, `--config <path>`. Output is terminal-injection-safe by construction (all CSI/OSC/bidi stripped). Exit codes: `0` ok · `1` validation · `2` config/vault/lock · `4` internal · `5` usage. *(The single error envelope carries `retryable`/`retryAfterMs` at exit 4; only the `jobs run` batch aggregate can return `7`. The old secret-scan `3` and action-required `6` codes retired with the security architecture — no command emits them.)*
 
 ---
 
 ## Project status
 
-**Six PR-gated phases, all complete** (~96 commits, issues/PRs #1–#161). Each phase opened with a *contracts gate* PR that landed the normative spec + JSON schemas before any feature code.
+**Six PR-gated V1 phases, then the v2 single-process pivot.** V1 shipped the full security fortress and drove a real vault end-to-end (2026-07-17: **210 notes graduated, 0 refused**; `index eval` clears the gate at **recall@10 0.911 / MRR 0.830** on the default hybrid config; thresholds ≥ 0.85 / ≥ 0.70). **v2** ([ADR-0003](docs/adr/0003-retire-security-architecture.md)) retired the entire security architecture in place:
 
-| Phase (tracker) | Delivered | PRs |
-|---|---|---|
-| **0 — Scaffold + contracts** (#3) | Monorepo, CI matrix, retained CLI-contract harness, the design SSOT + phase-1 schemas, fixture vaults | #61 |
-| **1 — Foundation** (#4) | Contracts, config, vault reader, sqlite-store core, `@atlas/git`, CLI foundation, provisioning, the broker trio + ledger DR | #62–#64, #66 |
-| **2 — Ingest loop** (#5) | Scan engine + guards, sandboxed parser, workflow state machine, durable queue, egress broker + `@atlas/models`, ingest capture | #67, #71–#79 |
-| **3 — Retrieval** (#6) | Chunker + generation fence, embedding write path, hybrid search + RRF, `brain query`, index ops + eval harness | #68, #80–#85 |
-| **4 — Workflows** (#7) | Patch engine, risk/mutation policy, validation, synthesis plan/apply/refresh, trust, purge, the Tier-3 git review lifecycle | #69, #86–#141 |
-| **5 — Graduation** (#8) | Graduation scan/audit/migrate, quarantine, scan ruleset v2, the open type system, the full-corpus live index build + eval gate | #70, #99–#161 |
+| Kept (v2) | Retired (revivable from `v1-fortress`) |
+|---|---|
+| Note model + the 12-op ChangePlan | The integration + egress brokers, all three OS identities, provisioning daemons |
+| Plain SQLite projection + `db rebuild` | `@atlas/scan`, scan-before-persist, quarantine, trust tiers + taint |
+| LanceDB retrieval + the eval gate | The signed audit ledger, the cross-store write protocol, encrypted backup/restore |
+| Synthesis + evidence (the agentic layer under test) | Graduation, authorization challenges + capabilities + budgets |
+| Direct in-process Gemini client | The absorb-cycle sync + canonical-ref indirection |
+| Minimal SQLite-backed jobs queue | The Atlas Console + the authorization signer + `brain watch` |
 
-### The 2026-07-17 full-corpus live drive
-
-The graduation + retrieval pipeline run end-to-end against a **real** vault ([retro](docs/retros/2026-07-18-search-index-live-drive-retro.md), the authoritative account):
-
-- **Graduation apply** (operator-signed, D20): **210 notes, 0 refused, 0 quarantined, 3 renames** — the live `main-vault` HEAD never touched.
-- **Index rebuild**: **199 notes → 1,647 chunks** with real Gemini embeddings in **85 s** (10 empty title-only stubs correctly left unactivated). `index rebuild` ×2 → byte-identical output — determinism proven.
-- **Eval gate** (thresholds **recall@10 ≥ 0.85, MRR ≥ 0.70**): at drive time the gate passed **0.878 / 0.784** on the vector-only fallback, because no FTS index had been built and brute-force lexical matches flooded top-K. **#159 built a real stemmed/stop-word inverted index**; the default **hybrid config now scores 0.911 / 0.830** — hybrid is the recommended default, no fallback.
-
-### Open
-
-Two issues remain open, both real but non-blocking:
-
-- **#60** — graduation E2E remaining slices (workflow runs on the migrated copy, purge E2E across every storage class, the `tools/scale-bench.ts` 5k/50k profiles + CI regression subset). The retrieval-eval and rebuild-consistency slices are done.
-- **#65** — ledger/backup disaster-recovery hardening residuals from the #23 review (seq-allocator rewind on older-cut restore, universal-startup restore recovery, deleted-DB restore, watermark coverage under concurrent backup, retry backoff, force-unblock without the AEAD key).
+The command surface dropped **55 → 24**; exit codes `3` and `6` retired; `@atlas/broker` and `@atlas/scan` are deleted. `v1-fortress` is the sole revival path (code + provisioning only).
 
 ---
 
@@ -194,21 +174,19 @@ Two issues remain open, both real but non-blocking:
 
 Docs live with the code under `docs/`, folder-per-type. Start with the [root constitution](CLAUDE.md); each package carries its own `CLAUDE.md` with operational truth the code can't show.
 
-- **Design SSOT** — [`docs/specs/2026-07-11-atlas-v1-design.md`](docs/specs/2026-07-11-atlas-v1-design.md) (capability + scope + architecture; the `In V1 / Out of V1` list is normative)
-- **Implementation plan** — [`docs/plans/atlas-v1-implementation-2026-07-12.md`](docs/plans/atlas-v1-implementation-2026-07-12.md) (six phases, decisions D1–D20, §2.7 migration ownership, §2.8 cross-store write protocol)
-- **Contract specs** — `docs/specs/*.md`: [security-broker](docs/specs/security-broker-contract.md), [retrieval-index](docs/specs/retrieval-index-contract.md), [jobs](docs/specs/jobs-contract.md), [sandbox](docs/specs/sandbox-contract.md), [normalization](docs/specs/normalization-contract.md), [recovery-state-machine](docs/specs/recovery-state-machine.md), [sqlite-data-dictionary](docs/specs/sqlite-data-dictionary.md), [ledger-backup](docs/specs/ledger-backup-contract.md), [workflow-risk](docs/specs/workflow-risk-contract.md), [acceptance-thresholds](docs/specs/acceptance-thresholds.md), [bootstrap-migration](docs/specs/bootstrap-migration.md)
-- **The one ADR** — [`docs/adr/0001-egress-response-scan-released-bytes.md`](docs/adr/0001-egress-response-scan-released-bytes.md)
-- **CLI contract** — [`docs/specs/cli-contract/`](docs/specs/cli-contract/) (registry `commands.json` + one JSON schema per command + generated overviews)
-- **Retro** — [`docs/retros/2026-07-18-search-index-live-drive-retro.md`](docs/retros/2026-07-18-search-index-live-drive-retro.md)
+- **The v2 decision** — [`docs/adr/0003-retire-security-architecture.md`](docs/adr/0003-retire-security-architecture.md) (supersedes ADR-0001 + ADR-0002) + [`docs/specs/2026-07-21-atlas-v2-single-process-simplification-spec.md`](docs/specs/2026-07-21-atlas-v2-single-process-simplification-spec.md)
+- **CLI contract** — [`docs/specs/cli-contract/`](docs/specs/cli-contract/) (registry `commands.json` version 2 + one JSON schema per command + generated overviews)
+- **V1 design SSOT** — [`docs/specs/2026-07-11-atlas-v1-design.md`](docs/specs/2026-07-11-atlas-v1-design.md) (superseded by the v2 spec + ADR-0003; historical)
+- **Install runbook** — [`docs/install.md`](docs/install.md) (clone → build → point config → migrate/rebuild/index)
 - Full doc map + conventions: [`docs/CLAUDE.md`](docs/CLAUDE.md).
 
 ---
 
 ## Development workflow
 
-- **Contract-first.** `docs/specs/cli-contract/commands.json` is the single owner of command membership/phase/privilege/idempotency. `node tools/gen-cli-contract.ts --check` gates surface drift in CI; `tools/contract-lint.test.ts` (the ~100 KB mega-gate) enforces registry↔fixture↔schema bijection, the SQLite table inventory (executed against `node:sqlite`), the recovery state machine, the authz catalog, and the acceptance-threshold constants against the plan. Generated docs (`commands-overview.md`, `failpoints.generated.md`) are never hand-edited.
-- **CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) — `ubuntu-latest` + `macos-15`, Node 26: `sudo -E provisioning/ci/setup.sh` → `pnpm install --frozen-lockfile` → `pnpm -r build` → `pnpm -r test` (`ATLAS_PROVISIONED=1`, so the two-UID suites never skip) → the contract-drift `--check`.
-- **Test live.** Local verification isn't enough for anything touching the real broker, sandbox, or provider surface — exercise it. Every high-value bug in the trail (scan false positives, identity collisions, FTS flooding) surfaced only against the real 208-note corpus, never synthetic fixtures.
+- **Contract-first.** `docs/specs/cli-contract/commands.json` is the single owner of command membership/phase/privilege/idempotency. `node tools/gen-cli-contract.ts --check` gates surface drift in CI; `tools/contract-lint.test.ts` enforces the registry↔fixture↔schema bijection. Generated docs are never hand-edited.
+- **CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) — **zero-provisioning, daemon-free**: `ubuntu-latest` + `macos-15`, Node 26: `pnpm install --frozen-lockfile` → `pnpm -r build` → `pnpm -r test` → the contract-drift `--check`. The ubuntu leg is a portability canary for the platform-neutral suite (macOS is the supported target).
+- **Test live.** Local verification isn't enough for anything touching the real Gemini surface — exercise it. Every high-value bug in the trail surfaced only against the real corpus, never synthetic fixtures.
 - **Branch + PR for everything.** No direct-to-main; commits authored `Aryeh Stark <aryeh@21stark.com>`. Merge once the PR is green — playground posture, no soak/canary. Docs update in the same change as the behavior they describe.
 
 Agents working in this repo read [`AGENTS.md`](AGENTS.md); the [root `CLAUDE.md`](CLAUDE.md) is the full constitution.

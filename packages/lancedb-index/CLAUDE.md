@@ -1,10 +1,11 @@
-# `@atlas/lancedb-index` — Phase-3 retrieval index
+# `@atlas/lancedb-index` — the retrieval index
 
 Turns notes into fenced, searchable chunk+embedding **generations** in LanceDB and exposes the
 statistical (FTS + vector) retrieval layers. Private, `version 0.0.0`, ESM, `main = dist/index.js`.
 The whole package is engineered around **crash-safety + concurrency correctness**: deterministic
 identity so state is re-derivable, verify-before-activate so partial writes never go live, one
-required lock so retire/compaction can't race activation across processes.
+required lock so retire/compaction can't race activation across processes. Built in Phase 3; carried
+forward unchanged through the Atlas v2 single-process pivot ([ADR-0003](../../docs/adr/0003-retire-security-architecture.md)) — the retrieval layer + eval gate are on the KEPT list.
 
 - **Normative spec (SSOT):** [`docs/specs/retrieval-index-contract.md`](../../docs/specs/retrieval-index-contract.md).
   §8 carries the `retrievalContract` JSON digest that `tools/contract-lint.test.ts` asserts against
@@ -17,8 +18,8 @@ required lock so retire/compaction can't race activation across processes.
 ## Boundary discipline (D14 — stated in every module header)
 
 Imports only `@atlas/contracts` (DTOs + `canonicalSerialize`) + LanceDB/Arrow. **Never** imports
-`apps/cli`, `@atlas/sqlite-store`, `@atlas/models`, or `@atlas/broker` in production — the SQLite
-activation authority and the embedder are injected as **structural interfaces** (`ActivationStore`,
+`apps/cli`, `@atlas/sqlite-store`, or `@atlas/models` in production — the SQLite activation
+authority and the embedder are injected as **structural interfaces** (`ActivationStore`,
 `Embedder`, `EmbedClient`). `@atlas/models` + `@atlas/sqlite-store` are `devDependencies` (tests only).
 `asProviderFault` duck-types a `ProviderCallError` by shape (`kind ∈ PROVIDER_ERROR_KINDS` + boolean
 `retryable`, or `name === "ProviderCallError"`) rather than importing the class; a non-provider throw
@@ -28,21 +29,22 @@ is rethrown, so a bug never masquerades as an embed failure.
 
 | File | Role |
 |---|---|
-| `index.ts` | Barrel; the entire public surface, exports mapped to Tasks 3.1/3.2/3.3/3.5. |
+| `index.ts` | Barrel; the entire public surface. |
 | `chunker.ts` | `chunkNote(note, cfg) → Chunk[]`; `CHUNKER_VERSION = 1`. Byte-identical per `(ParsedNote, IndexingConfig)`. |
 | `generation.ts` | `generationId`/`generationIdFor`, `chunkId`, `indexingConfigKey`; branded `GenerationId`/`ChunkId`. |
 | `schema.ts` | `SearchChunk` row, `SEARCH_CHUNK_TABLE` (`"search_chunks"`), `SEARCH_CHUNK_SCHEMA_VERSION` (`1`), `searchChunkArrowSchema`, `toSearchChunk` (identity validator). |
 | `writer.ts` | Table open/create, idempotent `mergeInsert` write, `verifyComplete`, generation reads, `sqlQuote`. |
 | `activate.ts` | `indexNote` + `reconcileIndex` orchestrators; `ActivationStore`/`Embedder`/`IndexDeps`/`IndexHooks`; the `IndexOutcome` union. |
-| `embedder.ts` | `embedderFromClient` capability-closing adapter; `asProviderFault`. |
-| `retire.ts` | `retireSupersededGenerations`, `compactOrphans` (LanceDB deletes only — never touch SQLite). |
+| `reconcile-notes.ts` | `indexNotes` — the O(delta) scoped reconcile (60-B) analog of `reconcileIndex`; `ReconcileReport`/`ReconcileKind`. |
+| `embedder.ts` | `embedderFromClient` — run-binding adapter over the in-process embed client; `asProviderFault`. |
+| `retire.ts` | `retireSupersededGenerations`, `removeNoteGenerations`, `compactOrphans` (LanceDB deletes only — never touch SQLite). |
 | `lock.ts` | `IndexMaintenanceLock`; two-layer mutex + advisory lockfile. |
 | `retrieval-filter.ts` | `retrieveActiveChunks` — the active-generation fence enforcement point. |
 | `search.ts` | `searchLayers` — FTS + vector ranked candidates; FTS-fallback isolated here. |
 | `fts.ts` | `SEARCH_FTS_ANALYZER` + `ensureFtsIndex` — the English-analyzer inverted index on `text`. |
-| `staleness.ts` / `verify.ts` / `repair.ts` | `computeStaleness` (drift class), `indexVerify` (read-only divergence report), `indexRepair`/`indexRebuild`. |
-| `eval.ts` | `runRetrievalEval` — recall@10 + MRR over labeled fixtures, the graduation gate metric math. |
-| `test/generation-fencing.test.ts` | 1,015 lines — locks fence/crash/lock/empty-note behavior. The correctness core. |
+| `staleness.ts` / `verify.ts` / `repair.ts` | `computeStaleness` (drift class), `indexVerify` (read-only divergence report), `indexRepair`/`indexRebuild`. In v2 the CLI folds `index repair`/`status`/`verify` into the one `index rebuild` command; these stay separate engine functions. |
+| `eval.ts` | `runRetrievalEval` — recall@10 + MRR over labeled fixtures, the `index eval` gate metric math. |
+| `test/generation-fencing.test.ts` | 1,013 lines — locks fence/crash/lock/empty-note behavior. The correctness core. |
 
 **Pipeline (§3), all in `activate.ts::indexNote`:** `chunk → embed → write → verify-complete →
 activate(SQLite CAS) → retire → mark`. Steps 3–6 run inside one `lock.runExclusive`; **embed is
@@ -63,7 +65,7 @@ lock through every `indexNote` + the final `compactOrphans` sweep.
 - **`toSearchChunk` refuses inconsistent rows** — rejects `embedding.length ≠ cfg.dimensions` (D7)
   and a caller-supplied `gen ≠ generationIdFor(...)`. Identity is derived from the DTO, never
   caller-injected. All Arrow columns non-nullable.
-- **SQLite is the sole activation authority (D13).** This package never flips `active_generation*`;
+- **SQLite is the sole activation authority.** This package never flips `active_generation*`;
   it calls the injected `ActivationStore.activateGeneration` CAS (fences on **content-hash unchanged**
   AND **config-revision-not-superseded**) + `tombstoneGeneration`. Epoch is **server-owned** — callers
   pass `indexingConfigKey(cfg)` (config identity), never a raw revision integer.
@@ -81,7 +83,7 @@ lock through every `indexNote` + the final `compactOrphans` sweep.
   tombstone + retire orphaned chunks.
 - **Embedding failures are typed, never thrown across the seam** — `Embedder` returns a discriminated
   `EmbedOutcome`; `embedding-failed` (permanent) / `embedding-retryable` surface as outcomes so
-  `index repair` can converge or escalate.
+  `index rebuild` can converge or escalate.
 - **Eval gate:** `recall@10 ≥ 0.85`, `MRR ≥ 0.70` (default `K=10`). Metric math in `eval.ts`; the
   threshold comparison is enforced CLI-side (`index eval`, exit 1 on miss).
 
@@ -92,7 +94,7 @@ lock through every `indexNote` + the final `compactOrphans` sweep.
   the FTS layer PARTICIPATES with degraded QUALITY (floods top-K with common-term matches) rather than
   degrading to `null` — `search.ts::ftsLayer` only maps *thrown* queries to `null`. A pre-#159 table
   (rows, no analyzer index) stays actively degraded — brute-forced, not fenced — until its next
-  `index rebuild`/`repair`. **This is exactly the #156 failure.** Fix: `ensureFtsIndex` runs at the end
+  `index rebuild`. **This is exactly the #156 failure.** Fix: `ensureFtsIndex` runs at the end
   of every rebuild/repair convergence (`replace: true`, idempotent); it skips a zero-row table (LanceDB
   can't index no rows — `search.ts` degrades to vector-only until the first generation lands).
 - **The FTS analyzer is a single v1 constant, not a config knob.** `SEARCH_FTS_ANALYZER` = `simple`
@@ -102,7 +104,7 @@ lock through every `indexNote` + the final `compactOrphans` sweep.
 - **`weight[vector]` is bounded `(0, 10]` — strictly positive** (schema-enforced): the FTS-fallback
   fuses over the vector layer alone, so a zero vector weight would silently annihilate the only
   surviving layer. `weight[fts]` may be `0`.
-- **The chunker re-scans `note.raw` to recover body spans** because `SectionTree` (Task 1.3) carries
+- **The chunker re-scans `note.raw` to recover body spans** because `SectionTree` carries
   heading hierarchy + unique `path` but NOT bodies/spans, and D14 forbids importing the section model.
   Its ATX-heading + fenced-code rules (`parseAtxHeading`/`openingFence`/`isClosingFence`) MUST stay
   lock-step with `apps/cli` `markdown/{parse,sections,fence}.ts`. `chunkNote` guards drift by matching
@@ -140,11 +142,11 @@ Phase 3, ~6 slices (contracts gate #68, tracker #6) + two 2026-07-18 follow-ups.
 
 - **Task 3.1** schema/chunker/identity — PR #80. **Task 3.5** status/verify/repair/rebuild + staleness
   — PR #84. **Eval harness** shipped CLI-side (#85), then **`eval.ts` moved into this package** in
-  `7fd802f` (#155) for `brain index eval` — the graduation gate.
+  `7fd802f` (#155) for `brain index eval` — the retrieval eval gate.
 - **Task 3.2** embedding + fenced write path — PR #81. **The correctness core.** Heavy multi-round
   review; the code cites **round-2 findings 2/3/5/6** (retire/compaction races, orphan-invisibility,
   empty-note policy) and **round-3 findings 1/2/3/4/6** (required cross-process lock, fenced tombstone,
-  server-owned epoch by config identity, rollback, capability-closing embedder).
+  server-owned epoch by config identity, rollback, the run-binding embedder adapter).
 - **Task 3.3** hybrid search — PR #82 (`9aa20de`): shipped `search.ts` with the FTS-maturity fallback
   isolated here, and **deferred FTS *index creation* to index-ops (#42)** ("search degrades correctly
   until it exists"). That deferral is the bug that bit — the index was never actually built until #159.
@@ -158,22 +160,24 @@ Phase 3, ~6 slices (contracts gate #68, tracker #6) + two 2026-07-18 follow-ups.
   strongest layer. **Hybrid is now the recommended default; `fts.enabled:false` is the retained safety
   valve.** Authoritative retro:
   [`docs/retros/2026-07-18-search-index-live-drive-retro.md`](../../docs/retros/2026-07-18-search-index-live-drive-retro.md).
-- **#157 → PR #161** (`ba39e3e`): `index eval` validates the eval-set files before connecting egress —
-  CLI-side, did not touch this package.
+- **#157 → PR #161** (`ba39e3e`): `index eval` validates the eval-set files before making any embed
+  call — CLI-side, did not touch this package.
 
-## Live-drive gotcha (folds into `apps/cli` / broker / install docs)
+## Live-drive gotcha (folds into `apps/cli` / install docs)
 
-Every mint-bearing command that reaches this package's paths — `index rebuild`, `index eval`, `query` —
-needs **`ATLAS_EGRESS_CAPABILITY_KEY`** exported: the CLI mints an embed capability against the same
-secret the egress daemon verifies. `index rebuild` correctly leaves title-only stubs unactivated (10 of
-209 on the 2026-07-17 drive).
+Every embed-bearing command that reaches this package's paths — `index rebuild`, `index eval`, `query`
+— needs the **Gemini API key** resolvable: `ATLAS_GEMINI_API_KEY` (env override wins) or the macOS
+Keychain generic-password service `atlas-gemini-api-key`. The in-process Gemini client (`@atlas/models`)
+resolves it **lazily on the first embed call** and threads only a run-id binding (`{ runId }`) into
+`models.embed(req, run)` — no egress broker, no capability mint, no daemon ([ADR-0003](../../docs/adr/0003-retire-security-architecture.md)).
+`index rebuild` correctly leaves title-only stubs unactivated (10 of 209 on the 2026-07-17 drive).
 
 ## Open items / follow-ups
 
-- **#60** (open) — graduation E2E remaining slices touching this package: `tools/scale-bench.ts`
-  (synthetic 5k/50k profiles; §scale gate spec'd but unbenchmarked), ingest→index auto-hook.
-  Rebuild-consistency already proven deterministic (`index rebuild ×2` → identical 199 notes / 1,647
-  chunks; chunk-id set guaranteed identical by contract §1 even though embedding vector bytes may differ).
+- **#60** — the remaining slice touching this package is `tools/scale-bench.ts` (synthetic 5k/50k
+  profiles; §scale gate spec'd but not yet benchmarked — the file doesn't exist yet). Rebuild-consistency
+  already proven deterministic (`index rebuild ×2` → identical 199 notes / 1,647 chunks; the chunk-id
+  set is guaranteed identical by contract §1 even though embedding vector bytes may differ).
 - **FTS analyzer configurability** — deferred until a second analyzer is needed (needs a co-versioned
   query-side switch); currently a single documented v1 constant.
 - **LanceDB-native FTS follow-up** — the maturity fallback (`retrieval.fts.enabled`) stays the safety

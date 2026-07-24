@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "atlas://cli-contract/evidence-review.schema.json",
   "title": "brain evidence review [<note>] — --json success output",
-  "description": "Paginated read-only listing of evidence needing attention (stale, pending, or failed re-verification), optionally scoped to a single note. Non-mutating. Exit 0 with the (possibly empty) page.",
+  "description": "Paginated read-only listing of v2 vault-derived evidence needing attention (status other than resolved: pending, failed, or needs-review), optionally scoped to a single note. Non-mutating. Exit 0 with the (possibly empty) page.",
   "type": "object",
   "unevaluatedProperties": false,
   "required": ["command", "items", "pagination"],
@@ -14,13 +14,17 @@
       "items": {
         "type": "object",
         "unevaluatedProperties": false,
-        "required": ["evidenceId", "noteId", "state"],
+        "required": ["evidenceId", "noteId", "state", "target"],
         "properties": {
           "evidenceId": { "type": "string", "minLength": 1 },
-          "noteId": { "type": "string", "minLength": 1, "description": "The owning note." },
+          "noteId": { "type": "string", "minLength": 1, "description": "The soft-referenced owning note." },
           "state": {
-            "enum": ["stale", "pending", "failed"],
-            "description": "Why the evidence needs attention: stale = rendition moved and re-verification not yet run; pending = re-verification in flight; failed = re-verification failed."
+            "enum": ["pending", "failed", "needs-review"],
+            "description": "Why the evidence needs attention: pending = not yet checked; failed = reverification failed; needs-review = target missing or source drifted (stale)."
+          },
+          "target": {
+            "enum": ["present", "missing"],
+            "description": "Best-effort read-time resolution of the soft noteId/sectionPath: missing = the note no longer resolves (deleted/renamed) — eligible for needs-review, never a crash."
           },
           "detail": { "type": "string" },
           "updatedAt": { "type": "string" }
@@ -43,7 +47,7 @@
     {
       "command": "evidence review",
       "items": [
-        { "evidenceId": "ev-01J9Z8Q0000000000000000000", "noteId": "project-meridian", "state": "stale", "detail": "rendition superseded; re-verification pending", "updatedAt": "2026-07-13T10:00:00.000Z" }
+        { "evidenceId": "ev-meridian-2025", "noteId": "project-meridian", "state": "needs-review", "target": "present", "detail": "source note edited since last fold (stale)", "updatedAt": "2026-07-13T10:00:00.000Z" }
       ],
       "pagination": { "limit": 50, "offset": 0, "total": 1, "hasMore": false }
     }
@@ -54,8 +58,8 @@
     "privilege": "shared",
     "idempotency": "none",
     "executionClass": "read",
-    "summary": "Paginated read-only listing of evidence needing attention (stale/pending/failed), optionally scoped to a note.",
-    "ordering": { "sortKey": "updatedAt", "direction": "desc", "tieBreaker": "evidenceId", "note": "stable total order (updatedAt, evidenceId)." },
+    "summary": "Paginated read-only listing of v2 evidence needing attention (pending/failed/needs-review), optionally scoped to a note.",
+    "ordering": { "sortKey": "createdAt", "direction": "desc", "tieBreaker": "evidenceId", "note": "stable total order (createdAt, evidenceId); `updatedAt` in the payload is the row's lastCheckedAt or createdAt." },
     "args": [
       { "arg": "<note>", "type": "string", "required": false, "description": "Optional note id/handle to scope the listing to a single note." }
     ],

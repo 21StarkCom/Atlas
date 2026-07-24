@@ -44,11 +44,10 @@ import { openStore, registerGenerationMigration, type Store } from "@atlas/sqlit
 import {
   ModelsClient,
   ProviderCallError,
-  mintEgressCapability,
-  type EgressCapability,
   type EmbedResult,
   type Invoker,
   type ModelCallReceipt,
+  type RunBinding,
 } from "@atlas/models";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -908,23 +907,13 @@ describe("permanent embedding failure — a typed, repairable outcome", () => {
   });
 });
 
-describe("the capability-closing embedder adapter drives a REAL ModelsClient (round-3 finding 6)", () => {
+describe("the run-binding-closing embedder adapter drives a REAL ModelsClient (round-3 finding 6)", () => {
   const RUN_ID = "01J9Z8Q0000000000000000000";
 
-  /** A real minted, run-bound egress capability (D19) — the SECOND arg the real API requires. */
-  function capability(): EgressCapability {
-    return mintEgressCapability(
-      { runId: RUN_ID },
-      {
-        operation: "embed",
-        model: OLD_CFG.embedding_model,
-        maxBytes: 1_000_000,
-        maxTokens: 1_000_000,
-        costCeiling: 1_000_000,
-        allowedSensitivity: "internal",
-      },
-      { secret: "test-mint-secret" },
-    );
+  /** The run binding — the SECOND arg the real API requires post the in-process
+   * cutover (no capability mint; the receipt attributes to `runId`). */
+  function capability(): RunBinding {
+    return { runId: RUN_ID };
   }
 
   /** A minimal receipt (the client just hands it to the sink; it is not re-validated). */
@@ -935,10 +924,12 @@ describe("the capability-closing embedder adapter drives a REAL ModelsClient (ro
     return new ModelsClient(invoker, async () => {});
   }
 
-  it("threads the capability into ModelsClient.embed(request, capability, options) and returns vectors", async () => {
-    let seenCap: EgressCapability | undefined;
+  it("threads the run binding into ModelsClient.embed(request, run, options) and returns vectors", async () => {
+    let seenRunId: string | undefined;
+    let seenOperation: string | undefined;
     const invoker: Invoker = async (params) => {
-      seenCap = params.capability;
+      seenRunId = params.runId;
+      seenOperation = params.body.operation;
       const result: EmbedResult = {
         vectors: [Array(DIMS).fill(0.5), Array(DIMS).fill(0.5)],
         dimensions: DIMS,
@@ -952,10 +943,9 @@ describe("the capability-closing embedder adapter drives a REAL ModelsClient (ro
     const out = await embed(["alpha", "beta"]);
     expect(out.ok).toBe(true);
     if (out.ok) expect(out.vectors.length).toBe(2);
-    // The adapter closed over the capability and passed it through to the real embed.
-    expect(seenCap).toBeDefined();
-    expect(seenCap!.claims.operation).toBe("embed");
-    expect(seenCap!.claims.runId).toBe(RUN_ID);
+    // The adapter closed over the run binding and passed it through to the real embed.
+    expect(seenOperation).toBe("embed");
+    expect(seenRunId).toBe(RUN_ID);
   });
 
   it("a permanent ProviderCallError thrown across the real client becomes a non-retryable typed failure", async () => {
@@ -1010,7 +1000,7 @@ describe("the capability-closing embedder adapter drives a REAL ModelsClient (ro
   });
 
   it("a non-provider throw (a bug) is NOT swallowed by the adapter", async () => {
-    const buggy = { embed: async () => { throw new TypeError("boom"); } } satisfies EmbedClient<EgressCapability>;
+    const buggy = { embed: async () => { throw new TypeError("boom"); } } satisfies EmbedClient<RunBinding>;
     await expect(embedderFromClient(buggy, capability(), OLD_CFG)(["x"])).rejects.toThrow("boom");
   });
 });

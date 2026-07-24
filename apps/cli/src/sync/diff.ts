@@ -20,6 +20,111 @@ import type { Repo } from "@atlas/git";
 
 const execFileAsync = promisify(execFile);
 
+// ===========================================================================
+// v2 reconciliation routine (#329, Phase-3 task 5) — the ONE SSOT differ.
+// ===========================================================================
+//
+// v2 retires the absorb-cycle's HEAD cursor: the SQLite projection's per-note
+// `content_hash` IS the cursor. `reconcile` classifies the vault working tree
+// against that projection, matched by the note's STABLE frontmatter `id` (never
+// its path — a rename keeps the id and moves the path). Both `sync` (to act) and
+// `status` (read-only, for the pending counts) consume this exact function, so
+// the two can never disagree about the pending set.
+//
+// The four buckets are DISJOINT and a content change ALWAYS wins:
+//   - **new**     — a vault id absent from the projection.
+//   - **dropped** — a projection id absent from the vault (purged, not archived).
+//   - **moved**   — same id, IDENTICAL content hash, different path. Path-only ⇒
+//                   no re-embed; the handler updates `file_path` in place.
+//   - **changed** — same id, DIFFERENT content hash. Carries the (possibly new)
+//                   path. A rename-plus-edit (new path AND new hash) is `changed`
+//                   (never `moved`): the handler updates `file_path` AND
+//                   re-embeds exactly once.
+// A vault note whose id, hash, AND path all match the projection is UNCHANGED —
+// it appears in no bucket. An empty result set is a structural noop.
+
+/** A vault ↔ projection note keyed by its stable frontmatter id. */
+export interface ReconcileNote {
+  readonly noteId: string;
+  readonly path: string;
+  readonly contentHash: string;
+}
+
+/** A pure move: same id + identical content, path relocated. No re-embed. */
+export interface ReconcileMove {
+  readonly noteId: string;
+  readonly fromPath: string;
+  readonly toPath: string;
+  /** The (unchanged) content hash shared by both sides — proof it is path-only. */
+  readonly contentHash: string;
+}
+
+/** The classification result. `reindexed = changed + new` is DERIVABLE (consumers sum) — not stored. */
+export interface ReconcileResult {
+  /** Content changed (carries the current path — possibly relocated too). Re-embedded. */
+  readonly changed: readonly ReconcileNote[];
+  /** Present in the vault, absent from the projection. Indexed fresh. */
+  readonly new: readonly ReconcileNote[];
+  /** Present in the projection, absent from the vault. Purged cross-store. */
+  readonly dropped: readonly ReconcileNote[];
+  /** Same id + identical content, relocated. Path updated in place; no re-embed. */
+  readonly moved: readonly ReconcileMove[];
+}
+
+/**
+ * Classify the vault working tree against the SQLite projection by stable id.
+ * Pure and deterministic; every bucket is sorted by `noteId` for a stable
+ * envelope. `vault` is every successfully-parsed working-tree note; `projection`
+ * is every `notes` row. A duplicate id in either input is a caller error (the
+ * vault reader surfaces duplicate ids as a fatal error before `sync` reconciles);
+ * here the LAST occurrence wins, deterministically.
+ */
+export function reconcile(
+  vault: readonly ReconcileNote[],
+  projection: readonly ReconcileNote[],
+): ReconcileResult {
+  const proj = new Map<string, ReconcileNote>();
+  for (const p of projection) proj.set(p.noteId, p);
+  const vaultById = new Map<string, ReconcileNote>();
+  for (const v of vault) vaultById.set(v.noteId, v);
+
+  const changed: ReconcileNote[] = [];
+  const created: ReconcileNote[] = [];
+  const moved: ReconcileMove[] = [];
+
+  for (const v of vaultById.values()) {
+    const p = proj.get(v.noteId);
+    if (p === undefined) {
+      created.push(v);
+      continue;
+    }
+    if (p.contentHash !== v.contentHash) {
+      // Content-change WINS — even if the path also moved (rename-plus-edit),
+      // this is `changed` carrying the current path, never `moved`.
+      changed.push(v);
+      continue;
+    }
+    // Identical content hash from here.
+    if (p.path !== v.path) {
+      moved.push({ noteId: v.noteId, fromPath: p.path, toPath: v.path, contentHash: v.contentHash });
+    }
+    // else: id + hash + path all match ⇒ unchanged ⇒ no bucket.
+  }
+
+  const dropped: ReconcileNote[] = [];
+  for (const p of proj.values()) {
+    if (!vaultById.has(p.noteId)) dropped.push(p);
+  }
+
+  const byId = (a: { noteId: string }, b: { noteId: string }): number =>
+    a.noteId < b.noteId ? -1 : a.noteId > b.noteId ? 1 : 0;
+  changed.sort(byId);
+  created.sort(byId);
+  dropped.sort(byId);
+  moved.sort(byId);
+  return { changed, new: created, dropped, moved };
+}
+
 export type Divergence =
   | { readonly state: "ok" }
   | { readonly state: "non-ancestral"; readonly cursorOid: string; readonly upstreamHead: string }

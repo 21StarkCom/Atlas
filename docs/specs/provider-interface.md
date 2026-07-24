@@ -1,4 +1,16 @@
-# Provider interface contract (normative) — Atlas V1 Phase 2
+# Provider interface contract — Atlas V1 Phase 2
+
+> **SUPERSEDED (2026-07-22, phase-2-in-process-cutover · task 2.1).** The IPC/egress-broker
+> framing this document mandates is **retired**. The Gemini adapter, the provider credential, and
+> the outbound network now live **IN-PROCESS** inside `@atlas/models`: there is **no egress-broker
+> seam, no run-bound capability, no in-broker payload/response scan, and no per-run budget**, and the
+> operation signatures are `(req, run: RunBinding, signal?)` — a `RunBinding` (`{ runId }`), NOT a
+> `(req, cap, signal?)` capability arg. The **normative** description of the surviving in-process
+> interface is the `@atlas/models` package doc + code: [`packages/models/CLAUDE.md`](../../packages/models/CLAUDE.md)
+> and `packages/models/src/client.ts` (`ModelsClient`, `createInProcessInvoker`, `EgressInvokeParams`).
+> The sections below are retained **for historical reference only** (request/result shapes, batch
+> semantics, the `AbortSignal` contract, and the `ProviderError` taxonomy binding are still accurate;
+> everything about the broker seam / capability / in-broker scan is not).
 
 **Owner task:** 2.0 · **Consumed by:** Task 2.8 (`@atlas/models` typed IPC client + the Gemini adapter
 inside the egress broker). This fixes the request/result types, batch semantics, the `AbortSignal`
@@ -6,10 +18,11 @@ contract, and the binding to the `ProviderError` taxonomy (`@atlas/contracts`). 
 **extraction/classification/synthesis only** — it is provably restricted to non-mutating provider
 calls; it never touches the vault, git, or the ledger.
 
-> Seam. Every provider call crosses the egress-broker IPC seam (D10). The request/result shapes here
-> are the framed-JSON messages validated by `@atlas/contracts` schemas on both sides. Each call
-> carries a run-bound capability (D19) and is scanned in-broker (payload + response). This contract
-> defines the CLIENT surface; the broker's capability/budget/scan enforcement is Task 2.8.
+> Seam _(historical — superseded above)_. Every provider call crossed the egress-broker IPC seam
+> (D10). The request/result shapes here are the framed-JSON messages validated by `@atlas/contracts`
+> schemas on both sides. Each call carried a run-bound capability (D19) and was scanned in-broker
+> (payload + response). This contract defined the CLIENT surface; the broker's capability/budget/scan
+> enforcement was Task 2.8.
 
 ## 1. Operations
 

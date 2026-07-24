@@ -32,11 +32,8 @@ import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { platform, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { PrePersistenceGuard, type QuarantineSink, type SecretFinding } from "@atlas/scan";
 import {
   normalize,
-  runInSandbox,
-  selectBackend,
   EXTRACTOR_VERSION,
   NORMALIZER_VERSION,
   EXTRACTOR_PINS,
@@ -49,39 +46,61 @@ import {
 const FIXTURES = fileURLToPath(new URL("../../../fixtures/inputs/", import.meta.url));
 const fx = (name: string): string => join(FIXTURES, name);
 
-/**
- * Synchronous sandbox-support probe (host primitives only, no worker launch) so the
- * describe blocks can gate at collection time. A provisioned CI host must support it.
- */
-const BACKEND = selectBackend();
-const SANDBOX_SUPPORTED = BACKEND !== null && BACKEND.probe().every((c) => c.available);
-const REQUIRE_SUPPORTED =
-  process.env.ATLAS_SANDBOX_REQUIRE === "1" || (process.env.CI === "true" && platform() === "darwin");
-/** `describe` when the sandbox is available, else a loud-skipping `describe.skip`. */
-const sandboxDescribe = SANDBOX_SUPPORTED ? describe : describe.skip;
+// v2 (#334): the sandbox jail + scan guard are retired — normalize() parses
+// in-process, so these conformance rows run unconditionally on every host.
+const sandboxDescribe = describe;
 
-/** A sink that must never be called by these clean fixtures — a call is a test failure. */
-class NoopSink implements QuarantineSink {
-  calls = 0;
-  quarantine(_: { bytes: Uint8Array; origin: string; findings: readonly SecretFinding[] }): Promise<void> {
-    this.calls++;
-    return Promise.resolve();
-  }
-}
-
-/** Fresh guard per call (the guard is stateless, but a fresh sink keeps assertions local). */
-function freshGuard(): { guard: PrePersistenceGuard; sink: NoopSink } {
-  const sink = new NoopSink();
-  return { guard: new PrePersistenceGuard(sink), sink };
-}
-
-/** Normalize `path` with a fresh clean guard; assert the guard's sink never fired. */
+/** Normalize `path` through the guard-free v2 surface. */
 async function run(path: string): Promise<NormalizeResult> {
-  const { guard, sink } = freshGuard();
-  const result = await normalize({ path, guard });
-  expect(sink.calls).toBe(0);
-  return result;
+  return normalize({ path });
 }
+
+describe("contract constants + pins (host-independent)", () => {
+  it("exposes each format's locatorScheme via the contract table", () => {
+    expect(LOCATOR_SCHEME).toEqual({
+      markdown: "char-offset",
+      text: "char-offset",
+      pdf: "pdf-page-span",
+      html: "dom-anchor",
+    });
+  });
+
+
+  it("PINS the parse5 extractor version — the RESOLVED package version must equal the pin", () => {
+    // Ties EXTRACTOR_VERSION to the ACTUALLY-RESOLVED parse5 so an upgrade is a conscious
+    // change (a new rendition identity), never silent drift (review hint: pin the extractor
+    // lib). Asserting the range's textual lower bound is NOT enough — a floating `^8.0.1`
+    // could resolve to a later 8.x that changes extraction without bumping extractorVersion
+    // (wing round-3 finding 6). So we (a) read the version parse5 ACTUALLY resolves to and
+    // (b) require the manifest pin through the workspace catalog (no floating range).
+    const pkgUrl = fileURLToPath(new URL("../package.json", import.meta.url));
+    const resolved = resolvedParse5Version(pkgUrl);
+    expect(resolved).toBe(EXTRACTOR_PINS.parse5);
+    // The manifest must reference the catalog (the single exact version source), not a range.
+    const pkg = JSON.parse(readFileSync(pkgUrl, "utf8")) as { dependencies?: Record<string, string> };
+    expect(pkg.dependencies?.parse5).toBe("catalog:");
+  });
+
+  it("binary-PDF charset cells are genuinely inapplicable (documented against the contract)", () => {
+    // The contract fixes pdf.encodings = ["binary"]: there is no text charset to reject,
+    // so the generic `unsupported-encoding` / BOM-variant cells do NOT apply to PDF. Its
+    // analogues are the PDF-specific rejections (encrypted / no-extractable-text /
+    // partial-extraction), all covered below. This asserts the omission is contract-driven.
+    const contractMd = readFileSync(
+      fileURLToPath(new URL("../../../docs/specs/normalization-contract.md", import.meta.url)),
+      "utf8",
+    );
+    const block = /```json normalizationContract\n([\s\S]*?)\n```/.exec(contractMd);
+    expect(block).not.toBeNull();
+    const contract = JSON.parse(block![1]!) as { formats: { format: string; encodings: string[] }[] };
+    const byFormat = new Map(contract.formats.map((f) => [f.format, f.encodings]));
+    expect(byFormat.get("pdf")).toEqual(["binary"]);
+    // The text formats + html DO carry text charsets (so their charset cells apply).
+    for (const f of ["markdown", "text", "html"]) {
+      expect(byFormat.get(f)!.some((e) => e.startsWith("utf-8"))).toBe(true);
+    }
+  });
+});
 
 const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
 
@@ -125,58 +144,6 @@ function write(name: string, bytes: Uint8Array): string {
 // Host-independent checks (no sandbox needed).
 // ---------------------------------------------------------------------------
 
-describe("contract constants + pins (host-independent)", () => {
-  it("exposes each format's locatorScheme via the contract table", () => {
-    expect(LOCATOR_SCHEME).toEqual({
-      markdown: "char-offset",
-      text: "char-offset",
-      pdf: "pdf-page-span",
-      html: "dom-anchor",
-    });
-  });
-
-  it("provisioned CI hosts must support the sandbox (no green-skip of the matrix)", () => {
-    if (REQUIRE_SUPPORTED && !SANDBOX_SUPPORTED) {
-      throw new Error("[normalization-conformance] provisioned CI host must support the sandbox but does not");
-    }
-    expect(true).toBe(true);
-  });
-
-  it("PINS the parse5 extractor version — the RESOLVED package version must equal the pin", () => {
-    // Ties EXTRACTOR_VERSION to the ACTUALLY-RESOLVED parse5 so an upgrade is a conscious
-    // change (a new rendition identity), never silent drift (review hint: pin the extractor
-    // lib). Asserting the range's textual lower bound is NOT enough — a floating `^8.0.1`
-    // could resolve to a later 8.x that changes extraction without bumping extractorVersion
-    // (wing round-3 finding 6). So we (a) read the version parse5 ACTUALLY resolves to and
-    // (b) require the manifest pin through the workspace catalog (no floating range).
-    const pkgUrl = fileURLToPath(new URL("../package.json", import.meta.url));
-    const resolved = resolvedParse5Version(pkgUrl);
-    expect(resolved).toBe(EXTRACTOR_PINS.parse5);
-    // The manifest must reference the catalog (the single exact version source), not a range.
-    const pkg = JSON.parse(readFileSync(pkgUrl, "utf8")) as { dependencies?: Record<string, string> };
-    expect(pkg.dependencies?.parse5).toBe("catalog:");
-  });
-
-  it("binary-PDF charset cells are genuinely inapplicable (documented against the contract)", () => {
-    // The contract fixes pdf.encodings = ["binary"]: there is no text charset to reject,
-    // so the generic `unsupported-encoding` / BOM-variant cells do NOT apply to PDF. Its
-    // analogues are the PDF-specific rejections (encrypted / no-extractable-text /
-    // partial-extraction), all covered below. This asserts the omission is contract-driven.
-    const contractMd = readFileSync(
-      fileURLToPath(new URL("../../../docs/specs/normalization-contract.md", import.meta.url)),
-      "utf8",
-    );
-    const block = /```json normalizationContract\n([\s\S]*?)\n```/.exec(contractMd);
-    expect(block).not.toBeNull();
-    const contract = JSON.parse(block![1]!) as { formats: { format: string; encodings: string[] }[] };
-    const byFormat = new Map(contract.formats.map((f) => [f.format, f.encodings]));
-    expect(byFormat.get("pdf")).toEqual(["binary"]);
-    // The text formats + html DO carry text charsets (so their charset cells apply).
-    for (const f of ["markdown", "text", "html"]) {
-      expect(byFormat.get(f)!.some((e) => e.startsWith("utf-8"))).toBe(true);
-    }
-  });
-});
 
 // ---------------------------------------------------------------------------
 // Valid documents — one per format (committed fixtures).
@@ -1144,19 +1111,19 @@ sandboxDescribe("html inline whitespace + verbatim alt (wing round-3 findings 2 
 });
 
 // ---------------------------------------------------------------------------
-// Gaps survive the raw runInSandbox result (wing round-2 finding 2, launcher layer).
+// Gaps survive on the normalize result (v2 #334: the launcher layer is retired).
 // ---------------------------------------------------------------------------
 
-sandboxDescribe("runInSandbox surfaces validated gap metadata", () => {
-  it("an HTML image with no alt yields an image-no-alt gap on the sandbox result", async () => {
+sandboxDescribe("normalize surfaces validated gap metadata", () => {
+  it("an HTML image with no alt yields an image-no-alt gap on the rendition", async () => {
     const base = mkdtempSync(join(tmpdir(), "atlas-gaps-"));
     try {
       const input = join(base, "img.html");
       writeFileSync(input, `<!doctype html><html><body><p>hi</p><img src="x.png"></body></html>`);
-      const res = await runInSandbox({ inputPath: input, format: "html", denyReadRoots: [base] });
+      const res = await run(input);
       expect(res.ok).toBe(true);
       if (!res.ok) return;
-      expect(res.gaps).toEqual([{ kind: "image-no-alt", locator: "dom:/html[1]/body[1]/img[1]" }]);
+      expect(res.rendition.gaps).toEqual([{ kind: "image-no-alt", locator: "dom:/html[1]/body[1]/img[1]" }]);
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
@@ -1173,17 +1140,15 @@ sandboxDescribe("file-replacement race (scanned snapshot is authoritative)", () 
   it("a mid-flight replacement of the source path never changes the rendition", async () => {
     const ORIGINAL = "ORIGINAL snapshot content - exactly the scanned bytes";
     const path = write("race.md", enc(ORIGINAL));
-    const { guard, sink } = freshGuard();
     // Start normalize: it synchronously stat()s + reads the raw bytes BEFORE its first
     // await, so the snapshot is captured now. Deliberately do NOT await yet.
-    const pending = normalize({ path, guard });
+    const pending = normalize({ path });
     // Replace the on-disk bytes before the confined worker opens its handle. A worker that
     // re-opened `path` (the pre-fix behaviour) would parse THIS replacement; the staged
     // snapshot must make that impossible.
     writeFileSync(path, enc("REPLACED later content - must never be parsed"));
 
     const r = await pending;
-    expect(sink.calls).toBe(0);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     // The rendition reflects the scanned snapshot, never the replacement.
@@ -1222,8 +1187,7 @@ describe("unsupported source extension", () => {
     try {
       const path = join(dir, "data.bin");
       writeFileSync(path, enc("whatever"));
-      const { guard } = freshGuard();
-      await expect(normalize({ path, guard })).rejects.toBeInstanceOf(UnsupportedSourceError);
+      await expect(normalize({ path })).rejects.toBeInstanceOf(UnsupportedSourceError);
     } finally {
       if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
     }
@@ -1242,8 +1206,7 @@ describe("non-regular-file source (finding 4)", () => {
       // A DIRECTORY carrying a supported extension — opens fine but is not a regular file.
       const notAFile = join(dir, "source.md");
       mkdirSync(notAFile);
-      const { guard } = freshGuard();
-      await expect(normalize({ path: notAFile, guard })).rejects.toBeInstanceOf(IrregularSourceError);
+      await expect(normalize({ path: notAFile })).rejects.toBeInstanceOf(IrregularSourceError);
     } finally {
       if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
     }

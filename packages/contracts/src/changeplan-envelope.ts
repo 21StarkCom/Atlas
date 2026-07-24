@@ -6,8 +6,14 @@
  */
 import { z } from "zod";
 
-/** Risk tier a change proposes (Tier-2 auto-commit vs Tier-3 review, plan §2.5). */
-export const RISK_TIERS = ["tier-1", "tier-2", "tier-3"] as const;
+/**
+ * Risk tier a change proposes. v2 (#335, ADR-0003): the Tier-3 = review-required
+ * escalation is retired with the trust/review architecture — a v2 change either
+ * applies deterministically (tier-1, captures) or is a model-authored synthesis
+ * that applies directly (tier-2). There is no review-pending path, so no tier-3.
+ * The field is advisory only (never read to gate an apply).
+ */
+export const RISK_TIERS = ["tier-1", "tier-2"] as const;
 export type RiskTier = (typeof RISK_TIERS)[number];
 
 /** Reversibility class of a proposed change. */

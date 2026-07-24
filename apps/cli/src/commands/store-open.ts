@@ -15,7 +15,7 @@ import { existsSync } from "node:fs";
 import { openStore, registerGenerationMigration, registerSyncCursorsMigration, type Store } from "@atlas/sqlite-store";
 import { registerJobsMigration } from "@atlas/jobs";
 import { CliError, EXIT } from "../errors/envelope.js";
-import { ledgerDbPath } from "./backup-config.js";
+import { ledgerDbPath } from "./paths.js";
 import { openWorkflowStore, registerWorkflowMigrations } from "../workflows/index.js";
 import type { RunContext } from "../handlers.js";
 
@@ -69,12 +69,41 @@ function isMigrated(store: Store): boolean {
   return store.db.prepare(`SELECT 1 FROM db_schema_migrations WHERE id = ?`).get(CORE_MIGRATION_ID) !== undefined;
 }
 
+/** The first required table that is absent from `store`, or `null` if all present. */
+function firstMissingTable(store: Store, required: readonly string[]): string | null {
+  const has = store.db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`);
+  for (const t of required) {
+    if (has.get(t) === undefined) return t;
+  }
+  return null;
+}
+
+/**
+ * The projection tables a read-only synthesis PREVIEW (`enrich`/`reconcile`/
+ * `maintain`) queries: the `0001_core` note projections AND the `0014_evidence_v2`
+ * flat `evidence` projection (read by the maintain unverified-evidence detector).
+ * `openMigratedStore`'s bare `0001_core` check is NOT enough — a ledger migrated to
+ * core but not `0014` would pass it and then die with an internal `no such table:
+ * evidence` when the preview queries the evidence table. Requiring these up front
+ * turns that into the typed `db-unavailable` exit 2 (no DDL applied). (The v1
+ * `claims`/`claim_evidence` tables were forward-dropped by `0014` — #337.)
+ */
+export const PREVIEW_PROJECTION_TABLES: readonly string[] = [
+  "notes",
+  "note_identity_keys",
+  "note_links",
+  "evidence",
+];
+
 /**
  * Open the ledger store, asserting it is ALREADY migrated. Never creates the DB
- * file and never applies DDL — the caller (rebuild / status) is not the schema
- * owner. The caller owns closing the returned store.
+ * file and never applies DDL — the caller (rebuild / status / a read-only preview)
+ * is not the schema owner. Pass `requiredTables` to additionally assert the feature
+ * tables the caller queries are present, so a partially-migrated ledger fails with a
+ * typed `db-unavailable` (exit 2) instead of an internal no-such-table error. The
+ * caller owns closing the returned store.
  */
-export function openMigratedStore(ctx: RunContext): Store {
+export function openMigratedStore(ctx: RunContext, requiredTables: readonly string[] = []): Store {
   const dbPath = ledgerDbPath(ctx);
   if (!existsSync(dbPath)) throw dbUnavailable(dbPath, "no ledger database exists yet");
 
@@ -88,6 +117,11 @@ export function openMigratedStore(ctx: RunContext): Store {
   if (!isMigrated(store)) {
     store.close();
     throw dbUnavailable(dbPath, "the ledger has not been migrated (0001_core absent)");
+  }
+  const missing = firstMissingTable(store, requiredTables);
+  if (missing !== null) {
+    store.close();
+    throw dbUnavailable(dbPath, `a required projection table is absent (${missing}) — the ledger is only partially migrated`);
   }
   return store;
 }

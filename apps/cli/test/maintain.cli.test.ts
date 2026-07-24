@@ -1,7 +1,7 @@
 /**
  * `maintain.cli` (Task 4.11) — the wired `brain maintain` command. PREVIEW (default) dispatches
  * through the real router, runs the deterministic detector, and reports schema-valid findings +
- * the run's effective risk with NO daemon and NO sink. (The detector's own cases are covered by
+ * the findings with NO daemon and NO sink. (The detector's own cases are covered by
  * `maintain.test`; the apply → tiered-synthesis loop reuses the assembly proven by `enrich.e2e`.)
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -13,7 +13,7 @@ import type { ParsedNote, VaultSnapshot, WikiLink } from "@atlas/contracts";
 import { openStore, rebuildProjections } from "@atlas/sqlite-store";
 import { buildSectionTree } from "../src/markdown/sections.js";
 import { splitFrontmatter } from "../src/markdown/parse.js";
-import { parseArgs, instructionFor, effectiveRisk } from "../src/commands/maintain.js";
+import { parseArgs, instructionFor } from "../src/commands/maintain.js";
 import { runCli } from "../src/main.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..", "..", "..");
@@ -90,27 +90,22 @@ describe("maintain argument + mapping helpers (Task 4.11)", () => {
     expect(() => parseArgs(["--nope"])).toThrow(/unknown flag/);
     expect(() => parseArgs(["positional"])).toThrow(/unexpected argument/);
   });
-  it("effectiveRisk takes the highest tier; empty ⇒ tier-0", () => {
-    expect(effectiveRisk([])).toBe("tier-0");
-    expect(effectiveRisk(["tier-2", "tier-3", "tier-2"])).toBe("tier-3");
-    expect(effectiveRisk(["tier-2"])).toBe("tier-2");
-  });
   it("instructionFor derives a destructive vs re-verification prompt by kind", () => {
-    expect(instructionFor({ kind: "orphan-note", noteId: "n", detail: "d", minTier: "tier-3" })).toMatch(/orphan/);
-    expect(instructionFor({ kind: "unverified-evidence", noteId: "n", detail: "d", minTier: "tier-2" })).toMatch(/re-verification/);
+    expect(instructionFor({ kind: "orphan-note", noteId: "n", detail: "d", destructive: true })).toMatch(/orphan/);
+    expect(instructionFor({ kind: "unverified-evidence", noteId: "n", detail: "d", destructive: false })).toMatch(/re-verification/);
   });
 });
 
 describe("brain maintain (preview)", () => {
-  it("an empty ledger ⇒ zero findings, tier-0, schema-valid", async () => {
+  it("an empty ledger ⇒ zero findings, schema-valid", async () => {
     const r = await cli(["maintain", "--json"]);
     expect(r.code, r.out).toBe(0);
     const out = JSON.parse(r.out);
     validateSchema("maintain", out);
-    expect(out).toMatchObject({ command: "maintain", mode: "preview", risk: "tier-0", findings: [] });
+    expect(out).toMatchObject({ command: "maintain", mode: "preview", findings: [] });
   });
 
-  it("a seeded orphan ⇒ a destructive Tier-3 orphan finding; risk tier-3; schema-valid; no sink", async () => {
+  it("a seeded orphan ⇒ a destructive orphan finding; schema-valid; no sink", async () => {
     // hub ↔ leaf are linked (not orphans); `lonely` has no links.
     const s = openStore({ path: dbPath });
     try {
@@ -125,8 +120,7 @@ describe("brain maintain (preview)", () => {
     expect(r.code, r.out).toBe(0);
     const out = JSON.parse(r.out);
     validateSchema("maintain", out);
-    expect(out.risk).toBe("tier-3");
-    expect(out.findings).toEqual([{ kind: "orphan", target: "lonely", destructive: true, risk: "tier-3" }]);
+    expect(out.findings).toEqual([{ kind: "orphan", target: "lonely", destructive: true }]);
 
     // Preview touched no sink (git HEAD unchanged / still unborn).
     expect(head()).toBe(canonicalBefore);

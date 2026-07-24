@@ -1,37 +1,33 @@
 /**
- * Synthesis plan pipeline (Task 4.5, slice A) — the retrieval-first, fully
- * deterministic-given-its-seams FRONT of the synthesis workflow: `retrieve →
- * pack → generateObject<ChangePlan> → validate (4.4) → effectiveRisk (4.3) →
- * generatePatch (4.2)`. It produces the {@link SynthesisPlan} the apply path
- * (slice B) drives through the 2.5 engine (plan→patch→worktree→commit→integrate).
+ * Synthesis plan pipeline + apply path (Task 4.5), REBUILT for the v2 direct-commit
+ * mutation order (task 3-2/3-3b, ADR-0003). The plan FRONT is unchanged in spirit:
+ * `retrieve → pack → generateObject<ChangePlan> → validate (4.4) → generatePatch (4.2)`.
+ * The apply path no longer runs the retired trust/risk-tier/scan-gate machinery —
+ * there is no `effectiveRisk`, no Tier-2/Tier-3 branch, no `review-pending`, no
+ * `GeneratedArtifactGuard`, no broker CAS, no agent worktree. A validated + grounded
+ * plan applies as ONE direct commit onto `refs/heads/main` via {@link runMutation}
+ * (validate → ground → apply → commitPaths → refresh → exit 0).
  *
- * Two invariants this stage OWNS:
- *  - **Retrieval-first (orchestration-enforced).** The plan is generated ONLY
- *    after a real retrieval, and the packed retrieval context is a REQUIRED input
- *    the generator must present. An empty or failed retrieval aborts with {@link
- *    RetrievalRequiredError} BEFORE any ChangePlan is generated — no grounding,
- *    no synthesis (the `retrieval.order-invariant` guarantee).
- *  - **Side-effect-free.** This stage takes only read/compute seams (retrieve,
- *    generate, readNote) — no store/repo/broker/worktree sink. `previewSynthesis`
- *    is therefore provably free of every mutation sink; persistence + the
- *    `GeneratedArtifactGuard` boundary live in the apply slice.
+ * Two invariants the plan FRONT still OWNS:
+ *  - **Retrieval-first (orchestration-enforced).** The plan is generated ONLY after a
+ *    real retrieval; an empty/failed retrieval aborts with {@link RetrievalRequiredError}
+ *    BEFORE any ChangePlan is generated.
+ *  - **Side-effect-free preview.** {@link previewSynthesis} takes only read/compute
+ *    seams — no store/repo/worktree sink — so it is provably free of every mutation.
  */
-import { mkdtemp } from "node:fs/promises";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { canonicalSerialize, newRunId, type ChangePlan, type ChangePlanOperation, type NoteType, type ParsedNote, type RiskTier, type RunManifest } from "@atlas/contracts";
-import type { AuditBroker, LedgerBackupConfig, SqliteDatabase, Store } from "@atlas/sqlite-store";
+import { newRunId, type ChangePlan, type NoteType, type ParsedNote } from "@atlas/contracts";
+import type { SqliteDatabase, Store } from "@atlas/sqlite-store";
 import type { Repo } from "@atlas/git";
-import { GeneratedArtifactGuard } from "@atlas/scan";
 import { packContext, type ContextPack } from "../retrieval/pack.js";
 import type { RetrievalResult } from "../retrieval/layers.js";
 import { generatePatch, isPatchableOp, type Patch } from "../markdown/patch.js";
 import { applyPatch } from "../markdown/apply.js";
-import { effectiveRisk, type PolicyContext, type RiskConfig } from "../policies/risk.js";
 import { validatePlan, type ValidationReport, type ValidationVault } from "../validation/index.js";
-import { startRun, sha256Canonical, type IntegratedResult, type RunIntegrator, type WorkflowDeps } from "./index.js";
-import { executeOp, isExecutableOp, OpExecutionError, type OpContext } from "./ops/index.js";
+import { executeOp, isExecutableOp, type OpContext } from "./ops/index.js";
+import { runMutation, type Grounded } from "./mutation-order.js";
+import type { RunContext } from "../handlers.js";
 import { CliError, EXIT } from "../errors/envelope.js";
 
 /** The three model-authored synthesis workflows (plan §D11 / §2.5). */
@@ -59,24 +55,20 @@ export interface PlanGenerationInput {
   readonly retrievalRunId: string;
 }
 
-/** The output of the plan pipeline: the plan, its validation, patch, and tier. */
+/** The output of the plan pipeline: the plan, its validation, and the patch. */
 export interface SynthesisPlan {
   readonly retrievalRunId: string;
   readonly changePlan: ChangePlan;
   readonly report: ValidationReport;
   /** The materialized patch, or `null` when the op is unpatchable or validation blocked it. */
   readonly patch: Patch | null;
-  /** The effective risk tier (`tier-2` auto-commit vs `tier-3` review). */
-  readonly tier: RiskTier;
-  /** Whether the plan cleared every Tier-2 gate (validator + policy). */
-  readonly tier2Eligible: boolean;
 }
 
 /** The read/compute seams the plan pipeline needs (no mutation sink among them). */
 export interface SynthesisPlanDeps {
   /** Hybrid retrieval + RRF fusion (Task 3.3). */
   retrieve(query: { text: string; k?: number; filters?: { type?: string } }): Promise<RetrievalResult>;
-  /** Generate a ChangePlan grounded on the packed context (broker egress generateObject seam). */
+  /** Generate a ChangePlan grounded on the packed context (in-process generateObject seam). */
   generatePlan(input: PlanGenerationInput): Promise<ChangePlan>;
   /** Resolve the target note (for patch generation + target type), or `null` if absent. */
   readNote(noteId: string): ParsedNote | null;
@@ -84,14 +76,9 @@ export interface SynthesisPlanDeps {
   readonly validationVault: ValidationVault;
   /** Verification states of the evidence supporting a plan (evidence-gating input). */
   supportingEvidenceStates(plan: ChangePlan): readonly string[];
-  /** Whether every contributing source is trusted (Task 4.8 seam; default supplied by caller). */
-  inputsTrusted(plan: ChangePlan): boolean;
-  /** Whether every anchored evidence item is `valid` (Task 4.7 seam). */
-  evidenceValid(plan: ChangePlan): boolean;
   readonly config: {
     readonly packBudgetTokens: number;
     readonly requireSourcesForSynthesis: boolean;
-    readonly risk: RiskConfig;
   };
 }
 
@@ -107,8 +94,8 @@ export class RetrievalRequiredError extends Error {
 /**
  * Run the retrieval-first plan pipeline. Retrieval happens FIRST and its packed
  * result is presented to the generator; an empty/failed retrieval throws {@link
- * RetrievalRequiredError} before any plan exists. The returned {@link
- * SynthesisPlan} is pure data — nothing is persisted here.
+ * RetrievalRequiredError} before any plan exists. The returned {@link SynthesisPlan}
+ * is pure data — nothing is persisted here.
  */
 export async function planSynthesis(
   kind: SynthesisKind,
@@ -126,8 +113,7 @@ export async function planSynthesis(
   }
   const context = packContext(retrieval, { maxTokens: deps.config.packBudgetTokens });
 
-  // 2. Generate the ChangePlan, grounded on the packed context (retrieval-first:
-  // the generator cannot be reached without the packed retrieval result).
+  // 2. Generate the ChangePlan, grounded on the packed context (retrieval-first).
   const changePlan = await deps.generatePlan({
     kind,
     input,
@@ -135,8 +121,7 @@ export async function planSynthesis(
     retrievalRunId: retrieval.retrievalRunId,
   });
 
-  // 3. Validate (4.4). Reserved/immutable/schema violations block here (report.ok
-  // = false); review/evidence gates clear tier2Eligible.
+  // 3. Validate (4.4). Reserved/immutable/schema violations block here (report.ok = false).
   const note = deps.readNote(input.target);
   const targetType: NoteType = note?.type ?? "";
   const report = validatePlan(changePlan, {
@@ -152,30 +137,7 @@ export async function planSynthesis(
       ? generatePatch(note, changePlan.operation)
       : null;
 
-  // 5. Effective risk (4.3) — the SOLE risk producer. validationConfidence is
-  // derived from the validator's own Tier-2 gate (a cleared gate ⇒ 1, else 0 ⇒
-  // fail-closed to Tier-3).
-  const policyContext: PolicyContext = {
-    targetType,
-    changedLines: patch ? changedLinesOf(patch) : 0,
-    sections: patch ? sectionsOf(patch) : 0,
-    singleNote: true,
-    destructive: isDestructive(changePlan.operation),
-    inputsTrusted: deps.inputsTrusted(changePlan),
-    evidenceValid: deps.evidenceValid(changePlan),
-    validationConfidence: report.gates.tier2Eligible ? 1 : 0,
-    config: deps.config.risk,
-  };
-  const tier = effectiveRisk(changePlan, policyContext);
-
-  return {
-    retrievalRunId: retrieval.retrievalRunId,
-    changePlan,
-    report,
-    patch,
-    tier,
-    tier2Eligible: report.gates.tier2Eligible,
-  };
+  return { retrievalRunId: retrieval.retrievalRunId, changePlan, report, patch };
 }
 
 /** A side-effect-free preview: the plan pipeline result, applied to no sink. */
@@ -186,8 +148,8 @@ export interface SynthesisPreview {
 
 /**
  * Preview a synthesis run: run the plan pipeline and return its result WITHOUT
- * touching any store/repo/broker/worktree sink. Provably side-effect-free — the
- * deps carry no mutation seam.
+ * touching any store/repo/worktree sink. Provably side-effect-free — the deps
+ * carry no mutation seam.
  */
 export async function previewSynthesis(
   kind: SynthesisKind,
@@ -197,10 +159,7 @@ export async function previewSynthesis(
   return { mode: "preview", plan: await planSynthesis(kind, input, deps) };
 }
 
-// ── apply path (Task 4.5, slice B): plan → worktree → agent commit → tier branch ─
-
-/** The all-zero placeholder for an unborn canonical ref. */
-const ZERO_OID = "0".repeat(40);
+// ── apply path (v2): plan → ground → apply → commitPaths → refresh → exit 0 ─────────
 
 /** RFC-3339 UTC millisecond timestamp. */
 function rfc3339MsNow(): string {
@@ -209,23 +168,20 @@ function rfc3339MsNow(): string {
 
 /**
  * The mutation seams the apply path needs ON TOP of the pure {@link SynthesisPlanDeps}.
- * The workflow engine (`store`/`broker`/`backup`/`repo`) drives the persisted run; the
- * `integrate` seam performs the Tier-2 canonical install (see {@link
- * import("./integrate.js").makeSynthesisIntegrator}); the `guard` scans every persisted
- * synthesis artifact before its sink; `foldProjections` re-derives projections from the
- * immutable canonical commit after integration.
+ * The whole sequence runs through {@link runMutation}, which owns the advisory vault
+ * lock + the direct {@link import("@atlas/git").commitPaths} install onto
+ * `refs/heads/main` — no broker, no worktree, no CAS. The `refreshIndex`/`refreshProjection`
+ * seams re-derive the affected note's derived-store rows (index-then-projection).
  */
 export interface SynthesisApplyDeps extends SynthesisPlanDeps {
-  readonly store: Store;
-  readonly broker: AuditBroker;
-  readonly backup: LedgerBackupConfig;
+  /** The run context (owns env + the lock manager `runMutation` acquires). */
+  readonly ctx: RunContext;
+  /** The vault git repo handle. */
   readonly repo: Repo;
-  /** The Tier-2 canonical-install seam. A `broker.cas_failed` refusal triggers a retry. */
-  readonly integrate: RunIntegrator;
-  /** The generated-artifact scan boundary — every persisted synthesis artifact passes it. */
-  readonly guard: GeneratedArtifactGuard;
-  /** Re-derive projections from the immutable canonical commit (post-integration). */
-  foldProjections(canonicalRef: string): Promise<void>;
+  /** The projection store (dirty-vault comparison + the caller's refresh seams). */
+  readonly store: Store;
+  /** Absolute vault working-tree path (the git repo root). */
+  readonly vaultPath: string;
   /**
    * Op-execution seams (Task 4.6) — consulted for the projection-serializing ops
    * (claims/evidence) the 4.2 patch generator cannot express. Optional: a run whose
@@ -234,63 +190,31 @@ export interface SynthesisApplyDeps extends SynthesisPlanDeps {
   resolveRendition?(handle: string): string | null;
   hasClaim?(claimKey: string): boolean;
   hasNote?(noteId: string): boolean;
-  /** `git.worktrees_path` — where the ephemeral agent worktree is created. */
-  readonly worktreesPath: string;
-  /** The canonical protected ref (config `git.canonical_ref`, threaded by the caller). */
-  readonly canonicalRef: string;
-  /** Max attempts across CAS-miss rebases (default 3). */
-  readonly maxAttempts?: number;
+  /** Refresh the LanceDB retrieval index for the affected note (runs BEFORE the projection). */
+  refreshIndex?(noteId: string, commitSha: string): Promise<void>;
+  /** Refresh the SQLite projection for the affected note (advances `notes.content_hash`). */
+  refreshProjection?(noteId: string, commitSha: string): Promise<void>;
   readonly now?: () => string;
 }
 
-/** The terminal outcome of an applied synthesis run. */
+/** The terminal outcome of an applied synthesis run — always integrated (no tier gate). */
 export interface SynthesisApplyResult {
-  /** `integrated` — auto-committed to canonical (Tier-2); `review-pending` — awaiting approval (Tier-3). */
-  readonly mode: "integrated" | "review-pending";
   readonly runId: string;
-  /** The `refs/agent/<runId>` the agent commit lives on. */
-  readonly agentRef: string;
+  /** The direct commit on `refs/heads/main` the change landed as. */
   readonly commitSha: string;
   readonly plan: SynthesisPlan;
-  /** The canonical sha after integration (`integrated` mode only). */
-  readonly canonicalSha?: string;
-  /** How many attempts ran (1 + CAS-miss rebases). */
-  readonly attempts: number;
 }
 
 /** A synthesis apply failure the CLI boundary maps to an exit code. */
 export class SynthesisApplyError extends CliError {}
 
-/** `true` iff `err` is the broker's CAS-miss refusal (canonical advanced concurrently). */
-function isCasFailed(err: unknown): boolean {
-  return typeof err === "object" && err !== null && (err as { code?: unknown }).code === "broker.cas_failed";
-}
-
-/** Best-effort worktree removal (the reconciler's orphan sweep is the durable backstop). */
-async function cleanupWorktree(repo: Repo, dir: string): Promise<void> {
-  try {
-    await repo.removeWorktree(dir);
-  } catch {
-    try {
-      rmSync(dir, { recursive: true, force: true });
-    } catch {
-      /* best-effort */
-    }
-  }
-}
-
 /**
- * Apply a synthesis run through the 2.5 engine: `plan (retrieval-first) → validate →
- * patch → worktree apply → agent commit → tier branch`. Tier-2 auto-integrates via the
- * injected {@link SynthesisApplyDeps.integrate} seam under CAS (a `broker.cas_failed`
- * rebases, regenerates, and revalidates — no lost update / duplicate commit); Tier-3
- * stops durably at `review-pending` (the CLI surfaces exit 6 + a `review_pending` payload).
- *
- * The {@link GeneratedArtifactGuard} scans the ChangePlan, the applied note text, the
- * commit message, and the run manifest before each reaches its sink — so a secret a
- * model emits never lands unscanned. Retrieval-first is inherited from {@link
- * planSynthesis}: an empty/failed retrieval throws {@link RetrievalRequiredError} BEFORE
- * any run, plan, worktree, or commit exists.
+ * Apply a synthesis run through the v2 mutation order: `plan (retrieval-first) → validate →
+ * ground (compute the new note text) → apply → commitPaths → refresh`. Every validated +
+ * grounded plan lands as ONE commit onto `refs/heads/main`; there is no tier gate, no
+ * `review-pending`, and no exit 6 — a would-be Tier-3 change applies directly. Retrieval-first
+ * is inherited from {@link planSynthesis}: an empty/failed retrieval throws {@link
+ * RetrievalRequiredError} BEFORE any mutation.
  */
 export async function applySynthesis(
   kind: SynthesisKind,
@@ -298,93 +222,59 @@ export async function applySynthesis(
   deps: SynthesisApplyDeps,
 ): Promise<SynthesisApplyResult> {
   const now = deps.now ?? rfc3339MsNow;
-  const canonicalRef = deps.canonicalRef;
-  const maxAttempts = Math.max(1, deps.maxAttempts ?? 3);
 
-  let lastCasError: unknown = null;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const base = (await deps.repo.readRef(canonicalRef)) ?? ZERO_OID;
+  // Grounding-phase state, captured for the refresh + result seams.
+  let plan!: SynthesisPlan;
+  let note!: ParsedNote;
 
-    // 1. Plan (retrieval-first). Throws RetrievalRequiredError BEFORE any run exists.
-    const plan = await planSynthesis(kind, input, deps);
-    if (!plan.report.ok) {
-      throw new SynthesisApplyError({
-        code: "synthesis-validation-failed",
-        message: `synthesis plan failed validation: ${plan.report.findings.filter((f) => f.severity === "error").map((f) => f.code).join(", ") || "invalid"}`,
-        hint: "The ChangePlan violates a structural/identity/provenance/accessibility rule; no mutation was applied.",
-        exitCode: EXIT.VALIDATION,
-      });
-    }
-    const note = deps.readNote(input.target);
-    if (note === null) {
-      throw new SynthesisApplyError({
-        code: "synthesis-note-not-found",
-        message: `synthesis target note "${input.target}" does not exist`,
-        hint: "Enrich/reconcile/maintain operate on an existing note; check the target id.",
-        exitCode: EXIT.VALIDATION,
-      });
-    }
-    // The op must have EITHER a materialized patch (section/frontmatter edits, Task 4.2)
-    // OR a projection-serializing executor (claims/evidence, Task 4.6). Anything else
-    // (CreateNote, ProposeMerge, trust) is not yet applicable.
-    const op = plan.changePlan.operation;
-    if (plan.patch === null && !isExecutableOp(op.op)) {
-      throw new SynthesisApplyError({
-        code: "synthesis-op-not-applicable",
-        message: `operation "${op.op}" has no single-note apply path yet`,
-        hint: "Supported: UpdateSection/AppendSection/SetFrontmatterField/AddAlias (patch) and CreateClaim/AttachEvidence/UpdateEvidenceVerification (executor).",
-        exitCode: EXIT.VALIDATION,
-      });
-    }
-
-    const runId = newRunId();
-    const tierNum: 2 | 3 = plan.tier === "tier-2" ? 2 : 3;
-    const planHash = sha256Canonical(plan.changePlan);
-
-    // 2. GUARD the ChangePlan BEFORE it is persisted at `planned` (sqlite sink).
-    await deps.guard.assertClean({ text: JSON.stringify(plan.changePlan), sink: "sqlite", runId });
-
-    const wdeps: WorkflowDeps = { store: deps.store, broker: deps.broker, backup: deps.backup, repo: deps.repo, now };
-    const handle = await startRun(wdeps, { operation: kind, runId, targetNoteId: note.id, canonicalCommit: base });
-
-    // Record the run's synthesis input so `git refresh <runId>` can reconstruct the generation
-    // (kind + target live on agent_runs; the instruction + retrieval knobs do not). Guarded on the
-    // 0011 table's presence so a store that predates the migration is never broken by the write.
-    persistRunInput(deps.store.db, runId, input);
-
-    let worktreeDir: string | null = null;
-    try {
-      await handle.checkpoint("planned", {
-        planId: `${runId}-plan`,
-        tier: tierNum,
-        confidence: plan.changePlan.confidence,
-        summary: `${plan.changePlan.operation.op}: ${plan.changePlan.rationale.slice(0, 60)}`,
-        planHash,
-        canonicalRef,
-        baseRef: base,
-      });
-
-      // 3. Create the agent branch + worktree; apply the patch to the target note file.
-      const agentRef = await deps.repo.createAgentBranch(runId, canonicalRef);
-      const wtParent = deps.worktreesPath && existsSync(deps.worktreesPath) ? deps.worktreesPath : tmpdir();
-      worktreeDir = await mkdtemp(join(wtParent, `atlas-syn-${runId}-`));
-      const worktree = await deps.repo.addWorktree(agentRef, worktreeDir);
-
-      const notePath = join(worktreeDir, note.path);
-      const currentText = readFileSync(notePath, "utf8");
+  return runMutation<SynthesisApplyResult>({
+    ctx: deps.ctx,
+    repo: deps.repo,
+    vaultPath: deps.vaultPath,
+    store: deps.store,
+    async ground(preApply): Promise<Grounded> {
+      // 1. Plan (retrieval-first). Throws RetrievalRequiredError before any mutation.
+      plan = await planSynthesis(kind, input, deps);
+      if (!plan.report.ok) {
+        throw new SynthesisApplyError({
+          code: "synthesis-validation-failed",
+          message: `synthesis plan failed validation: ${plan.report.findings.filter((f) => f.severity === "error").map((f) => f.code).join(", ") || "invalid"}`,
+          hint: "The ChangePlan violates a structural/identity/provenance/accessibility rule; no mutation was applied.",
+          exitCode: EXIT.VALIDATION,
+        });
+      }
+      const resolved = deps.readNote(input.target);
+      if (resolved === null) {
+        throw new SynthesisApplyError({
+          code: "synthesis-note-not-found",
+          message: `synthesis target note "${input.target}" does not exist`,
+          hint: "Enrich/reconcile/maintain operate on an existing note; check the target id.",
+          exitCode: EXIT.VALIDATION,
+        });
+      }
+      note = resolved;
+      // The op must have EITHER a materialized patch (section/frontmatter edits, Task 4.2)
+      // OR a projection-serializing executor. The v1 claims/evidence executors are retired
+      // (#337), so the executable set is currently empty — anything without a patch
+      // (CreateNote, ProposeMerge, …) is not yet applicable.
+      const op = plan.changePlan.operation;
+      if (plan.patch === null && !isExecutableOp(op.op)) {
+        throw new SynthesisApplyError({
+          code: "synthesis-op-not-applicable",
+          message: `operation "${op.op}" has no single-note apply path yet`,
+          hint: "Supported: UpdateSection/AppendSection/SetFrontmatterField/AddAlias (patch).",
+          exitCode: EXIT.VALIDATION,
+        });
+      }
 
       // Produce the note's new text via the patch path (4.2) or the op executor (4.6).
+      const notePath = join(deps.vaultPath, note.path);
+      const currentText = readFileSync(notePath, "utf8");
       let nextText: string;
-      let changedLines: number;
-      let changedSections: number;
-      let patchHash: string;
       if (plan.patch !== null) {
         const applied = applyPatch(currentText, plan.patch);
         if (!applied.ok) {
           // Stale context (a concurrent edit changed the note since the plan was read).
-          await handle.fail("planned", `synthesis-stale-context: ${applied.error.code}`);
-          await cleanupWorktree(deps.repo, worktreeDir);
-          worktreeDir = null;
           throw new SynthesisApplyError({
             code: "synthesis-stale-context",
             message: `patch preconditions no longer hold for "${note.id}": ${applied.error.code}`,
@@ -394,12 +284,12 @@ export async function applySynthesis(
           });
         }
         nextText = applied.next;
-        changedLines = changedLinesOf(plan.patch);
-        changedSections = sectionsOf(plan.patch);
-        patchHash = sha256Canonical(plan.patch);
       } else {
-        // Projection-serializing op (claims/evidence). A business-rule violation is a
-        // typed OpExecutionError — fail the run cleanly, mirroring the stale-context path.
+        // Projection-serializing op executor. With the v1 claims/evidence executors
+        // retired (#337) the executable set is empty, so this branch is currently
+        // unreachable (the isExecutableOp guard above throws first); it is retained for
+        // the deferred CreateRelationship executor. A business-rule violation surfaces
+        // as a typed OpExecutionError (validation, exit 1) — it propagates out of runMutation.
         const opCtx: OpContext = {
           note,
           resolveRendition: deps.resolveRendition ?? (() => null),
@@ -407,146 +297,36 @@ export async function applySynthesis(
           hasNote: deps.hasNote ?? (() => false),
           now: now(),
         };
-        let outcome;
-        try {
-          outcome = executeOp(op, opCtx);
-        } catch (e) {
-          if (e instanceof OpExecutionError) {
-            await handle.fail("planned", `op-execution-failed: ${e.code}`);
-            await cleanupWorktree(deps.repo, worktreeDir);
-            worktreeDir = null;
-          }
-          throw e;
-        }
+        const outcome = executeOp(op, opCtx);
         nextText = outcome.nextText;
-        changedLines = Math.max(1, nextText.split("\n").length - currentText.split("\n").length);
-        changedSections = 1;
-        patchHash = sha256Canonical({ op });
       }
 
-      // GUARD the new note text BEFORE it is written to the worktree.
-      await deps.guard.assertClean({ text: nextText, sink: "worktree", runId });
-      writeFileSync(notePath, nextText, "utf8");
+      // Post-grounding boundary: re-check the external git index.lock (+ test barrier).
+      preApply();
 
-      await handle.checkpoint("patched", {
-        patchId: `${runId}-patch`,
-        planId: `${runId}-plan`,
-        noteId: note.id,
-        changedLines,
-        changedSections,
-        patchHash,
-        planHash,
-      });
-
-      // The applied-tree evidence is persisted BEFORE the commit (crash-recoverable).
-      const treeHash = sha256Canonical({ path: note.path, text: nextText });
-      await handle.checkpoint("worktree-applied", { worktreePath: worktreeDir, treeHash, agentRef });
-
-      // 4. Agent commit carrying the run manifest (ChangePlan digest + proposed risk).
-      const commitMsg = `synthesis(${kind}): ${plan.changePlan.operation.op} ${note.id}`;
-      // The manifest carries the ChangePlan digest (provenance). The EFFECTIVE risk
-      // tier lives on `agent_runs.tier` (recorded at planned/agent-committed) — it is
-      // deliberately NOT stamped into the manifest's model-proposed-risk field, which
-      // no module reads for control flow (the Task-4.3 grep-guard pins that invariant).
-      const commitManifest: RunManifest = {
-        schemaVersion: 1,
-        runId,
-        state: "agent-committed",
-        createdAt: now(),
-        canonicalBaseCommit: base,
-        targets: [note.id],
-        changePlanDigest: planHash,
+      return {
+        touchedPaths: [note.path],
+        commitMessage: `synthesis(${kind}): ${op.op} ${note.id}`,
+        affectedNoteIds: [note.id],
+        dirtyCheckPaths: [note.path],
+        apply(): void {
+          writeFileSync(notePath, nextText, "utf8");
+        },
       };
-      // GUARD the commit message + manifest BEFORE they are written to a git object.
-      await deps.guard.assertClean({ text: commitMsg, sink: "git-object", runId });
-      await deps.guard.assertClean({ text: canonicalSerialize(commitManifest).toString(), sink: "git-object", runId });
-      const commitSha = await worktree.commit(commitMsg, commitManifest);
-      await handle.checkpoint("agent-committed", { commitSha, treeHash, agentRef, tier: tierNum });
-
-      // 5. Tier branch.
-      if (tierNum === 3 || !plan.tier2Eligible) {
-        // Tier-3: stop durably at review-pending (the agent commit persists on its ref).
-        await handle.checkpoint("review-pending", { commitSha, agentRef });
-        await cleanupWorktree(deps.repo, worktreeDir);
-        worktreeDir = null;
-        return { mode: "review-pending", runId, agentRef, commitSha, plan, attempts: attempt };
-      }
-
-      // Tier-2: auto-integrate under CAS.
-      let integrated: IntegratedResult;
-      try {
-        integrated = await handle.integrate(deps.integrate);
-      } catch (e) {
-        if (isCasFailed(e)) {
-          // Canonical advanced between plan and commit: the engine dropped the pending
-          // intent and left the run at `agent-committed`. Fail it and rebase — the next
-          // attempt regenerates + revalidates against the advanced canonical (§4.5).
-          await handle.fail("agent-committed", "broker.cas_failed: canonical advanced during integration; rebasing");
-          await cleanupWorktree(deps.repo, worktreeDir);
-          worktreeDir = null;
-          lastCasError = e;
-          continue;
-        }
-        throw e;
-      }
-
-      // Post-CAS: re-derive projections from the immutable canonical commit (replayable),
-      // advance to reindexed, then finalize.
-      await deps.foldProjections(canonicalRef);
-      await handle.checkpoint("reindexed", { indexGeneration: 1, canonicalSha: integrated.canonicalSha });
-      await handle.finalize();
-      await cleanupWorktree(deps.repo, worktreeDir);
-      worktreeDir = null;
-      return { mode: "integrated", runId, agentRef, commitSha, canonicalSha: integrated.canonicalSha, plan, attempts: attempt };
-    } finally {
-      if (worktreeDir) await cleanupWorktree(deps.repo, worktreeDir);
-    }
-  }
-
-  // Every attempt lost the CAS race — surface it retryable.
-  throw new SynthesisApplyError({
-    code: "synthesis-cas-exhausted",
-    message: `synthesis integration lost the canonical CAS race ${maxAttempts} times`,
-    hint: "Canonical is advancing faster than synthesis can rebase; retry when contention subsides.",
-    exitCode: EXIT.INTERNAL,
-    retryable: true,
-    ...(lastCasError instanceof Error ? { cause: lastCasError } : {}),
+    },
+    async refreshIndex(_g, commitSha): Promise<void> {
+      if (deps.refreshIndex) await deps.refreshIndex(note.id, commitSha);
+    },
+    async refreshProjection(_g, commitSha): Promise<void> {
+      if (deps.refreshProjection) await deps.refreshProjection(note.id, commitSha);
+    },
+    buildResult(commitSha): SynthesisApplyResult {
+      return { runId: newRunId(), commitSha, plan };
+    },
   });
 }
 
-/** Count the changed lines a patch introduces (replacement/append bodies + scalar edits). */
-function changedLinesOf(patch: Patch): number {
-  let lines = 0;
-  for (const op of patch.ops) {
-    if (op.kind === "replace-section-body") lines += Math.max(1, op.newBody.split("\n").filter((l) => l.trim() !== "").length);
-    else if (op.kind === "append-to-section") lines += Math.max(1, op.content.split("\n").filter((l) => l.trim() !== "").length);
-    else lines += 1; // frontmatter/alias edits are single-line
-  }
-  return lines;
-}
-
-/** Count the distinct sections a patch touches (at least one — the note itself). */
-function sectionsOf(patch: Patch): number {
-  const paths = new Set<string>();
-  for (const op of patch.ops) {
-    if (op.kind === "replace-section-body" || op.kind === "append-to-section") paths.add(op.path);
-  }
-  return Math.max(1, paths.size);
-}
-
-/** Whether an operation removes/replaces existing content (destructive class → Tier-3). */
-function isDestructive(op: ChangePlanOperation): boolean {
-  switch (op.op) {
-    case "ProposeArchive":
-    case "ProposeMerge":
-    case "ProposeRename":
-      return true;
-    case "SetLink":
-      return op.action === "remove";
-    default:
-      return false;
-  }
-}
+// ── run-input persistence (git refresh reconstruction, Task 4.11) ───────────────────
 
 /** The persisted synthesis input for a run, reconstructed by `git refresh` (Task 4.11). */
 export interface PersistedRunInput {

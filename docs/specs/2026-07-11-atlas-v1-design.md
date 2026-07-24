@@ -3,6 +3,19 @@
 **Status:** approved-pending-review · **Date:** 2026-07-11 · **Author:** Aryeh Stark
 **Repo:** `21StarkCom/Atlas` (new, standalone) · **Language:** TypeScript (strict, ESM, pnpm monorepo)
 
+> **⛔ SUPERSEDED (2026-07-22) — this is the V1 design, not shipped Atlas.** The entire security
+> architecture this document specifies (privilege-separated brokers, scan-before-persist, the signed
+> WORM audit ledger, trust tiers, graduation, authorization signing) was **retired in place** by the
+> v2 pivot — [`docs/adr/0003-retire-security-architecture.md`](adr/0003-retire-security-architecture.md)
+> + the [v2 spec](2026-07-21-atlas-v2-single-process-simplification-spec.md). Atlas v2 is a **single
+> process**; **git is the only safety mechanism.** This file is kept as the immutable historical record
+> (supersede, don't rewrite); its "In V1 / Out of V1" lists and subsystem designs **no longer describe
+> shipped Atlas** — read it only for revival from the **`v1-fortress`** tag.
+>
+> **Exit codes (v2):** the command surface emits **`{0, 1, 2, 4, 5}`**; `7` (provider-retryable) is the
+> `jobs run` batch-aggregate outcome ONLY. **`3` (secret-scan) and `6` (action-required) are retired** —
+> no command emits them. Any `3`/`6` below reflects the retired V1 design, not v2 behavior.
+
 ## Purpose
 
 Atlas is a local-first, agent-maintained knowledge system in the spirit of Karpathy's

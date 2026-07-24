@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "atlas://cli-contract/link.schema.json",
+  "title": "brain link <source> <target> [--predicate <p>] [--alias <a>] [--remove] — --json success output",
+  "description": "Add, re-alias, or remove an edge between two notes (v2, #331). No --predicate ⇒ the plain SetLink form (a body [[wiki-link]], projected with predicate NULL); --predicate ⇒ the typed CreateRelationship form (a frontmatter `related:` entry — markdown-derived, model A). Grounding resolves <source>/<target> through the tiered id → slug → declared-alias precedence (@atlas/contracts identity keys; the two partial UNIQUE indexes ux_note_links_plain / ux_note_links_pred are the physical enforcement mirror) and refuses (exit 1) an unknown or dirty source/target BEFORE any mutation. Every applied outcome edits the source note and lands EXACTLY ONE commit on refs/heads/main via the canonical mutation order; the projection is re-folded from the committed blob (no LanceDB refresh — links never re-embed). The noop set is exactly: duplicate-identical add, aliasless re-add of an existing edge (an omitted --alias preserves the stored alias), and absent-edge remove — each emits action:\"noop\", commit:null, noop:true, exit 0, and writes NEITHER git NOR the projection. An alias change on an existing edge is action:\"updated\" (one in-place mutation, never a new edge). --remove with --predicate p removes exactly that typed edge (the plain link and other predicates survive); without --predicate, only the plain NULL-predicate edge. The commit-null-IFF-noop invariant is machine-enforced by the allOf below.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["command", "action", "source", "target", "predicate", "alias", "commit", "noop"],
+  "properties": {
+    "command": { "const": "link" },
+    "action": {
+      "enum": ["added", "updated", "removed", "related", "noop"],
+      "description": "added = new plain edge; related = new typed edge; updated = alias CHANGED on an existing edge (a metadata mutation — consumers counting new relationships must not count it); removed = matching edge removed; noop = post-state equals pre-state."
+    },
+    "source": { "type": "string", "minLength": 1, "description": "The RESOLVED source note id (never the raw seed spelling)." },
+    "target": { "type": "string", "minLength": 1, "description": "The RESOLVED target note id (never the raw seed spelling)." },
+    "predicate": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "description": "The relationship predicate; null for the plain SetLink form."
+    },
+    "alias": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "description": "The display alias as passed via --alias; null unless --alias (an omitted --alias never clobbers a stored alias)."
+    },
+    "commit": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "The sha of the ONE commit the applied change landed; null IFF noop."
+    },
+    "noop": { "type": "boolean", "description": "true iff action:\"noop\" — no git write, no projection write." }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "noop": { "const": true } }, "required": ["noop"] },
+      "then": { "properties": { "action": { "const": "noop" }, "commit": { "type": "null" } } }
+    },
+    {
+      "if": { "properties": { "noop": { "const": false } }, "required": ["noop"] },
+      "then": { "properties": { "action": { "enum": ["added", "updated", "removed", "related"] }, "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" } } }
+    }
+  ],
+  "examples": [
+    {
+      "command": "link",
+      "action": "added",
+      "source": "concept-a",
+      "target": "concept-b",
+      "predicate": null,
+      "alias": null,
+      "commit": "5f3a581aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "noop": false
+    },
+    {
+      "command": "link",
+      "action": "related",
+      "source": "concept-a",
+      "target": "concept-b",
+      "predicate": "cites",
+      "alias": "the B concept",
+      "commit": "5f3a581bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "noop": false
+    },
+    {
+      "command": "link",
+      "action": "noop",
+      "source": "concept-a",
+      "target": "concept-b",
+      "predicate": null,
+      "alias": null,
+      "commit": null,
+      "noop": true
+    }
+  ],
+  "x-atlas-contract": {
+    "command": "link",
+    "phase": 4,
+    "privilege": "shared",
+    "idempotency": "intrinsic",
+    "executionClass": "mutating",
+    "summary": "Add, re-alias, or remove a plain wiki-link or typed relationship edge between two notes; noop-idempotent; exactly one commit per applied change.",
+    "args": [
+      { "name": "<source>", "required": true, "description": "Source note (id, filename slug, or unique declared alias) — the note the edge is written into." },
+      { "name": "<target>", "required": true, "description": "Target note (id, filename slug, or unique declared alias)." }
+    ],
+    "flags": [
+      { "flag": "--predicate <p>", "type": "string", "description": "Typed-relationship predicate: present ⇒ CreateRelationship (frontmatter `related:` entry); absent ⇒ the plain SetLink body wiki-link." },
+      { "flag": "--alias <a>", "type": "string", "description": "Display alias, meaningful only on add; omitted ⇒ a stored alias is preserved (aliasless re-add is a noop). Refused with --remove (exit 5)." },
+      { "flag": "--remove", "type": "boolean", "default": false, "description": "Remove the edge the selector names: with --predicate p exactly that typed edge; without, only the plain NULL-predicate edge. A matching edge ⇒ action:\"removed\"; no match ⇒ noop (idempotent, never an error)." }
+    ],
+    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "locks": [{ "scope": "vault-maintenance", "mode": "exclusive" }],
+    "sideEffects": [
+      "rewrites the SOURCE note in the working tree (body wiki-link surgery for the plain form; frontmatter `related:` surgery for the typed form)",
+      "commits exactly the source note's path onto refs/heads/main (one commit per applied change; unrelated working-tree dirt survives uncommitted)",
+      "re-folds the source note's projection rows (notes + note_identity_keys + outgoing note_links) from the committed blob"
+    ],
+    "prohibitedEffects": [
+      "any git or projection write on a noop (duplicate-identical add, aliasless re-add, absent-edge remove)",
+      "clobbering a stored alias on an add whose --alias is omitted",
+      "removing an edge the selector does not name (the plain link and other-predicate edges survive a predicate-scoped remove)",
+      "re-embedding / any LanceDB write (a link edit never re-embeds)",
+      "mutating anything when <source>/<target> is unknown or dirty (grounding fails exit 1 before any apply or commit)"
+    ],
+    "exitCodes": [0, 1, 2, 4, 5],
+    "errorCodes": [
+      { "code": "usage", "exit": 5, "when": "--alias combined with --remove, a missing <source>/<target>, or an unknown flag — evaluated before grounding" },
+      { "code": "note-not-found", "exit": 1, "when": "<source> or <target> resolves to no note (never a noop), or the note is not projected yet" },
+      { "code": "ambiguous-note", "exit": 1, "when": "a seed matches more than one note within one identity tier" },
+      { "code": "dirty-vault", "exit": 1, "when": "the source or target note is dirty (uncommitted git diff vs HEAD, or on-disk hash != projection content_hash) — before any apply or commit" },
+      { "code": "db-unavailable", "exit": 2, "when": "the ledger store is absent or unmigrated (link never creates or migrates it)" },
+      { "code": "head-not-canonical", "exit": 2, "when": "HEAD is not attached to refs/heads/main (nothing mutated)" },
+      { "code": "locked:vault-maintenance", "exit": 2, "retryable": true, "when": "another writer holds the vault-maintenance lock" },
+      { "code": "git-index-locked", "exit": 2, "when": "a pre-existing external git index.lock is present at apply time" },
+      { "code": "internal", "exit": 4, "when": "unexpected internal failure (e.g. the projection edge set disagrees with the clean markdown)" }
+    ],
+    "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
+  }
+}

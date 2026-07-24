@@ -1,65 +1,183 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "atlas://cli-contract/query.schema.json",
-  "title": "brain query <text> — --json success output",
-  "description": "Tier-0 hybrid retrieval, optionally + grounded answer. Resolves the query through the layer precedence in retrieval-index-contract.md §5 (exact id → slug → unique alias → fts/vector RRF fusion), packs a section-aware context, and — unless --no-answer — returns a generated answer citing note ids. Retrieval runs only over the SQLite-active generation, filtered by notes.active_generation_id (§2). The response is a discriminated union on `mode`: `answered` (default) generates an answer and records a model_calls row; `retrieval-only` (--no-answer) returns ranked items only and records NO model_calls. Either mode records retrieval_runs/retrieval_results via finalizeLedgerWrite and emits exactly one run.readonly git-ref audit event; neither makes any canonical/worktree/projection mutation. A post-run backup applies (it wrote ledger rows). Exit 0 on success.",
+  "title": "brain query <text> \u2014 --json success output",
+  "description": "Tier-0 hybrid retrieval, optionally + grounded answer. Resolves the query through the layer precedence in retrieval-index-contract.md \u00a75 (exact id \u2192 slug \u2192 unique alias \u2192 fts/vector RRF fusion), packs a section-aware context, and \u2014 unless --no-answer \u2014 returns a generated answer citing note ids. Retrieval runs only over the SQLite-active generation, filtered by notes.active_generation_id (\u00a72). The response is a discriminated union on `mode`: `answered` (default) generates an answer and records a model_calls row; `retrieval-only` (--no-answer) returns ranked items only and records NO model_calls. Either mode records retrieval_runs/retrieval_results as plain operational rows (v2 #338: the audit ledger + backup are retired — no run.readonly audit event, no watermark gate); neither makes any canonical/worktree/projection mutation. Exit 0 on success.",
   "type": "object",
   "unevaluatedProperties": false,
-  "required": ["command", "mode", "query", "items", "layersUsed", "retrievalRunId"],
+  "required": [
+    "command",
+    "mode",
+    "query",
+    "items",
+    "layersUsed",
+    "retrievalRunId"
+  ],
   "allOf": [
     {
-      "if": { "properties": { "mode": { "const": "answered" } } },
-      "then": { "required": ["answer", "modelCalls"] }
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "answered"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "answer",
+          "modelCalls"
+        ]
+      }
     },
     {
-      "if": { "properties": { "mode": { "const": "retrieval-only" } } },
-      "then": { "not": { "anyOf": [{ "required": ["answer"] }, { "required": ["modelCalls"] }, { "required": ["truncated"] }] } }
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "retrieval-only"
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "answer"
+              ]
+            },
+            {
+              "required": [
+                "modelCalls"
+              ]
+            },
+            {
+              "required": [
+                "truncated"
+              ]
+            }
+          ]
+        }
+      }
     }
   ],
   "properties": {
-    "command": { "const": "query" },
-    "mode": { "enum": ["answered", "retrieval-only"], "description": "`answered` (default) generates and returns an answer (and records a model_calls row); `retrieval-only` (--no-answer) skips generation entirely — no `answer`, no `modelCalls`, no model_calls ledger side effect." },
-    "query": { "type": "string", "minLength": 1, "description": "The verbatim query text." },
-    "answer": { "type": "string", "description": "The generated answer, grounded in the packed context and citing note ids. Present iff mode=answered; may be empty when no context met the retrieval threshold. Absent in retrieval-only mode." },
-    "truncated": { "const": true, "description": "Present (always `true`) iff mode=answered AND the provider cut the answer short (finish reason other than STOP, e.g. MAX_TOKENS) — the `answer` is a fragment, not a complete grounded answer. Absent when the answer completed normally or in retrieval-only mode." },
-    "modelCalls": { "type": "integer", "minimum": 1, "description": "Number of model_calls ledger rows recorded by the generation step. Present iff mode=answered; absent in retrieval-only mode (generation is skipped, so no model_calls row is written)." },
+    "command": {
+      "const": "query"
+    },
+    "mode": {
+      "enum": [
+        "answered",
+        "retrieval-only"
+      ],
+      "description": "`answered` (default) generates and returns an answer (and records a model_calls row); `retrieval-only` (--no-answer) skips generation entirely \u2014 no `answer`, no `modelCalls`, no model_calls ledger side effect."
+    },
+    "query": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The verbatim query text."
+    },
+    "answer": {
+      "type": "string",
+      "description": "The generated answer, grounded in the packed context and citing note ids. Present iff mode=answered; may be empty when no context met the retrieval threshold. Absent in retrieval-only mode."
+    },
+    "truncated": {
+      "const": true,
+      "description": "Present (always `true`) iff mode=answered AND the provider cut the answer short (finish reason other than STOP, e.g. MAX_TOKENS) \u2014 the `answer` is a fragment, not a complete grounded answer. Absent when the answer completed normally or in retrieval-only mode."
+    },
+    "modelCalls": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Number of model_calls ledger rows recorded by the generation step. Present iff mode=answered; absent in retrieval-only mode (generation is skipped, so no model_calls row is written)."
+    },
     "items": {
       "type": "array",
-      "description": "The ranked retrieval results backing the answer, one entry PER NOTE (chunks are folded to their owning note per §5), in fused (RRF) rank order. Ordered by descending `score`, ties broken by ascending `noteId`.",
+      "description": "The ranked retrieval results backing the answer, one entry PER NOTE (chunks are folded to their owning note per \u00a75), in fused (RRF) rank order. Ordered by descending `score`, ties broken by ascending `noteId`.",
       "items": {
         "type": "object",
         "unevaluatedProperties": false,
-        "required": ["noteId", "score", "contributions"],
+        "required": [
+          "noteId",
+          "score",
+          "contributions"
+        ],
         "properties": {
-          "noteId": { "type": "string", "minLength": 1, "description": "The candidate note (the RRF candidate unit — chunks are folded to notes, §5)." },
-          "sectionPath": { "type": "string", "description": "Heading breadcrumb of the best-ranked matching section for this note (§1); the chunk that supplied the note's best per-layer rank." },
-          "score": { "type": "number", "description": "Fused RRF score (§5): the sum of every entry's `weightedContribution`. For an identity short-circuit it is that layer's deterministic score." },
+          "noteId": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The candidate note (the RRF candidate unit \u2014 chunks are folded to notes, \u00a75)."
+          },
+          "sectionPath": {
+            "type": "string",
+            "description": "Heading breadcrumb of the best-ranked matching section for this note (\u00a71); the chunk that supplied the note's best per-layer rank."
+          },
+          "score": {
+            "type": "number",
+            "description": "Fused RRF score (\u00a75): the sum of every entry's `weightedContribution`. For an identity short-circuit it is that layer's deterministic score."
+          },
           "contributions": {
             "type": "array",
             "minItems": 1,
-            "description": "Per-layer provenance (Task 3.3): every layer that surfaced this note, with its folded 1-based rank and weighted RRF contribution. An FTS+vector hit lists both; an identity short-circuit lists exactly one identity layer. `Σ weightedContribution == score`.",
+            "description": "Per-layer provenance (Task 3.3): every layer that surfaced this note, with its folded 1-based rank and weighted RRF contribution. An FTS+vector hit lists both; an identity short-circuit lists exactly one identity layer. `\u03a3 weightedContribution == score`.",
             "items": {
               "type": "object",
               "unevaluatedProperties": false,
-              "required": ["layer", "rank", "weightedContribution"],
+              "required": [
+                "layer",
+                "rank",
+                "weightedContribution"
+              ],
               "properties": {
-                "layer": { "enum": ["exact-id", "slug", "unique-alias", "fts", "vector"], "description": "The layer that surfaced this note. Identity layers short-circuit; fts/vector are the fused statistical layers." },
-                "rank": { "type": "integer", "minimum": 1, "description": "This note's folded 1-based rank within the layer (best chunk rank, re-densified per §5). Identity short-circuits report rank 1." },
-                "weightedContribution": { "type": "number", "description": "weight[layer] / (k + rank) for statistical layers (§5); the deterministic score for an identity short-circuit." }
+                "layer": {
+                  "enum": [
+                    "exact-id",
+                    "slug",
+                    "unique-alias",
+                    "fts",
+                    "vector"
+                  ],
+                  "description": "The layer that surfaced this note. Identity layers short-circuit; fts/vector are the fused statistical layers."
+                },
+                "rank": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "This note's folded 1-based rank within the layer (best chunk rank, re-densified per \u00a75). Identity short-circuits report rank 1."
+                },
+                "weightedContribution": {
+                  "type": "number",
+                  "description": "weight[layer] / (k + rank) for statistical layers (\u00a75); the deterministic score for an identity short-circuit."
+                }
               }
             }
           },
-          "citation": { "type": "boolean", "description": "True when this item is cited by the answer." }
+          "citation": {
+            "type": "boolean",
+            "description": "True when this item is cited by the answer."
+          }
         }
       }
     },
     "layersUsed": {
       "type": "array",
-      "description": "Which retrieval layers participated for this query (fts absent when the FTS-maturity fallback is active — contract §6).",
-      "items": { "enum": ["exact-id", "slug", "unique-alias", "fts", "vector"] }
+      "description": "Which retrieval layers participated for this query (fts absent when the FTS-maturity fallback is active \u2014 contract \u00a76).",
+      "items": {
+        "enum": [
+          "exact-id",
+          "slug",
+          "unique-alias",
+          "fts",
+          "vector"
+        ]
+      }
     },
-    "retrievalRunId": { "type": "string", "minLength": 1, "description": "Correlates the persisted retrieval_runs/retrieval_results/model_calls rows." },
-    "degraded": { "type": "boolean", "description": "True when the LanceDB FTS-maturity fallback (contract §6) dropped the fts layer for this query." }
+    "retrievalRunId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Correlates the persisted retrieval_runs/retrieval_results/model_calls rows."
+    },
+    "degraded": {
+      "type": "boolean",
+      "description": "True when the LanceDB FTS-maturity fallback (contract \u00a76) dropped the fts layer for this query."
+    }
   },
   "examples": [
     {
@@ -69,10 +187,42 @@
       "answer": "Meridian is discussed in [[concept-meridian]] and [[source-report-2026]].",
       "modelCalls": 1,
       "items": [
-        { "noteId": "concept-meridian", "sectionPath": "Meridian › Overview", "score": 0.0325, "contributions": [ { "layer": "fts", "rank": 2, "weightedContribution": 0.0161 }, { "layer": "vector", "rank": 1, "weightedContribution": 0.0164 } ], "citation": true },
-        { "noteId": "source-report-2026", "sectionPath": "Findings", "score": 0.0161, "contributions": [ { "layer": "fts", "rank": 1, "weightedContribution": 0.0164 } ], "citation": true }
+        {
+          "noteId": "concept-meridian",
+          "sectionPath": "Meridian \u203a Overview",
+          "score": 0.0325,
+          "contributions": [
+            {
+              "layer": "fts",
+              "rank": 2,
+              "weightedContribution": 0.0161
+            },
+            {
+              "layer": "vector",
+              "rank": 1,
+              "weightedContribution": 0.0164
+            }
+          ],
+          "citation": true
+        },
+        {
+          "noteId": "source-report-2026",
+          "sectionPath": "Findings",
+          "score": 0.0161,
+          "contributions": [
+            {
+              "layer": "fts",
+              "rank": 1,
+              "weightedContribution": 0.0164
+            }
+          ],
+          "citation": true
+        }
       ],
-      "layersUsed": ["fts", "vector"],
+      "layersUsed": [
+        "fts",
+        "vector"
+      ],
       "retrievalRunId": "rr-000512"
     },
     {
@@ -80,9 +230,23 @@
       "mode": "retrieval-only",
       "query": "what sources discuss meridian",
       "items": [
-        { "noteId": "concept-meridian", "sectionPath": "Meridian › Overview", "score": 0.0164, "contributions": [ { "layer": "vector", "rank": 1, "weightedContribution": 0.0164 } ] }
+        {
+          "noteId": "concept-meridian",
+          "sectionPath": "Meridian \u203a Overview",
+          "score": 0.0164,
+          "contributions": [
+            {
+              "layer": "vector",
+              "rank": 1,
+              "weightedContribution": 0.0164
+            }
+          ]
+        }
       ],
-      "layersUsed": ["fts", "vector"],
+      "layersUsed": [
+        "fts",
+        "vector"
+      ],
       "retrievalRunId": "rr-000514"
     },
     {
@@ -91,8 +255,23 @@
       "query": "concept-atlas",
       "answer": "Atlas is the second-brain system described in [[concept-atlas]].",
       "modelCalls": 1,
-      "items": [ { "noteId": "concept-atlas", "score": 1, "contributions": [ { "layer": "exact-id", "rank": 1, "weightedContribution": 1 } ], "citation": true } ],
-      "layersUsed": ["exact-id"],
+      "items": [
+        {
+          "noteId": "concept-atlas",
+          "score": 1,
+          "contributions": [
+            {
+              "layer": "exact-id",
+              "rank": 1,
+              "weightedContribution": 1
+            }
+          ],
+          "citation": true
+        }
+      ],
+      "layersUsed": [
+        "exact-id"
+      ],
       "retrievalRunId": "rr-000513",
       "degraded": true
     }
@@ -103,38 +282,112 @@
     "privilege": "shared",
     "idempotency": "none",
     "executionClass": "audited-read",
-    "summary": "Hybrid retrieval (layer precedence + RRF fusion per retrieval-index-contract.md) → packed context → grounded, cited answer; audited Tier-0 read.",
-    "args": [{ "name": "<text>", "required": true, "description": "The natural-language query." }],
-    "flags": [
-      { "name": "--k <n>", "default": 10, "constraint": "1..100", "description": "Number of ranked items to retrieve/fuse before context packing." },
-      { "name": "--type <noteType>", "default": null, "description": "Metadata filter: restrict retrieval to a note type." },
-      { "name": "--no-answer", "default": false, "description": "Retrieval-only mode: return ranked items only (response mode=retrieval-only), skipping the generation step entirely — no `answer`, no `modelCalls`, and no model_calls ledger row. Default (mode=answered) generates a grounded answer." }
+    "summary": "Hybrid retrieval (layer precedence + RRF fusion per retrieval-index-contract.md) \u2192 packed context \u2192 grounded, cited answer; audited Tier-0 read.",
+    "args": [
+      {
+        "name": "<text>",
+        "required": true,
+        "description": "The natural-language query."
+      }
     ],
-    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "flags": [
+      {
+        "name": "--k <n>",
+        "default": 10,
+        "constraint": "1..100",
+        "description": "Number of ranked items to retrieve/fuse before context packing."
+      },
+      {
+        "name": "--type <noteType>",
+        "default": null,
+        "description": "Metadata filter: restrict retrieval to a note type."
+      },
+      {
+        "name": "--no-answer",
+        "default": false,
+        "description": "Retrieval-only mode: return ranked items only (response mode=retrieval-only), skipping the generation step entirely \u2014 no `answer`, no `modelCalls`, and no model_calls ledger row. Default (mode=answered) generates a grounded answer."
+      }
+    ],
+    "commonFlags": [
+      "--json",
+      "--quiet",
+      "--verbose",
+      "--plain",
+      "--no-color",
+      "--config <path>",
+      "--vault <path>"
+    ],
     "sideEffects": [
-      "records retrieval_runs/retrieval_results via finalizeLedgerWrite (both modes)",
-      "records a model_calls row ONLY in mode=answered; --no-answer (mode=retrieval-only) skips generation and writes no model_calls row",
-      "emits exactly one run.readonly git-ref audit event (executed Tier-0 read)",
-      "a post-run backup applies (this run wrote ledger rows)"
+      "records retrieval_runs/retrieval_results as plain operational rows (both modes)",
+      "records a model_calls row ONLY in mode=answered; --no-answer (mode=retrieval-only) skips generation and writes no model_calls row"
     ],
     "prohibitedEffects": [
       "no vault/projection mutation",
       "no canonical branch/worktree change",
-      "no retrieval over a non-active index generation",
-      "no more than one terminal run.readonly event per run"
+      "no retrieval over a non-active index generation"
     ],
-    "locks": [{ "scope": "shared", "mode": "shared" }],
-    "exitCodes": [0, 1, 2, 4, 5, 7],
+    "locks": [
+      {
+        "scope": "shared",
+        "mode": "shared"
+      }
+    ],
+    "exitCodes": [
+      0,
+      1,
+      2,
+      4,
+      5
+    ],
     "errorCodes": [
-      { "code": "usage", "exit": 5, "when": "unknown flag/argument or out-of-range --k", "retryable": false },
-      { "code": "config-invalid", "exit": 2, "when": "brain.config.yaml fails schema validation", "retryable": false },
-      { "code": "db-unavailable", "exit": 2, "when": "the SQLite store file is missing or unopenable", "retryable": false },
-      { "code": "index-unavailable", "exit": 2, "when": "the LanceDB index is not configured/present so no statistical layer can run", "retryable": false },
-      { "code": "backup-unhealthy", "exit": 2, "when": "the fail-closed backup watermark is blocked (ledger-backup-contract.md §5): query writes retrieval_runs/retrieval_results via finalizeLedgerWrite, so BOTH modes (answered and retrieval-only) are refused when the watermark is blocked — a ledger-writing run is fail-closed until a verified backup catches up", "retryable": true },
-      { "code": "ambiguous-note", "exit": 1, "when": "the query normalizes to more than one note's alias (identity layer refuses a silent pick)", "retryable": false },
-      { "code": "embedding-retryable", "exit": 7, "when": "the query embed (or answer generation) hit a provider-retryable ProviderError — rate_limit/quota/timeout/transport; envelope carries retryable:true and retryAfterMs when the provider supplied timing", "retryable": true },
-      { "code": "embedding-failed", "exit": 4, "when": "the query embed failed with a non-retryable ProviderError (authentication/model_incompatible/embedding-dimension mismatch)", "retryable": false },
-      { "code": "internal", "exit": 4, "when": "unexpected internal failure", "retryable": false }
+      {
+        "code": "usage",
+        "exit": 5,
+        "when": "unknown flag/argument or out-of-range --k",
+        "retryable": false
+      },
+      {
+        "code": "config-invalid",
+        "exit": 2,
+        "when": "brain.config.yaml fails schema validation",
+        "retryable": false
+      },
+      {
+        "code": "db-unavailable",
+        "exit": 2,
+        "when": "the SQLite store file is missing or unopenable",
+        "retryable": false
+      },
+      {
+        "code": "index-unavailable",
+        "exit": 2,
+        "when": "the LanceDB index is not configured/present so no statistical layer can run",
+        "retryable": false
+      },
+      {
+        "code": "ambiguous-note",
+        "exit": 1,
+        "when": "the query normalizes to more than one note's alias (identity layer refuses a silent pick)",
+        "retryable": false
+      },
+      {
+        "code": "embedding-retryable",
+        "exit": 4,
+        "when": "the query embed (or answer generation) hit a provider-retryable ProviderError \u2014 rate_limit/quota/timeout/transport; envelope carries retryable:true and retryAfterMs when the provider supplied timing",
+        "retryable": true
+      },
+      {
+        "code": "embedding-failed",
+        "exit": 4,
+        "when": "the query embed failed with a non-retryable ProviderError (authentication/model_incompatible/embedding-dimension mismatch)",
+        "retryable": false
+      },
+      {
+        "code": "internal",
+        "exit": 4,
+        "when": "unexpected internal failure",
+        "retryable": false
+      }
     ],
     "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
   }

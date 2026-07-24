@@ -525,30 +525,6 @@ mechanically enforces acceptance criterion 1 and can never drift from the regist
       "driftCodes": ["authz.generation_mismatch", "authz.migration_plan_mismatch", "authz.signature_invalid", "authz.payload_mismatch", "authz.signer_unknown", "authz.signer_revoked", "authz.signer_not_permitted", "authz.nonce_unknown", "authz.nonce_expired", "authz.nonce_replayed"]
     },
     {
-      "op": "source trust promote",
-      "command": "source trust promote",
-      "mechanism": "broker-signature",
-      "challengeFields": ["op", "intendedEffect", "nonce", "expiresAt"],
-      "verificationSteps": [
-        "current trust level equals intendedEffect.fromLevel",
-        "signerId is enrolled, active, and permitted for this op",
-        "append the promote record to refs/trust/ledger"
-      ],
-      "driftCodes": ["authz.trust_level_mismatch", "authz.signature_invalid", "authz.payload_mismatch", "authz.signer_unknown", "authz.signer_revoked", "authz.signer_not_permitted", "authz.nonce_unknown", "authz.nonce_expired", "authz.nonce_replayed"]
-    },
-    {
-      "op": "source trust revoke",
-      "command": "source trust revoke",
-      "mechanism": "broker-signature",
-      "challengeFields": ["op", "intendedEffect", "nonce", "expiresAt"],
-      "verificationSteps": [
-        "current trust level equals intendedEffect.fromLevel",
-        "signerId is enrolled, active, and permitted for this op",
-        "append the revoke record to refs/trust/ledger"
-      ],
-      "driftCodes": ["authz.trust_level_mismatch", "authz.signature_invalid", "authz.payload_mismatch", "authz.signer_unknown", "authz.signer_revoked", "authz.signer_not_permitted", "authz.nonce_unknown", "authz.nonce_expired", "authz.nonce_replayed"]
-    },
-    {
       "op": "db backup --force-unblock",
       "command": "db backup",
       "variant": true,

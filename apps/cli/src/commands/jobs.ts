@@ -20,9 +20,6 @@ import { canonicalStringify } from "@atlas/contracts";
 import {
   runAll,
   listJobs,
-  jobIdsInStates,
-  cancelJob,
-  retryJob,
   SqliteCancellationSource,
   type JobHandler,
   type JobsDeps,
@@ -131,9 +128,11 @@ function requestHash(command: string, selector: Selector): string {
  *    the prior `{ items, aggregate }` + exit code WITHOUT re-running the work;
  *  - key reuse with a DIFFERENT request is REJECTED (`idempotency-key-conflict`, exit 1);
  *  - a concurrent duplicate still `in-progress` BLOCKS on the key
- *    (`idempotency-in-progress`, exit 6, retryable) rather than executing twice —
- *    for `jobs run` this happens BEFORE the `jobs-runner` lock, so a duplicate never
- *    even attempts the drain.
+ *    (`idempotency-in-progress`, exit 6, retryable) rather than executing twice.
+ *    For `jobs run` the caller now holds `jobs-runner` around this whole call
+ *    (round-2 finding), so store open + the idempotency claim + the drain are all
+ *    serialized under the one lock — a concurrent runner is rejected `locked:jobs-runner`
+ *    (exit 2) at the lock BEFORE it can open a store or write an in-progress claim.
  *
  * A failure of `work` releases the in-progress slot so a later retry can re-claim it.
  */
@@ -168,73 +167,6 @@ async function runKeyed(
       releaseIdempotent(store.db, req); // free the slot so a retry can re-claim the key
       throw e;
     }
-  } finally {
-    store.close();
-  }
-}
-
-/**
- * Run a SYNCHRONOUS key-accepting mutating command (`jobs retry`/`jobs cancel`) with
- * CRASH-SAFE result publication (finding 2). The reviewer flagged that the async
- * {@link runKeyed} publishes the idempotency result AFTER the queue mutation commits —
- * a crash in that window leaves committed work whose slot the reconciler later releases,
- * so a retry re-executes and returns a DIFFERENT result than the original.
- *
- * Because a retry/cancel batch is pure SQLite (no async handler), the whole thing runs
- * synchronously, so the queue mutation AND the idempotency completion commit in ONE
- * IMMEDIATE transaction: they land together (a replay returns the identical result) or
- * neither lands (a crash rolls both back — nothing committed — and a retry re-drives a
- * clean, identical redo). The `in-progress` claim itself is committed first (the
- * serialization point for concurrent duplicates); if the atomic body throws, the claim
- * is released so a retry can re-claim the key. `afterCommit` runs only after a durable
- * commit (used by cancel to write cross-process cancel-intent markers, finding 1).
- *
- * `jobs run` keeps the async {@link runKeyed} path: its drain is multi-transaction with
- * external side effects and cannot be one atomic transaction, but re-execution after a
- * crash is safe — each job is individually crash-safe (a completed job is terminal and
- * never re-claimed), so a released slot only re-drains the still-eligible remainder.
- */
-function runKeyedAtomic(
-  ctx: RunContext,
-  command: string,
-  selector: Selector,
-  work: (store: Store) => CommandResult,
-  afterCommit?: (result: CommandResult) => void,
-): number {
-  const store = openJobsCommandStore(ctx);
-  const emit = (r: CommandResult): number => {
-    if (ctx.output.mode === "json") emitJson(r.output);
-    else ctx.render(renderBatch(command, r.output.aggregate));
-    return r.exitCode;
-  };
-  try {
-    if (selector.idempotencyKey === undefined) {
-      const result = work(store);
-      afterCommit?.(result);
-      return emit(result);
-    }
-
-    const req: IdempotencyRequest = {
-      command,
-      key: selector.idempotencyKey,
-      requestHash: requestHash(command, selector),
-      runId: ctx.runId,
-    };
-    const start = beginIdempotentCommand<CommandResult>(store, req, nowIso);
-    if (start.kind === "replay") return emit(start.result);
-    let result: CommandResult;
-    try {
-      result = store.db.transaction(() => {
-        const r = work(store); // queue mutation …
-        start.complete(r); // … and result publication, in the SAME transaction
-        return r;
-      }).immediate();
-    } catch (e) {
-      releaseIdempotent(store.db, req); // free the slot so a retry can re-claim the key
-      throw e;
-    }
-    afterCommit?.(result);
-    return emit(result);
   } finally {
     store.close();
   }
@@ -304,126 +236,49 @@ function jobsList(ctx: RunContext): number {
 function jobsRun(ctx: RunContext): Promise<number> {
   const selector = parseSelector("jobs run", ctx.argv);
   const j = ctx.config.config.jobs;
-  return runKeyed(ctx, "jobs run", selector, async (store) => {
-    // Cross-process cancel (finding 3): the drain observes DURABLE cancel intents a
-    // separate `jobs cancel` records atomically in `job_cancellations`, aborting a
-    // running job at its next checkpoint — observed from durable SQLite state, not a
-    // filesystem marker (so a crash after the cancel commit cannot lose it).
-    const cancellation = new SqliteCancellationSource(store.db);
-    const deps: JobsDeps = {
-      store,
-      // Production executors are built per-drain (they close over ctx + the open
-      // store); the import-time map carries only the env-gated test handler. The
-      // test handler is spread FIRST so a production workflow can never be
-      // shadowed by `ATLAS_TEST_JOB_WORKFLOW` naming collision.
-      handlers: { ...JOB_HANDLERS, ...buildJobHandlers({ ctx, store }) },
-      withLock: ctx.withLock,
-      now: nowIso,
-      backoff: { baseMs: j.backoff_base_ms, factor: j.backoff_factor, maxMs: j.backoff_max_ms },
-      defaultMaxAttempts: j.max_attempts,
-      cancellation,
-    };
-    // A `locked:jobs-runner` from `withLock` propagates (runCli → exit 2 envelope).
-    // Bare invocation (no <jobId>, no --all) defaults to --all (contract §8).
-    const runSelector = selector.jobId !== undefined ? { jobId: selector.jobId } : { all: true };
-    const report: JobRunReport = await runAll(deps, runSelector);
-    return {
-      output: { command: "jobs run", items: report.items, aggregate: report.aggregate },
-      exitCode: report.aggregate.exitCode,
-    };
-  });
-}
-
-// ---------------------------------------------------------------------------
-// jobs retry / cancel — shared per-item batch driver
-// ---------------------------------------------------------------------------
-
-interface BatchItem {
-  jobId: string;
-  outcome: string;
-  error?: { code: string; message: string; retryable: boolean };
-}
-
-/** Aggregate a retry/cancel batch (no `run`-only outcomes; exit 4 iff a write failed). */
-function batchAggregate(items: BatchItem[]): BatchAggregate {
-  let succeeded = 0;
-  let failed = 0;
-  let skipped = 0;
-  for (const it of items) {
-    if (it.outcome === "failed") failed++;
-    else if (it.outcome === "requeued" || it.outcome === "cancelled" || it.outcome === "cancel-requested") succeeded++;
-    else skipped++; // not-failed / not-found / already-terminal / skipped:state-changed
-  }
-  return { exitCode: failed > 0 ? EXIT.INTERNAL : EXIT.OK, succeeded, failed, skipped, actionRequired: 0 };
-}
-
-/** Bare invocation (no `<jobId>`, no `--all`) ⇒ exit 5 (never a silent select-all). */
-function requireSelector(command: string, selector: Selector): void {
-  if (selector.jobId === undefined && !selector.all) {
-    throw CliError.usage(`\`${command}\`: a selector is required — pass <jobId> or --all (bare invocation is refused)`);
-  }
-}
-
-function resolveTargets(command: string, selector: Selector, all: () => string[]): string[] {
-  if (selector.jobId !== undefined) return [selector.jobId];
-  if (selector.all) return all();
-  requireSelector(command, selector); // defensive — callers guard before store open
-  return [];
-}
-
-/** Assemble a retry/cancel batch into a {@link CommandResult} (shared by keyed + bare paths). */
-function batchResult(command: string, items: BatchItem[]): CommandResult {
-  const aggregate = batchAggregate(items);
-  return { output: { command, items, aggregate }, exitCode: aggregate.exitCode };
-}
-
-function jobsRetry(ctx: RunContext): number {
-  const selector = parseSelector("jobs retry", ctx.argv);
-  requireSelector("jobs retry", selector); // bare (no selector) ⇒ exit 5, before any store open
-  return runKeyedAtomic(ctx, "jobs retry", selector, (store) => {
-    const targets = resolveTargets("jobs retry", selector, () => jobIdsInStates(store.db, ["failed"]));
-    const bulk = selector.all;
-    const items: BatchItem[] = targets.map((id) => {
-      try {
-        const r = retryJob(store.db, id, nowIso());
-        const outcome = r === "not-failed" && bulk ? "skipped:state-changed" : r;
-        return { jobId: id, outcome };
-      } catch (e) {
-        return { jobId: id, outcome: "failed", error: { code: "internal", message: errMsg(e), retryable: false } };
-      }
-    });
-    return batchResult("jobs retry", items);
-  });
-}
-
-function jobsCancel(ctx: RunContext): number {
-  const selector = parseSelector("jobs cancel", ctx.argv);
-  requireSelector("jobs cancel", selector); // bare (no selector) ⇒ exit 5, before any store open
-  // Finding 3: `cancelJob` records a `running` job's cancel intent DURABLY in
-  // `job_cancellations` INSIDE its transaction — the same transaction `runKeyedAtomic`
-  // uses to commit the idempotency result. Intent + published result therefore land
-  // atomically (or neither does), so a crash can never leave a replayable
-  // `cancel-requested` success with nothing observable to stop the job. No post-commit
-  // filesystem write is needed; the draining runner observes the intent from SQLite.
-  return runKeyedAtomic(ctx, "jobs cancel", selector, (store) => {
-    const targets = resolveTargets("jobs cancel", selector, () => jobIdsInStates(store.db, ["pending", "running"]));
-    const items: BatchItem[] = targets.map((id) => {
-      try {
-        return { jobId: id, outcome: cancelJob(store.db, id, nowIso()) };
-      } catch (e) {
-        return { jobId: id, outcome: "failed", error: { code: "internal", message: errMsg(e), retryable: false } };
-      }
-    });
-    return batchResult("jobs cancel", items);
-  });
+  // Acquire `jobs-runner` OUTERMOST — around store open, the idempotency claim, AND
+  // the drain (round-2 finding). Previously `runKeyed` opened the store and wrote the
+  // in-progress idempotency claim BEFORE `runAll` took the lock, so a lock loser (or a
+  // crash) could strand a claim / write a derived store while another runner held the
+  // lock. Now every derived-store write for `jobs run` is serialized under the one
+  // lock. A `locked:jobs-runner` here fails fast (exit 2, no queueing) BEFORE any store
+  // open or idempotency write. Bare invocation (no <jobId>, no --all) defaults to --all.
+  return ctx.withLock("jobs-runner", () =>
+    runKeyed(ctx, "jobs run", selector, async (store) => {
+      // Cross-process cancel (finding 3): the drain observes DURABLE cancel intents a
+      // separate `jobs cancel` records atomically in `job_cancellations`, aborting a
+      // running job at its next checkpoint — observed from durable SQLite state, not a
+      // filesystem marker (so a crash after the cancel commit cannot lose it).
+      const cancellation = new SqliteCancellationSource(store.db);
+      const deps: JobsDeps = {
+        store,
+        // Production executors are built per-drain (they close over ctx + the open
+        // store); the import-time map carries only the env-gated test handler. The
+        // test handler is spread FIRST so a production workflow can never be
+        // shadowed by `ATLAS_TEST_JOB_WORKFLOW` naming collision.
+        handlers: { ...JOB_HANDLERS, ...buildJobHandlers({ ctx, store }) },
+        // The `jobs-runner` lock is ALREADY held by the outer `ctx.withLock` above;
+        // `runAll` MUST NOT re-take it (re-acquiring the same scope in one process is
+        // an order violation → exit 4). Pass a passthrough so the existing `runAll`
+        // body runs under the already-held lock.
+        withLock: (_scope, fn) => Promise.resolve(fn()),
+        now: nowIso,
+        backoff: { baseMs: j.backoff_base_ms, factor: j.backoff_factor, maxMs: j.backoff_max_ms },
+        defaultMaxAttempts: j.max_attempts,
+        cancellation,
+      };
+      const runSelector = selector.jobId !== undefined ? { jobId: selector.jobId } : { all: true };
+      const report: JobRunReport = await runAll(deps, runSelector);
+      return {
+        output: { command: "jobs run", items: report.items, aggregate: report.aggregate },
+        exitCode: report.aggregate.exitCode,
+      };
+    }),
+  );
 }
 
 function renderBatch(command: string, a: { succeeded: number; failed: number; skipped: number; actionRequired: number }): string {
   return `${command}: ${a.succeeded} ok, ${a.failed} failed, ${a.skipped} skipped, ${a.actionRequired} action-required`;
-}
-
-function errMsg(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
 }
 
 // Env-gated (`ATLAS_TEST_JOB_HANDLER=1`) test workflow executor for the real-process
@@ -433,7 +288,5 @@ installTestJobHandler(process.env, registerJobHandler);
 
 registerCommand("jobs list", jobsList);
 registerCommand("jobs run", jobsRun);
-registerCommand("jobs retry", jobsRetry);
-registerCommand("jobs cancel", jobsCancel);
 
-export { jobsList, jobsRun, jobsRetry, jobsCancel };
+export { jobsList, jobsRun };

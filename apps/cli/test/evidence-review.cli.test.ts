@@ -1,23 +1,20 @@
 /**
- * `evidence-review.cli` (Task 4.7 / #59) — the wired read-only `brain evidence review`. Seeds
- * evidence in mixed verification states via the real projections and asserts the command lists only
- * the non-`valid` heads (stale/pending/failed), scoped + paginated, schema-valid, no mutation.
+ * `evidence-review.cli` (v2 task 4-4 + #337-F1) — the wired read-only `brain evidence
+ * review`. Seeds v2 vault-derived evidence via real on-disk notes + `sync` (so
+ * `sourceNoteHash` matches the committed content), then asserts the command lists the
+ * EFFECTIVE needing-attention set (pending/failed/needs-review), computed against the
+ * CURRENT working tree — so an edited-but-unsynced note re-surfaces as stale/needs-review
+ * (F1: `sourceNoteHash` is read, not just stamped) and a gone target is `target: missing`.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, appendFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import _Ajv2020 from "ajv/dist/2020.js";
-import { openStore, rebuildProjections } from "@atlas/sqlite-store";
-import type { ParsedNote, VaultSnapshot } from "@atlas/contracts";
-import { buildSectionTree } from "../src/markdown/sections.js";
-import { splitFrontmatter } from "../src/markdown/parse.js";
+import { openStore, EvidenceRepo } from "@atlas/sqlite-store";
 import { runCli } from "../src/main.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..", "..", "..");
-const HEX_A = "a".repeat(64);
-const HEX_B = "b".repeat(64);
-const CONTENT_A = `sha256:${HEX_A}:text/plain`;
 const Ajv = ((_Ajv2020 as unknown as { default?: unknown }).default ?? _Ajv2020) as new (opts?: unknown) => {
   compile: (s: unknown) => ((v: unknown) => boolean) & { errors?: unknown };
   errorsText: (e?: unknown) => string;
@@ -29,24 +26,18 @@ function validateSchema(name: string, value: unknown): void {
   if (!validate(value)) throw new Error(`${name} failed schema: ${ajv.errorsText(validate.errors)}\n${JSON.stringify(value)}`);
 }
 
-function note(raw: string, over: Partial<ParsedNote> = {}): ParsedNote {
-  const { body } = splitFrontmatter(raw);
-  const id = /id:\s*(\S+)/.exec(raw)?.[1] ?? "n";
-  return { id, path: `${id}.md`, type: "concept", schemaVersion: 1, title: id, status: "active", created: "2026-07-11", updated: "2026-07-11", aliases: [], sources: [], declaredSensitivity: "internal", links: [], sections: buildSectionTree(body), contentHash: "sha256:0", raw, ...over };
-}
-function sourceNote(): ParsedNote {
-  const raw = ["---", "id: s-a", "type: source", "schema_version: 1", "title: s-a", "created: 2026-07-11", "updated: 2026-07-11",
-    `contentId: "${CONTENT_A}"`, "origin: notes/a.txt", "provenance:", "  vault_path: sources/a.txt", "  size_bytes: 12", "  renditions:",
-    `    - { extractor_version: 1, normalizer_version: 1, normalized_content_hash: "${HEX_B}", size_bytes: 10, locator_scheme: char }`, "---", "", "# s-a", ""].join("\n");
-  return note(raw, { type: "source", id: "s-a", path: "sources/s-a.md" });
-}
-function claimNote(id: string, claimId: string, verification: string): ParsedNote {
-  const raw = ["---", `id: ${id}`, "type: concept", "schema_version: 1", `title: ${id}`, "created: 2026-07-11", "updated: 2026-07-11", "claims:",
-    `  - claim_id: ${claimId}`, '    text: "c."', "    evidence:", `      - rendition: "${CONTENT_A}:1:1"`, `        verification: ${verification}`, "---", "", `# ${id}`, ""].join("\n");
-  return note(raw, { id, path: `${id}.md` });
+/** A valid v2 note carrying one flat `evidence:` frontmatter entry in the given status. */
+function evidenceNote(id: string, status: string): string {
+  return [
+    "---", `id: ${id}`, "type: concept", "schema_version: 1", `title: ${id}`,
+    "created: 2026-07-11", "updated: 2026-07-11",
+    "evidence:", `  - id: ev-${id}`, '    claim: "c."', `    status: ${status}`,
+    "---", "", `# ${id}`, "", "Body prose for embedding.", "",
+  ].join("\n");
 }
 
-let root: string, cwd: string, env: NodeJS.ProcessEnv, dbPath: string;
+let root: string, cwd: string, env: NodeJS.ProcessEnv, dbPath: string, vaultDir: string;
+function git(args: string[]): void { execFileSync("git", args, { cwd: vaultDir }); }
 async function cli(argv: string[]): Promise<{ code: number; out: string }> {
   let out = "";
   const realOut = process.stdout.write.bind(process.stdout);
@@ -64,11 +55,14 @@ async function cli(argv: string[]): Promise<{ code: number; out: string }> {
 beforeEach(async () => {
   root = mkdtempSync(join("/tmp", "atlas-er-"));
   cwd = join(root, "work");
+  vaultDir = join(cwd, "vault");
   mkdirSync(join(cwd, ".atlas"), { recursive: true });
-  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: (mkdirSync(join(cwd, "vault"), { recursive: true }), join(cwd, "vault")) });
+  mkdirSync(vaultDir, { recursive: true });
+  git(["init", "-q", "-b", "main"]);
+  git(["config", "user.email", "t@t"]); git(["config", "user.name", "t"]);
   dbPath = join(cwd, ".atlas", "atlas.db");
   const config = [
-    "vault:", `  path: ${join(cwd, "vault")}`,
+    "vault:", `  path: ${vaultDir}`,
     "sqlite:", "  path: ./.atlas/atlas.db", "  ledger_backup:", "    dir: ./.atlas/backups",
     "lancedb:", "  dir: ./.atlas/lancedb",
     "indexing:", "  chunker_version: 1", "  embedding_model: gemini-embedding-001", "  dimensions: 768",
@@ -77,17 +71,20 @@ beforeEach(async () => {
     "broker:", `  socket_path: ${join(root, "b.sock")}`, `  egress_socket_path: ${join(root, "e.sock")}`, "",
   ].join("\n");
   writeFileSync(join(cwd, "brain.config.yaml"), config, "utf8");
-  env = { ...process.env, NO_COLOR: "1" };
-  await cli(["db", "migrate", "--json"]);
-  const s = openStore({ path: dbPath });
-  try {
-    rebuildProjections(s.db, { notes: [sourceNote(), claimNote("note-p", "claim-p", "pending"), claimNote("note-v", "claim-v", "valid"), claimNote("note-f", "claim-f", "failed")], errors: [] } as VaultSnapshot);
-  } finally { s.close(); }
+  env = { ...process.env, NO_COLOR: "1", ATLAS_TEST_MODE: "1", ATLAS_FAKE_PROVIDER: "1", ATLAS_GEMINI_API_KEY: "test-key" };
+  for (const [id, status] of [["note-p", "pending"], ["note-f", "failed"], ["note-r", "resolved"], ["note-nr", "needs-review"]] as const) {
+    writeFileSync(join(vaultDir, `${id}.md`), evidenceNote(id, status), "utf8");
+  }
+  git(["add", "-A"]); git(["commit", "-q", "-m", "seed"]);
+  const mig = await cli(["db", "migrate", "--json"]);
+  expect(mig.code, mig.out).toBe(0);
+  const sync = await cli(["sync", "--json"]);
+  expect(sync.code, sync.out).toBe(0); // folds evidence rows with sourceNoteHash = committed content
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
 describe("brain evidence review", () => {
-  it("lists only non-valid heads (stale/pending/failed), schema-valid, with a correct total", async () => {
+  it("lists only the effectively non-resolved rows (pending/failed/needs-review), target present, schema-valid", async () => {
     const r = await cli(["evidence", "review", "--json"]);
     expect(r.code, r.out).toBe(0);
     const out = JSON.parse(r.out);
@@ -95,14 +92,45 @@ describe("brain evidence review", () => {
     const states = new Map(out.items.map((i: { noteId: string; state: string }) => [i.noteId, i.state]));
     expect(states.get("note-p")).toBe("pending");
     expect(states.get("note-f")).toBe("failed");
-    expect(states.has("note-v")).toBe(false); // valid is NOT listed
-    expect(out.pagination.total).toBe(2);
-    expect(out.pagination.hasMore).toBe(false);
+    expect(states.get("note-nr")).toBe("needs-review");
+    expect(states.has("note-r")).toBe(false); // resolved + unchanged ⇒ not listed
+    expect(out.items.every((i: { target: string }) => i.target === "present")).toBe(true);
+    expect(out.pagination.total).toBe(3);
+  });
+
+  it("F1: an on-disk edit without sync re-surfaces a RESOLVED row as stale/needs-review with a detail", async () => {
+    // note-r is resolved (excluded above). Edit it on disk WITHOUT sync ⇒ its content
+    // hash no longer matches the folded sourceNoteHash ⇒ effective needs-review.
+    appendFileSync(join(vaultDir, "note-r.md"), "\nedited on disk, not synced\n");
+    const r = await cli(["evidence", "review", "--json"]);
+    expect(r.code, r.out).toBe(0);
+    const out = JSON.parse(r.out);
+    validateSchema("evidence-review", out);
+    const item = out.items.find((i: { noteId: string }) => i.noteId === "note-r");
+    expect(item, "the now-stale resolved row must re-surface").toBeDefined();
+    expect(item.state).toBe("needs-review");
+    expect(item.target).toBe("present");
+    expect(item.detail).toMatch(/stale|edited/i);
+    expect(out.pagination.total).toBe(4); // the 3 non-resolved + the newly-stale note-r
+  });
+
+  it("a gone target (note absent from the vault) ⇒ target:missing, never a crash", async () => {
+    // Seed an orphan row directly (no note file) — review must surface it, not throw.
+    const s = openStore({ path: dbPath });
+    try {
+      new EvidenceRepo(s.db).replaceForNote("ghost", "hash-g", [{ id: "ev-ghost", claim: "orphan", status: "pending", createdAt: "2026-07-11" }]);
+    } finally { s.close(); }
+    const r = await cli(["evidence", "review", "--json"]);
+    expect(r.code, r.out).toBe(0);
+    const out = JSON.parse(r.out);
+    validateSchema("evidence-review", out);
+    const item = out.items.find((i: { evidenceId: string }) => i.evidenceId === "ev-ghost");
+    expect(item).toMatchObject({ noteId: "ghost", target: "missing", state: "needs-review" });
   });
 
   it("scopes to a single note", async () => {
     const r = await cli(["evidence", "review", "note-p", "--json"]);
-    expect(r.code).toBe(0);
+    expect(r.code, r.out).toBe(0);
     const out = JSON.parse(r.out);
     expect(out.items).toHaveLength(1);
     expect(out.items[0].noteId).toBe("note-p");
@@ -113,7 +141,7 @@ describe("brain evidence review", () => {
     const r = await cli(["evidence", "review", "--limit", "1", "--json"]);
     const out = JSON.parse(r.out);
     expect(out.items).toHaveLength(1);
-    expect(out.pagination).toMatchObject({ limit: 1, offset: 0, total: 2, hasMore: true });
+    expect(out.pagination).toMatchObject({ limit: 1, offset: 0, total: 3, hasMore: true });
     const bad = await cli(["evidence", "review", "--limit", "0", "--json"]);
     expect(bad.code).toBe(5);
   });

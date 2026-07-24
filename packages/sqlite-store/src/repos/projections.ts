@@ -35,12 +35,19 @@ export interface IdentityKeyRow {
   readonly normalizer_version: number;
 }
 
-/** A row of `note_links`. */
+/** A row of `note_links` (v2 shape — `0013_links_v2`). */
 export interface NoteLinkRow {
   readonly source_note_id: string;
   readonly target_note_id: string;
-  readonly predicate: string;
-  readonly ordinal: number;
+  /** `null` = a plain `[[wiki-link]]`; a string = a typed relationship edge. */
+  readonly predicate: string | null;
+  /** The `[[target|alias]]` display text; omit/`null` when absent. */
+  readonly alias?: string | null;
+  /**
+   * v1 authoring-order column, removed by `0013_links_v2`. Accepted-but-ignored
+   * so pre-v2 callers (which passed `ordinal: 0`) still type-check; never persisted.
+   */
+  readonly ordinal?: number;
 }
 
 /** A row of `vault_schema_migrations`. */
@@ -86,14 +93,42 @@ export class ProjectionRepo {
       .run(row);
   }
 
+  /**
+   * Insert a link (v2 — `0013_links_v2`). A plain link (`predicate === null`)
+   * upserts against the partial `ux_note_links_plain(source, target)` index; a
+   * typed relationship upserts against `ux_note_links_pred(source, target,
+   * predicate)`. Either conflict refreshes `alias` — a repeated link to the same
+   * target collapses to one row (last display text wins) rather than tripping the
+   * unique index, exactly as the v1 PK-upsert collapsed repeated edges. The
+   * conflict target names the partial index's `WHERE` clause verbatim (SQLite
+   * requires it to select a partial-index upsert arbiter).
+   */
   insertLink(row: NoteLinkRow): void {
-    this.db
-      .prepare(
-        `INSERT INTO note_links (source_note_id, target_note_id, predicate, ordinal)
-         VALUES (@source_note_id, @target_note_id, @predicate, @ordinal)
-         ON CONFLICT(source_note_id, target_note_id, predicate) DO UPDATE SET ordinal = excluded.ordinal`,
-      )
-      .run(row);
+    const alias = row.alias ?? null;
+    if (row.predicate === null) {
+      this.db
+        .prepare(
+          `INSERT INTO note_links (source_note_id, target_note_id, predicate, alias)
+           VALUES (@source_note_id, @target_note_id, NULL, @alias)
+           ON CONFLICT(source_note_id, target_note_id) WHERE predicate IS NULL
+           DO UPDATE SET alias = excluded.alias`,
+        )
+        .run({ source_note_id: row.source_note_id, target_note_id: row.target_note_id, alias });
+    } else {
+      this.db
+        .prepare(
+          `INSERT INTO note_links (source_note_id, target_note_id, predicate, alias)
+           VALUES (@source_note_id, @target_note_id, @predicate, @alias)
+           ON CONFLICT(source_note_id, target_note_id, predicate) WHERE predicate IS NOT NULL
+           DO UPDATE SET alias = excluded.alias`,
+        )
+        .run({
+          source_note_id: row.source_note_id,
+          target_note_id: row.target_note_id,
+          predicate: row.predicate,
+          alias,
+        });
+    }
   }
 
   insertSchemaMigration(row: VaultSchemaMigrationRow): void {

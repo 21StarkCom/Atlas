@@ -2,69 +2,119 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "atlas://cli-contract/source-add.schema.json",
   "title": "brain source add — --json success output",
-  "description": "Deterministic Tier-1 source capture that APPLIES immediately (D11) — no preview mode. Funnels through captureSource: scan-before-persist (secret detection ⇒ exit 3, quarantined, nothing persisted), dedup by (rawContentHash, canonicalMediaType), capture keyed (contentId, origin), broker Tier-1 CAS integration. Reports the minted ids + what was reused.",
+  "description": "Record a source in the v2 operational `source` registry (0015_source_registry). A plain operational SQLite write — NO git commit, NO capture/normalize (that is `ingest`), NO mutation order. Derives kind (file|url) from the locator, generates a stable id, and inserts one row deduped on the UNIQUE locator. A duplicate locator is a NOOP SUCCESS returning the existing id (added:false), so a repeated add is intrinsically idempotent.",
   "type": "object",
   "unevaluatedProperties": false,
-  "required": ["command", "contentId", "captureId", "renditionId", "noteId", "runId", "reused"],
+  "required": [
+    "command",
+    "id",
+    "kind",
+    "locator",
+    "added"
+  ],
   "properties": {
-    "command": { "const": "source add" },
-    "contentId": { "type": "string", "minLength": 1 },
-    "captureId": { "type": "string", "minLength": 1 },
-    "renditionId": { "type": "string", "minLength": 1 },
-    "noteId": { "type": "string", "minLength": 1 },
-    "runId": { "type": "string", "minLength": 1 },
-    "reused": {
-      "type": "object",
-      "unevaluatedProperties": false,
-      "required": ["blob", "capture"],
-      "properties": {
-        "blob": { "type": "boolean", "description": "True when an existing content blob was reused (identical bytes)." },
-        "capture": { "type": "boolean", "description": "True when an existing capture (contentId, origin) was reused (idempotent re-add)." }
-      }
+    "command": {
+      "const": "source add"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The registry row id (the new one on insert; the pre-existing one on a dedup noop)."
+    },
+    "kind": {
+      "enum": ["file", "url"],
+      "description": "Derived from the locator: a <scheme>:// locator is `url`, else `file`."
+    },
+    "locator": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The file path or URL locating the source (the UNIQUE dedup key)."
+    },
+    "title": {
+      "type": "string",
+      "description": "Optional human title (only present when --title was given)."
+    },
+    "added": {
+      "type": "boolean",
+      "description": "True when a new row was inserted; false on a dedup noop (the locator was already registered)."
     }
   },
   "examples": [
     {
       "command": "source add",
-      "contentId": "sha256:aaaa:text/markdown",
-      "captureId": "cap-1",
-      "renditionId": "sha256:aaaa:text/markdown:1:1",
-      "noteId": "source-sample",
-      "runId": "01J9Z8Q0000000000000000000",
-      "reused": { "blob": false, "capture": false }
+      "id": "src_0123456789abcdef",
+      "kind": "file",
+      "locator": "/inbox/sample.md",
+      "added": true
+    },
+    {
+      "command": "source add",
+      "id": "src_fedcba9876543210",
+      "kind": "url",
+      "locator": "https://example.com/doc",
+      "title": "Example Doc",
+      "added": false
     }
   ],
   "x-atlas-contract": {
     "command": "source add",
     "phase": 2,
     "privilege": "shared",
-    "idempotency": "key-accepting",
+    "idempotency": "intrinsic",
     "executionClass": "mutating",
-    "summary": "Deterministic Tier-1 source capture; applies immediately.",
-    "args": [{ "name": "<path>", "required": true, "description": "Path to the source file to capture." }],
-    "flags": [{ "name": "--idempotency-key <key>" }],
-    "commonFlags": ["--json", "--quiet", "--verbose", "--plain", "--no-color", "--config <path>", "--vault <path>"],
+    "summary": "Record a source in the operational registry; dedup on locator is a noop success.",
+    "args": [
+      {
+        "name": "<locator>",
+        "required": true,
+        "description": "A file path or URL locating the source."
+      }
+    ],
+    "flags": [
+      {
+        "name": "--title <title>"
+      }
+    ],
+    "commonFlags": [
+      "--json",
+      "--quiet",
+      "--verbose",
+      "--plain",
+      "--no-color",
+      "--config <path>",
+      "--vault <path>"
+    ],
     "sideEffects": [
-      "copies raw bytes immutably under sources/",
-      "writes the content-blob/capture/rendition manifests + a source note",
-      "integrates the capture commit via broker Tier-1 CAS (advances canonical exactly one commit)",
-      "writes ledger rows + one terminal run.integrated audit-ref event via finalizeLedgerWrite"
+      "inserts one row into the operational `source` registry (0015_source_registry)"
     ],
     "prohibitedEffects": [
-      "no byte persists or transmits before the secret scan passes (scan-before-persist)",
-      "never mutates a note other than the created source note"
+      "no git commit or canonical-ref move",
+      "no capture/normalize/blob copy (that is `ingest`)",
+      "no vault lock / mutation order"
     ],
-    "locks": [
-      { "scope": "canonical-integration", "mode": "exclusive" }
+    "locks": [],
+    "exitCodes": [
+      0,
+      2,
+      4,
+      5
     ],
-    "exitCodes": [0, 1, 2, 3, 4, 5],
     "errorCodes": [
-      { "code": "usage", "exit": 5, "when": "missing <path> argument" },
-      { "code": "validation-error", "exit": 1, "when": "the source cannot be normalized (typed normalization rejection)" },
-      { "code": "secret-detected", "exit": 3, "when": "the secret scanner flagged the bytes; source quarantined, nothing persisted" },
-      { "code": "locked:canonical-integration", "exit": 2, "when": "an integration holds the lock", "retryable": true },
-      { "code": "backup-unhealthy", "exit": 2, "when": "ledger-writing is blocked pending a verified backup" },
-      { "code": "internal", "exit": 4, "when": "unexpected internal failure" }
+      {
+        "code": "usage",
+        "exit": 5,
+        "when": "missing <locator> argument or unknown flag"
+      },
+      {
+        "code": "db-unavailable",
+        "exit": 2,
+        "when": "the ledger is absent or not migrated (run `brain db migrate`)"
+      },
+      {
+        "code": "internal",
+        "exit": 4,
+        "when": "unexpected internal failure"
+      }
     ],
     "errorEnvelopeRef": "docs/specs/cli-contract/error-envelope.schema.json"
   }

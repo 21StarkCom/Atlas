@@ -36,10 +36,11 @@ describe("rebuild from git (DR, Task 4.11)", () => {
       const report = rebuildFromGit(s.db, snap);
       expect(report.rebuilt.notes).toBe(2);
       expect(report.clean).toBe(true); // no data-loss gaps from the vault
-      // The three ledger/audit classes are reported (recoverable only from the audit ref/backup).
+      // v2 (#338): the operational classes are reported (not derivable from Markdown).
+      // The audit ledger is retired, so `audit_events` is no longer among them.
       const classes = report.gaps.map((g) => g.storageClass);
       expect(classes).toContain("agent_runs");
-      expect(classes).toContain("audit_events");
+      expect(classes).not.toContain("audit_events");
       expect(classes).toContain("workflow_idempotency");
       // The projection was actually written.
       const n = s.db.prepare(`SELECT COUNT(*) AS n FROM notes`).get() as { n: number };

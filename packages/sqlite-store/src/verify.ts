@@ -5,9 +5,10 @@
  * Both suites are **table-aware**: a query/assertion that references a table not
  * yet created (jobs → `0002`, claims/provenance → `0003`/`0004`) is skipped, so
  * `verify` is correct at every migration frontier. In this package's frontier
- * (`0001_core` only) it exercises invariant §7.1 (one slug per note) + §7.7
- * (audit terminal cardinality) and the six §6 assertions whose tables/indexes
- * `0001_core` owns.
+ * (`0001_core` only) it exercises invariant §7.1 (one slug per note) and the §6
+ * EQP assertions whose tables/indexes `0001_core` owns. v2 (#338) retired the
+ * audit ledger, so the audit-terminal-cardinality invariant + the `audit-by-run`
+ * EQP assertion are gone with the `audit_events` table.
  */
 import type { SqliteDatabase } from "./connection.js";
 
@@ -40,6 +41,20 @@ function tableExists(db: SqliteDatabase, name: string): boolean {
   );
 }
 
+/**
+ * Whether a migration id has been applied, per the runner-owned
+ * `db_schema_migrations` table. Used to make an index-contract assertion
+ * migration-frontier-aware (a table's expected index can change across a
+ * table-rebuild migration). A DB with no runner table (or the id unapplied) is
+ * treated as being BEFORE that migration.
+ */
+function migrationApplied(db: SqliteDatabase, id: string): boolean {
+  if (!tableExists(db, "db_schema_migrations")) return false;
+  return (
+    db.prepare(`SELECT 1 FROM db_schema_migrations WHERE id = ?`).get(id) !== undefined
+  );
+}
+
 interface InvariantSpec {
   readonly name: string;
   readonly tables: readonly string[];
@@ -56,77 +71,11 @@ const INVARIANTS: readonly InvariantSpec[] = [
         ON k.note_id = n.note_id
       WHERE COALESCE(k.c, 0) <> 1;`,
   },
-  {
-    name: "no-dangling-evidence-rendition",
-    tables: ["claim_evidence", "source_renditions"],
-    sql: `SELECT e.evidence_id FROM claim_evidence e
-      LEFT JOIN source_renditions r
-        ON r.raw_content_hash = e.raw_content_hash AND r.canonical_media_type = e.canonical_media_type
-       AND r.extractor_version = e.extractor_version AND r.normalizer_version = e.normalizer_version
-      WHERE r.raw_content_hash IS NULL;`,
-  },
-  {
-    name: "note-sources-renditions-resolve",
-    tables: ["note_sources", "source_renditions"],
-    sql: `SELECT s.note_id FROM note_sources s
-      LEFT JOIN source_renditions r
-        ON r.raw_content_hash = s.raw_content_hash AND r.canonical_media_type = s.canonical_media_type
-       AND r.extractor_version = s.extractor_version AND r.normalizer_version = s.normalizer_version
-      WHERE s.extractor_version IS NOT NULL AND r.raw_content_hash IS NULL;`,
-  },
-  {
-    name: "one-current-evidence-head-per-lineage",
-    tables: ["claim_evidence"],
-    sql: `SELECT lineage_id, SUM(current) AS current_heads
-      FROM claim_evidence
-      GROUP BY lineage_id
-      HAVING SUM(current) <> 1;`,
-  },
-  {
-    name: "active-rendition-consistency",
-    tables: ["content_blobs", "source_renditions"],
-    sql: `SELECT b.raw_content_hash FROM content_blobs b
-      LEFT JOIN source_renditions r
-        ON r.raw_content_hash = b.raw_content_hash AND r.canonical_media_type = b.canonical_media_type
-       AND r.extractor_version = b.active_extractor_version AND r.normalizer_version = b.active_normalizer_version
-      WHERE b.active_extractor_version IS NOT NULL AND r.raw_content_hash IS NULL;`,
-  },
-  {
-    name: "effective-staleness",
-    tables: ["claim_evidence", "content_blobs"],
-    sql: `SELECT e.evidence_id FROM claim_evidence e
-      JOIN content_blobs b
-        ON b.raw_content_hash = e.raw_content_hash AND b.canonical_media_type = e.canonical_media_type
-      WHERE e.current = 1
-        AND (e.extractor_version <> b.active_extractor_version OR e.normalizer_version <> b.active_normalizer_version)
-        AND e.verification = 'valid';`,
-  },
-  {
-    // The closed set of terminal audit-event types (plan §2.5 audit SSOT): the
-    // workflow terminals PLUS the read-class terminals `run.readonly` (an executed
-    // Tier-0 read — `inspect`/`status`/`query`, Task 1.9/3.4) and `run.projection`
-    // (an executed projection rebuild, Task 1.9/3.5). Cardinality is "each terminal
-    // event type exactly once per run". A `finalized` agent_run is therefore covered
-    // by ANY terminal event — including `run.readonly` (the audited-read shape
-    // `brain query` uses: a `finalized` retrieve run whose sole terminal is one
-    // `run.readonly`, no workflow install event). Real workflow runs still carry
-    // their own install/reject terminal, so recognizing the read-class kinds never
-    // weakens them.
-    name: "audit-terminal-event-cardinality",
-    tables: ["audit_events", "agent_runs"],
-    sql: `SELECT run_id, 'duplicate:' || event_type AS issue
-      FROM audit_events
-      WHERE event_type IN ('run.integrated','run.rejected','run.rolled_back','run.failed','run.cancelled','run.readonly','run.projection')
-      GROUP BY run_id, event_type HAVING COUNT(*) > 1
-      UNION ALL
-      SELECT r.run_id, 'missing-terminal-event' AS issue
-      FROM agent_runs r
-      WHERE r.status IN ('finalized','rejected','rolled-back','failed','cancelled')
-        AND NOT EXISTS (
-          SELECT 1 FROM audit_events e
-          WHERE e.run_id = r.run_id
-            AND e.event_type IN ('run.integrated','run.rejected','run.rolled_back','run.failed','run.cancelled','run.readonly','run.projection'));`,
-  },
+  // v2 (#340): the `note-sources-renditions-resolve` + `active-rendition-consistency`
+  // invariants are RETIRED with the v1 content-addressed provenance model — 0015
+  // forward-DROPs `content_blobs`/`source_captures`/`source_renditions`/`note_sources`,
+  // so there is nothing left to cross-check (git is the safety mechanism; `source` is a
+  // flat operational registry with no rendition graph).
 ];
 
 interface QueryPlanSpec {
@@ -134,6 +83,15 @@ interface QueryPlanSpec {
   readonly table: string;
   /** The index that MUST appear in the plan; `null` = the table's PK (autoindex). */
   readonly index: string | null;
+  /**
+   * Migration-frontier-aware override of {@link index}, resolved against the live
+   * DB at check time. Returns the index that MUST appear (or `null` to require
+   * only a PK-autoindex SEARCH). Used where the expected index depends on which
+   * migrations have been applied (e.g. `note_links` forward traversal: the v1
+   * 3-column PK autoindex before `0013_links_v2`, the explicit
+   * `idx_note_links_forward` after). When set, it takes precedence over `index`.
+   */
+  readonly resolveIndex?: (db: SqliteDatabase) => string | null;
   readonly sql: string;
   readonly params: readonly unknown[];
 }
@@ -150,7 +108,17 @@ const QUERY_PLANS: readonly QueryPlanSpec[] = [
   {
     pattern: "note-links-forward",
     table: "note_links",
-    index: null,
+    // Migration-frontier-aware. v2 (`0013_links_v2`) dropped the 3-column PK
+    // whose autoindex gave forward traversal a free `SEARCH` and recreated an
+    // EXPLICIT `idx_note_links_forward(source_note_id, target_note_id)`; the data
+    // dictionary §6 requires `db verify` to enforce that index BY NAME after 0013
+    // (a partial `ux_note_links_plain` can never serve this unfiltered forward
+    // lookup). BEFORE 0013 a valid pre-migration DB correctly serves the same
+    // lookup via the PK autoindex (`sqlite_autoindex_note_links_1`), so we accept
+    // any PK `SEARCH` there (`null`) rather than failing a legitimate old schema.
+    index: "idx_note_links_forward",
+    resolveIndex: (db) =>
+      migrationApplied(db, "0013_links_v2") ? "idx_note_links_forward" : null,
     sql: `SELECT target_note_id FROM note_links WHERE source_note_id = ?`,
     params: ["n1"],
   },
@@ -182,13 +150,6 @@ const QUERY_PLANS: readonly QueryPlanSpec[] = [
     sql: `SELECT note_id FROM notes WHERE active_generation < ?`,
     params: [1],
   },
-  {
-    pattern: "audit-by-run",
-    table: "audit_events",
-    index: "idx_audit_events_run",
-    sql: `SELECT seq FROM audit_events WHERE run_id = ?`,
-    params: ["r1"],
-  },
 ];
 
 interface EqpRow {
@@ -211,7 +172,8 @@ export function checkQueryPlans(db: SqliteDatabase): {
     const plan = rows.map((r) => r.detail).join(" | ");
     const usesSearch = /\bSEARCH\b/.test(plan);
     const scansTarget = new RegExp(`\\bSCAN ${spec.table}\\b`).test(plan);
-    const usesIndex = spec.index === null ? true : plan.includes(spec.index);
+    const expectedIndex = spec.resolveIndex ? spec.resolveIndex(db) : spec.index;
+    const usesIndex = expectedIndex === null ? true : plan.includes(expectedIndex);
     if (!usesSearch || scansTarget || !usesIndex) {
       violations.push({ pattern: spec.pattern, plan });
     }

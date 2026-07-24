@@ -12,7 +12,7 @@
  * (`registerWorkflowMigrations`/`openWorkflowStore`).
  */
 import { randomUUID } from "node:crypto";
-import { openStore, registerKnownSchemaHead, type SqliteConfig, type Store } from "@atlas/sqlite-store";
+import { openStore, type SqliteConfig, type Store } from "@atlas/sqlite-store";
 import { migration0002Jobs } from "../migrations/0002_jobs.js";
 import { migration0007JobCancellations } from "../migrations/0007_job_cancellations.js";
 import { bindEnqueueContext, type EnqueueContext } from "./repo.js";
@@ -51,13 +51,8 @@ export function productionEnqueueContext(overrides: Partial<EnqueueContext> = {}
 export function registerJobsMigration(store: Store): void {
   store.registerMigration(migration0002Jobs);
   store.registerMigration(migration0007JobCancellations);
-  // Once a jobs-owned migration is applied it becomes the schema HEAD, and every backup
-  // taken afterwards is stamped with it. `@atlas/sqlite-store` cannot import these ids
-  // (it does not depend on `@atlas/jobs` — that would be a cycle), so without this the
-  // backup §8.3 compatibility check would reject this binary's OWN backups as a
-  // "future/unknown schema". Declare them alongside the migrations, same seam.
-  registerKnownSchemaHead(migration0002Jobs.id);
-  registerKnownSchemaHead(migration0007JobCancellations.id);
+  // v2 (#338): the AEAD backup/verify subsystem is retired, so the schema-head
+  // self-recognition (`registerKnownSchemaHead`) it needed is gone with it.
 }
 
 /**

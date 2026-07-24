@@ -45,6 +45,21 @@ export interface CommitChanges {
 }
 
 /**
+ * One RAW name-status change — git's letter UNTOUCHED (no `T`→`M`/`C`→`A`
+ * normalization) and BOTH sides of a rename/copy reported as separate entries
+ * under the (score-stripped) letter. This is the shape a scope gate must see to
+ * match the broker's `changedPathStatusesInRange` byte-for-byte: the broker
+ * REFUSES a `T` typechange and validates every reported rename side, so a
+ * consumer folding `T`→`M` or dropping a rename source would silently accept a
+ * change the broker rejects. Distinct from {@link PathChange} (the normalized
+ * alphabet the sync cycle consumes).
+ */
+export interface RawStatusChange {
+  readonly status: string;
+  readonly path: string;
+}
+
+/**
  * Classify a `git cat-file blob <commit>:<path>` failure as "does not resolve".
  * cat-file has no `--quiet`, so unlike `readRef`'s exit-1-empty-stderr signal
  * (refs.ts:59-75) the unresolved case here is exit 128 WITH a fatal message —
@@ -115,6 +130,52 @@ function parseNameStatusZ(out: string): PathChange[] {
     }
   }
   return changes;
+}
+
+/**
+ * Parse NUL-delimited `git … --name-status -z` output into RAW
+ * {@link RawStatusChange} entries — a structural mirror of the broker's
+ * `parseNameStatusZ` (packages/broker/src/git.ts:36-56), NOT the normalizing
+ * {@link parseNameStatusZ} above. The status letter is preserved verbatim (its
+ * first char, so a score suffix like `R100` reduces to `R` exactly as the broker
+ * does) and a rename/copy contributes BOTH its old and new path as separate
+ * entries under that letter — so a scope gate sees (and can reject) the rename
+ * SOURCE, not just its destination. A truncated trailing record is DROPPED as a
+ * fault rather than half-parsed, matching the broker parser.
+ */
+function parseRawNameStatusZ(out: string): RawStatusChange[] {
+  if (out.length === 0) return [];
+  const fields = out.split("\0");
+  if (fields[fields.length - 1] === "") fields.pop();
+  const entries: RawStatusChange[] = [];
+  let i = 0;
+  while (i < fields.length) {
+    const raw = fields[i++]!;
+    const status = raw.charAt(0);
+    const isRenameOrCopy = status === "R" || status === "C";
+    const wanted = isRenameOrCopy ? 2 : 1;
+    // Require the full record; a truncated tail is not silently accepted.
+    if (i + wanted > fields.length) break;
+    for (let k = 0; k < wanted; k++) {
+      const p = fields[i++]!;
+      if (p.length > 0) entries.push({ status, path: p });
+    }
+  }
+  return entries;
+}
+
+/** De-duplicate `{status, path}` entries (union across a multi-commit range) — mirrors the broker's `dedupeStatuses`. */
+function dedupeRawStatuses(entries: RawStatusChange[]): RawStatusChange[] {
+  const seen = new Set<string>();
+  const out: RawStatusChange[] = [];
+  for (const e of entries) {
+    const key = `${e.status}\t${e.path}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(e);
+    }
+  }
+  return out;
 }
 
 export interface Repo {
@@ -204,6 +265,51 @@ export interface Repo {
    * {@link Repo.commitsInRange}. Used by `sync reset`'s tree diff.
    */
   changedPaths(from: string, to: string, pathspec: readonly string[]): Promise<PathChange[]>;
+  /**
+   * The UNION of RAW per-path change statuses across EVERY commit reachable in
+   * `from..to` (or all of `to`'s history when `from` is `null`), each commit
+   * diffed against EVERY parent (`git log --name-status -z --format= -m`). This
+   * is the ALL-REACHABLE, RAW-status analogue of {@link commitsInRange} — and the
+   * byte-for-byte mirror of the broker's `changedPathStatusesInRange` /
+   * `changedPathStatusesFromRoot` (packages/broker/src/git.ts). Two properties are
+   * load-bearing for a scope gate that must match the broker:
+   *  - **All-reachable, not first-parent.** `-m` diffs a merge against each parent,
+   *    so a forbidden change made (and even reverted) on a MERGED SIDE BRANCH
+   *    surfaces here — a first-parent walk ({@link commitsInRange}) would never
+   *    see it, letting a merge smuggle a scope violation past the tip.
+   *  - **Raw status letters.** `T` (typechange) stays `T`, `C` stays `C` — no
+   *    fold to `M`/`A`. The broker's scope gate REFUSES `T`; a normalized `M`
+   *    would wrongly pass.
+   * Renames/copies report BOTH sides as separate entries (see
+   * {@link parseRawNameStatusZ}). NOT pathspec-filtered — the gate inspects the
+   * whole change set, exactly as the broker does.
+   */
+  changedStatusesInRange(from: string | null, to: string): Promise<RawStatusChange[]>;
+  /**
+   * The fully-qualified ref `HEAD` is attached to (`refs/heads/main`), or `null`
+   * when `HEAD` is detached. Read via `git rev-parse --symbolic-full-name HEAD`
+   * (NOT `git symbolic-ref`, which the source-audit forbids outside `refs.ts`);
+   * git prints the literal `HEAD` for a detached head, which maps to `null`. The
+   * v2 mutation-order wrapper asserts this equals `refs/heads/main` before any
+   * mutation — a feature-branch / detached-HEAD checkout must never be mutated.
+   */
+  headRef(): Promise<string | null>;
+  /**
+   * The porcelain working-tree status (`git status --porcelain=v1 -z`) restricted
+   * to `paths` — the RAW two-letter XY code + path for every touched entry
+   * (staged, unstaged, or untracked). Empty ⇒ the paths match `HEAD` with nothing
+   * uncommitted. The v2 dirty-vault doctrine reads this to refuse mutating a note
+   * whose on-disk state diverges from the committed tree. An empty `paths` scans
+   * the whole working tree.
+   */
+  worktreeStatus(paths: readonly string[]): Promise<WorktreeStatusEntry[]>;
+}
+
+/** One `git status --porcelain` entry: the 2-char XY code and the repo-relative path. */
+export interface WorktreeStatusEntry {
+  /** The two-column porcelain status code (e.g. ` M`, `A `, `??`, `MM`). */
+  readonly code: string;
+  readonly path: string;
 }
 
 class RepoImpl implements Repo {
@@ -307,6 +413,48 @@ class RepoImpl implements Repo {
       ...pathspec,
     ]);
     return parseNameStatusZ(raw);
+  }
+
+  async changedStatusesInRange(from: string | null, to: string): Promise<RawStatusChange[]> {
+    // `git log --name-status -z --format= -m` over the whole new history: every
+    // reachable commit (all-parent, not first-parent) with RAW status letters —
+    // byte-for-byte the broker's `changedPathStatuses{FromRoot,InRange}`. When
+    // `from` is null canonical is unborn, so the range is all of `to`'s history.
+    const range = from === null ? to : `${from}..${to}`;
+    const raw = await runGit(this.dir, ["log", "--name-status", "-z", "--format=", "-m", range]);
+    return dedupeRawStatuses(parseRawNameStatusZ(raw));
+  }
+
+  async headRef(): Promise<string | null> {
+    // `--symbolic-full-name` prints the attached branch ref (`refs/heads/main`)
+    // or the literal `HEAD` for a detached head. Deliberately NOT `git
+    // symbolic-ref` — the no-protected-write source audit treats that token as a
+    // ref-write subcommand and refuses it outside `refs.ts`; this is a pure read.
+    const out = (await runGit(this.dir, ["rev-parse", "--symbolic-full-name", "HEAD"])).trim();
+    return out === "" || out === "HEAD" ? null : out;
+  }
+
+  async worktreeStatus(paths: readonly string[]): Promise<WorktreeStatusEntry[]> {
+    // `-z` NUL-terminates records so paths with spaces/newlines survive; each
+    // record is `XY<space>path`. Renames carry a second NUL-separated origin
+    // path we skip (the current path is what a dirty-vault check keys on). The
+    // `--literal-pathspecs` guard keeps a `*`/`[ab]` filename a literal, never a glob.
+    // `--literal-pathspecs` is a MAIN git option — it must precede the subcommand.
+    const args = ["--literal-pathspecs", "status", "--porcelain=v1", "-z"];
+    if (paths.length > 0) args.push("--", ...paths);
+    const raw = await runGit(this.dir, args);
+    const out: WorktreeStatusEntry[] = [];
+    const records = raw.split("\0");
+    for (let i = 0; i < records.length; i++) {
+      const rec = records[i]!;
+      if (rec.length < 4) continue; // "XY path" is at least 4 chars
+      const code = rec.slice(0, 2);
+      out.push({ code, path: rec.slice(3) });
+      // A rename/copy (`R`/`C` in either column) is followed by its origin path
+      // as the NEXT NUL record — consume it so it is not misread as an entry.
+      if (code[0] === "R" || code[0] === "C") i++;
+    }
+    return out;
   }
 
   async createAgentBranch(runId: string, base: string): Promise<string> {

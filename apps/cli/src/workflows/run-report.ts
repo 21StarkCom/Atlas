@@ -26,8 +26,6 @@ export interface RunReport {
   readonly finishedAt: string | null;
   /** The gating hashes/shas recorded along the run's path. */
   readonly artifacts: RunArtifacts;
-  /** The audit events emitted for this run, ascending by seq. */
-  readonly auditSeqs: readonly RunAuditEvent[];
   /** `true` when `state` is a terminal (`agent_runs` sink). */
   readonly terminal: boolean;
 }
@@ -43,14 +41,6 @@ export interface RunArtifacts {
   readonly commitSha: string | null;
   readonly canonicalSha: string | null;
   readonly indexGeneration: number | null;
-}
-
-/** One `audit_events` row for the run. */
-export interface RunAuditEvent {
-  readonly seq: number;
-  readonly kind: string;
-  readonly payloadHash: string;
-  readonly gitHead: string | null;
 }
 
 const TERMINALS: ReadonlySet<string> = new Set([
@@ -120,10 +110,6 @@ export function assembleRunReport(store: Store, runId: string): RunReport | unde
     indexGeneration: parseGeneration(reindexed?.ref_name),
   };
 
-  const auditSeqs = db
-    .prepare(`SELECT seq, event_type, payload_hash, git_head FROM audit_events WHERE run_id = ? ORDER BY seq ASC`)
-    .all(runId) as { seq: number; event_type: string; payload_hash: string; git_head: string | null }[];
-
   return {
     runId: run.run_id,
     operation: run.operation,
@@ -136,7 +122,6 @@ export function assembleRunReport(store: Store, runId: string): RunReport | unde
     updatedAt: run.updated_at,
     finishedAt: run.finished_at,
     artifacts,
-    auditSeqs: auditSeqs.map((r) => ({ seq: r.seq, kind: r.event_type, payloadHash: r.payload_hash, gitHead: r.git_head })),
     terminal: TERMINALS.has(run.status),
   };
 }
