@@ -76,7 +76,7 @@ Plus the supporting scaffolding those four require: the `apps/desktop` workspace
 
 ## interfaces — Interfaces & Contracts
 
-The app introduces **no network API and no new CLI commands**. Its interfaces are: (a) the workspace/package surface, (b) the consumed `brain status --json` contract, (c) the consumed config schema, (d) the internal main↔renderer IPC surface, (e) the credential module it consumes from `@atlas/models`, (f) the macOS login-item API. It holds **no projection DB handle and issues no direct git query.**
+The app introduces **no network API and no new CLI commands**. Its interfaces map 1:1 onto the numbered subsections below: (a) §1 the workspace/package surface, (b) §2 the consumed `brain status --json` contract, (c) §3 the consumed config schema, (d) §4 the internal main↔renderer IPC surface — which is where the login-item and quit channels live (the macOS login-item API is reached only through §4's `app:getLoginItem`/`app:setLoginItem`), (e) §5 the credential module it consumes from `@atlas/models`, (f) §6 the errors-to-user envelope. It holds **no projection DB handle and issues no direct git query.**
 
 ### 1. Workspace / package
 
@@ -359,7 +359,8 @@ There is **no** projection-DB step — the app opens no DB handle.
 |---|---|---|
 | `configLoaded == false` | `broken` | `config-invalid` |
 | CLI unreachable / spawn failure / timeout / unparseable output | `broken` | `cli-unreachable` \| `status-unparseable` |
-| CLI exit ∈ {1, 2, 4, 5} | `broken` | from the envelope |
+| CLI exit ∈ {1, 2, 4} | `broken` | from the envelope |
+| CLI exit `5` (usage) | `broken` | `app-cli-mismatch` (an app-owned slug — the app built the wrong argv, a bug; not from the envelope) |
 | any check with `ok == false` whose severity is `fail` | `broken` | `check-failed:<name>` |
 | any check with `ok == false` whose severity is `warn` | `degraded` | `check-warn:<name>` (e.g. `check-warn:index-not-stale`) |
 | otherwise (every check `ok`) | `healthy` | `ok` |
@@ -672,7 +673,7 @@ Run against the real `main-vault`, the real `brain` binary, and the real Keychai
 1. Launch; glyph green; accessible label `Atlas: healthy`; scoreboard shows all passing checks and a fresh `lastCheckedAt`.
 2. `mv` the vault aside → by the next completed poll the glyph turns red, exactly one notification with a self-contained message; restore → recovery notification, green.
 3. Let the index go stale (or force a pending migration) → the glyph turns **amber** (advisory), one notification; the reason names the warn check; fix it → green.
-4. Delete the Keychain item → `provider-key-present` fails, glyph red; re-set the key through the config form → green; confirm via `security find-generic-password -s <service>` (exit 0, one item) and `security find-generic-password -s <service> -g 2>&1 | grep -c '"acct"<blob>="'` that **exactly one** account entry exists (no duplicate); grep the app log for the key value → **zero hits**.
+4. Delete the Keychain item → `provider-key-present` fails, glyph red; re-set the key through the config form → green; confirm via `security find-generic-password -s <service>` (exit 0, one item) and `security find-generic-password -s <service> -g 2>&1 | grep -c '"acct"<blob>="'` that **exactly one** account entry exists (no duplicate); grep the app log **and** the written `brain.config.yaml` for the key value → **zero hits** in both (the key must never reach config by design — this closes the `brain.config.yaml` half of success criterion 5).
 5. Click Restart on a healthy session; capture `git -C <vault> status --porcelain` and the `notes` count from `brain status --json` before and after → identical.
 6. Click Restart while the vault is dirty and while a `brain` command runs in a terminal → no error, no interference, no lock contention (confirming `status` is lock-free). Also click Restart during a deliberately-slowed poll → no stale result lands afterward and `pgrep -f 'brain status'` → empty.
 7. Edit the vault path to a bogus value → save → the glyph goes red **on the post-save restart, without waiting for the next tick** (confirm the log shows a restart+poll line immediately after the write line); edit back → green immediately.
