@@ -177,7 +177,7 @@ interface CheckView {
 
 interface SessionSnapshot {
   health: Health;
-  reason: string;          // stable slug, e.g. 'ok' | 'index-stale' | 'cli-unreachable'
+  reason: string;          // stable slug, e.g. 'ok' | 'check-warn:index-not-stale' | 'cli-unreachable'
   message: string;         // one-line human sentence; also the accessible label body
   checks: CheckView[];     // [] when the CLI could not be reached
   configLoaded: boolean;
