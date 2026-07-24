@@ -43,7 +43,7 @@
 6. Toggling **Launch at login** registers/unregisters the macOS login item, the toggle renders the OS-observed value after the write, and after a logout/login the app starts and the glyph settles green.
 7. `pnpm -r build`, `pnpm -r test`, and `node tools/gen-cli-contract.ts --check` stay green on both CI legs (`ubuntu-latest` and `macos-15`).
 
-**Finalized vs open.** Finalized: the engine-access doctrine, the four capabilities, the state model, the pure-`brain status` readiness split, Keychain-only credentials owned by `@atlas/models`, the Keychain account value, and the app-owned check-severity policy. Open: the credential key-probe-on-save, the amber auto-offer, and concurrent-edit file-watching — all in `open-questions`.
+**Finalized vs open.** Finalized: the engine-access doctrine, the four capabilities, the state model, the pure-`brain status` readiness split, Keychain-only credentials owned by `@atlas/models`, the Keychain account value, the app-owned check-severity policy, and — settled in `open-questions` — no key-probe-on-save (rely on `provider-key-present`) and index-staleness as advisory amber only (no in-UI `index rebuild`). Genuinely open (all in `open-questions`, none blocking the plan): the live `POLL_TIMEOUT_MS` confirmation, the exact shape of the `@atlas/cli`/`@atlas/models` export extractions, concurrent-edit file-watching, the ADR-0004 wording, and hardening the credential write off argv.
 
 ## scope — Scope & Boundaries
 
@@ -56,7 +56,7 @@
 | 1 | Running indicator | Menubar glyph (3 states, shape+color), popover scoreboard of the CLI checks + last-checked time, interval poll (60 s default, tunable) + on-demand refresh, macOS notification on health transition |
 | 2 | Restart Atlas | Tear down + re-initialize the engine session; non-destructive; refreshes the indicator |
 | 3 | Configuration | Vault (`vault.path`, `vault.note_globs`), AI (`models.generation_model`, `models.embedding_model`), credential (set/replace the Keychain item; presence-only display) |
-| 4 | Launch at login | A labeled toggle that registers/unregisters the macOS login item; renders the OS-observed state; failure semantics per `interfaces` §5 |
+| 4 | Launch at login | A labeled toggle that registers/unregisters the macOS login item; renders the OS-observed state; failure semantics per the `app:setLoginItem` channel in `interfaces` §4 |
 
 Plus the supporting scaffolding those four require: the `apps/desktop` workspace, the main/renderer split, the engine-session lifecycle, the CLI-spawn wrapper, and quit.
 
@@ -157,7 +157,7 @@ A small, closed, typed channel set defined in `src/shared/ipc.ts`. All handlers 
 | `app:setLoginItem` | invoke | `{ enabled: boolean }` | `LoginItemResult` |
 | `app:quit` | invoke | — | `OpResult` |
 
-**Runtime request validation + consistent error semantics.** Every channel handler runs behind a single shared invocation wrapper in the preload/main boundary. The wrapper **runtime-validates each request payload** (TypeScript types do not protect Electron IPC at runtime) before dispatch: a payload that fails its declared shape (e.g. `enabled` not a boolean, `credential.value` not a string) is **never** dispatched to the OS/spawn/file path — the wrapper short-circuits and the mutating channel returns `ok: false, reason: 'app-internal'` (a programming-error envelope), the same `OpResult` triple every other failure uses. The wrapper also catches any handler or transport rejection and converts it to that same `app-internal` envelope, so **no expected call ever rejects** at the renderer — consumers implement one uniform error path. (Truly unexpected crashes still propagate as rejections, logged.)
+**Runtime request validation + consistent error semantics.** Every channel handler runs behind a single shared invocation wrapper in the preload/main boundary. The wrapper **runtime-validates each request payload** (TypeScript types do not protect Electron IPC at runtime) before dispatch: a payload that fails its declared shape (e.g. `enabled` not a boolean, `credential.value` not a string) is **never** dispatched to the OS/spawn/file path — the wrapper short-circuits, and so does any handler/transport rejection, so **no expected call ever rejects** at the renderer. The error result is **not** a bare `OpResult`: each channel has an **error factory** that returns a value of *that channel's declared response shape* with `reason: 'app-internal'` and every required field populated at its zero value — a failed `config:write` returns a full `ConfigWriteResult` (`ok:false, changed:false, issues:[]`), a failed `app:setLoginItem` returns a full `LoginItemResult` (`readable:false, enabled` = the requested value flagged unverified), and so on. The `OpResult` triple (`reason`/`message`/`hint`) is the **common subset** every such error carries, which the UI envelope in §6 renders uniformly; the richer per-channel fields are always present so the runtime shape never breaks. Read channels (`session:*`, `config:read`, `credential:status`) never reject by construction, so they need no error factory. (Truly unexpected crashes still propagate as rejections, logged.)
 
 **`config:read` never rejects either.** It is a read channel, but every failure mode of reading a file on disk is modelled as a `ConfigState` branch rather than a thrown error, so the form always has a branch to render.
 
@@ -233,6 +233,12 @@ interface ConfigView {
   state: ConfigState;
   expectVaultPin: string | null;   // ATLAS_EXPECT_VAULT, or null when unset
   credential: CredentialStatus;
+  // Schema-derived defaults + the create-candidate (vault.path seeded from the pin when set),
+  // computed by main from AtlasConfigSchema. The renderer displays these for absent-optional
+  // fields (in `invalid`) and for the `missing` branch WITHOUT ever duplicating a default of its
+  // own — so the SSOT "read defaults from the schema, never restate them" rule holds in the UI too.
+  defaults: ConfigValues;
+  createCandidate: ConfigValues;
 }
 
 // Presence plus its provenance, so the form can distinguish "not set" from "could not be checked".
@@ -272,7 +278,7 @@ interface ConfigWriteResult extends OpResult {
 }
 ```
 
-**Invalid-state rendering rule (absent-optional vs present-but-wrong).** A managed field that is **present in the file but the wrong type** appears in neither `PartialConfigValues` (it is omitted) and **does** carry a matching `issues[]` entry — the form renders it as an empty control marked invalid. A field that is **optional in the schema and simply absent** produces **no** zod issue (the schema defaults it), so it has no `issues[]` entry; the form renders it with its **schema default, visibly marked "using default (not set in file)"** — never as an unmarked value the owner might read as their own. `vault.path` is required, so its absence is always an `issues[]` entry. This makes the invariant precise: *every present-but-wrong field has an issue; every absent optional field is default-marked; the required field always has an issue when missing.* Saving from `invalid` is still a full schema-validated round-trip: it either produces a file `AtlasConfigSchema` accepts, or writes nothing.
+**Invalid-state rendering rule (absent-optional vs present-but-wrong).** A managed field that is **present in the file but the wrong type** appears in neither `PartialConfigValues` (it is omitted) and **does** carry a matching `issues[]` entry — the form renders it as an empty control marked invalid. A field that is **optional in the schema and simply absent** produces **no** zod issue (the schema defaults it), so it has no `issues[]` entry; the form renders it with its **schema default (read from `ConfigView.defaults`, which main computes from the schema — the renderer holds no defaults of its own), visibly marked "using default (not set in file)"** — never as an unmarked value the owner might read as their own. `vault.path` is required, so its absence is always an `issues[]` entry. This makes the invariant precise: *every present-but-wrong field has an issue; every absent optional field is default-marked; the required field always has an issue when missing.* Saving from `invalid` is still a full schema-validated round-trip: it either produces a file `AtlasConfigSchema` accepts, or writes nothing.
 
 **`config:read` state derivation — the total mapping from disk condition to branch:**
 
@@ -406,7 +412,7 @@ Every snapshot is stamped with the session's `configGeneration`. Because the own
 - A successful write triggers **exactly one** immediate session Restart (config is session state) — one teardown, one re-init, one poll — then the indicator reflects that poll. It is not two polls.
 - **Credential set/replace**: the field is write-only. On save the value goes to `@atlas/models.setGeminiApiKey`; on success the field is cleared, the UI shows `Key: present`, and an immediate **refresh** (not a Restart — the session need not be rebuilt) runs so `provider-key-present` re-evaluates against post-write state. On failure the `OpResult` carries the specific reason (`empty-key`, `keychain-account-unresolved`, or `keychain-write-failed` with the `security` stderr line, which never contains the value).
 - **Per-state form behavior:**
-  - `missing` ⇒ fields render with the create-candidate values (schema defaults, or the pin for `vault.path` when set), disabled for edit; the only actions are **Create config** (`config:create`) and Reveal in Finder. No silent write.
+  - `missing` ⇒ fields render with the create-candidate values from `ConfigView.createCandidate` (schema defaults, or the pin for `vault.path` when set), disabled for edit; the only actions are **Create config** (`config:create`) and Reveal in Finder. No silent write.
   - `unreadable` ⇒ read-only with the OS error shown, offering **Reveal in Finder** and a retry of `config:read`; the app will not overwrite a file whose contents it could not read.
   - `unparseable` ⇒ read-only with the parse error shown and a **Reveal in Finder** action; the app will not overwrite a file it could not parse.
   - `invalid` ⇒ present-but-wrong fields render empty and marked from `issues[]`; absent optional fields render default-marked; saving is allowed because the save is a full schema-validated round-trip that either produces a valid file or writes nothing.
@@ -677,7 +683,7 @@ Run against the real `main-vault`, the real `brain` binary, and the real Keychai
 12. Toggle launch-at-login; confirm the rendered state matches System Settings; log out and back in; confirm the app starts and the glyph settles green; toggle back off and confirm the item is removed.
 13. Measure `brain status --json` wall-clock over ~20 runs on the real vault; confirm `POLL_TIMEOUT_MS` sits comfortably above the observed p99 (resolves the timeout open question).
 14. **Real sleep/wake**: `pmset sleepnow`, break a check while asleep, wake → the glyph updates from a wake-triggered poll promptly, and exactly one poll fired on wake (app log).
-15. **Real double-launch**: with the app running, launch again from Finder → the existing menubar item is focused, no second glyph, `pgrep` shows exactly one app process, the app log shows **no** second session init. (The process-count check is scoped to the app's own bundle id via `pgrep -f <bundle-id-or-app-path>`, not a bare name match, so an unrelated process cannot mask a real second instance.)
+15. **Real double-launch**: with the app running, launch again from Finder → the existing menubar item is focused, no second glyph. The single-instance proof is **two independent oracles**, because one Electron instance owns several helper processes (GPU, renderer, utility) whose command lines share the app path: (a) count only the **main** process with an exact predicate that matches the main executable path and **excludes** any `--type=` helper (e.g. `pgrep -lf "<app>/Contents/MacOS/<main-exe>" | grep -v -- '--type='` ⇒ exactly one), and (b) confirm the app log shows exactly **one** session-init marker (no second init line from the relaunch). Both must hold.
 16. Full VoiceOver + keyboard-only pass, plus 200%-zoom and contrast checks (see `accessibility`).
 17. Build and launch the packaged `.app`; confirm it resolves the **bundled** `brain` binary and `ATLAS_ROOT` outside a `pnpm dev` context, and repeat step 15 against the packaged build (the single-instance lock is the behavior most likely to differ between `pnpm dev` and a real `.app`).
 
