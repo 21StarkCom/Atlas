@@ -54,6 +54,7 @@ dir|delete|/usr/local/lib/atlas/bin|rm-rf|
 dir|delete|/usr/local/var/log/atlas|rm-rf|
 dir|delete|/usr/local/etc/atlas|rmdir|
 dir|delete|/usr/local/var/atlas|rmdir|
+dir|delete|/usr/local/lib/atlas|rmdir|
 
 # (F) operator-home signer store — removed as $SUDO_USER (never root), under the RESOLVED home.
 signer-store|delete|Library/Application Support/atlas-signer|sudo-user-rm-rf|
