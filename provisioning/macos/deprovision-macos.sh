@@ -80,12 +80,14 @@ del_launchd() { # $1 label  $2 plist
   rm -f "$2"
 }
 del_user() { # $1 username
-  # -keepHome is MANDATORY: every service account's NFSHomeDirectory is the SHARED, root-owned
-  # system dir /var/empty (lib.sh:93) — sshd's privilege-separation dir + dozens of built-in
-  # accounts' home. Without -keepHome, `sysadminctl -deleteUser` deletes that home by default
-  # and breaks host SSH/privsep. There is nothing per-account to reclaim.
+  # Use `dscl . -delete` (v1 teardown's approach): it removes ONLY the directory-service
+  # record and NEVER touches the home directory — so the SHARED, root-owned /var/empty that
+  # every service account uses (lib.sh:93, sshd's privilege-separation dir) is untouched, with
+  # nothing per-account to reclaim. `sysadminctl -deleteUser` deletes the home by default, and
+  # its `-keepHome` guard is NOT available on every macOS version (fails "not available on this
+  # system") — so dscl is both safer and portable.
   if dscl . -read "/Users/$1" >/dev/null 2>&1; then
-    info "deleteUser $1 (-keepHome)"; sysadminctl -deleteUser "$1" -keepHome || die "sysadminctl -deleteUser $1 failed"
+    info "delete user $1 (dscl -delete — home untouched)"; dscl . -delete "/Users/$1" || die "dscl -delete /Users/$1 failed"
   else
     info "user $1 already absent"
   fi

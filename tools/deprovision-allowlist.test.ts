@@ -77,6 +77,7 @@ const EXPECTED_DELETE_KEYS = [
   "dir:/usr/local/var/log/atlas",
   "dir:/usr/local/etc/atlas",
   "dir:/usr/local/var/atlas",
+  "dir:/usr/local/lib/atlas",
   "signer-store:Library/Application Support/atlas-signer",
   "keychain:atlas-egress-capability",
 ];
@@ -96,6 +97,9 @@ const PROVISIONED_CHILDREN: Record<string, string[]> = {
   ],
   "/usr/local/etc/atlas": [
     "/usr/local/etc/atlas/keys", // lib.sh ATLAS_KEYS_DIR
+  ],
+  "/usr/local/lib/atlas": [
+    "/usr/local/lib/atlas/bin", // lib.sh ATLAS_INSTALL_BIN — the parent must be rmdir'd after its bin/ child
   ],
 };
 
@@ -117,13 +121,12 @@ describe("deprovision allowlist gate (#344)", () => {
     expect(gate).toContain('"provisioning/deprovision-allowlist.txt"');
   });
 
-  it("(4) the two expected-empty parents use rmdir, NEVER rm -rf", () => {
+  it("(4) the expected-empty parents use rmdir, NEVER rm -rf", () => {
     const rmdirs = DELETES.filter((r) => r.method === "rmdir").map((r) => r.id).sort();
-    expect(rmdirs).toEqual(["/usr/local/etc/atlas", "/usr/local/var/atlas"]);
-    // Neither empty-parent path appears as an rm-rf target.
+    expect(rmdirs).toEqual(["/usr/local/etc/atlas", "/usr/local/lib/atlas", "/usr/local/var/atlas"]);
+    // None of the empty-parent paths appears as an rm-rf target.
     const rmrfs = new Set(DELETES.filter((r) => r.method === "rm-rf").map((r) => r.id));
-    expect(rmrfs.has("/usr/local/etc/atlas")).toBe(false);
-    expect(rmrfs.has("/usr/local/var/atlas")).toBe(false);
+    for (const p of rmdirs) expect(rmrfs.has(p), `${p} must not be rm-rf`).toBe(false);
   });
 
   it("(5) the signer-store removal resolves $SUDO_USER (not root) and targets the resolved home", () => {
@@ -205,9 +208,13 @@ describe("deprovision allowlist gate (#344)", () => {
     }
   });
 
-  it("del_user passes -keepHome — never deletes the SHARED /var/empty system home", () => {
+  it("del_user uses dscl -delete — removes the record, never touches the SHARED /var/empty home (no non-portable sysadminctl)", () => {
     const sh = readFileSync(SCRIPT, "utf8");
-    expect(sh).toMatch(/sysadminctl -deleteUser "\$1" -keepHome/);
+    // dscl -delete removes only the directory-service record (v1 teardown's method); it never
+    // deletes the home. `sysadminctl -deleteUser` deletes the home by default, and its -keepHome
+    // guard is not available on every macOS ("not available on this system") — proven live in #346.
+    expect(sh).toMatch(/dscl \. -delete "\/Users\/\$1"/);
+    expect(sh).not.toMatch(/sysadminctl -deleteUser "\$1"/); // no executable home-deleting call (comments may still name it)
   });
 
   it("fails closed on an empty allowlist id (load-time guard + signer-store home-root guard)", () => {
