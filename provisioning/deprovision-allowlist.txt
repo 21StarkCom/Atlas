@@ -1,0 +1,64 @@
+# Atlas v2 deprovision allowlist (Phase-5 task 5-2, #344) — the SINGLE machine-readable
+# SSOT of retired v1 host resources that provisioning/macos/deprovision-macos.sh deletes,
+# and the sole grep-gate-exempt data file permitted to name retired resources
+# (tools/no-retired-reference.test.ts EXEMPT). tools/deprovision-allowlist.test.ts asserts
+# this enumeration is EXACTLY the retired set and that atlas-gemini-api-key is PRESERVED.
+#
+# Format (pipe-delimited, one resource per line; blank + #-comment lines ignored):
+#   <category>|<action>|<id>|<method>|<extra>
+#     category : launchd | user | group | socket | dir | signer-store | keychain
+#     action   : delete | preserve
+#     id       : the resource identifier (label / username / group / abs path / rel path / service)
+#     method   : bootout-rm | deleteUser | dscl-delete | rm-f | rm-rf | rmdir | sudo-user-rm-rf | security-delete | security-preserve
+#     extra    : method-specific (launchd → plist path; keychain → account; else empty)
+#
+# ORDER IS THE SAFE DELETION ORDER: sockets precede the run-dir rm-rf; child dirs precede the
+# empty-parent rmdir. Empty parents use rmdir (NOT rm -rf) so any unexpected content HALTS the
+# script for inspection instead of being swept up.
+
+# (A) launchd services — bootout the running service, then remove its plist.
+launchd|delete|com.atlas.broker|bootout-rm|/Library/LaunchDaemons/com.atlas.broker.plist
+launchd|delete|com.atlas.egress|bootout-rm|/Library/LaunchDaemons/com.atlas.egress.plist
+launchd|delete|com.atlas.sync|bootout-rm|/Library/LaunchDaemons/com.atlas.sync.plist
+
+# (B) OS users — the two service accounts + the dedicated non-login agent UID (D17).
+user|delete|atlas-agent|deleteUser|
+user|delete|atlas-broker|deleteUser|
+user|delete|atlas-egress|deleteUser|
+
+# (C) OS groups — atlas-git PLUS the same-named primary group create_service_user makes per
+#     service account (lib.sh:96); `sysadminctl -deleteUser` does NOT remove these standalone
+#     group records (v1 teardown deleted them explicitly). Deleted AFTER the users (section B).
+group|delete|atlas-git|dscl-delete|
+group|delete|atlas-agent|dscl-delete|
+group|delete|atlas-broker|dscl-delete|
+group|delete|atlas-egress|dscl-delete|
+
+# (D) sockets — removed BEFORE the run dir that contains them.
+socket|delete|/usr/local/var/run/atlas/broker.sock|rm-f|
+socket|delete|/usr/local/var/run/atlas/egress.sock|rm-f|
+
+# (E) host directories — recursive removals, then the now-empty parents via rmdir. EVERY child
+#     of an rmdir'd parent MUST be rm-rf'd first, or the rmdir halts on ENOTEMPTY. `services.sh
+#     install` layers TWO dirs beyond the original daemon set: the sync-agent HOME
+#     /usr/local/var/atlas/agent (a child of the rmdir'd /usr/local/var/atlas) and the daemon
+#     LOG_DIR /usr/local/var/log/atlas (a sibling under the SHARED /usr/local/var/log — rm-rf'd
+#     but its parent is NEVER rmdir'd). The gate (tools/deprovision-allowlist.test.ts) models
+#     rmdir-halts-on-nonempty against the real provisioned child set.
+dir|delete|/usr/local/etc/atlas/keys|rm-rf|
+dir|delete|/usr/local/var/atlas/audit-anchor|rm-rf|
+dir|delete|/usr/local/var/atlas/egress|rm-rf|
+dir|delete|/usr/local/var/atlas/agent|rm-rf|
+dir|delete|/usr/local/var/run/atlas|rm-rf|
+dir|delete|/usr/local/lib/atlas/bin|rm-rf|
+dir|delete|/usr/local/var/log/atlas|rm-rf|
+dir|delete|/usr/local/etc/atlas|rmdir|
+dir|delete|/usr/local/var/atlas|rmdir|
+
+# (F) operator-home signer store — removed as $SUDO_USER (never root), under the RESOLVED home.
+signer-store|delete|Library/Application Support/atlas-signer|sudo-user-rm-rf|
+
+# (G) Keychain generic-password items (System.keychain) — delete the retired capability secret;
+#     PRESERVE the Gemini API key the v2 brain reads directly (explicit negative).
+keychain|delete|atlas-egress-capability|security-delete|atlas-agent
+keychain|preserve|atlas-gemini-api-key|security-preserve|
