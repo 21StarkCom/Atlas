@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "atlas://cli-contract/note-add.schema.json",
   "title": "brain note add \u2014 --json success output",
-  "description": "Deterministic Tier-1 ingest of a PRE-AUTHORED vault note that APPLIES immediately (#262) \u2014 no preview mode. Funnels through addNote: scan-before-persist (secret detection \u21d2 exit 3, quarantined, nothing persisted), vault-reader frontmatter validation, id/alias/path collision refusal against the current projections, then broker Tier-1 CAS integration under the additions-only \"note\" scope (the commit may only ADD *.md files outside sources/). Unlike source add (immutable blob + manifest stub), the file itself lands at <dest>/<basename> on canonical as first-class vault content; it becomes projection-visible and retrievable after the next `db rebuild` + `index rebuild` (there is no ingest\u2192index auto-hook yet \u2014 #60).",
+  "description": "Deterministic ingest of a PRE-AUTHORED vault note that APPLIES immediately (#262) \u2014 no preview mode. Funnels through addNote on the v2 mutation order (runMutation \u2192 commitPaths, one commit on refs/heads/main): vault-reader frontmatter validation, then id/alias/path collision refusal against the current projections, then the file lands verbatim at <dest>/<basename> as first-class vault content and the added path is committed directly. v2 (ADR-0003): NO secret scan, NO broker, NO quarantine \u2014 the retired v1 scan-before-persist / Tier-1-CAS gates are gone (git is the only safety mechanism). The added note is projection-visible after the mutation's projection + index refresh (or, on a fresh store, the next `db rebuild` + `index rebuild`).",
   "type": "object",
   "unevaluatedProperties": false,
   "required": [
@@ -58,7 +58,7 @@
     "privilege": "shared",
     "idempotency": "key-accepting",
     "executionClass": "mutating",
-    "summary": "Deterministic Tier-1 authored-note ingest; applies immediately.",
+    "summary": "Deterministic authored-note ingest; applies immediately (v2 runMutation → commitPaths).",
     "args": [
       {
         "name": "<path>",
@@ -86,18 +86,17 @@
       "--vault <path>"
     ],
     "sideEffects": [
-      "writes the note file verbatim at <dest>/<basename> on an agent branch",
-      "integrates the note-add commit via broker Tier-1 CAS under scope \"note\" (advances canonical exactly one commit)",
-      "writes ledger rows + one terminal run.integrated audit-ref event via finalizeLedgerWrite"
+      "writes the note file verbatim at <dest>/<basename> in the working tree",
+      "commits exactly that added path directly onto refs/heads/main (the common runMutation → commitPaths order — one commit)",
+      "refreshes the LanceDB index then the SQLite projection for the added note"
     ],
     "prohibitedEffects": [
-      "no byte persists or transmits before the secret scan passes (scan-before-persist)",
-      "never modifies or deletes ANY existing vault content (broker-enforced additions-only scope)",
-      "never writes under sources/ (the capture-only namespace)"
+      "never modifies or deletes ANY existing vault content (additions-only — commits only the new path)",
+      "never writes under sources/ (the ingest-only namespace)"
     ],
     "locks": [
       {
-        "scope": "canonical-integration",
+        "scope": "vault-maintenance",
         "mode": "exclusive"
       }
     ],
@@ -120,15 +119,10 @@
         "when": "the note fails normalization, frontmatter validation, or collides with an existing id/alias/path"
       },
       {
-        "code": "locked:canonical-integration",
+        "code": "locked:vault-maintenance",
         "exit": 2,
-        "when": "an integration holds the lock",
+        "when": "another vault mutation holds the exclusive lock",
         "retryable": true
-      },
-      {
-        "code": "backup-unhealthy",
-        "exit": 2,
-        "when": "ledger-writing is blocked pending a verified backup"
       },
       {
         "code": "idempotency-in-progress",
